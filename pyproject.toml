@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "everyric2"
+version = "0.1.0"
+description = "Lyrics synchronization using Qwen3-Omni multimodal LLM"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Everyric Team" }
+]
+keywords = ["lyrics", "synchronization", "multimodal", "qwen", "audio"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+    "numpy>=1.24.0",
+    "yt-dlp>=2024.0.0",
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.25.0",
+    "qwen-omni-utils>=0.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+separator = [
+    "demucs>=4.0.0",
+]
+vllm = [
+    "vllm>=0.4.0",
+]
+
+[project.scripts]
+everyric2 = "everyric2.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["everyric2"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
