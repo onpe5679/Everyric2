@@ -1,5 +1,19 @@
 """Output formatting module."""
 
-from everyric2.output.formatters import SRTFormatter, ASSFormatter, LRCFormatter, JSONFormatter
+from everyric2.output.formatters import (
+    BaseFormatter,
+    SRTFormatter,
+    ASSFormatter,
+    LRCFormatter,
+    JSONFormatter,
+    FormatterFactory,
+)
 
-__all__ = ["SRTFormatter", "ASSFormatter", "LRCFormatter", "JSONFormatter"]
+__all__ = [
+    "BaseFormatter",
+    "SRTFormatter",
+    "ASSFormatter",
+    "LRCFormatter",
+    "JSONFormatter",
+    "FormatterFactory",
+]

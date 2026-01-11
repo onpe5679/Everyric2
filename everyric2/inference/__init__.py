@@ -1,6 +1,6 @@
 """Inference module for Qwen-Omni models."""
 
-from everyric2.inference.qwen_omni import QwenOmniAligner
-from everyric2.inference.prompt import PromptBuilder
+from everyric2.inference.qwen_omni import QwenOmniEngine
+from everyric2.inference.prompt import PromptBuilder, LyricLine, SyncResult
 
-__all__ = ["QwenOmniAligner", "PromptBuilder"]
+__all__ = ["QwenOmniEngine", "PromptBuilder", "LyricLine", "SyncResult"]

@@ -35,12 +35,17 @@ dependencies = [
     "transformers>=4.40.0",
     "accelerate>=0.25.0",
     "qwen-omni-utils>=0.0.2",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.6",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.26.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
 ]
@@ -49,6 +54,9 @@ separator = [
 ]
 vllm = [
     "vllm>=0.4.0",
+]
+all = [
+    "everyric2[dev,separator]",
 ]
 
 [project.scripts]
