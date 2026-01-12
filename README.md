@@ -12,6 +12,158 @@ Qwen3-Omni 멀티모달 LLM을 사용한 가사 싱크 도구입니다.
 | LLM이 오디오를 못 들음 | **오디오를 직접 들으면서** 타이밍 정렬 |
 | 추측 기반 타이밍 | 실제 음성 기반 정확한 타이밍 |
 
+## 구현 로직
+
+### 전체 아키텍처
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              CLI (cli.py)                                │
+│  everyric2 sync audio.mp3 lyrics.txt --separate --translate --debug     │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+            ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+            │ AudioLoader │ │ LyricLine   │ │ Translator  │
+            │ (loader.py) │ │ (prompt.py) │ │(translator) │
+            └─────────────┘ └─────────────┘ └─────────────┘
+                    │               │               │
+                    ▼               │               │
+            ┌─────────────┐         │               │
+            │VocalSeparator│        │               │
+            │(separator.py)│        │               │
+            │  (Demucs)   │         │               │
+            └─────────────┘         │               │
+                    │               │               │
+                    └───────────────┼───────────────┘
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │     QwenOmniGGUFEngine        │
+                    │    (qwen_omni_gguf.py)        │
+                    │                               │
+                    │  ┌─────────────────────────┐  │
+                    │  │    Chunk Processing     │  │
+                    │  │  60초씩 분할 + 전체 가사  │  │
+                    │  └─────────────────────────┘  │
+                    │              │                │
+                    │              ▼                │
+                    │  ┌─────────────────────────┐  │
+                    │  │     llama-server        │  │
+                    │  │   (localhost:8081)      │  │
+                    │  │  Qwen3-Omni GGUF 모델   │  │
+                    │  └─────────────────────────┘  │
+                    └───────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │         Output                │
+                    │  ┌─────────┐ ┌─────────────┐  │
+                    │  │Formatter│ │ Visualizer  │  │
+                    │  │SRT/ASS/ │ │diagnostics  │  │
+                    │  │LRC/JSON │ │   .png      │  │
+                    │  └─────────┘ └─────────────┘  │
+                    └───────────────────────────────┘
+```
+
+### 처리 흐름
+
+```
+1. 오디오 로드
+   audio.mp3 → AudioLoader → AudioData (waveform, sample_rate, duration)
+
+2. 보컬 분리 (--separate)
+   AudioData → Demucs → vocals AudioData (배경음 제거)
+
+3. 가사 로드
+   lyrics.txt → LyricLine.from_file() → list[LyricLine]
+
+4. 번역 (--translate)
+   list[LyricLine] → LyricsTranslator → translated_text (한국어)
+
+5. 청크 분할 및 LLM 처리
+   ┌────────────────────────────────────────────────────────┐
+   │ 220초 오디오 예시 (60초 청크)                           │
+   │                                                        │
+   │ Chunk 0: 0-60초   ──┐                                  │
+   │ Chunk 1: 60-120초 ──┼── 각 청크에 전체 가사 포함        │
+   │ Chunk 2: 120-180초──┤   "이 오디오는 X초~Y초 구간입니다" │
+   │ Chunk 3: 180-220초──┘   → LLM이 해당 구간 가사만 타이밍 │
+   └────────────────────────────────────────────────────────┘
+
+6. 결과 병합 및 중복 제거
+   chunk_results → deduplicate → final_results
+
+7. 출력 생성
+   - output.srt (원본 가사 자막)
+   - output_translated.srt (번역 자막, --translate 시)
+   - diagnostics.png (시각화, --debug 시)
+```
+
+### 프롬프트 구조
+
+```
+# 첫 번째 청크 (0-60초)
+Listen to this audio and synchronize these lyrics with timestamps.
+
+LYRICS:
+1. 名前を握りしめて
+2. 振り向かれないように
+...
+
+# 이후 청크들 (60초 이후)
+This audio segment is from 60.0s to 120.0s of a 220.0s song.
+
+FULL LYRICS OF THE SONG:
+1. 名前を握りしめて
+2. 振り向かれないように
+...
+
+Listen to this audio segment and identify which lyrics are sung.
+Provide timestamps relative to the FULL SONG (not this segment).
+```
+
+### 디버그 출력 구조 (--debug)
+
+```
+output/20260112_211713/
+├── audio_original.wav      # 원본 전체 오디오
+├── audio_vocals.wav        # 보컬 분리된 오디오 (--separate 시)
+├── chunks/                 # 청크별 디버그 파일
+│   ├── chunk_000_0.0s-60.0s.wav      # 청크 오디오 (보컬 분리본)
+│   ├── chunk_000_prompt.txt          # LLM에 보낸 프롬프트
+│   ├── chunk_000_response.txt        # LLM 응답
+│   ├── chunk_001_60.0s-120.0s.wav
+│   ├── chunk_001_prompt.txt
+│   ├── chunk_001_response.txt
+│   └── ...
+├── lyrics_original.txt     # 원본 가사
+├── lyrics_translated_ko.txt # 번역된 가사 (--translate 시)
+├── output.srt              # 원본 자막
+├── output_translated.srt   # 번역 자막 (--translate 시)
+├── debug_info.json         # 전체 디버그 정보 (타이밍, 설정 등)
+├── diagnostics.png         # 시각화 차트
+└── settings.json           # 실행 설정
+```
+
+### Diagnostics 시각화 (6컬럼)
+
+```
+┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+│  Audio   │  Audio   │ Original │Translated│  Chunk   │  Synced  │
+│(Original)│ (Vocals) │  Lyrics  │  Lyrics  │Processing│  Output  │
+├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤
+│          │          │名前を握り│이름을 꼭 │ Chunk 1  │名前を握り│
+│ ▓▓▓▓▓▓  │ ▓▓▓▓▓   │しめて    │쥐고      │ 0-60s    │ 0.0-2.5s │
+│          │          │          │          │          │          │
+│ ▓▓▓     │ ▓▓▓▓    │振り向か  │뒤돌아보지│          │振り向か  │
+│          │          │れない    │않도록    │          │ 2.5-5.0s │
+│          │          │ように    │          │          │          │
+│  ...     │  ...     │  ...     │  ...     │ Chunk 2  │  ...     │
+│          │          │          │          │ 60-120s  │          │
+└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
 ## 요구사항
 
 - Python 3.10+
@@ -35,19 +187,12 @@ cd Everyric2
 # 가상환경 생성 (권장)
 python -m venv .venv
 source .venv/bin/activate  # Linux/Mac
-# or: .venv\Scripts\activate  # Windows
 
-# 기본 설치
-pip install -e .
-
-# 개발 의존성 포함 설치
-pip install -e ".[dev]"
-
-# 보컬 분리 (Demucs) 포함 설치
-pip install -e ".[separator]"
-
-# 전체 설치
+# 전체 설치 (보컬 분리 포함)
 pip install -e ".[all]"
+
+# 추가 의존성
+pip install demucs torchcodec
 ```
 
 ### llama.cpp 설정
@@ -61,46 +206,76 @@ cmake .. -DGGML_CUDA=ON
 cmake --build . --config Release -j
 
 # 모델 파일 배치
-# 기본 경로: /mnt/d/models/qwen3-omni/
 mkdir -p /mnt/d/models/qwen3-omni
 # thinker-q4_k_m.gguf와 mmproj-f16.gguf를 해당 경로에 복사
 ```
 
 ## 사용법
 
-### CLI 모드
+### 빠른 시작
 
 ```bash
-# 로컬 오디오 파일과 가사 싱크
+cd /home/at192u/dev/everyric2
+source .venv/bin/activate
+
+# 권장: 보컬 분리 + 번역 + 디버그 모드
+everyric2 sync song.mp3 lyrics.txt --separate --translate --debug
+
+# 결과: output/YYYYMMDD_HHMMSS/ 폴더에 저장됨
+```
+
+### CLI 옵션
+
+```bash
+everyric2 sync [OPTIONS] SOURCE LYRICS
+
+Arguments:
+  SOURCE    오디오 파일 경로 또는 YouTube URL
+  LYRICS    가사 텍스트 파일 경로
+
+Options:
+  -o, --output PATH           출력 파일 경로
+  -f, --format TEXT           출력 포맷: srt, ass, lrc, json (기본: srt)
+  -s, --separate              Demucs로 보컬 분리 (정확도 향상)
+  -t, --translate             가사를 한국어로 번역
+  -d, --debug                 디버그 파일 저장 (청크, 프롬프트, 진단 이미지)
+  -c, --chunk-duration INT    청크 길이 초 (기본: 60)
+  -m, --model TEXT            모델 경로 오버라이드
+  --help                      도움말
+```
+
+### 예시
+
+```bash
+# 기본 사용
 everyric2 sync song.mp3 lyrics.txt -o output.srt
 
-# YouTube 영상에서 가사 싱크
-# 주의: YouTube 봇 감지로 인해 쿠키가 필요할 수 있습니다
-everyric2 sync "https://youtube.com/watch?v=..." lyrics.txt -o output.srt
+# 보컬 분리 (배경음 제거로 정확도 향상)
+everyric2 sync song.mp3 lyrics.txt -s -o output.srt
 
-# 보컬 분리 사용 (정확도 향상)
-everyric2 sync song.mp3 lyrics.txt --separate -o output.srt
+# 번역 포함
+everyric2 sync song.mp3 lyrics.txt -s -t -o output.srt
 
-# 다른 출력 포맷
+# 전체 기능 (디버그 모드)
+everyric2 sync song.mp3 lyrics.txt -s -t -d
+
+# 청크 크기 조절 (긴 오디오용)
+everyric2 sync long_song.mp3 lyrics.txt -s -t -d -c 90
+
+# YouTube에서 직접
+everyric2 sync "https://youtube.com/watch?v=..." lyrics.txt -s -t -d
+
+# LRC 포맷 출력
 everyric2 sync song.mp3 lyrics.txt -f lrc -o output.lrc
-everyric2 sync song.mp3 lyrics.txt -f ass -o output.ass
-everyric2 sync song.mp3 lyrics.txt -f json -o output.json
-
-# 도움말
-everyric2 --help
-everyric2 sync --help
 ```
 
 ### 배치 모드
 
-여러 곡을 한 번에 처리할 수 있습니다:
+여러 곡을 한 번에 처리:
 
 ```bash
-# 배치 테스트 실행
 everyric2 batch batch.yaml
-
-# 이전 결과에서 이어서 실행
-everyric2 batch batch.yaml --resume
+everyric2 batch batch.yaml --resume  # 이어서 실행
 ```
 
 배치 설정 파일 예시 (`batch.yaml`):
@@ -117,17 +292,13 @@ tests:
     lyrics: |
       First line
       Second line
-      Third line
 ```
 
 ### API 서버 모드
 
 ```bash
-# 서버 시작
 everyric2 serve --port 8000
-
-# 개발 모드 (auto-reload)
-everyric2 serve --port 8000 --reload
+everyric2 serve --port 8000 --reload  # 개발 모드
 ```
 
 API 엔드포인트:
@@ -135,7 +306,6 @@ API 엔드포인트:
 - `GET /formats` - 지원 포맷 목록
 - `POST /sync/upload` - 파일 업로드로 싱크
 - `POST /sync/youtube` - YouTube URL로 싱크
-- `GET /youtube/info` - YouTube 영상 정보
 
 ### Python 코드에서 사용
 
@@ -144,9 +314,9 @@ from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
 from everyric2.inference.prompt import LyricLine
 from everyric2.output.formatters import FormatterFactory
 
-# 엔진 초기화
-engine = QwenOmniGGUFEngine()
-engine.load_model()  # llama-server 시작 (첫 실행 시 ~1분)
+# 엔진 초기화 (청크 크기 60초)
+engine = QwenOmniGGUFEngine(chunk_duration=60)
+engine.load_model()  # llama-server 자동 시작 (~1분)
 
 # 가사 준비
 lyrics = LyricLine.from_file("lyrics.txt")
@@ -166,20 +336,47 @@ with open("output.srt", "w") as f:
 engine.unload_model()
 ```
 
+## 프로젝트 구조
+
+```
+everyric2/
+├── cli.py                    # CLI 인터페이스
+├── server.py                 # FastAPI 서버
+├── batch.py                  # 배치 처리
+├── inference/
+│   ├── qwen_omni_gguf.py    # GGUF 엔진 (llama.cpp)
+│   │   ├── QwenOmniGGUFEngine  # 메인 엔진 클래스
+│   │   ├── ChunkContext        # 청크 컨텍스트 (dataclass)
+│   │   ├── _sync_single()      # 단일 청크 처리
+│   │   ├── _sync_with_chunks() # 청크 분할 처리
+│   │   └── _build_prompt()     # 프롬프트 생성
+│   └── prompt.py             # 프롬프트 빌더, LyricLine, SyncResult
+├── audio/
+│   ├── downloader.py        # YouTube 다운로더 (yt-dlp)
+│   ├── loader.py            # 오디오 로더 (AudioData)
+│   └── separator.py         # 보컬 분리 (Demucs)
+├── translation/
+│   └── translator.py        # 가사 번역 (LLM 기반)
+├── debug/
+│   ├── output_manager.py    # 디버그 출력 관리
+│   ├── debug_info.py        # 디버그 정보 수집
+│   └── visualizer.py        # Diagnostics 시각화
+├── output/
+│   └── formatters.py        # SRT/ASS/LRC/JSON 포매터
+└── config/
+    └── settings.py          # 설정 관리
+```
+
 ## 설정
 
-환경변수 또는 `.env` 파일로 설정합니다:
+환경변수 또는 `.env` 파일:
 
 ```bash
-# 캐시 디렉토리 (WSL에서 D: 드라이브 사용)
 EVERYRIC_MODEL__CACHE_DIR=/mnt/d/huggingface_cache
-
-# 서버 설정
 EVERYRIC_SERVER__PORT=8080
 ```
 
 현재 설정 확인:
-
 ```bash
 everyric2 config
 ```
@@ -197,83 +394,51 @@ everyric2 config
 
 | 모델 | VRAM |
 |------|------|
-| GGUF Q4_K_M | ~16GB |
-| GGUF Q4_K_M + 긴 오디오 | ~24GB |
-
-## 프로젝트 구조
-
-```
-everyric2/
-├── cli.py                    # CLI 인터페이스
-├── server.py                 # FastAPI 서버
-├── batch.py                  # 배치 처리
-├── inference/
-│   ├── qwen_omni_gguf.py    # GGUF 엔진 (llama.cpp)
-│   ├── qwen_omni_vllm.py    # vLLM 엔진 (미사용)
-│   └── prompt.py            # 프롬프트 빌더
-├── audio/
-│   ├── downloader.py        # YouTube 다운로더
-│   ├── loader.py            # 오디오 로더
-│   └── separator.py         # 보컬 분리 (Demucs)
-├── output/
-│   └── formatters.py        # SRT/ASS/LRC/JSON 포매터
-└── config/
-    └── settings.py          # 설정 관리
-```
-
-## 개발
-
-```bash
-# 테스트 실행
-pytest
-
-# 커버리지 포함
-pytest --cov=everyric2
-
-# 린트
-ruff check everyric2
-
-# 타입 체크
-mypy everyric2
-```
+| GGUF Q4_K_M | ~18GB |
+| GGUF Q4_K_M + 보컬분리 + 긴 오디오 | ~24GB |
 
 ## 문제 해결
 
-### YouTube 다운로드 오류
+### llama-server 시작 실패 / 타임아웃
 
-YouTube 봇 감지로 인해 다운로드가 실패할 수 있습니다:
+```bash
+# 1. 기존 프로세스 정리
+pkill -9 llama-server
+
+# 2. 수동 시작
+/home/at192u/dev/llama-cpp-qwen3-omni/build/bin/llama-server \
+  -m /mnt/d/models/qwen3-omni/thinker-q4_k_m.gguf \
+  --mmproj /mnt/d/models/qwen3-omni/mmproj-f16.gguf \
+  --port 8081 -ngl 99 -c 8192
+
+# 3. 상태 확인 (1~2분 대기 후)
+curl http://localhost:8081/health
+# {"status":"ok"} 나오면 정상
+```
+
+### 청크 처리 중 연결 끊김
+
+청크 크기를 줄여보세요:
+```bash
+everyric2 sync song.mp3 lyrics.txt -s -t -d -c 45  # 45초 청크
+```
+
+### YouTube 다운로드 오류
 
 ```
 ERROR: Sign in to confirm you're not a bot
 ```
 
-해결 방법:
-1. 브라우저에서 YouTube에 로그인
-2. 쿠키를 추출하여 사용 ([yt-dlp 쿠키 가이드](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp))
-
-또는 로컬 파일을 직접 사용하세요:
+로컬 파일을 직접 사용하세요:
 ```bash
-everyric2 sync local_audio.mp3 lyrics.txt -o output.srt
-```
-
-### llama-server 시작 실패
-
-모델 경로를 확인하세요:
-```bash
-ls -la /mnt/d/models/qwen3-omni/
-# thinker-q4_k_m.gguf, mmproj-f16.gguf 파일이 있어야 함
-```
-
-llama-server 바이너리 경로 확인:
-```bash
-ls -la /home/at192u/dev/llama-cpp-qwen3-omni/build/bin/llama-server
+everyric2 sync local_audio.mp3 lyrics.txt -s -t -d
 ```
 
 ### VRAM 부족
 
-긴 오디오는 자동으로 30초 청크로 분할됩니다. 그래도 부족하면:
 - 더 작은 양자화 모델 사용 (Q3_K_M 등)
-- 보컬 분리 비활성화
+- 청크 크기 줄이기: `-c 30`
+- 보컬 분리 비활성화: `-s` 옵션 제거
 
 ## 라이선스
 
