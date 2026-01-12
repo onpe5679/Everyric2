@@ -62,3 +62,7 @@ Thumbs.db
 
 # Demucs output
 separated/
+
+# for test
+output/
+ftest1/

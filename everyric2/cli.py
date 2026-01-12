@@ -167,9 +167,9 @@ def sync(
         # Step 4: Synchronize
         progress.update(task, description="Loading model...")
         try:
-            from everyric2.inference.qwen_omni import QwenOmniEngine
+            from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
 
-            engine = QwenOmniEngine(settings.model)
+            engine = QwenOmniGGUFEngine(settings.model)
             engine.load_model()
             console.print("[green]Model loaded[/green]")
 
@@ -197,6 +197,68 @@ def sync(
             raise typer.Exit(1)
 
         progress.update(task, description="Done!")
+
+
+@app.command()
+def batch(
+    config_file: Annotated[Path, typer.Argument(help="YAML config file for batch tests")],
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", "-r", help="Resume from last completed test"),
+    ] = False,
+) -> None:
+    """Run batch tests from YAML config.
+
+    Example config (batch.yaml):
+        output_dir: ./output
+        formats: [srt, ass, lrc, json]
+        tests:
+          - title: "Song Name"
+            source: "https://youtube.com/watch?v=..."
+            lyrics: |
+              First line
+              Second line
+          - title: "Another Song"
+            source: "./song.mp3"
+            lyrics_file: "./lyrics.txt"
+
+    Usage:
+        everyric2 batch batch.yaml
+        everyric2 batch batch.yaml --resume
+    """
+    if not config_file.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {config_file}")
+        raise typer.Exit(1)
+
+    try:
+        from everyric2.batch import BatchConfig, BatchRunner
+
+        config = BatchConfig.from_yaml(config_file)
+        config.resume = resume
+        runner = BatchRunner(config)
+
+        console.print(f"[cyan]Batch config loaded:[/cyan] {len(config.tests)} tests")
+        console.print(f"[cyan]Output directory:[/cyan] {config.output_dir}")
+        console.print(f"[cyan]Formats:[/cyan] {', '.join(config.formats)}")
+
+        def progress_cb(current: int, total: int, title: str) -> None:
+            console.print(f"\n[cyan][{current}/{total}][/cyan] {title}")
+
+        def log_cb(msg: str) -> None:
+            console.print(f"  {msg}")
+
+        results = runner.run(progress_callback=progress_cb, log_callback=log_cb)
+
+        console.print("\n[green]Batch complete![/green]")
+        for title, path in results.items():
+            if path:
+                console.print(f"  [green]✓[/green] {title} → {path}")
+            else:
+                console.print(f"  [red]✗[/red] {title} (failed)")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
 
 @app.command()

@@ -17,6 +17,13 @@ Qwen3-Omni 멀티모달 LLM을 사용한 가사 싱크 도구입니다.
 - Python 3.10+
 - NVIDIA GPU (24GB+ VRAM 권장)
 - ffmpeg
+- [llama.cpp with Qwen3-Omni support](https://github.com/user/llama-cpp-qwen3-omni)
+
+### 모델 파일
+
+GGUF 모델 파일이 필요합니다:
+- `thinker-q4_k_m.gguf` (~18GB) - 메인 모델
+- `mmproj-f16.gguf` (~2.4GB) - 멀티모달 프로젝터
 
 ## 설치
 
@@ -26,9 +33,9 @@ git clone https://github.com/onpe5679/Everyric2.git
 cd Everyric2
 
 # 가상환경 생성 (권장)
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: venv\Scripts\activate  # Windows
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# or: .venv\Scripts\activate  # Windows
 
 # 기본 설치
 pip install -e .
@@ -43,22 +50,20 @@ pip install -e ".[separator]"
 pip install -e ".[all]"
 ```
 
-## 모델 캐시 설정 (WSL 사용자)
-
-WSL에서 D: 드라이브에 모델을 저장하여 여러 프로젝트에서 공유할 수 있습니다:
+### llama.cpp 설정
 
 ```bash
-# .env 파일 생성
-cp .env.example .env
+# llama.cpp 빌드 (Qwen3-Omni 지원 버전)
+git clone https://github.com/user/llama-cpp-qwen3-omni.git
+cd llama-cpp-qwen3-omni
+mkdir build && cd build
+cmake .. -DGGML_CUDA=ON
+cmake --build . --config Release -j
 
-# .env 파일 편집
-EVERYRIC_MODEL__CACHE_DIR=/mnt/d/huggingface_cache
-```
-
-또는 환경변수로 직접 설정:
-
-```bash
-export HF_HOME=/mnt/d/huggingface_cache
+# 모델 파일 배치
+# 기본 경로: /mnt/d/models/qwen3-omni/
+mkdir -p /mnt/d/models/qwen3-omni
+# thinker-q4_k_m.gguf와 mmproj-f16.gguf를 해당 경로에 복사
 ```
 
 ## 사용법
@@ -70,6 +75,7 @@ export HF_HOME=/mnt/d/huggingface_cache
 everyric2 sync song.mp3 lyrics.txt -o output.srt
 
 # YouTube 영상에서 가사 싱크
+# 주의: YouTube 봇 감지로 인해 쿠키가 필요할 수 있습니다
 everyric2 sync "https://youtube.com/watch?v=..." lyrics.txt -o output.srt
 
 # 보컬 분리 사용 (정확도 향상)
@@ -83,6 +89,35 @@ everyric2 sync song.mp3 lyrics.txt -f json -o output.json
 # 도움말
 everyric2 --help
 everyric2 sync --help
+```
+
+### 배치 모드
+
+여러 곡을 한 번에 처리할 수 있습니다:
+
+```bash
+# 배치 테스트 실행
+everyric2 batch batch.yaml
+
+# 이전 결과에서 이어서 실행
+everyric2 batch batch.yaml --resume
+```
+
+배치 설정 파일 예시 (`batch.yaml`):
+
+```yaml
+output_dir: ./output
+formats: [srt, ass, lrc, json]
+tests:
+  - title: "Song Name"
+    source: "./song.mp3"
+    lyrics_file: "./lyrics.txt"
+  - title: "Another Song"
+    source: "https://youtube.com/watch?v=..."
+    lyrics: |
+      First line
+      Second line
+      Third line
 ```
 
 ### API 서버 모드
@@ -105,12 +140,13 @@ API 엔드포인트:
 ### Python 코드에서 사용
 
 ```python
-from everyric2.inference import QwenOmniEngine, LyricLine
-from everyric2.output import FormatterFactory
+from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
+from everyric2.inference.prompt import LyricLine
+from everyric2.output.formatters import FormatterFactory
 
 # 엔진 초기화
-engine = QwenOmniEngine()
-engine.load_model()
+engine = QwenOmniGGUFEngine()
+engine.load_model()  # llama-server 시작 (첫 실행 시 ~1분)
 
 # 가사 준비
 lyrics = LyricLine.from_file("lyrics.txt")
@@ -125,6 +161,9 @@ output = formatter.format(results)
 # 저장
 with open("output.srt", "w") as f:
     f.write(output)
+
+# 서버 종료
+engine.unload_model()
 ```
 
 ## 설정
@@ -132,14 +171,8 @@ with open("output.srt", "w") as f:
 환경변수 또는 `.env` 파일로 설정합니다:
 
 ```bash
-# 모델 경로 변경
-EVERYRIC_MODEL__PATH=your/custom/model
-
 # 캐시 디렉토리 (WSL에서 D: 드라이브 사용)
 EVERYRIC_MODEL__CACHE_DIR=/mnt/d/huggingface_cache
-
-# GPU 메모리가 부족한 경우 청크 크기 줄이기
-EVERYRIC_MODEL__CHUNK_DURATION=600  # 10분
 
 # 서버 설정
 EVERYRIC_SERVER__PORT=8080
@@ -164,8 +197,29 @@ everyric2 config
 
 | 모델 | VRAM |
 |------|------|
-| AWQ-4bit (기본) | ~24GB |
-| AWQ-4bit + 긴 오디오 | ~32GB |
+| GGUF Q4_K_M | ~16GB |
+| GGUF Q4_K_M + 긴 오디오 | ~24GB |
+
+## 프로젝트 구조
+
+```
+everyric2/
+├── cli.py                    # CLI 인터페이스
+├── server.py                 # FastAPI 서버
+├── batch.py                  # 배치 처리
+├── inference/
+│   ├── qwen_omni_gguf.py    # GGUF 엔진 (llama.cpp)
+│   ├── qwen_omni_vllm.py    # vLLM 엔진 (미사용)
+│   └── prompt.py            # 프롬프트 빌더
+├── audio/
+│   ├── downloader.py        # YouTube 다운로더
+│   ├── loader.py            # 오디오 로더
+│   └── separator.py         # 보컬 분리 (Demucs)
+├── output/
+│   └── formatters.py        # SRT/ASS/LRC/JSON 포매터
+└── config/
+    └── settings.py          # 설정 관리
+```
 
 ## 개발
 
@@ -183,12 +237,51 @@ ruff check everyric2
 mypy everyric2
 ```
 
+## 문제 해결
+
+### YouTube 다운로드 오류
+
+YouTube 봇 감지로 인해 다운로드가 실패할 수 있습니다:
+
+```
+ERROR: Sign in to confirm you're not a bot
+```
+
+해결 방법:
+1. 브라우저에서 YouTube에 로그인
+2. 쿠키를 추출하여 사용 ([yt-dlp 쿠키 가이드](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp))
+
+또는 로컬 파일을 직접 사용하세요:
+```bash
+everyric2 sync local_audio.mp3 lyrics.txt -o output.srt
+```
+
+### llama-server 시작 실패
+
+모델 경로를 확인하세요:
+```bash
+ls -la /mnt/d/models/qwen3-omni/
+# thinker-q4_k_m.gguf, mmproj-f16.gguf 파일이 있어야 함
+```
+
+llama-server 바이너리 경로 확인:
+```bash
+ls -la /home/at192u/dev/llama-cpp-qwen3-omni/build/bin/llama-server
+```
+
+### VRAM 부족
+
+긴 오디오는 자동으로 30초 청크로 분할됩니다. 그래도 부족하면:
+- 더 작은 양자화 모델 사용 (Q3_K_M 등)
+- 보컬 분리 비활성화
+
 ## 라이선스
 
 MIT License
 
 ## 크레딧
 
-- [Qwen-Omni](https://github.com/QwenLM/Qwen2.5-Omni) - 멀티모달 LLM
+- [Qwen3-Omni](https://github.com/QwenLM/Qwen2.5-Omni) - 멀티모달 LLM
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF 추론 엔진
 - [Demucs](https://github.com/facebookresearch/demucs) - 보컬 분리
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - YouTube 다운로드

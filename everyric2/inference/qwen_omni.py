@@ -96,19 +96,17 @@ class QwenOmniEngine:
             else:
                 torch_dtype = getattr(torch, self.config.torch_dtype)
 
-            # Determine attention implementation
             attn_impl = "flash_attention_2" if self.config.use_flash_attention else "eager"
 
             self._model = ModelClass.from_pretrained(
                 self.config.path,
                 dtype=torch_dtype,
-                device_map=self.config.device_map,
+                device_map="auto",
                 attn_implementation=attn_impl,
                 cache_dir=str(self.config.cache_dir) if self.config.cache_dir else None,
                 trust_remote_code=True,
             )
 
-            # Disable talker (TTS) - we only need text output
             if hasattr(self._model, "disable_talker"):
                 self._model.disable_talker()
 
