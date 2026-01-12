@@ -62,7 +62,7 @@ class QwenOmniGGUFEngine:
     DEFAULT_MODEL_PATH = "/mnt/d/models/qwen3-omni/thinker-q4_k_m.gguf"
     DEFAULT_MMPROJ_PATH = "/mnt/d/models/qwen3-omni/mmproj-f16.gguf"
     SERVER_PORT = 8081
-    DEFAULT_CHUNK_DURATION = 90
+    DEFAULT_CHUNK_DURATION = 100  # llama.cpp position embeddings 제한: ~120초
     DEFAULT_CHUNK_OVERLAP = 5.0
 
     def __init__(

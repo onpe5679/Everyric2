@@ -71,11 +71,9 @@ def sync(
         typer.Option("--cache-dir", help="HuggingFace cache directory"),
     ] = None,
     chunk_duration: Annotated[
-        int,
-        typer.Option(
-            "--chunk-duration", "-c", help="Audio chunk duration in seconds (default: 60)"
-        ),
-    ] = 60,
+        int | None,
+        typer.Option("--chunk-duration", "-c", help="Audio chunk duration in seconds"),
+    ] = None,
 ) -> None:
     """Synchronize lyrics with audio.
 
