@@ -99,10 +99,9 @@ class QwenOmniEngine:
             # Determine attention implementation
             attn_impl = "flash_attention_2" if self.config.use_flash_attention else "eager"
 
-            # Load model
             self._model = ModelClass.from_pretrained(
                 self.config.path,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,
                 device_map=self.config.device_map,
                 attn_implementation=attn_impl,
                 cache_dir=str(self.config.cache_dir) if self.config.cache_dir else None,
@@ -180,8 +179,7 @@ class QwenOmniEngine:
                 tokenize=False,
             )
 
-            # Process multimodal info
-            audios, images, videos = process_mm_info(conversation, use_audio_in_video=False)
+            audios, images, videos = process_mm_info(conversation, use_audio_in_video=False)[:3]
 
             # Prepare inputs
             inputs = self._processor(
@@ -208,13 +206,14 @@ class QwenOmniEngine:
                     do_sample=temperature > 0,
                 )
 
-            # Handle different output formats
             if isinstance(output, tuple):
                 text_ids = output[0]
             else:
                 text_ids = output
 
-            # Decode response
+            if hasattr(text_ids, "sequences"):
+                text_ids = text_ids.sequences
+
             response = self._processor.batch_decode(
                 text_ids[:, inputs["input_ids"].shape[1] :],
                 skip_special_tokens=True,
