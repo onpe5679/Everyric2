@@ -193,9 +193,9 @@ Output a JSON array like this:
         data: list,
         lyrics: list[LyricLine] | None = None,
     ) -> list[SyncResult]:
-        """Parse JSON list into SyncResult list."""
         results = []
-        lyrics_map = {l.text.lower(): l.line_number for l in lyrics} if lyrics else {}
+        lyrics_text_map = {l.text.lower(): l.line_number for l in lyrics} if lyrics else {}
+        lyrics_by_number = {l.line_number: l for l in lyrics} if lyrics else {}
 
         for item in data:
             if not isinstance(item, dict):
@@ -206,8 +206,15 @@ Output a JSON array like this:
             end = item.get("end", item.get("end_time", 0))
             confidence = item.get("confidence")
 
-            # Match line number from original lyrics
-            line_num = lyrics_map.get(text.lower())
+            line_num = item.get("line")
+
+            if line_num is not None and lyrics_by_number:
+                original_lyric = lyrics_by_number.get(line_num)
+                if original_lyric:
+                    text = original_lyric.text
+
+            if line_num is None:
+                line_num = lyrics_text_map.get(text.lower())
 
             results.append(
                 SyncResult(
