@@ -8,10 +8,9 @@ from pathlib import Path
 
 @dataclass
 class LyricLine:
-    """A single line of lyrics."""
-
     text: str
     line_number: int
+    translation: str | None = None
 
     @classmethod
     def from_text(cls, text: str) -> list["LyricLine"]:

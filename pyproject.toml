@@ -40,6 +40,9 @@ dependencies = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     "python-multipart>=0.0.6",
+    "matplotlib>=3.7.0",
+    "deep-translator>=1.11.0",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]

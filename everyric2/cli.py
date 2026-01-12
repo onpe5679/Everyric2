@@ -54,6 +54,14 @@ def sync(
         bool,
         typer.Option("--separate", "-s", help="Use Demucs vocal separation"),
     ] = False,
+    translate: Annotated[
+        bool,
+        typer.Option("--translate", "-t", help="Translate lyrics to Korean"),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option("--debug", "-d", help="Save debug files (prompts, responses, diagnostics)"),
+    ] = False,
     model: Annotated[
         Optional[str],
         typer.Option("--model", "-m", help="Model path override"),
@@ -62,15 +70,24 @@ def sync(
         Optional[Path],
         typer.Option("--cache-dir", help="HuggingFace cache directory"),
     ] = None,
+    chunk_duration: Annotated[
+        int,
+        typer.Option(
+            "--chunk-duration", "-c", help="Audio chunk duration in seconds (default: 60)"
+        ),
+    ] = 60,
 ) -> None:
     """Synchronize lyrics with audio.
 
     Examples:
-        everyric2 sync "https://youtube.com/watch?v=..." lyrics.txt -o output.srt
-        everyric2 sync song.mp3 lyrics.txt --separate -f ass
-        everyric2 sync audio.wav lyrics.txt -f lrc --cache-dir /mnt/d/huggingface_cache
+        everyric2 sync song.mp3 lyrics.txt -o output.srt
+        everyric2 sync song.mp3 lyrics.txt --translate --debug
+        everyric2 sync "https://youtube.com/..." lyrics.txt -f lrc
     """
-    # Validate format
+    import json
+    import shutil
+    import sys
+
     supported_formats = FormatterFactory.get_supported_formats()
     if format.lower() not in supported_formats:
         console.print(
@@ -79,48 +96,52 @@ def sync(
         )
         raise typer.Exit(1)
 
-    # Validate lyrics file
     if not lyrics.exists():
         console.print(f"[red]Error:[/red] Lyrics file not found: {lyrics}")
         raise typer.Exit(1)
 
-    # Determine output path
-    if output is None:
-        formatter = FormatterFactory.get_formatter(format)
-        output = lyrics.with_suffix(f".{formatter.get_extension()}")
-
     settings = get_settings()
-
-    # Override settings if provided
     if model:
         settings.model.path = model
     if cache_dir:
         settings.model.cache_dir = cache_dir
+
+    video_title: str | None = None
+    audio_path: Path
+    audio = None
+    original_audio = None
+    vocals_audio = None
+    lyric_lines = None
+    translated_text: str | None = None
+    translated_results: list | None = None
+    results = None
+    debug_info = None
+    run_ctx = None
+    output_manager = None
 
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        # Step 1: Load/download audio
         task = progress.add_task("Loading audio...", total=None)
 
         try:
             from everyric2.audio.downloader import YouTubeDownloader
             from everyric2.audio.loader import AudioLoader
+            import time as time_module
 
+            step_start = time_module.time()
             loader = AudioLoader()
-            audio_path: Path
-
-            # Check if source is YouTube URL
             downloader = YouTubeDownloader()
+
             if downloader.validate_url(source):
                 progress.update(task, description="Downloading from YouTube...")
-                result = downloader.download(source)
-                audio_path = result.audio_path
-                console.print(f"[green]Downloaded:[/green] {result.title}")
+                dl_result = downloader.download(source)
+                audio_path = dl_result.audio_path
+                video_title = dl_result.title
+                console.print(f"[green]Downloaded:[/green] {video_title}")
             else:
-                # Local file
                 source_path = Path(source)
                 if not source_path.exists():
                     console.print(f"[red]Error:[/red] Audio file not found: {source}")
@@ -129,68 +150,214 @@ def sync(
 
             progress.update(task, description="Loading audio...")
             audio = loader.load(audio_path)
-            console.print(f"[green]Audio loaded:[/green] {audio.duration:.1f}s")
+            original_audio = audio
+            audio_load_time = time_module.time() - step_start
+            console.print(
+                f"[green]Audio loaded:[/green] {audio.duration:.1f}s ({audio_load_time:.1f}s)"
+            )
 
         except Exception as e:
             console.print(f"[red]Error loading audio:[/red] {e}")
             raise typer.Exit(1)
 
-        # Step 2: Vocal separation (optional)
+        if debug:
+            from everyric2.debug.output_manager import OutputManager
+            from everyric2.debug.debug_info import DebugInfo, StepTiming
+
+            output_manager = OutputManager()
+            command_str = " ".join(sys.argv)
+            run_ctx = output_manager.create_run_context(
+                title=video_title,
+                source=source,
+                command=command_str,
+                settings=settings.model_dump() if hasattr(settings, "model_dump") else {},
+            )
+            debug_info = DebugInfo(
+                source=source,
+                title=video_title,
+                command=command_str,
+                settings=settings.model_dump() if hasattr(settings, "model_dump") else {},
+                output_dir=run_ctx.output_dir,
+            )
+            output_manager.save_settings(run_ctx)
+            output_manager.save_audio(run_ctx, audio, "audio_original.wav")
+            debug_info.steps.append(
+                StepTiming(
+                    name="audio_load", start_time=step_start, end_time=step_start + audio_load_time
+                )
+            )
+            console.print(f"[cyan]Debug output:[/cyan] {run_ctx.output_dir}")
+
         if separate:
             progress.update(task, description="Separating vocals...")
+            sep_start = time_module.time()
             try:
                 from everyric2.audio.separator import VocalSeparator
 
                 separator = VocalSeparator()
                 if separator.is_available():
-                    result = separator.separate(audio)
-                    audio = result.vocals
-                    console.print("[green]Vocal separation complete[/green]")
+                    sep_result = separator.separate(audio)
+                    vocals_audio = sep_result.vocals
+                    audio = vocals_audio
+                    sep_time = time_module.time() - sep_start
+                    console.print(f"[green]Vocal separation complete[/green] ({sep_time:.1f}s)")
+                    if debug and run_ctx and output_manager:
+                        output_manager.save_audio(run_ctx, vocals_audio, "audio_vocals.wav")
+                        if debug_info:
+                            from everyric2.debug.debug_info import StepTiming
+
+                            debug_info.steps.append(
+                                StepTiming("vocal_separation", sep_start, time_module.time())
+                            )
                 else:
-                    console.print(
-                        "[yellow]Warning:[/yellow] Demucs not installed. Skipping vocal separation."
-                    )
+                    console.print("[yellow]Warning:[/yellow] Demucs not installed.")
             except Exception as e:
                 console.print(f"[yellow]Warning:[/yellow] Vocal separation failed: {e}")
 
-        # Step 3: Load lyrics
         progress.update(task, description="Loading lyrics...")
         try:
             from everyric2.inference.prompt import LyricLine
 
             lyric_lines = LyricLine.from_file(lyrics)
+            lyrics_text = lyrics.read_text(encoding="utf-8")
             console.print(f"[green]Lyrics loaded:[/green] {len(lyric_lines)} lines")
+
+            if debug and run_ctx and output_manager:
+                output_manager.save_lyrics(run_ctx, lyrics_text, "lyrics_original.txt")
+                if debug_info:
+                    debug_info.original_lyrics = lyrics_text
+
         except Exception as e:
             console.print(f"[red]Error loading lyrics:[/red] {e}")
             raise typer.Exit(1)
 
-        # Step 4: Synchronize
+        if translate:
+            progress.update(task, description="Translating lyrics to Korean...")
+            trans_start = time_module.time()
+            try:
+                from everyric2.translation.translator import LyricsTranslator
+
+                translator = LyricsTranslator()
+                translated_text = translator.translate(lyric_lines)
+                trans_time = time_module.time() - trans_start
+                console.print(f"[green]Translation complete[/green] ({trans_time:.1f}s)")
+
+                if debug and run_ctx and output_manager:
+                    output_manager.save_translated_lyrics(run_ctx, translated_text)
+                    if debug_info:
+                        debug_info.translated_lyrics = translated_text
+                        from everyric2.debug.debug_info import StepTiming
+
+                        debug_info.steps.append(
+                            StepTiming("translation", trans_start, time_module.time())
+                        )
+
+            except Exception as e:
+                console.print(f"[yellow]Warning:[/yellow] Translation failed: {e}")
+
         progress.update(task, description="Loading model...")
+        model_start = time_module.time()
         try:
             from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
 
-            engine = QwenOmniGGUFEngine(settings.model)
+            engine = QwenOmniGGUFEngine(settings.model, chunk_duration=chunk_duration)
             engine.load_model()
-            console.print("[green]Model loaded[/green]")
+            model_time = time_module.time() - model_start
+            console.print(f"[green]Model loaded[/green] ({model_time:.1f}s)")
+
+            if debug_info:
+                from everyric2.debug.debug_info import StepTiming
+
+                debug_info.steps.append(StepTiming("model_load", model_start, time_module.time()))
 
             def progress_callback(current: int, total: int) -> None:
                 progress.update(task, description=f"Synchronizing... (chunk {current}/{total})")
 
             progress.update(task, description="Synchronizing lyrics...")
-            results = engine.sync_lyrics(audio, lyric_lines, progress_callback=progress_callback)
-            console.print(f"[green]Synchronized:[/green] {len(results)} lines")
+            sync_start = time_module.time()
+            results = engine.sync_lyrics(
+                audio, lyric_lines, progress_callback=progress_callback, debug_info=debug_info
+            )
+            sync_time = time_module.time() - sync_start
+            console.print(f"[green]Synchronized:[/green] {len(results)} lines ({sync_time:.1f}s)")
+
+            if debug_info:
+                from everyric2.debug.debug_info import StepTiming
+
+                debug_info.steps.append(StepTiming("sync", sync_start, time_module.time()))
 
         except Exception as e:
             console.print(f"[red]Error during synchronization:[/red] {e}")
             raise typer.Exit(1)
 
-        # Step 5: Format and save
         progress.update(task, description="Saving output...")
         try:
             formatter = FormatterFactory.get_formatter(format)
             formatted = formatter.format(results)
-            output.write_text(formatted, encoding="utf-8")
-            console.print(f"[green]Saved:[/green] {output}")
+
+            if debug and run_ctx:
+                final_output = run_ctx.output_dir / f"output.{format}"
+                final_output.write_text(formatted, encoding="utf-8")
+
+                if translated_text and results:
+                    from everyric2.inference.prompt import SyncResult
+
+                    translated_lines = [
+                        line for line in translated_text.strip().split("\n") if line.strip()
+                    ]
+                    translated_results = []
+                    for i, result in enumerate(results):
+                        trans_text = (
+                            translated_lines[i] if i < len(translated_lines) else result.text
+                        )
+                        translated_results.append(
+                            SyncResult(
+                                text=trans_text,
+                                start_time=result.start_time,
+                                end_time=result.end_time,
+                            )
+                        )
+                    translated_formatted = formatter.format(translated_results)
+                    translated_output = run_ctx.output_dir / f"output_translated.{format}"
+                    translated_output.write_text(translated_formatted, encoding="utf-8")
+                    console.print(f"[green]Translated output:[/green] {translated_output}")
+
+                if debug_info:
+                    debug_info.finalize(results)
+                    debug_json = run_ctx.output_dir / "debug_info.json"
+                    debug_json.write_text(
+                        json.dumps(debug_info.to_dict(), indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                if debug_info:
+                    progress.update(task, description="Generating diagnostics...")
+                    try:
+                        from everyric2.debug.visualizer import DiagnosticsVisualizer
+
+                        visualizer = DiagnosticsVisualizer()
+                        diag_path = run_ctx.output_dir / "diagnostics.png"
+                        visualizer.create_diagnostics(
+                            debug_info,
+                            results,
+                            diag_path,
+                            audio_waveform=original_audio.waveform
+                            if original_audio
+                            else audio.waveform,
+                            vocals_waveform=vocals_audio.waveform if vocals_audio else None,
+                            translated_results=translated_results,
+                            sample_rate=audio.sample_rate,
+                        )
+                        console.print(f"[green]Diagnostics:[/green] {diag_path}")
+                    except Exception as e:
+                        console.print(f"[yellow]Warning:[/yellow] Diagnostics failed: {e}")
+
+                console.print(f"[green]Saved:[/green] {final_output}")
+            else:
+                if output is None:
+                    output = lyrics.with_suffix(f".{formatter.get_extension()}")
+                output.write_text(formatted, encoding="utf-8")
+                console.print(f"[green]Saved:[/green] {output}")
 
         except Exception as e:
             console.print(f"[red]Error saving output:[/red] {e}")
