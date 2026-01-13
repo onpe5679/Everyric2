@@ -1,5 +1,3 @@
-"""Diagnostics visualization."""
-
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -36,14 +34,13 @@ _configure_cjk_fonts()
 
 
 class DiagnosticsVisualizer:
-    """Creates diagnostic visualization charts."""
-
     COLORS = {
         "original": "#FF6B6B",
         "vocals": "#4ECDC4",
         "final": "#45B7D1",
         "chunks": "#96CEB4",
         "llm_response": "#FFEAA7",
+        "transcription": "#DDA0DD",
     }
 
     def __init__(self, figsize: tuple[int, int] = (16, 20)):
@@ -59,11 +56,22 @@ class DiagnosticsVisualizer:
         translated_results: list[SyncResult] | None = None,
         sample_rate: int = 16000,
     ) -> Path:
+        transcription_sets = debug_info.transcription_sets or []
+        if not transcription_sets and debug_info.transcription_words:
+            transcription_sets = [
+                {
+                    "engine": debug_info.transcription_engine or "Transcription",
+                    "words": debug_info.transcription_words,
+                    "match_stats": debug_info.match_stats,
+                }
+            ]
+
         num_cols = 4
         if vocals_waveform is not None:
             num_cols += 1
         if translated_results:
             num_cols += 1
+        num_cols += len(transcription_sets)
 
         fig_width = 4 * num_cols
         fig, axes = plt.subplots(1, num_cols, figsize=(fig_width, 20), sharey=True)
@@ -91,6 +99,16 @@ class DiagnosticsVisualizer:
             self.COLORS["original"],
         )
         col_idx += 1
+
+        for tset in transcription_sets:
+            self._draw_transcription_column(
+                axes[col_idx],
+                tset.get("words", []),
+                tset.get("match_stats", {}),
+                duration,
+                tset.get("engine", "Transcription"),
+            )
+            col_idx += 1
 
         if translated_results:
             self._draw_synced_column(
@@ -160,6 +178,58 @@ class DiagnosticsVisualizer:
                     va="center",
                     fontsize=7,
                 )
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, duration)
+        ax.invert_yaxis()
+        ax.set_xticks([])
+
+    def _draw_transcription_column(
+        self,
+        ax,
+        words: list[dict],
+        match_stats: dict,
+        duration: float,
+        engine_name: str,
+    ) -> None:
+        title = f"{engine_name} Transcription"
+        if match_stats:
+            rate = match_stats.get("match_rate", 0) * 100
+            title += f"\n(match: {rate:.0f}%)"
+
+        ax.set_title(title, fontsize=12)
+
+        for word_data in words:
+            start = word_data.get("start", 0)
+            end = word_data.get("end", start + 0.1)
+            word = word_data.get("word", "")
+            confidence = word_data.get("confidence")
+
+            height = max(0.1, end - start)
+
+            alpha = 0.5 + 0.4 * (confidence if confidence else 0.5)
+            rect = mpatches.FancyBboxPatch(
+                (0.05, start),
+                0.9,
+                height,
+                boxstyle="round,pad=0.01",
+                facecolor=self.COLORS["transcription"],
+                alpha=alpha,
+                edgecolor="none",
+            )
+            ax.add_patch(rect)
+
+            if height > 0.3:
+                display = word[:8] if len(word) > 8 else word
+                ax.text(
+                    0.5,
+                    start + height / 2,
+                    display,
+                    ha="center",
+                    va="center",
+                    fontsize=5,
+                    rotation=0,
+                )
+
         ax.set_xlim(0, 1)
         ax.set_ylim(0, duration)
         ax.invert_yaxis()
@@ -253,7 +323,6 @@ class DiagnosticsVisualizer:
         ax.set_xlabel("Time (seconds)")
         ax.set_ylabel("Lyric Lines")
 
-        # Time ticks
         tick_interval = 10 if duration <= 120 else 30
         x_ticks = np.arange(0, duration + 1, tick_interval)
         ax.set_xticks(x_ticks)

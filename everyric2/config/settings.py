@@ -71,9 +71,33 @@ class AudioSettings(BaseSettings):
         return v
 
 
-class OutputSettings(BaseSettings):
-    """Output configuration."""
+class AlignmentSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="EVERYRIC_ALIGNMENT_")
 
+    engine: Literal["whisperx", "mfa", "hybrid", "qwen"] = Field(
+        default="hybrid", description="Alignment engine to use"
+    )
+    language: Literal["auto", "en", "ja", "ko"] = Field(
+        default="auto", description="Language for transcription/alignment"
+    )
+
+    whisperx_model: Literal["tiny", "base", "small", "medium", "large-v2", "large-v3"] = Field(
+        default="large-v3", description="WhisperX model size"
+    )
+    whisperx_batch_size: int = Field(default=16, description="Batch size for WhisperX")
+    whisperx_compute_type: Literal["float16", "float32", "int8"] = Field(
+        default="float16", description="Compute type for WhisperX"
+    )
+
+    mfa_beam: int = Field(default=1000, description="MFA beam width for difficult alignments")
+    mfa_retry_beam: int = Field(default=4000, description="MFA retry beam width")
+
+    alignment_sample_rate: int = Field(
+        default=16000, description="Sample rate for alignment engines (WhisperX/MFA require 16kHz)"
+    )
+
+
+class OutputSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_OUTPUT_")
 
     default_format: Literal["srt", "ass", "lrc", "json"] = Field(
@@ -105,6 +129,7 @@ class Settings(BaseSettings):
 
     model: ModelSettings = Field(default_factory=ModelSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
+    alignment: AlignmentSettings = Field(default_factory=AlignmentSettings)
     output: OutputSettings = Field(default_factory=OutputSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
 

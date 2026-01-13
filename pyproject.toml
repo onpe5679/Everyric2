@@ -57,11 +57,21 @@ dev = [
 separator = [
     "demucs>=4.0.0",
 ]
+whisperx = [
+    "whisperx>=3.1.0",
+    "faster-whisper>=1.0.0",
+]
+mfa = [
+    "praatio>=6.0.0",
+]
+alignment = [
+    "everyric2[whisperx,mfa]",
+]
 vllm = [
     "vllm>=0.4.0",
 ]
 all = [
-    "everyric2[dev,separator]",
+    "everyric2[dev,separator,alignment]",
 ]
 
 [project.scripts]

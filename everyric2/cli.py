@@ -1,7 +1,22 @@
 """Command-line interface for Everyric2."""
 
+# Monkey-patch torch.load to fix weights_only=True issue with pyannote/whisperx
+try:
+    import torch
+
+    _original_load = torch.load
+
+    def _patched_load(*args, **kwargs):
+        if "weights_only" in kwargs:
+            kwargs["weights_only"] = False
+        return _original_load(*args, **kwargs)
+
+    torch.load = _patched_load
+except ImportError:
+    pass
+
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Optional, cast, Literal
 
 import typer
 from rich.console import Console
@@ -62,9 +77,17 @@ def sync(
         bool,
         typer.Option("--debug", "-d", help="Save debug files (prompts, responses, diagnostics)"),
     ] = False,
+    engine: Annotated[
+        str,
+        typer.Option("--engine", "-e", help="Alignment engine (whisperx, mfa, hybrid, qwen)"),
+    ] = "hybrid",
+    language: Annotated[
+        str,
+        typer.Option("--language", "-l", help="Language (auto, en, ja, ko)"),
+    ] = "auto",
     model: Annotated[
         Optional[str],
-        typer.Option("--model", "-m", help="Model path override"),
+        typer.Option("--model", "-m", help="Model path override (for qwen engine)"),
     ] = None,
     cache_dir: Annotated[
         Optional[Path],
@@ -72,7 +95,7 @@ def sync(
     ] = None,
     chunk_duration: Annotated[
         int | None,
-        typer.Option("--chunk-duration", "-c", help="Audio chunk duration in seconds"),
+        typer.Option("--chunk-duration", "-c", help="Audio chunk duration in seconds (qwen only)"),
     ] = None,
 ) -> None:
     """Synchronize lyrics with audio.
@@ -253,28 +276,34 @@ def sync(
             except Exception as e:
                 console.print(f"[yellow]Warning:[/yellow] Translation failed: {e}")
 
-        progress.update(task, description="Loading model...")
+        progress.update(task, description=f"Loading {engine} engine...")
         model_start = time_module.time()
         try:
-            from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
+            from everyric2.alignment.factory import EngineFactory
 
-            engine = QwenOmniGGUFEngine(settings.model, chunk_duration=chunk_duration)
-            engine.load_model()
+            alignment_engine = EngineFactory.get_engine(engine, settings.alignment)
+            if not alignment_engine.is_available():
+                console.print(f"[red]Error:[/red] Engine '{engine}' is not available.")
+                console.print(
+                    "[yellow]Hint:[/yellow] Try 'everyric2 engines' to see available engines."
+                )
+                raise typer.Exit(1)
+
             model_time = time_module.time() - model_start
-            console.print(f"[green]Model loaded[/green] ({model_time:.1f}s)")
+            console.print(f"[green]Engine ready:[/green] {engine} ({model_time:.1f}s)")
 
             if debug_info:
                 from everyric2.debug.debug_info import StepTiming
 
-                debug_info.steps.append(StepTiming("model_load", model_start, time_module.time()))
+                debug_info.steps.append(StepTiming("engine_load", model_start, time_module.time()))
 
             def progress_callback(current: int, total: int) -> None:
-                progress.update(task, description=f"Synchronizing... (chunk {current}/{total})")
+                progress.update(task, description=f"Synchronizing... (step {current}/{total})")
 
             progress.update(task, description="Synchronizing lyrics...")
             sync_start = time_module.time()
-            results = engine.sync_lyrics(
-                audio, lyric_lines, progress_callback=progress_callback, debug_info=debug_info
+            results = alignment_engine.align(
+                audio, lyric_lines, language=language, progress_callback=progress_callback
             )
             sync_time = time_module.time() - sync_start
             console.print(f"[green]Synchronized:[/green] {len(results)} lines ({sync_time:.1f}s)")
@@ -283,6 +312,20 @@ def sync(
                 from everyric2.debug.debug_info import StepTiming
 
                 debug_info.steps.append(StepTiming("sync", sync_start, time_module.time()))
+
+                if hasattr(alignment_engine, "get_transcription_sets"):
+                    sets = alignment_engine.get_transcription_sets()
+                    for words, stats, engine_name in sets:
+                        if words:
+                            debug_info.add_transcription_data(words, stats, engine_name)
+                elif hasattr(alignment_engine, "get_last_transcription_data"):
+                    words, stats, engine_name = alignment_engine.get_last_transcription_data()
+                    if words:
+                        debug_info.add_transcription_data(words, stats, engine_name)
+                elif hasattr(alignment_engine, "get_last_transcription_data"):
+                    words, stats, engine_name = alignment_engine.get_last_transcription_data()
+                    if words:
+                        debug_info.add_transcription_data(words, stats, engine_name)
 
         except Exception as e:
             console.print(f"[red]Error during synchronization:[/red] {e}")
@@ -466,6 +509,119 @@ def serve(
             "[red]Error:[/red] uvicorn not installed. Install with: pip install uvicorn[standard]"
         )
         raise typer.Exit(1)
+
+
+@app.command()
+def engines() -> None:
+    """List available alignment engines."""
+    from everyric2.alignment.factory import EngineFactory
+
+    table = Table(title="Available Alignment Engines")
+    table.add_column("Engine", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Description")
+
+    for eng in EngineFactory.get_available_engines():
+        status = "[green]✓ Available[/green]" if eng["available"] else "[red]✗ Not installed[/red]"
+        table.add_row(eng["type"], status, eng["description"])
+
+    console.print(table)
+    console.print(
+        "\n[dim]Use --engine/-e option to select: everyric2 sync song.mp3 lyrics.txt -e whisperx[/dim]"
+    )
+
+
+@app.command()
+def transcribe(
+    source: Annotated[str, typer.Argument(help="YouTube URL or local audio file path")],
+    output: Annotated[
+        Optional[Path],
+        typer.Option("--output", "-o", help="Output file path for transcribed lyrics"),
+    ] = None,
+    separate: Annotated[
+        bool,
+        typer.Option("--separate", "-s", help="Use Demucs vocal separation"),
+    ] = False,
+    language: Annotated[
+        str,
+        typer.Option("--language", "-l", help="Language (auto, en, ja, ko)"),
+    ] = "auto",
+) -> None:
+    """Transcribe audio to text (no lyrics file needed)."""
+    from everyric2.alignment.factory import EngineFactory
+    from everyric2.audio.loader import AudioLoader
+
+    settings = get_settings()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Loading audio...", total=None)
+
+        try:
+            from everyric2.audio.downloader import YouTubeDownloader
+
+            loader = AudioLoader()
+            downloader = YouTubeDownloader()
+
+            if downloader.validate_url(source):
+                progress.update(task, description="Downloading from YouTube...")
+                dl_result = downloader.download(source)
+                audio_path = dl_result.audio_path
+                console.print(f"[green]Downloaded:[/green] {dl_result.title}")
+            else:
+                audio_path = Path(source)
+                if not audio_path.exists():
+                    console.print(f"[red]Error:[/red] Audio file not found: {source}")
+                    raise typer.Exit(1)
+
+            audio = loader.load(audio_path)
+            console.print(f"[green]Audio loaded:[/green] {audio.duration:.1f}s")
+
+        except Exception as e:
+            console.print(f"[red]Error loading audio:[/red] {e}")
+            raise typer.Exit(1)
+
+        if separate:
+            progress.update(task, description="Separating vocals...")
+            try:
+                from everyric2.audio.separator import VocalSeparator
+
+                separator = VocalSeparator()
+                if separator.is_available():
+                    sep_result = separator.separate(audio)
+                    audio = sep_result.vocals
+                    console.print("[green]Vocal separation complete[/green]")
+                else:
+                    console.print("[yellow]Warning:[/yellow] Demucs not installed.")
+            except Exception as e:
+                console.print(f"[yellow]Warning:[/yellow] Vocal separation failed: {e}")
+
+        progress.update(task, description="Transcribing...")
+        try:
+            engine = EngineFactory.get_engine("whisperx", settings.alignment)
+            if not engine.is_available():
+                console.print("[red]Error:[/red] WhisperX not available for transcription.")
+                raise typer.Exit(1)
+
+            result = engine.transcribe(audio, language=language)
+            console.print(
+                f"[green]Transcribed:[/green] {len(result.words)} words, language: {result.language}"
+            )
+
+            output_text = result.text
+            if output:
+                output.write_text(output_text, encoding="utf-8")
+                console.print(f"[green]Saved:[/green] {output}")
+            else:
+                console.print("\n[cyan]Transcription:[/cyan]")
+                console.print(output_text)
+
+        except Exception as e:
+            console.print(f"[red]Error during transcription:[/red] {e}")
+            raise typer.Exit(1)
 
 
 @app.command()

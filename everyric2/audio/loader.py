@@ -236,3 +236,56 @@ class AudioLoader:
         output_path = self.config.temp_dir / filename
         sf.write(output_path, audio.waveform, audio.sample_rate)
         return output_path
+
+    def resample_for_alignment(
+        self,
+        audio: AudioData,
+        target_sr: int = 16000,
+    ) -> AudioData:
+        if audio.sample_rate == target_sr:
+            return audio
+
+        resampled = librosa.resample(
+            audio.waveform,
+            orig_sr=audio.sample_rate,
+            target_sr=target_sr,
+        )
+        return AudioData(
+            waveform=resampled,
+            sample_rate=int(target_sr),
+            duration=len(resampled) / target_sr,
+            source_path=audio.source_path,
+        )
+
+    def normalize_audio(
+        self,
+        audio: AudioData,
+        target_db: float = -20.0,
+    ) -> AudioData:
+        rms = np.sqrt(np.mean(audio.waveform**2))
+        if rms < 1e-10:
+            return audio
+
+        current_db = 20 * np.log10(rms + 1e-10)
+        gain = 10 ** ((target_db - current_db) / 20)
+
+        normalized = audio.waveform * gain
+        normalized = np.clip(normalized, -1.0, 1.0)
+
+        return AudioData(
+            waveform=normalized,
+            sample_rate=audio.sample_rate,
+            duration=audio.duration,
+            source_path=audio.source_path,
+        )
+
+    def prepare_for_alignment(
+        self,
+        audio: AudioData,
+        target_sr: int = 16000,
+        normalize: bool = True,
+    ) -> AudioData:
+        prepared = self.resample_for_alignment(audio, target_sr)
+        if normalize:
+            prepared = self.normalize_audio(prepared)
+        return prepared

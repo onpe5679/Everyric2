@@ -1,18 +1,22 @@
-"""Lyrics translation using LLM."""
-
+import os
 import re
 from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 
 from everyric2.inference.prompt import LyricLine
 
+load_dotenv()
+
 
 class LyricsTranslator:
-    """Translates lyrics to Korean using local LLM."""
-
-    def __init__(self, api_url: str = "http://localhost:8081/v1/chat/completions"):
-        self.api_url = api_url
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        self.api_url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        )
 
     def translate(
         self,
@@ -28,25 +32,30 @@ class LyricsTranslator:
         if not text.strip():
             return ""
 
+        if not self.api_key:
+            return self._fallback_translate(text)
+
         prompt = self._build_prompt(text, source_lang, target_lang)
 
         try:
             response = requests.post(
-                self.api_url,
+                f"{self.api_url}?key={self.api_key}",
                 json={
-                    "model": "qwen3-omni",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 4096,
-                    "temperature": 0.3,
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 4096,
+                    },
                 },
                 timeout=120,
             )
 
             if not response.ok:
-                return f"[Translation Error: {response.status_code}]"
+                return f"[Translation Error: {response.status_code} - {response.text[:200]}]"
 
-            result = response.json()["choices"][0]["message"]["content"]
-            return self._clean_response(result, text)
+            result = response.json()
+            content = result["candidates"][0]["content"]["parts"][0]["text"]
+            return self._clean_response(content, text)
 
         except requests.exceptions.ConnectionError:
             return self._fallback_translate(text)
@@ -58,7 +67,7 @@ class LyricsTranslator:
         target = lang_names.get(target_lang, target_lang)
 
         return f"""Translate these song lyrics to {target}. 
-Keep the same line structure. Only output the translation, no explanations.
+Keep the same line structure (same number of lines). Only output the translation, no explanations or notes.
 
 LYRICS:
 {text}
@@ -66,26 +75,17 @@ LYRICS:
 TRANSLATION:"""
 
     def _clean_response(self, response: str, original: str) -> str:
-        # Remove thinking tags if present
         response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL)
 
-        # Remove common prefixes
         for prefix in ["TRANSLATION:", "Translation:", "번역:", "Here is", "Here's"]:
             if response.strip().startswith(prefix):
                 response = response.strip()[len(prefix) :].strip()
 
         lines = [l.strip() for l in response.strip().split("\n") if l.strip()]
-        original_lines = [l.strip() for l in original.strip().split("\n") if l.strip()]
-
-        # If line counts match, return as-is
-        if len(lines) == len(original_lines):
-            return "\n".join(lines)
-
         return "\n".join(lines)
 
     def _fallback_translate(self, text: str) -> str:
-        """Fallback when LLM is not available - return original with note."""
-        return f"[LLM not available - original lyrics]\n{text}"
+        return f"[GEMINI_API_KEY not set - original lyrics]\n{text}"
 
     def translate_file(self, input_path: Path, output_path: Path | None = None) -> str:
         text = input_path.read_text(encoding="utf-8")
