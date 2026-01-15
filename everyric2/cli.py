@@ -299,7 +299,11 @@ def sync(
                 debug_info.steps.append(StepTiming("engine_load", model_start, time_module.time()))
 
             def progress_callback(current: int, total: int) -> None:
-                progress.update(task, description=f"Synchronizing... (step {current}/{total})")
+                if hasattr(alignment_engine, "get_status_string"):
+                    status = alignment_engine.get_status_string()
+                    progress.update(task, description=f"Synchronizing... [{status}]")
+                else:
+                    progress.update(task, description=f"Synchronizing... (step {current}/{total})")
 
             progress.update(task, description="Synchronizing lyrics...")
             sync_start = time_module.time()

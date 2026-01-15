@@ -2,29 +2,37 @@
 flowchart TD
     subgraph HYBRID["HybridEngine.align()"]
         A[시작] --> B[_transcription_sets = 빈 리스트]
+        B --> C{MFA 사용 가능?}
         
-        B --> C[WhisperX 정렬 실행]
-        C --> D[whisperx.get_transcription_sets]
-        D --> E[_transcription_sets에 추가]
+        C -->|No| D[WhisperX만 실행]
+        D --> E[결과 반환]
         
-        E --> F{MFA 사용 가능?}
-        F -->|No| G[WhisperX 결과 반환]
+        C -->|Yes| F[ThreadPoolExecutor 생성]
         
-        F -->|Yes| H{모델 설치됨?}
-        H -->|No| G
+        subgraph PARALLEL["병렬 실행"]
+            direction LR
+            G[WhisperX 스레드]
+            H[MFA 스레드]
+        end
         
-        H -->|Yes| I[MFA 정렬 실행]
-        I --> J{성공?}
+        F --> G
+        F --> H
         
-        J -->|No| G
-        J -->|Yes| K[mfa.get_transcription_sets]
-        K --> L[_transcription_sets에 추가]
-        L --> M[MFA 결과 반환]
+        G --> I[whisperx... → whisperx ✓]
+        H --> J[mfa... → mfa ✓]
+        
+        I --> K[as_completed 대기]
+        J --> K
+        
+        K --> L[transcription_sets 수집]
+        L --> M{MFA 성공?}
+        
+        M -->|Yes| N[MFA 결과 반환]
+        M -->|No| O[WhisperX 결과 반환]
     end
 
-    subgraph DATA["get_transcription_sets() 반환값"]
-        N["[<br/>  (whisperx_words, stats, 'whisperx'),<br/>  (mfa_words, stats, 'mfa')<br/>]"]
+    subgraph STATUS["진행률 표시"]
+        P["[whisperx... | mfa...]"]
+        Q["[whisperx ✓ | mfa...]"]
+        R["[whisperx ✓ | mfa ✓]"]
     end
-
-    M --> N
-    G --> N

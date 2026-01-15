@@ -33,8 +33,16 @@ classDiagram
         +whisperx: WhisperXEngine
         +mfa: MFAEngine
         -_transcription_sets: list
+        -_progress_lock: Lock
+        -_engine_status: dict
         +align(audio, lyrics, language)
         +get_transcription_sets()
+        +get_status_string() str
+        -_align_parallel()
+        -_align_whisperx_only()
+        -_collect_transcription_sets()
+        -_update_status()
+        -_report_progress()
     }
 
     class LyricsMatcher {

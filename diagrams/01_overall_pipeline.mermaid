@@ -12,10 +12,12 @@ flowchart TD
         F[LyricLine.from_file<br/>원본 가사 파싱]
     end
 
-    subgraph ENGINE["정렬 엔진 (원본 가사 사용)"]
-        I[HybridEngine.align]
-        J[WhisperX<br/>전사 + 매칭]
-        K[MFA<br/>강제 정렬]
+    subgraph ENGINE["HybridEngine (병렬 실행)"]
+        subgraph PARALLEL["ThreadPoolExecutor"]
+            J[WhisperX<br/>전사 + 매칭]
+            K[MFA<br/>강제 정렬]
+        end
+        I[결과 수집<br/>transcription_sets]
     end
 
     subgraph TRANSLATE["번역 (정렬과 별개)"]
@@ -35,20 +37,23 @@ flowchart TD
     B --> F
     C --> D
     D -->|Yes| E
-    D -->|No| I
-    E --> I
+    D -->|No| J
+    D -->|No| K
+    E --> J
+    E --> K
     E --> N
     
-    F -->|원본 가사| I
+    F -->|원본 가사| J
+    F -->|원본 가사| K
     F -->|원본 가사| G
+    
+    J --> I
+    K --> I
+    
     G -->|Yes| H
     H --> T
     
-    I --> J
-    I --> K
-    J --> L
-    K --> L
-    
+    I --> L
     L -->|타임스탬프 복사| L2
     T -->|번역 텍스트| L2
     
