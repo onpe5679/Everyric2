@@ -1,14 +1,23 @@
 # Everyric2
 
-WhisperX + MFA 기반 하이브리드 가사 싱크 도구.
+GPU 가속 가사 싱크 도구. CTC / WhisperX / MFA 지원.
 
-## 엔진 비교
+## 엔진 비교 (155초 일본어 오디오 기준)
 
-| 엔진 | Match Rate | Speed | VRAM | 특징 |
-|------|------------|-------|------|------|
-| **WhisperX** | ~35% | ~10x | ~6GB | 전사 기반, 퍼지 매칭 |
-| **MFA** | ~100% | ~5x | CPU | 정확한 가사 필요, 초정밀 |
-| **Hybrid** | Best | ~3x | ~6GB | WhisperX + MFA 동시 실행, 진단 비교 |
+| 엔진 | 속도 | 일본어 | 특징 |
+|------|------|--------|------|
+| **CTC** | **5초** | ✅ | GPU 가속, HuggingFace wav2vec2 |
+| **WhisperX** | 10초 | ⚠️ | 전사 기반, ~35% match rate |
+| **MFA** | 454초 | ✅ | CPU 전용, 최고 정확도 |
+| **Hybrid** | 460초 | ✅ | WhisperX + MFA 동시 실행 |
+
+### 언어별 권장 엔진
+
+| 언어 | 권장 엔진 | 이유 |
+|------|----------|------|
+| 일본어/한국어/중국어 | `ctc` | HuggingFace 모델로 native 문자 지원, 90배 빠름 |
+| 영어/유럽어 | `ctc` | MMS_FA 모델 사용 |
+| 최고 정확도 필요 | `mfa` | 느리지만 가장 정확 |
 
 ## 설치
 
@@ -43,19 +52,22 @@ mfa model download dictionary korean_mfa
 ## 사용법
 
 ```bash
-# 기본 (Hybrid - WhisperX + MFA)
-PATH="$HOME/.conda/envs/mfaenv/bin:$PATH" \
-everyric2 sync audio.wav lyrics.txt --language ja --debug
+# 권장: CTC 엔진 (가장 빠름, 일본어/한국어/중국어 지원)
+everyric2 sync audio.wav lyrics.txt --engine ctc --language ja --debug
 
 # 전체 파이프라인 (보컬분리 + 번역 + 진단)
-PATH="$HOME/.conda/envs/mfaenv/bin:$PATH" \
-everyric2 sync audio.wav lyrics.txt --separate --translate --debug --language ja
+everyric2 sync audio.wav lyrics.txt --engine ctc --separate --translate --debug --language ja
 
-# WhisperX만 사용
+# WhisperX (전사 기반)
 everyric2 sync audio.wav lyrics.txt --engine whisperx --language ja
 
-# MFA만 사용
+# MFA (최고 정확도, 느림)
+PATH="$HOME/.conda/envs/mfaenv/bin:$PATH" \
 everyric2 sync audio.wav lyrics.txt --engine mfa --language ja
+
+# Hybrid (WhisperX + MFA 동시 실행)
+PATH="$HOME/.conda/envs/mfaenv/bin:$PATH" \
+everyric2 sync audio.wav lyrics.txt --engine hybrid --language ja --debug
 ```
 
 ### 출력 구조
@@ -157,7 +169,7 @@ EVERYRIC_ALIGNMENT__MFA_RETRY_BEAM=4000   # 노래용 증가 (기본 400)
 
 ```python
 class AlignmentSettings(BaseSettings):
-    engine: Literal["whisperx", "mfa", "hybrid", "qwen"] = "hybrid"  # 기본값
+    engine: Literal["whisperx", "mfa", "hybrid", "ctc", "nemo", "gpu-hybrid"] = "ctc"
     language: Literal["auto", "en", "ja", "ko"] = "auto"
     
     whisperx_model: str = "large-v3"
@@ -200,16 +212,19 @@ everyric2/
 ├── cli.py                     # CLI
 ├── alignment/
 │   ├── base.py               # BaseAlignmentEngine
+│   ├── ctc_engine.py         # CTC (GPU, HuggingFace wav2vec2)
 │   ├── whisperx_engine.py    # WhisperX
-│   ├── mfa_engine.py         # MFA (conda 자동 감지)
-│   ├── hybrid_engine.py      # Hybrid (둘 다 실행)
-│   └── matcher.py            # LyricsMatcher, MatchStats
+│   ├── mfa_engine.py         # MFA (conda)
+│   ├── hybrid_engine.py      # WhisperX + MFA
+│   ├── nemo_engine.py        # NeMo NFA (영어만)
+│   ├── gpu_hybrid_engine.py  # CTC + NeMo
+│   └── matcher.py            # LyricsMatcher
 ├── audio/
 │   ├── loader.py             # AudioLoader
 │   └── separator.py          # Demucs
 ├── debug/
 │   ├── debug_info.py         # DebugInfo
-│   └── visualizer.py         # diagnostics.png 생성
+│   └── visualizer.py         # diagnostics.png
 ├── config/
 │   └── settings.py           # 설정
 ├── output/
@@ -223,6 +238,10 @@ everyric2/
 ```bash
 # 테스트 실행
 .venv/bin/pytest tests/ -q
+
+# CTC 엔진 테스트 (권장)
+.venv/bin/everyric2 sync ftest1/audio.wav ftest1/lyrics.txt \
+  --engine ctc --debug --language ja
 
 # Hybrid 엔진 테스트
 PATH="$HOME/.conda/envs/mfaenv/bin:$PATH" \

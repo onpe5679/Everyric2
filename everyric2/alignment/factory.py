@@ -4,7 +4,7 @@ from everyric2.alignment.base import BaseAlignmentEngine, EngineNotAvailableErro
 from everyric2.config.settings import AlignmentSettings, get_settings
 
 
-EngineType = Literal["whisperx", "mfa", "hybrid", "qwen"]
+EngineType = Literal["whisperx", "mfa", "hybrid", "qwen", "ctc", "nemo", "gpu-hybrid"]
 
 
 class EngineFactory:
@@ -32,6 +32,18 @@ class EngineFactory:
             from everyric2.alignment.qwen_engine import QwenEngine
 
             engine = QwenEngine(config)
+        elif engine_type == "ctc":
+            from everyric2.alignment.ctc_engine import CTCEngine
+
+            engine = CTCEngine(config)
+        elif engine_type == "nemo":
+            from everyric2.alignment.nemo_engine import NeMoEngine
+
+            engine = NeMoEngine(config)
+        elif engine_type == "gpu-hybrid":
+            from everyric2.alignment.gpu_hybrid_engine import GPUHybridEngine
+
+            engine = GPUHybridEngine(config)
         else:
             raise ValueError(f"Unknown engine type: {engine_type}")
 
@@ -111,6 +123,54 @@ class EngineFactory:
                 }
             )
 
+        try:
+            from everyric2.alignment.ctc_engine import CTCEngine
+
+            engine = CTCEngine()
+            engines.append(
+                {
+                    "type": "ctc",
+                    "available": engine.is_available(),
+                    "description": "CTC forced aligner (GPU, fast)",
+                }
+            )
+        except Exception:
+            engines.append(
+                {
+                    "type": "ctc",
+                    "available": False,
+                    "description": "CTC forced aligner (GPU, fast)",
+                }
+            )
+
+        try:
+            from everyric2.alignment.nemo_engine import NeMoEngine
+
+            engine = NeMoEngine()
+            engines.append(
+                {
+                    "type": "nemo",
+                    "available": engine.is_available(),
+                    "description": "NeMo NFA (GPU, NVIDIA)",
+                }
+            )
+        except Exception:
+            engines.append(
+                {
+                    "type": "nemo",
+                    "available": False,
+                    "description": "NeMo NFA (GPU, NVIDIA)",
+                }
+            )
+
+        engines.append(
+            {
+                "type": "gpu-hybrid",
+                "available": any(e["available"] for e in engines if e["type"] in ["ctc", "nemo"]),
+                "description": "CTC + NeMo GPU hybrid (best GPU performance)",
+            }
+        )
+
         return engines
 
     @staticmethod
@@ -119,7 +179,7 @@ class EngineFactory:
     ) -> BaseAlignmentEngine:
         config = config or get_settings().alignment
 
-        preferred_order = ["hybrid", "whisperx", "mfa", "qwen"]
+        preferred_order = ["gpu-hybrid", "ctc", "nemo", "hybrid", "whisperx", "mfa", "qwen"]
 
         for engine_type in preferred_order:
             try:

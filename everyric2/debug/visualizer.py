@@ -206,7 +206,7 @@ class DiagnosticsVisualizer:
 
             height = max(0.1, end - start)
 
-            alpha = 0.5 + 0.4 * (confidence if confidence else 0.5)
+            alpha = max(0.1, min(1.0, 0.5 + 0.4 * (confidence if confidence else 0.5)))
             rect = mpatches.FancyBboxPatch(
                 (0.05, start),
                 0.9,
