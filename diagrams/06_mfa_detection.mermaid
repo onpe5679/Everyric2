@@ -1,0 +1,26 @@
+%%{init: {'theme': 'base'}}%%
+flowchart TD
+    subgraph DETECT["MFAEngine._resolve_mfa_bin()"]
+        A[시작] --> B{EVERYRIC_ALIGNMENT__MFA_BIN<br/>환경변수 있음?}
+        B -->|Yes| C[해당 경로 사용]
+        B -->|No| D{~/.conda/envs/mfaenv/bin/mfa<br/>존재함?}
+        D -->|Yes| E[conda 경로 사용]
+        D -->|No| F{shutil.which 'mfa'<br/>PATH에서 찾음?}
+        F -->|Yes| G[PATH 경로 사용]
+        F -->|No| H[None 반환<br/>MFA 사용 불가]
+    end
+
+    subgraph MODELS["모델 확인"]
+        I[_check_models_installed]
+        J["mfa model list acoustic"]
+        K["mfa model list dictionary"]
+        L{japanese_mfa<br/>설치됨?}
+    end
+
+    C --> I
+    E --> I
+    G --> I
+    I --> J
+    I --> K
+    J --> L
+    K --> L

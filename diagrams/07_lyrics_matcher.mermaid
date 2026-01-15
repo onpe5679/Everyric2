@@ -1,0 +1,28 @@
+%%{init: {'theme': 'base'}}%%
+flowchart TD
+    subgraph MATCHER["LyricsMatcher.match_lyrics_to_words()"]
+        A[입력: lyrics, words] --> B[last_transcription_words = words 저장]
+        B --> C[각 가사 라인 토큰화]
+        C --> D[각 단어 텍스트 정규화]
+        D --> E[_find_best_matches 실행]
+        
+        E --> F[퍼지 매칭으로<br/>가사↔단어 연결]
+        F --> G[SyncResult 리스트 생성]
+        
+        G --> H[MatchStats 계산]
+        H --> I["match_rate = matched / total"]
+        I --> J[last_match_stats 저장]
+        J --> K[결과 반환]
+    end
+
+    subgraph STATS["MatchStats"]
+        L["total_lyrics: 37"]
+        M["matched_lyrics: 15"]
+        N["match_rate: 0.41 (41%)"]
+        O["avg_confidence: 0.85"]
+    end
+
+    K --> L
+    K --> M
+    K --> N
+    K --> O

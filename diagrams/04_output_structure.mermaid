@@ -1,0 +1,26 @@
+%%{init: {'theme': 'base'}}%%
+flowchart TD
+    subgraph OUTPUT["output/YYYYMMDD_HHMMSS/"]
+        A["audio_original.wav<br/>원본 오디오"]
+        B["audio_vocals.wav<br/>분리된 보컬<br/>(--separate)"]
+        C["lyrics_original.txt<br/>원본 가사"]
+        D["lyrics_translated_ko.txt<br/>번역된 가사<br/>(--translate)"]
+        E["output.srt<br/>최종 싱크 결과"]
+        F["output_translated.srt<br/>번역된 싱크<br/>(--translate)"]
+        G["diagnostics.png<br/>진단 이미지<br/>(--debug)"]
+        H["debug_info.json<br/>상세 디버그 데이터<br/>(--debug)"]
+        I["settings.json<br/>실행 설정<br/>(--debug)"]
+    end
+
+    subgraph FLAGS["CLI 플래그"]
+        F1["--debug"]
+        F2["--separate"]
+        F3["--translate"]
+    end
+
+    F1 -.-> G
+    F1 -.-> H
+    F1 -.-> I
+    F2 -.-> B
+    F3 -.-> D
+    F3 -.-> F

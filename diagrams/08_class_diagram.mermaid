@@ -1,0 +1,62 @@
+%%{init: {'theme': 'base'}}%%
+classDiagram
+    class BaseAlignmentEngine {
+        <<abstract>>
+        +config: AlignmentSettings
+        +align(audio, lyrics, language) list~SyncResult~
+        +transcribe(audio, language) TranscriptionResult
+        +is_available() bool
+        +get_transcription_sets() list
+    }
+
+    class WhisperXEngine {
+        -_model
+        -_align_model
+        -_last_matcher: LyricsMatcher
+        -_last_match_stats: MatchStats
+        +transcribe(audio, language)
+        +align(audio, lyrics, language)
+        +get_transcription_sets()
+    }
+
+    class MFAEngine {
+        -_mfa_bin: str
+        -_last_matcher: LyricsMatcher
+        +_resolve_mfa_bin() str
+        +_mfa_env() dict
+        +_check_models_installed(lang) tuple
+        +align(audio, lyrics, language)
+        +get_transcription_sets()
+    }
+
+    class HybridEngine {
+        +whisperx: WhisperXEngine
+        +mfa: MFAEngine
+        -_transcription_sets: list
+        +align(audio, lyrics, language)
+        +get_transcription_sets()
+    }
+
+    class LyricsMatcher {
+        +last_match_stats: MatchStats
+        +last_transcription_words: list
+        +match_lyrics_to_words(lyrics, words, lang)
+        +normalize_text(text, lang)
+        +tokenize(text, lang)
+    }
+
+    class MatchStats {
+        +total_lyrics: int
+        +matched_lyrics: int
+        +match_rate: float
+        +avg_confidence: float
+    }
+
+    BaseAlignmentEngine <|-- WhisperXEngine
+    BaseAlignmentEngine <|-- MFAEngine
+    BaseAlignmentEngine <|-- HybridEngine
+    HybridEngine *-- WhisperXEngine
+    HybridEngine *-- MFAEngine
+    WhisperXEngine --> LyricsMatcher
+    MFAEngine --> LyricsMatcher
+    LyricsMatcher --> MatchStats

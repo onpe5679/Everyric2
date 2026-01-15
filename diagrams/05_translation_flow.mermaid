@@ -1,0 +1,25 @@
+%%{init: {'theme': 'base'}}%%
+sequenceDiagram
+    participant CLI as CLI
+    participant ENV as .env 파일
+    participant TR as LyricsTranslator
+    participant API as Gemini API
+
+    CLI->>ENV: load_dotenv()
+    ENV-->>CLI: GEMINI_API_KEY 로드
+
+    CLI->>TR: translate(lyric_lines)
+    TR->>TR: API 키 확인
+    
+    alt API 키 없음
+        TR-->>CLI: "[GEMINI_API_KEY not set]"
+    else API 키 있음
+        TR->>API: POST /generateContent
+        Note over TR,API: 프롬프트: 가사 번역 요청
+        API-->>TR: 번역된 텍스트
+        TR->>TR: _clean_response()
+        TR-->>CLI: 번역된 가사
+    end
+
+    CLI->>CLI: lyrics_translated_ko.txt 저장
+    CLI->>CLI: output_translated.srt 생성

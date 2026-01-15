@@ -200,6 +200,7 @@ def sync(
                 settings=settings.model_dump() if hasattr(settings, "model_dump") else {},
                 output_dir=run_ctx.output_dir,
             )
+            debug_info.audio_duration = audio.duration
             output_manager.save_settings(run_ctx)
             output_manager.save_audio(run_ctx, audio, "audio_original.wav")
             debug_info.steps.append(
