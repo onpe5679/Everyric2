@@ -371,7 +371,7 @@ class CTCEngine(BaseAlignmentEngine):
 
         matcher = LyricsMatcher()
         _ = matcher.match_lyrics_to_words(lyrics, self._last_word_timestamps, resolved_lang)
-        self._last_match_stats = getattr(matcher, "_last_stats", None)
+        self._last_match_stats = matcher.last_match_stats
 
         return results
 
