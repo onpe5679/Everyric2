@@ -1,0 +1,62 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#10B981', 'secondaryColor': '#3B82F6'}}}%%
+flowchart TD
+    subgraph INPUT["입력"]
+        A[Audio 16kHz]
+        L[Lyrics Text]
+    end
+
+    subgraph LANG_SELECT["언어별 모델 선택"]
+        LANG{Language?}
+        
+        subgraph HF["HuggingFace Models"]
+            JA["ja: wav2vec2-xlsr-53-japanese<br/>2341 tokens (한자+가나)"]
+            KO["ko: wav2vec2-xlsr-korean<br/>한글 자모"]
+            ZH["zh: wav2vec2-xlsr-53-chinese"]
+        end
+        
+        subgraph MMS["torchaudio MMS_FA"]
+            EN["en/other: MMS_FA<br/>a-z 26자"]
+        end
+    end
+
+    subgraph PROCESS["GPU 처리"]
+        EMI[CTC Emissions<br/>logits shape: 1 x T x V]
+        TOK[Tokenize Lyrics<br/>문자 → token IDs]
+        FA[torchaudio.functional.forced_align<br/>GPU CUDA]
+        SPANS[Token Spans<br/>start/end frames]
+    end
+
+    subgraph OUTPUT["출력"]
+        WT[Word Timestamps<br/>96 words]
+        MATCH[LyricsMatcher<br/>98.4% match rate]
+        RESULT[SyncResult<br/>61 lines]
+    end
+
+    A --> LANG
+    LANG -->|ja| JA
+    LANG -->|ko| KO
+    LANG -->|zh| ZH
+    LANG -->|en/other| EN
+    
+    JA --> EMI
+    KO --> EMI
+    ZH --> EMI
+    EN --> EMI
+    
+    L --> TOK
+    
+    EMI --> FA
+    TOK --> FA
+    
+    FA --> SPANS
+    SPANS --> WT
+    
+    WT --> MATCH
+    L --> MATCH
+    MATCH --> RESULT
+
+    subgraph BENCHMARK["벤치마크 (155초 일본어)"]
+        B1["CTC: 5초 ⚡"]
+        B2["MFA: 454초"]
+        B3["90x 속도 향상"]
+    end

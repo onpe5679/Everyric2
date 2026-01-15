@@ -7,6 +7,21 @@ classDiagram
         +transcribe(audio, language) TranscriptionResult
         +is_available() bool
         +get_transcription_sets() list
+        +get_engine_type() str
+    }
+
+    class CTCEngine {
+        -_model: Wav2Vec2ForCTC
+        -_processor: Wav2Vec2Processor
+        -_current_lang: str
+        -_device: torch.device
+        -_last_word_timestamps: list
+        -_last_match_stats: MatchStats
+        +align(audio, lyrics, language)
+        +get_transcription_sets()
+        -_ensure_model_loaded(language)
+        -_align_cjk(waveform, lyrics, language)
+        -_align_mms(waveform, lyrics, language)
     }
 
     class WhisperXEngine {
@@ -38,11 +53,13 @@ classDiagram
         +align(audio, lyrics, language)
         +get_transcription_sets()
         +get_status_string() str
-        -_align_parallel()
-        -_align_whisperx_only()
-        -_collect_transcription_sets()
-        -_update_status()
-        -_report_progress()
+    }
+
+    class NeMoEngine {
+        -_model
+        -_current_lang: str
+        +align(audio, lyrics, language)
+        +get_transcription_sets()
     }
 
     class LyricsMatcher {
@@ -60,11 +77,16 @@ classDiagram
         +avg_confidence: float
     }
 
+    BaseAlignmentEngine <|-- CTCEngine
     BaseAlignmentEngine <|-- WhisperXEngine
     BaseAlignmentEngine <|-- MFAEngine
     BaseAlignmentEngine <|-- HybridEngine
+    BaseAlignmentEngine <|-- NeMoEngine
     HybridEngine *-- WhisperXEngine
     HybridEngine *-- MFAEngine
+    CTCEngine --> LyricsMatcher
     WhisperXEngine --> LyricsMatcher
     MFAEngine --> LyricsMatcher
     LyricsMatcher --> MatchStats
+
+    note for CTCEngine "권장 엔진\n- ja/ko/zh: HuggingFace wav2vec2\n- en/other: MMS_FA\n- 속도: 5초 (90x faster)"

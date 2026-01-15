@@ -12,15 +12,26 @@ flowchart TD
         F[LyricLine.from_file<br/>원본 가사 파싱]
     end
 
-    subgraph ENGINE["HybridEngine (병렬 실행)"]
-        subgraph PARALLEL["ThreadPoolExecutor"]
+    subgraph ENGINE["Alignment Engine"]
+        ENG{--engine?}
+        
+        subgraph CTC_ENG["CTCEngine (권장)"]
+            CTC_LANG{Language?}
+            CTC_JA[HuggingFace<br/>wav2vec2-xlsr-ja]
+            CTC_KO[HuggingFace<br/>wav2vec2-xlsr-ko]
+            CTC_EN[torchaudio<br/>MMS_FA]
+            CTC_FA[forced_align<br/>GPU]
+        end
+        
+        subgraph HYBRID_ENG["HybridEngine"]
             J[WhisperX<br/>전사 + 매칭]
             K[MFA<br/>강제 정렬]
         end
+        
         I[결과 수집<br/>transcription_sets]
     end
 
-    subgraph TRANSLATE["번역 (정렬과 별개)"]
+    subgraph TRANSLATE["번역 (선택)"]
         G{--translate?}
         H[LyricsTranslator<br/>Gemini API]
         T[translated_text]
@@ -37,14 +48,23 @@ flowchart TD
     B --> F
     C --> D
     D -->|Yes| E
-    D -->|No| J
-    D -->|No| K
-    E --> J
-    E --> K
+    D -->|No| ENG
+    E --> ENG
     E --> N
     
-    F -->|원본 가사| J
-    F -->|원본 가사| K
+    ENG -->|ctc| CTC_LANG
+    CTC_LANG -->|ja| CTC_JA
+    CTC_LANG -->|ko| CTC_KO
+    CTC_LANG -->|en/other| CTC_EN
+    CTC_JA --> CTC_FA
+    CTC_KO --> CTC_FA
+    CTC_EN --> CTC_FA
+    CTC_FA --> I
+    
+    ENG -->|hybrid| J
+    ENG -->|hybrid| K
+    
+    F -->|원본 가사| ENG
     F -->|원본 가사| G
     
     J --> I

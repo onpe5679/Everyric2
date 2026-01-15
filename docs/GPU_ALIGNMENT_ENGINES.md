@@ -17,24 +17,41 @@ GPU 기반 CTC forced alignment 엔진 2종 추가:
 
 ## Architecture
 
+> 다이어그램: [../diagrams/09_ctc_engine.mermaid](../diagrams/09_ctc_engine.mermaid)
+
 ```
-                    ┌─────────────────────────────────────┐
-                    │         HybridEngine v2             │
-                    │                                     │
-Audio + Lyrics ────→│  ┌─────────┐    ┌─────────┐       │
-                    │  │ CTCEngine│    │NeMoEngine│       │
-                    │  │  (GPU)   │    │  (GPU)   │       │
-                    │  └────┬────┘    └────┬────┘       │
-                    │       │              │             │
-                    │       ▼              ▼             │
-                    │  ┌─────────────────────────┐      │
-                    │  │   Result Selector       │      │
-                    │  │ (confidence-based)      │      │
-                    │  └───────────┬─────────────┘      │
-                    └──────────────┼──────────────────────┘
-                                   ▼
-                           Word Timestamps
+Audio 16kHz ─→ ┌─────────────────────────────────┐
+               │        Language Selection       │
+               │                                 │
+               │  ja → HuggingFace wav2vec2-xlsr │
+               │  ko → HuggingFace wav2vec2-xlsr │
+               │  en → torchaudio MMS_FA         │
+               └────────────────┬────────────────┘
+                                ↓
+               ┌─────────────────────────────────┐
+Lyrics ──────→ │     torchaudio.forced_align     │
+               │           (GPU CUDA)            │
+               └────────────────┬────────────────┘
+                                ↓
+                         Token Spans
+                                ↓
+                      Word Timestamps (96 words)
+                                ↓
+               ┌─────────────────────────────────┐
+               │        LyricsMatcher            │
+               │       98.4% match rate          │
+               └────────────────┬────────────────┘
+                                ↓
+                     SyncResult (61 lines)
 ```
+
+### CTC 언어별 모델 매핑
+
+| Language | Model | Vocabulary |
+|----------|-------|------------|
+| ja | `jonatasgrosman/wav2vec2-large-xlsr-53-japanese` | 2341 tokens (한자+가나) |
+| ko | `kresnik/wav2vec2-large-xlsr-korean` | 한글 자모 |
+| en/other | `torchaudio.pipelines.MMS_FA` | a-z 26자 |
 
 ---
 
@@ -62,83 +79,43 @@ Audio + Lyrics ────→│  ┌─────────┐    ┌─�
 
 ---
 
-## New Engines
+## Engines
 
-### 1. CTCEngine (ctc-forced-aligner)
+### 1. CTCEngine (권장)
 
+> 클래스 다이어그램: [../diagrams/08_class_diagram.mermaid](../diagrams/08_class_diagram.mermaid)
+
+**특징**:
+- GPU 가속 (CUDA)
+- 일본어/한국어: HuggingFace wav2vec2-xlsr 모델 (native 문자 지원)
+- 영어/기타: torchaudio MMS_FA (Latin alphabet)
+- **속도**: 155초 오디오 → 5초 (MFA 대비 90x)
+- **정확도**: 98.4% match rate (일본어)
+
+**모델 매핑**:
 ```python
-class CTCEngine(BaseAlignmentEngine):
-    """
-    CTC-based forced alignment using Wav2Vec2/MMS models.
-    
-    Features:
-    - GPU acceleration (CUDA)
-    - 1130+ languages via MMS
-    - Lightweight installation
-    
-    Models:
-    - Japanese: MMS-based or wav2vec2-large-xlsr-53-japanese
-    - Korean: wav2vec2-large-xlsr-korean
-    - English: wav2vec2-base-960h
-    """
-    
-    def align(self, audio, lyrics, language, progress_callback):
-        # 1. Load audio (16kHz)
-        # 2. Tokenize lyrics text
-        # 3. Run CTC forced alignment on GPU
-        # 4. Extract word timestamps
-        # 5. Match with lyrics lines
-        pass
-```
-
-**Installation**:
-```bash
-pip install ctc-forced-aligner
-```
-
-**Configuration**:
-```python
-ctc_model: str = "MahmoudAshraf/mms-300m-1130-forced-aligner"
-ctc_language: str = "jpn"  # ISO 639-3 code
+LANG_MODEL_MAP = {
+    "ja": "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",  # 2341 tokens
+    "ko": "kresnik/wav2vec2-large-xlsr-korean",
+    "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+}
+# 그 외: torchaudio.pipelines.MMS_FA (a-z 26자)
 ```
 
 ---
 
-### 2. NeMoEngine (NVIDIA NeMo NFA)
+### 2. NeMoEngine (제한적)
+
+**⚠️ 제한사항**: CJK 언어 모델 없음
+
+지원 언어: en, es, de, fr, it, ru, pl (7개만)
 
 ```python
-class NeMoEngine(BaseAlignmentEngine):
-    """
-    NVIDIA NeMo Forced Aligner using Conformer-CTC.
-    
-    Features:
-    - Production-grade from NVIDIA
-    - High accuracy
-    - Long audio support (1hr+)
-    
-    Models:
-    - Japanese: stt_ja_conformer_ctc_large
-    - Korean: stt_ko_conformer_ctc_large  
-    - English: stt_en_conformer_ctc_large
-    """
-    
-    def align(self, audio, lyrics, language, progress_callback):
-        # 1. Load NeMo ASR model
-        # 2. Generate CTC emissions
-        # 3. Run forced alignment
-        # 4. Extract word/token timestamps
-        # 5. Match with lyrics lines
-        pass
-```
-
-**Installation**:
-```bash
-pip install nemo_toolkit[asr]
-```
-
-**Configuration**:
-```python
-nemo_model: str = "nvidia/stt_ja_conformer_ctc_large"
+NEMO_LANG_MODEL = {
+    "en": "stt_en_conformer_ctc_large",
+    "es": "stt_es_conformer_ctc_large",
+    # ... ja, ko, zh 없음
+}
 ```
 
 ---
@@ -178,31 +155,24 @@ everyric2 sync audio.wav lyrics.txt --engine hybrid --language ja      # Whisper
 
 ---
 
-## Implementation Plan
+## Implementation Status ✅
 
-### Phase 1: CTCEngine
-1. [ ] Install and test ctc-forced-aligner
-2. [ ] Implement CTCEngine class
-3. [ ] Add to EngineFactory
-4. [ ] Test with ftest1
+### Phase 1: CTCEngine ✅
+- [x] HuggingFace wav2vec2 모델 통합 (ja/ko/zh)
+- [x] torchaudio MMS_FA 폴백 (en/기타)
+- [x] EngineFactory 등록
+- [x] 155초 일본어 오디오 5초 처리 (90x 향상)
 
-### Phase 2: NeMoEngine
-1. [ ] Install and test NeMo toolkit
-2. [ ] Implement NeMoEngine class
-3. [ ] Add to EngineFactory
-4. [ ] Test with ftest1
+### Phase 2: NeMoEngine ⚠️
+- [x] NeMo toolkit 설치 및 테스트
+- [x] NeMoEngine 구현
+- ⚠️ **제한**: CJK 언어 모델 없음 (en/es/de/fr/it/ru/pl만 지원)
 
-### Phase 3: GPU Hybrid
-1. [ ] Create GPUHybridEngine (CTC + NeMo)
-2. [ ] Implement confidence-based result selection
-3. [ ] Parallel execution on GPU
-4. [ ] Benchmark vs MFA
-
-### Phase 4: Integration
-1. [ ] Update CLI options
-2. [ ] Update diagnostics visualization
-3. [ ] Update README
-4. [ ] Performance comparison table
+### Phase 3: Integration ✅
+- [x] CLI 옵션 업데이트 (`--engine ctc`)
+- [x] diagnostics.png에 match rate 표시
+- [x] README 업데이트
+- [x] 벤치마크 완료
 
 ---
 

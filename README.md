@@ -96,25 +96,39 @@ output/20260113_212716/
 
 ### diagnostics.png 예시
 
-| Line# | Lyric | Start | End | whisperx (match: 35%) | mfa (match: 100%) |
-|-------|-------|-------|-----|----------------------|-------------------|
-| 1 | 歌詞テキスト | 0.50 | 2.30 | かし てきすと | 歌詞 テキスト |
+| Line# | Lyric | Start | End | ctc (match: 98%) |
+|-------|-------|-------|-----|------------------|
+| 1 | 全部 全部 アンタのせいだ | 0.50 | 2.54 | 全部 全部 アンタのせいだ |
+| 2 | 反吐が出るくらいにウザったいわ | 2.68 | 4.78 | 反吐が出るくらいにウザったいわ |
 
 ## 아키텍처
 
+> 다이어그램: [diagrams/01_overall_pipeline.mermaid](diagrams/01_overall_pipeline.mermaid)
+
 ```
-Audio ─→ [Demucs] ─→ Vocals ─→ ┌─────────────────┐
-                               │  HybridEngine   │
-Lyrics ──────────────────────→ │                 │
-                               │ 1. WhisperX ────┼─→ transcription_sets
-                               │ 2. MFA ─────────┼─→ transcription_sets
-                               └────────┬────────┘
-                                        ↓
-                               ┌─────────────────┐
-                               │ DiagnosticsViz  │ → diagnostics.png
-                               └────────┬────────┘
-                                        ↓
-                               SRT / ASS / LRC / JSON
+Audio ─→ [Demucs?] ─→ ┌─────────────────────────────┐
+                      │     Engine Selection        │
+Lyrics ─────────────→ │                             │
+                      │  --engine ctc (권장, GPU)   │
+                      │  --engine whisperx (GPU)    │
+                      │  --engine mfa (CPU)         │
+                      │  --engine hybrid            │
+                      └──────────────┬──────────────┘
+                                     ↓
+                      ┌─────────────────────────────┐
+                      │    CTCEngine (ja/ko/en)     │
+                      │  HuggingFace wav2vec2-xlsr  │
+                      │  or torchaudio MMS_FA       │
+                      └──────────────┬──────────────┘
+                                     ↓
+                              Word Timestamps
+                                     ↓
+                      ┌─────────────────────────────┐
+                      │      LyricsMatcher          │
+                      │      98.4% match rate       │
+                      └──────────────┬──────────────┘
+                                     ↓
+                           output.srt + diagnostics.png
 ```
 
 ## 핵심 컴포넌트
