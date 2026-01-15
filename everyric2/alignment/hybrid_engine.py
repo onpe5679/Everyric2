@@ -1,6 +1,8 @@
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Literal
+
 
 from everyric2.alignment.base import (
     AlignmentError,
@@ -23,6 +25,7 @@ class HybridEngine(BaseAlignmentEngine):
         self._last_engine = None
         self._progress_lock = threading.Lock()
         self._engine_status: dict[str, str] = {}
+        self._engine_step: dict[str, str] = {}
 
     def is_available(self) -> bool:
         return self.whisperx.is_available()
@@ -66,14 +69,25 @@ class HybridEngine(BaseAlignmentEngine):
         mfa_results = None
         wx_error = None
         mfa_error = None
+        done_event = threading.Event()
+
+        def wx_progress(current: int, total: int) -> None:
+            self._update_step("whisperx", f"{current}/{total}")
+            self._report_progress(progress_callback)
+
+        def mfa_progress(current: int, total: int) -> None:
+            self._update_step("mfa", f"{current}/{total}")
+            self._report_progress(progress_callback)
 
         def run_whisperx():
             nonlocal wx_results, wx_error
             try:
                 self._update_status("whisperx", "running")
+                self._update_step("whisperx", "starting")
                 self._report_progress(progress_callback)
-                wx_results = self.whisperx.align(audio, lyrics, language, None)
+                wx_results = self.whisperx.align(audio, lyrics, language, wx_progress)
                 self._update_status("whisperx", "done")
+                self._update_step("whisperx", "")
                 self._report_progress(progress_callback)
             except Exception as e:
                 wx_error = e
@@ -84,19 +98,30 @@ class HybridEngine(BaseAlignmentEngine):
             nonlocal mfa_results, mfa_error
             try:
                 self._update_status("mfa", "running")
+                self._update_step("mfa", "starting")
                 self._report_progress(progress_callback)
-                mfa_results = self.mfa.align(audio, lyrics, language, None)
+                mfa_results = self.mfa.align(audio, lyrics, language, mfa_progress)
                 self._update_status("mfa", "done")
+                self._update_step("mfa", "")
                 self._report_progress(progress_callback)
             except Exception as e:
                 mfa_error = e
                 self._update_status("mfa", "failed")
                 self._report_progress(progress_callback)
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(run_whisperx), executor.submit(run_mfa)]
-            for future in as_completed(futures):
-                pass
+        def progress_reporter():
+            while not done_event.is_set():
+                self._report_progress(progress_callback)
+                time.sleep(0.5)
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            reporter_future = executor.submit(progress_reporter)
+            wx_future = executor.submit(run_whisperx)
+            mfa_future = executor.submit(run_mfa)
+            wx_future.result()
+            mfa_future.result()
+            done_event.set()
+            reporter_future.result()
 
         if wx_results is not None:
             self._collect_transcription_sets(self.whisperx, "whisperx")
@@ -143,6 +168,10 @@ class HybridEngine(BaseAlignmentEngine):
         with self._progress_lock:
             self._engine_status[engine] = status
 
+    def _update_step(self, engine: str, step: str) -> None:
+        with self._progress_lock:
+            self._engine_step[engine] = step
+
     def _report_progress(self, callback: Callable[[int, int], None] | None) -> None:
         if not callback:
             return
@@ -156,15 +185,26 @@ class HybridEngine(BaseAlignmentEngine):
     def get_status_string(self) -> str:
         with self._progress_lock:
             statuses = self._engine_status.copy()
+            steps = self._engine_step.copy()
+
+        mfa_stage = getattr(self.mfa, "_mfa_stage", "")
 
         parts = []
         for engine, status in statuses.items():
+            step = steps.get(engine, "")
+            if engine == "mfa" and mfa_stage:
+                step = mfa_stage
             if status == "running":
-                parts.append(f"{engine}...")
+                if step and step != "starting":
+                    parts.append(f"{engine}({step})")
+                else:
+                    parts.append(f"{engine}...")
             elif status == "done":
-                parts.append(f"{engine} ✓")
+                parts.append(f"{engine}:done")
             elif status == "failed":
-                parts.append(f"{engine} ✗")
+                parts.append(f"{engine}:fail")
+            elif status == "waiting":
+                parts.append(f"{engine}:wait")
         return " | ".join(parts) if parts else "preparing..."
 
     def _align_with_mfa(

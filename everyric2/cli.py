@@ -1,9 +1,20 @@
 """Command-line interface for Everyric2."""
 
-# Monkey-patch torch.load to fix weights_only=True issue with pyannote/whisperx
+import warnings
+
+warnings.filterwarnings("ignore", message=".*torchaudio._backend.*")
+warnings.filterwarnings("ignore", message=".*Passing.*gradient_checkpointing.*")
+
 try:
     import torch
 
+    # Enable TF32 for RTX 30/40/50 series - MUST be before any model loading
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
+    # Monkey-patch torch.load to fix weights_only=True issue with pyannote/whisperx
     _original_load = torch.load
 
     def _patched_load(*args, **kwargs):
@@ -15,6 +26,7 @@ try:
 except ImportError:
     pass
 
+import threading
 from pathlib import Path
 from typing import Annotated, Optional, cast, Literal
 
@@ -298,18 +310,43 @@ def sync(
 
                 debug_info.steps.append(StepTiming("engine_load", model_start, time_module.time()))
 
+            last_status = {"value": ""}
+            status_lock = threading.Lock()
+            sync_done = threading.Event()
+
             def progress_callback(current: int, total: int) -> None:
                 if hasattr(alignment_engine, "get_status_string"):
                     status = alignment_engine.get_status_string()
-                    progress.update(task, description=f"Synchronizing... [{status}]")
-                else:
-                    progress.update(task, description=f"Synchronizing... (step {current}/{total})")
+                    with status_lock:
+                        last_status["value"] = status
+
+            def status_printer():
+                printed_status = ""
+                while not sync_done.is_set():
+                    with status_lock:
+                        current_status = last_status["value"]
+                    if current_status and current_status != printed_status:
+                        sys.stdout.write(f"\r\033[36mSync:\033[0m {current_status}    ")
+                        sys.stdout.flush()
+                        printed_status = current_status
+                    time_module.sleep(0.3)
+                if printed_status:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
 
             progress.update(task, description="Synchronizing lyrics...")
             sync_start = time_module.time()
-            results = alignment_engine.align(
-                audio, lyric_lines, language=language, progress_callback=progress_callback
-            )
+
+            status_thread = threading.Thread(target=status_printer, daemon=True)
+            status_thread.start()
+
+            try:
+                results = alignment_engine.align(
+                    audio, lyric_lines, language=language, progress_callback=progress_callback
+                )
+            finally:
+                sync_done.set()
+                status_thread.join(timeout=1.0)
             sync_time = time_module.time() - sync_start
             console.print(f"[green]Synchronized:[/green] {len(results)} lines ({sync_time:.1f}s)")
 

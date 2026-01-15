@@ -32,6 +32,7 @@ class MFAEngine(BaseAlignmentEngine):
         self.audio_loader = AudioLoader()
         self._last_matcher = None
         self._last_match_stats = None
+        self._mfa_stage = ""
 
     def _resolve_mfa_bin(self) -> str | None:
         if self._mfa_bin:
@@ -65,6 +66,12 @@ class MFAEngine(BaseAlignmentEngine):
 
     def is_available(self) -> bool:
         return self._resolve_mfa_bin() is not None
+
+    def _get_cpu_count(self) -> int:
+        try:
+            return os.cpu_count() or 4
+        except Exception:
+            return 4
 
     def _check_models_installed(self, language: str) -> tuple[bool, list[str]]:
         if language not in self.MFA_MODELS:
@@ -180,6 +187,9 @@ class MFAEngine(BaseAlignmentEngine):
                 raise AlignmentError("MFA binary not found")
 
             models = self.MFA_MODELS[resolved_lang]
+            num_jobs = (
+                self.config.mfa_num_jobs if self.config.mfa_num_jobs > 0 else self._get_cpu_count()
+            )
             cmd = [
                 mfa_bin,
                 "align",
@@ -193,20 +203,50 @@ class MFAEngine(BaseAlignmentEngine):
                 str(self.config.mfa_beam),
                 "--retry_beam",
                 str(self.config.mfa_retry_beam),
+                "--num_jobs",
+                str(num_jobs),
+            ]
+            if getattr(self.config, "mfa_single_speaker", True):
+                cmd.append("--single_speaker")
+
+            mfa_stages = [
+                ("Generating MFCCs", "mfcc"),
+                ("Generating final features", "features"),
+                ("first-pass alignment", "align1"),
+                ("Generating alignments", "align2"),
+                ("Exporting", "export"),
             ]
 
             try:
-                subprocess.run(
+                process = subprocess.Popen(
                     cmd,
-                    check=True,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=600,
                     env=self._mfa_env(),
                 )
-            except subprocess.CalledProcessError as e:
-                raise AlignmentError(f"MFA alignment failed: {e.stderr}")
+
+                stderr_lines = []
+                current_stage = ""
+                while True:
+                    line = process.stderr.readline()
+                    if not line and process.poll() is not None:
+                        break
+                    if line:
+                        stderr_lines.append(line)
+                        for stage_text, stage_name in mfa_stages:
+                            if stage_text in line and stage_name != current_stage:
+                                current_stage = stage_name
+                                if progress_callback:
+                                    self._mfa_stage = stage_name
+                                    progress_callback(2, 4)
+                                break
+
+                returncode = process.wait(timeout=600)
+                if returncode != 0:
+                    raise AlignmentError(f"MFA alignment failed: {''.join(stderr_lines)}")
             except subprocess.TimeoutExpired:
+                process.kill()
                 raise AlignmentError("MFA alignment timed out (>10 minutes)")
 
             if progress_callback:

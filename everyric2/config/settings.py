@@ -88,9 +88,16 @@ class AlignmentSettings(BaseSettings):
     whisperx_compute_type: Literal["float16", "float32", "int8"] = Field(
         default="float16", description="Compute type for WhisperX"
     )
+    whisperx_vad_method: Literal["silero", "pyannote"] = Field(
+        default="silero", description="VAD method (silero is faster)"
+    )
 
     mfa_beam: int = Field(default=1000, description="MFA beam width for difficult alignments")
     mfa_retry_beam: int = Field(default=4000, description="MFA retry beam width")
+    mfa_num_jobs: int = Field(default=0, description="MFA parallel jobs (0=auto, uses all cores)")
+    mfa_single_speaker: bool = Field(
+        default=True, description="Optimize for single speaker (lyrics)"
+    )
 
     alignment_sample_rate: int = Field(
         default=16000, description="Sample rate for alignment engines (WhisperX/MFA require 16kHz)"

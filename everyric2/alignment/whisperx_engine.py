@@ -34,6 +34,16 @@ class WhisperXEngine(BaseAlignmentEngine):
         self._last_matcher = None
         self._last_match_stats = None
 
+    def _enable_tf32(self) -> None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+        except Exception:
+            pass
+
     def _fix_torch_safe_globals(self) -> None:
         if self._safe_globals_fixed:
             return
@@ -76,12 +86,15 @@ class WhisperXEngine(BaseAlignmentEngine):
         if device == "cpu" and compute_type == "float16":
             compute_type = "float32"
 
+        vad_method = getattr(self.config, "whisperx_vad_method", "silero")
         self._model = whisperx.load_model(
             self.config.whisperx_model,
             device,
             compute_type=compute_type,
+            vad_method=vad_method,
         )
         self._device = device
+        self._enable_tf32()
 
     def _ensure_align_model_loaded(self, language: str) -> None:
         if self._align_model is not None and self._current_language == language:
@@ -99,6 +112,7 @@ class WhisperXEngine(BaseAlignmentEngine):
             device=self._device,
         )
         self._current_language = language
+        self._enable_tf32()
 
     def transcribe(
         self,
