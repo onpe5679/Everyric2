@@ -45,24 +45,59 @@ class LyricLine:
 
 
 @dataclass
-class SyncResult:
-    """Synchronization result for a single lyric line."""
-
-    text: str
-    start_time: float  # seconds
-    end_time: float  # seconds
+class WordSegment:
+    word: str
+    start: float
+    end: float
     confidence: float | None = None
-    line_number: int | None = None
 
     def to_dict(self) -> dict:
-        """Convert to dictionary."""
         return {
+            "word": self.word,
+            "start": self.start,
+            "end": self.end,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class SyncResult:
+    text: str
+    start_time: float
+    end_time: float
+    confidence: float | None = None
+    line_number: int | None = None
+    word_segments: list[WordSegment] | None = None
+    translation: str | None = None
+    pronunciation: str | None = None
+
+    def to_dict(self) -> dict:
+        result = {
             "text": self.text,
             "start": self.start_time,
             "end": self.end_time,
             "confidence": self.confidence,
             "line_number": self.line_number,
         }
+        if self.word_segments:
+            result["word_segments"] = [ws.to_dict() for ws in self.word_segments]
+        if self.translation:
+            result["translation"] = self.translation
+        if self.pronunciation:
+            result["pronunciation"] = self.pronunciation
+        return result
+
+    def get_display_text(
+        self,
+        include_translation: bool = False,
+        include_pronunciation: bool = False,
+    ) -> str:
+        lines = [self.text]
+        if include_pronunciation and self.pronunciation:
+            lines.append(f"({self.pronunciation})")
+        if include_translation and self.translation:
+            lines.append(self.translation)
+        return "\n".join(lines)
 
 
 @dataclass

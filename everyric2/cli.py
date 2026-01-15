@@ -85,6 +85,10 @@ def sync(
         bool,
         typer.Option("--translate", "-t", help="Translate lyrics to Korean"),
     ] = False,
+    pronunciation: Annotated[
+        bool,
+        typer.Option("--pronunciation", "-p", help="Include pronunciation transcription"),
+    ] = False,
     debug: Annotated[
         bool,
         typer.Option("--debug", "-d", help="Save debug files (prompts, responses, diagnostics)"),
@@ -105,6 +109,32 @@ def sync(
         Optional[Path],
         typer.Option("--cache-dir", help="HuggingFace cache directory"),
     ] = None,
+    segment_mode: Annotated[
+        str,
+        typer.Option("--segment-mode", help="Segmentation mode (line, word, character)"),
+    ] = "line",
+    min_silence_gap: Annotated[
+        float,
+        typer.Option("--min-silence-gap", help="Minimum silence gap in seconds"),
+    ] = 0.3,
+    translate_engine: Annotated[
+        str,
+        typer.Option("--translate-engine", help="Translation engine (gemini, openai, local)"),
+    ] = "gemini",
+    translate_model: Annotated[
+        Optional[str],
+        typer.Option("--translate-model", help="Translation model name"),
+    ] = None,
+    translate_api_url: Annotated[
+        Optional[str],
+        typer.Option("--translate-api-url", help="Custom API URL for local LLM translation"),
+    ] = None,
+    translate_tone: Annotated[
+        str,
+        typer.Option(
+            "--translate-tone", help="Translation tone (literal, natural, poetic, casual, formal)"
+        ),
+    ] = "natural",
 ) -> None:
     """Synchronize lyrics with audio.
 
@@ -135,6 +165,17 @@ def sync(
     if cache_dir:
         settings.model.cache_dir = cache_dir
 
+    settings.translation.engine = translate_engine
+    if translate_model:
+        settings.translation.model = translate_model
+    if translate_api_url:
+        settings.translation.api_url = translate_api_url
+    settings.translation.tone = translate_tone
+    settings.translation.include_pronunciation = pronunciation
+
+    settings.segmentation.mode = segment_mode
+    settings.segmentation.min_silence_gap = min_silence_gap
+
     video_title: str | None = None
     audio_path: Path
     audio = None
@@ -142,11 +183,13 @@ def sync(
     vocals_audio = None
     lyric_lines = None
     translated_text: str | None = None
+    translation_result = None
     translated_results: list | None = None
     results = None
     debug_info = None
     run_ctx = None
     output_manager = None
+    silence_gaps = None
 
     with Progress(
         SpinnerColumn(),
@@ -261,14 +304,20 @@ def sync(
             console.print(f"[red]Error loading lyrics:[/red] {e}")
             raise typer.Exit(1)
 
-        if translate:
-            progress.update(task, description="Translating lyrics to Korean...")
+        if translate or pronunciation:
+            progress.update(task, description="Translating lyrics...")
             trans_start = time_module.time()
             try:
                 from everyric2.translation.translator import LyricsTranslator
 
-                translator = LyricsTranslator()
-                translated_text = translator.translate(lyric_lines)
+                translator = LyricsTranslator(settings=settings.translation)
+                if pronunciation:
+                    translation_result = translator.translate_with_pronunciation(lyric_lines)
+                    translated_text = "\n".join(
+                        line.translation for line in translation_result.lines
+                    )
+                else:
+                    translated_text = translator.translate(lyric_lines)
                 trans_time = time_module.time() - trans_start
                 console.print(f"[green]Translation complete[/green] ({trans_time:.1f}s)")
 
@@ -369,6 +418,27 @@ def sync(
             console.print(f"[red]Error during synchronization:[/red] {e}")
             raise typer.Exit(1)
 
+        progress.update(task, description="Post-processing...")
+        try:
+            from everyric2.alignment.silence import SilenceHandler
+            from everyric2.alignment.segmentation import SegmentationProcessor
+
+            silence_handler = SilenceHandler(settings.segmentation)
+            silence_gaps = silence_handler.detect_silence_gaps(results)
+            results = silence_handler.process(results)
+
+            if translation_result:
+                for i, result in enumerate(results):
+                    if i < len(translation_result.lines):
+                        result.translation = translation_result.lines[i].translation
+                        result.pronunciation = translation_result.lines[i].pronunciation
+
+            segmentation_processor = SegmentationProcessor(settings.segmentation)
+            results = segmentation_processor.process(results)
+
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Post-processing failed: {e}")
+
         progress.update(task, description="Saving output...")
         try:
             formatter = FormatterFactory.get_formatter(format)
@@ -378,28 +448,29 @@ def sync(
                 final_output = run_ctx.output_dir / f"output.{format}"
                 final_output.write_text(formatted, encoding="utf-8")
 
-                if translated_text and results:
+                if (translated_text or translation_result) and results:
                     from everyric2.inference.prompt import SyncResult
+                    from everyric2.output.multi_output import MultiOutputGenerator
 
-                    translated_lines = [
-                        line for line in translated_text.strip().split("\n") if line.strip()
-                    ]
+                    multi_gen = MultiOutputGenerator(format)
+                    outputs = multi_gen.generate_all_variants(
+                        results, translation_result, run_ctx.output_dir, "output"
+                    )
+                    for out in outputs:
+                        if out.variant != "original":
+                            console.print(
+                                f"[green]{out.variant.title()} output:[/green] {out.path}"
+                            )
+
                     translated_results = []
-                    for i, result in enumerate(results):
-                        trans_text = (
-                            translated_lines[i] if i < len(translated_lines) else result.text
-                        )
+                    for result in results:
                         translated_results.append(
                             SyncResult(
-                                text=trans_text,
+                                text=result.translation or result.text,
                                 start_time=result.start_time,
                                 end_time=result.end_time,
                             )
                         )
-                    translated_formatted = formatter.format(translated_results)
-                    translated_output = run_ctx.output_dir / f"output_translated.{format}"
-                    translated_output.write_text(translated_formatted, encoding="utf-8")
-                    console.print(f"[green]Translated output:[/green] {translated_output}")
 
                 if debug_info:
                     debug_info.finalize(results)
@@ -426,6 +497,8 @@ def sync(
                             vocals_waveform=vocals_audio.waveform if vocals_audio else None,
                             translated_results=translated_results,
                             sample_rate=audio.sample_rate,
+                            silence_gaps=silence_gaps,
+                            segment_mode=segment_mode,
                         )
                         console.print(f"[green]Diagnostics:[/green] {diag_path}")
                     except Exception as e:

@@ -102,11 +102,55 @@ class AlignmentSettings(BaseSettings):
     )
 
 
+class TranslationSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="EVERYRIC_TRANSLATE_")
+
+    engine: Literal["gemini", "openai", "local"] = Field(
+        default="gemini", description="Translation engine"
+    )
+    model: str = Field(default="gemini-2.0-flash", description="Model name")
+    api_url: str | None = Field(default=None, description="Custom API URL for local LLM")
+    api_key: str | None = Field(default=None, description="API key (env var takes precedence)")
+    tone: Literal["literal", "natural", "poetic", "casual", "formal"] = Field(
+        default="natural", description="Translation tone/style"
+    )
+    temperature: float = Field(default=0.3, description="Generation temperature")
+    include_pronunciation: bool = Field(
+        default=False, description="Include pronunciation transcription"
+    )
+    pronunciation_format: Literal["parentheses", "brackets", "newline"] = Field(
+        default="parentheses", description="Pronunciation display format"
+    )
+    target_language: str = Field(default="ko", description="Target language for translation")
+    timeout: int = Field(default=120, description="API timeout in seconds")
+
+
+class SegmentationSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="EVERYRIC_SEGMENT_")
+
+    mode: Literal["line", "word", "character"] = Field(
+        default="line", description="Segmentation mode"
+    )
+    min_duration: float = Field(default=0.2, description="Minimum segment duration in seconds")
+    max_chars_per_segment: int = Field(
+        default=50, description="Maximum characters per segment (for auto-split in line mode)"
+    )
+    min_silence_gap: float = Field(
+        default=0.3, description="Minimum silence gap between segments. Shorter gaps are merged"
+    )
+    silence_merge_mode: Literal["midpoint", "extend_prev", "extend_next"] = Field(
+        default="midpoint", description="How to merge short silence gaps"
+    )
+
+
 class OutputSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_OUTPUT_")
 
     default_format: Literal["srt", "ass", "lrc", "json"] = Field(
         default="srt", description="Default output format"
+    )
+    generate_all_variants: bool = Field(
+        default=False, description="Generate all output variants (original, translated, etc.)"
     )
 
 
@@ -135,6 +179,8 @@ class Settings(BaseSettings):
     model: ModelSettings = Field(default_factory=ModelSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
     alignment: AlignmentSettings = Field(default_factory=AlignmentSettings)
+    translation: TranslationSettings = Field(default_factory=TranslationSettings)
+    segmentation: SegmentationSettings = Field(default_factory=SegmentationSettings)
     output: OutputSettings = Field(default_factory=OutputSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
 

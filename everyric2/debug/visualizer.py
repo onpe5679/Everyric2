@@ -39,6 +39,9 @@ class DiagnosticsVisualizer:
         "vocals": "#4ECDC4",
         "final": "#45B7D1",
         "transcription": "#DDA0DD",
+        "pronunciation": "#FFD93D",
+        "silence_gap": "#FF0000",
+        "word_segment": "#98D8C8",
     }
 
     def __init__(self, figsize: tuple[int, int] = (16, 20)):
@@ -53,6 +56,8 @@ class DiagnosticsVisualizer:
         vocals_waveform: np.ndarray | None = None,
         translated_results: list[SyncResult] | None = None,
         sample_rate: int = 16000,
+        silence_gaps: list[dict] | None = None,
+        segment_mode: str = "line",
     ) -> Path:
         transcription_sets = debug_info.transcription_sets or []
         if not transcription_sets and debug_info.transcription_words:
@@ -71,15 +76,30 @@ class DiagnosticsVisualizer:
             num_cols += 1
         num_cols += len(transcription_sets)
 
+        has_word_segments = any(r.word_segments for r in results)
+        if has_word_segments and segment_mode != "line":
+            num_cols += 1
+
+        has_pronunciation = any(r.pronunciation for r in results)
+        if has_pronunciation:
+            num_cols += 1
+
         fig_width = 4 * num_cols
         fig, axes = plt.subplots(1, num_cols, figsize=(fig_width, 20), sharey=True)
+        if num_cols == 1:
+            axes = [axes]
         fig.suptitle("Everyric2 Diagnostics", fontsize=16, fontweight="bold")
 
         duration = debug_info.audio_duration or (len(results) * 5 if results else 60)
         col_idx = 0
 
         self._draw_waveform(
-            axes[col_idx], audio_waveform, duration, "Audio (Original)", self.COLORS["original"]
+            axes[col_idx],
+            audio_waveform,
+            duration,
+            "Audio (Original)",
+            self.COLORS["original"],
+            silence_gaps=silence_gaps,
         )
         col_idx += 1
 
@@ -108,6 +128,16 @@ class DiagnosticsVisualizer:
             )
             col_idx += 1
 
+        if has_word_segments and segment_mode != "line":
+            self._draw_word_segments_column(
+                axes[col_idx], results, duration, f"Word Segments ({segment_mode})"
+            )
+            col_idx += 1
+
+        if has_pronunciation:
+            self._draw_pronunciation_column(axes[col_idx], results, duration)
+            col_idx += 1
+
         if translated_results:
             self._draw_synced_column(
                 axes[col_idx], translated_results, duration, "Translated", self.COLORS["vocals"]
@@ -131,13 +161,38 @@ class DiagnosticsVisualizer:
         return output_path
 
     def _draw_waveform(
-        self, ax, waveform: np.ndarray | None, duration: float, title: str, color: str
+        self,
+        ax,
+        waveform: np.ndarray | None,
+        duration: float,
+        title: str,
+        color: str,
+        silence_gaps: list[dict] | None = None,
     ) -> None:
         ax.set_title(title, fontsize=12)
         if waveform is not None:
             times = np.linspace(0, duration, len(waveform))
             step = max(1, len(waveform) // 10000)
             ax.fill_betweenx(times[::step], 0, np.abs(waveform[::step]), alpha=0.7, color=color)
+
+        if silence_gaps:
+            for gap in silence_gaps:
+                if gap.get("is_short", False):
+                    ax.axhline(
+                        y=gap["start"],
+                        color=self.COLORS["silence_gap"],
+                        linestyle="--",
+                        linewidth=1,
+                        alpha=0.8,
+                    )
+                    ax.axhline(
+                        y=gap["end"],
+                        color=self.COLORS["silence_gap"],
+                        linestyle="--",
+                        linewidth=1,
+                        alpha=0.8,
+                    )
+
         ax.set_xlim(0, 1)
         ax.set_ylim(0, duration)
         ax.invert_yaxis()
@@ -249,6 +304,64 @@ class DiagnosticsVisualizer:
             display = result.text[:15] + "..." if len(result.text) > 15 else result.text
             ax.text(
                 0.5, result.start_time + height / 2, display, ha="center", va="center", fontsize=7
+            )
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, duration)
+        ax.invert_yaxis()
+        ax.set_xticks([])
+
+    def _draw_word_segments_column(
+        self, ax, results: list[SyncResult], duration: float, title: str
+    ) -> None:
+        ax.set_title(title, fontsize=12)
+        for result in results:
+            if not result.word_segments:
+                continue
+            for seg in result.word_segments:
+                height = max(0.1, seg.end - seg.start)
+                rect = mpatches.FancyBboxPatch(
+                    (0.05, seg.start),
+                    0.9,
+                    height,
+                    boxstyle="round,pad=0.01",
+                    facecolor=self.COLORS["word_segment"],
+                    alpha=0.7,
+                    edgecolor="none",
+                )
+                ax.add_patch(rect)
+                if height > 0.2:
+                    display = seg.word[:6] if len(seg.word) > 6 else seg.word
+                    ax.text(
+                        0.5, seg.start + height / 2, display, ha="center", va="center", fontsize=5
+                    )
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, duration)
+        ax.invert_yaxis()
+        ax.set_xticks([])
+
+    def _draw_pronunciation_column(self, ax, results: list[SyncResult], duration: float) -> None:
+        ax.set_title("Pronunciation", fontsize=12)
+        for result in results:
+            if not result.pronunciation:
+                continue
+            height = max(0.5, result.end_time - result.start_time)
+            rect = mpatches.FancyBboxPatch(
+                (0.05, result.start_time),
+                0.9,
+                height,
+                boxstyle="round,pad=0.02",
+                facecolor=self.COLORS["pronunciation"],
+                alpha=0.7,
+                edgecolor="none",
+            )
+            ax.add_patch(rect)
+            display = (
+                result.pronunciation[:12] + "..."
+                if len(result.pronunciation) > 12
+                else result.pronunciation
+            )
+            ax.text(
+                0.5, result.start_time + height / 2, display, ha="center", va="center", fontsize=6
             )
         ax.set_xlim(0, 1)
         ax.set_ylim(0, duration)

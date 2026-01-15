@@ -3,7 +3,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from everyric2.alignment.base import WordTimestamp
-from everyric2.inference.prompt import LyricLine, SyncResult
+from everyric2.inference.prompt import LyricLine, SyncResult, WordSegment
 
 
 MIN_LINE_DURATION = 1.5
@@ -173,21 +173,33 @@ class LyricsMatcher:
         expected_duration = total_duration / n
 
         anchor_times = {}
+        anchor_word_segments = {}
         for idx, match in matches.items():
             anchor_times[idx] = (
                 words[match.word_start_idx].start,
                 words[match.word_end_idx].end,
                 match.confidence,
             )
+            anchor_word_segments[idx] = [
+                WordSegment(
+                    word=words[j].word,
+                    start=words[j].start,
+                    end=words[j].end,
+                    confidence=words[j].confidence,
+                )
+                for j in range(match.word_start_idx, match.word_end_idx + 1)
+            ]
 
         results = []
         for i, lyric in enumerate(lyrics):
             if i in anchor_times:
                 start_time, end_time, confidence = anchor_times[i]
+                word_segments = anchor_word_segments.get(i)
             else:
                 start_time = i * expected_duration
                 end_time = (i + 1) * expected_duration
                 confidence = 0.0
+                word_segments = None
 
             results.append(
                 SyncResult(
@@ -196,6 +208,7 @@ class LyricsMatcher:
                     end_time=end_time,
                     line_number=lyric.line_number,
                     confidence=confidence,
+                    word_segments=word_segments,
                 )
             )
 
@@ -309,10 +322,21 @@ class LyricsMatcher:
                             end_time = max(end_time, start_time + MIN_LINE_DURATION)
 
                 confidence = match.confidence
+
+                word_segments = [
+                    WordSegment(
+                        word=words[j].word,
+                        start=words[j].start,
+                        end=words[j].end,
+                        confidence=words[j].confidence,
+                    )
+                    for j in range(match.word_start_idx, match.word_end_idx + 1)
+                ]
             else:
                 start_time = 0.0
                 end_time = 0.0
                 confidence = 0.0
+                word_segments = None
 
             results.append(
                 SyncResult(
@@ -321,6 +345,7 @@ class LyricsMatcher:
                     end_time=end_time,
                     line_number=lyric.line_number,
                     confidence=confidence,
+                    word_segments=word_segments,
                 )
             )
 
