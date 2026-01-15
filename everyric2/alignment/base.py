@@ -1,11 +1,14 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, TYPE_CHECKING
 
 from everyric2.audio.loader import AudioData
 from everyric2.config.settings import AlignmentSettings
 from everyric2.inference.prompt import LyricLine, SyncResult
+
+if TYPE_CHECKING:
+    from everyric2.alignment.matcher import MatchStats
 
 
 class AlignmentError(Exception):
@@ -73,3 +76,20 @@ class BaseAlignmentEngine(ABC):
     @staticmethod
     def get_engine_type() -> Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"]:
         raise NotImplementedError
+
+    # Optional methods - subclasses can override these
+    def get_status_string(self) -> str | None:
+        """Get current processing status string for progress display."""
+        return None
+
+    def get_transcription_sets(
+        self,
+    ) -> list[tuple[list[WordTimestamp], "MatchStats | None", str]]:
+        """Get all transcription data sets (for engines that produce multiple)."""
+        return []
+
+    def get_last_transcription_data(
+        self,
+    ) -> tuple[list[WordTimestamp], "MatchStats | None", str] | None:
+        """Get the last transcription data (words, stats, engine_name)."""
+        return None

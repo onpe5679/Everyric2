@@ -1,0 +1,86 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4ECDC4', 'secondaryColor': '#FF6B6B'}}}%%
+flowchart TD
+    subgraph INPUT["입력"]
+        SR[SyncResult 리스트<br/>타임스탬프 + 가사]
+        WS[word_segments<br/>단어별 타임스탬프]
+    end
+
+    subgraph SILENCE["SilenceHandler"]
+        SH_IN[무성 구간 감지]
+        SH_GAP{gap < min_silence_gap?}
+        SH_MERGE[갭 병합]
+        SH_MODE{merge_mode?}
+        SH_MID[midpoint<br/>중간점에서 분할]
+        SH_PREV[extend_prev<br/>이전 자막 확장]
+        SH_NEXT[extend_next<br/>다음 자막 확장]
+    end
+
+    subgraph SEGMENT["SegmentationProcessor"]
+        SEG_MODE{--segment-mode?}
+        
+        subgraph LINE_MODE["line (기본)"]
+            LM_CHECK{길이 > max_chars?}
+            LM_SPLIT[긴 줄 분할]
+            LM_PASS[그대로 유지]
+        end
+        
+        subgraph WORD_MODE["word"]
+            WM_CHECK{word_segments<br/>존재?}
+            WM_SPLIT[단어별 SyncResult 생성]
+            WM_FALLBACK[줄 단위 유지]
+            WM_DUR{duration ><br/>min_duration?}
+        end
+        
+        subgraph CHAR_MODE["character"]
+            CM_CHECK{word_segments<br/>존재?}
+            CM_WORD[단어 → 글자 분할]
+            CM_LINE[줄 → 글자 분할]
+            CM_CALC[글자별 duration 계산]
+        end
+    end
+
+    subgraph OUTPUT["출력"]
+        OUT[처리된 SyncResult 리스트]
+        OUT_EX1["Line: '願いの歌'<br/>00:01.000 → 00:03.000"]
+        OUT_EX2["Word: '願い' → '歌'<br/>각각 타임스탬프"]
+        OUT_EX3["Char: '願' 'い' '歌'<br/>각각 타임스탬프"]
+    end
+
+    SR --> SH_IN
+    WS -.-> SR
+    
+    SH_IN --> SH_GAP
+    SH_GAP -->|Yes| SH_MERGE
+    SH_GAP -->|No| SEG_MODE
+    SH_MERGE --> SH_MODE
+    SH_MODE -->|midpoint| SH_MID
+    SH_MODE -->|extend_prev| SH_PREV
+    SH_MODE -->|extend_next| SH_NEXT
+    SH_MID --> SEG_MODE
+    SH_PREV --> SEG_MODE
+    SH_NEXT --> SEG_MODE
+    
+    SEG_MODE -->|line| LM_CHECK
+    LM_CHECK -->|Yes| LM_SPLIT
+    LM_CHECK -->|No| LM_PASS
+    LM_SPLIT --> OUT
+    LM_PASS --> OUT
+    
+    SEG_MODE -->|word| WM_CHECK
+    WM_CHECK -->|Yes| WM_SPLIT
+    WM_CHECK -->|No| WM_FALLBACK
+    WM_SPLIT --> WM_DUR
+    WM_DUR -->|Yes| OUT
+    WM_DUR -->|No| WM_SPLIT
+    WM_FALLBACK --> OUT
+    
+    SEG_MODE -->|character| CM_CHECK
+    CM_CHECK -->|Yes| CM_WORD
+    CM_CHECK -->|No| CM_LINE
+    CM_WORD --> CM_CALC
+    CM_LINE --> CM_CALC
+    CM_CALC --> OUT
+    
+    OUT --> OUT_EX1
+    OUT --> OUT_EX2
+    OUT --> OUT_EX3

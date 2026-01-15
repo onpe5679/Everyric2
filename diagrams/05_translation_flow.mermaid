@@ -1,25 +1,54 @@
 %%{init: {'theme': 'base'}}%%
 sequenceDiagram
     participant CLI as CLI
-    participant ENV as .env 파일
-    participant TR as LyricsTranslator
-    participant API as Gemini API
+    participant ENV as .env / Settings
+    participant FACT as TranslatorFactory
+    participant BASE as BaseTranslator
+    participant GEM as GeminiTranslator
+    participant OAI as OpenAICompatibleTranslator
+    participant API as External API
 
-    CLI->>ENV: load_dotenv()
-    ENV-->>CLI: GEMINI_API_KEY 로드
+    CLI->>ENV: load_dotenv() + get_settings()
+    ENV-->>CLI: TranslationSettings<br/>(engine, tone, api_key, model)
 
-    CLI->>TR: translate(lyric_lines)
-    TR->>TR: API 키 확인
+    CLI->>FACT: get_translator(settings)
     
-    alt API 키 없음
-        TR-->>CLI: "[GEMINI_API_KEY not set]"
-    else API 키 있음
-        TR->>API: POST /generateContent
-        Note over TR,API: 프롬프트: 가사 번역 요청
-        API-->>TR: 번역된 텍스트
-        TR->>TR: _clean_response()
-        TR-->>CLI: 번역된 가사
+    alt engine == "gemini"
+        FACT-->>CLI: GeminiTranslator
+        CLI->>GEM: translate(lyrics, source_lang, target_lang)
+        
+        GEM->>GEM: _build_prompt()<br/>톤 설정 적용
+        
+        alt include_pronunciation == true
+            Note over GEM: JSON 형식 프롬프트<br/>[{original, translation, pronunciation}]
+        else include_pronunciation == false
+            Note over GEM: 텍스트 형식 프롬프트
+        end
+        
+        GEM->>API: POST generativelanguage.googleapis.com
+        API-->>GEM: 응답 텍스트
+        
+        alt pronunciation 포함
+            GEM->>GEM: _parse_json_response()
+        else pronunciation 미포함
+            GEM->>GEM: _parse_text_response()
+        end
+        
+        GEM-->>CLI: TranslationResult
+        
+    else engine == "openai"
+        FACT-->>CLI: OpenAICompatibleTranslator
+        CLI->>OAI: translate(lyrics, source_lang, target_lang)
+        OAI->>API: POST api.openai.com/v1/chat/completions
+        API-->>OAI: 응답
+        OAI-->>CLI: TranslationResult
+        
+    else engine == "local"
+        FACT-->>CLI: OpenAICompatibleTranslator
+        CLI->>OAI: translate(lyrics, source_lang, target_lang)
+        OAI->>API: POST localhost:11434/v1/chat/completions<br/>(Ollama/LM Studio)
+        API-->>OAI: 응답
+        OAI-->>CLI: TranslationResult
     end
 
-    CLI->>CLI: lyrics_translated_ko.txt 저장
-    CLI->>CLI: output_translated.srt 생성
+    Note over CLI: TranslationResult 구조:<br/>lines: [TranslationLine]<br/>source_lang, target_lang<br/>engine, tone

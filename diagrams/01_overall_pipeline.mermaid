@@ -27,18 +27,31 @@ flowchart TD
             J[WhisperX<br/>전사 + 매칭]
         end
         
-        I[결과 수집<br/>transcription_sets]
+        I[LyricsMatcher<br/>가사 ↔ 타임스탬프 매칭]
     end
 
-    subgraph TRANSLATE["번역 (선택)"]
-        G{--translate?}
-        H[LyricsTranslator<br/>Gemini API]
-        T[translated_text]
+    subgraph POSTPROCESS["후처리 파이프라인"]
+        SH[SilenceHandler<br/>무성 구간 병합]
+        
+        subgraph TRANSLATE["번역 (선택)"]
+            G{--translate?}
+            TR_FACT{TranslatorFactory}
+            TR_GEM[GeminiTranslator]
+            TR_OAI[OpenAICompatibleTranslator]
+            TR_LOC[Local LLM<br/>Ollama/LM Studio]
+            PRON{--pronunciation?}
+            TR_RES[TranslationResult<br/>번역 + 발음]
+        end
+        
+        SEG[SegmentationProcessor<br/>line/word/character]
     end
 
     subgraph OUTPUT["출력"]
-        L[output.srt<br/>원본 가사 + 타임스탬프]
-        L2[output_translated.srt<br/>번역 가사 + 타임스탬프]
+        MOG[MultiOutputGenerator]
+        L1[output.srt<br/>원본 가사]
+        L2[output_translated.srt<br/>번역만]
+        L3[output_pronunciation.srt<br/>원본 + 발음]
+        L4[output_full.srt<br/>원본 + 발음 + 번역]
         M[diagnostics.png]
         N[audio_vocals.wav]
     end
@@ -63,15 +76,29 @@ flowchart TD
     ENG -->|whisperx| J
     
     F -->|원본 가사| ENG
-    F -->|원본 가사| G
     
     J --> I
     
-    G -->|Yes| H
-    H --> T
+    I --> SH
+    SH --> G
     
-    I --> L
-    L -->|타임스탬프 복사| L2
-    T -->|번역 텍스트| L2
+    G -->|Yes| TR_FACT
+    TR_FACT -->|gemini| TR_GEM
+    TR_FACT -->|openai| TR_OAI
+    TR_FACT -->|local| TR_LOC
+    TR_GEM --> PRON
+    TR_OAI --> PRON
+    TR_LOC --> PRON
+    PRON -->|Yes| TR_RES
+    PRON -->|No| TR_RES
+    TR_RES --> SEG
+    
+    G -->|No| SEG
+    
+    SEG --> MOG
+    MOG --> L1
+    MOG --> L2
+    MOG --> L3
+    MOG --> L4
     
     I --> M

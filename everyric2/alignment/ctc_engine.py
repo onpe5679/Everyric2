@@ -18,6 +18,7 @@ from everyric2.alignment.base import (
     TranscriptionResult,
     WordTimestamp,
 )
+from everyric2.alignment.matcher import MatchStats
 from everyric2.audio.loader import AudioData
 from everyric2.config.settings import AlignmentSettings
 from everyric2.inference.prompt import LyricLine, SyncResult
@@ -73,7 +74,7 @@ class CTCEngine(BaseAlignmentEngine):
             logger.info(f"Loading HuggingFace model: {model_name}")
 
             self._processor = Wav2Vec2Processor.from_pretrained(model_name)
-            self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)
+            self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
             self._model.eval()
         else:
             logger.info("Loading torchaudio MMS_FA model")
@@ -105,16 +106,16 @@ class CTCEngine(BaseAlignmentEngine):
             progress_callback(2, 5)
 
         with torch.inference_mode():
-            inputs = self._processor(
+            inputs = self._processor(  # pyright: ignore[reportCallIssue,reportOptionalCall]
                 waveform.numpy(), sampling_rate=16000, return_tensors="pt", padding=True
             )
             input_values = inputs.input_values.to(device)
-            logits = self._model(input_values).logits
+            logits = self._model(input_values).logits  # pyright: ignore[reportOptionalCall]
 
         if progress_callback:
             progress_callback(3, 5)
 
-        vocab = self._processor.tokenizer.get_vocab()
+        vocab = self._processor.tokenizer.get_vocab()  # pyright: ignore[reportAttributeAccessIssue,reportOptionalMemberAccess]
         id2char = {v: k for k, v in vocab.items()}
 
         tokens = []
@@ -237,7 +238,7 @@ class CTCEngine(BaseAlignmentEngine):
         if progress_callback:
             progress_callback(2, 5)
 
-        dictionary = bundle.get_dict(star=None)
+        dictionary = bundle.get_dict(star=None)  # pyright: ignore[reportAttributeAccessIssue]
 
         all_words = []
         line_word_counts = []
@@ -260,7 +261,7 @@ class CTCEngine(BaseAlignmentEngine):
 
         waveform_2d = waveform.unsqueeze(0).to(device)
         with torch.inference_mode():
-            emission, _ = self._model(waveform_2d)
+            emission, _ = self._model(waveform_2d)  # pyright: ignore[reportOptionalCall]
 
         tokens = [
             dictionary[c]
@@ -375,10 +376,10 @@ class CTCEngine(BaseAlignmentEngine):
 
         return results
 
-    def get_last_transcription_data(self) -> tuple[list[WordTimestamp], dict | None, str]:
+    def get_last_transcription_data(self) -> tuple[list[WordTimestamp], MatchStats | None, str]:
         return (self._last_word_timestamps, self._last_match_stats, "ctc")
 
-    def get_transcription_sets(self) -> list[tuple]:
+    def get_transcription_sets(self) -> list[tuple[list[WordTimestamp], MatchStats | None, str]]:
         data = self.get_last_transcription_data()
         if data[0]:
             return [data]

@@ -1,5 +1,6 @@
 %%{init: {'theme': 'base'}}%%
 classDiagram
+    %% ===== Alignment Engines =====
     class BaseAlignmentEngine {
         <<abstract>>
         +config: AlignmentSettings
@@ -34,20 +35,6 @@ classDiagram
         +get_transcription_sets()
     }
 
-    class NeMoEngine {
-        -_model
-        -_current_lang: str
-        +align(audio, lyrics, language)
-        +get_transcription_sets()
-    }
-
-    class GPUHybridEngine {
-        -_ctc: CTCEngine
-        -_nemo: NeMoEngine
-        +align(audio, lyrics, language)
-        +get_transcription_sets()
-    }
-
     class LyricsMatcher {
         +last_match_stats: MatchStats
         +last_transcription_words: list
@@ -65,12 +52,137 @@ classDiagram
 
     BaseAlignmentEngine <|-- CTCEngine
     BaseAlignmentEngine <|-- WhisperXEngine
-    BaseAlignmentEngine <|-- NeMoEngine
-    BaseAlignmentEngine <|-- GPUHybridEngine
-    GPUHybridEngine *-- CTCEngine
-    GPUHybridEngine *-- NeMoEngine
     CTCEngine --> LyricsMatcher
     WhisperXEngine --> LyricsMatcher
     LyricsMatcher --> MatchStats
 
+    %% ===== Post-Processing =====
+    class SilenceHandler {
+        +settings: SegmentationSettings
+        +process(results) list~SyncResult~
+        +detect_silence_gaps(results) list~dict~
+        -_merge_gap(prev, curr) tuple
+    }
+
+    class SegmentationProcessor {
+        +settings: SegmentationSettings
+        +process(results) list~SyncResult~
+        -_process_line_mode(results)
+        -_process_word_mode(results)
+        -_process_character_mode(results)
+        -_split_long_line(result)
+        -_split_by_word_segments(result, max_chars)
+        -_split_text_to_chars(result)
+        -_split_word_segment_to_chars(seg, line_num)
+    }
+
+    class SegmentationSettings {
+        +mode: Literal[line, word, character]
+        +min_silence_gap: float
+        +silence_merge_mode: str
+        +max_chars_per_segment: int
+        +min_duration: float
+    }
+
+    SilenceHandler --> SegmentationSettings
+    SegmentationProcessor --> SegmentationSettings
+
+    %% ===== Translation =====
+    class BaseTranslator {
+        <<abstract>>
+        +settings: TranslationSettings
+        +translate(lyrics, source_lang, target_lang) TranslationResult
+        #_build_prompt(text, source, target, include_pron) str
+        #_parse_json_response(response, lines) list
+        #_parse_text_response(response, lines) list
+    }
+
+    class GeminiTranslator {
+        -api_key: str
+        -model: str
+        -api_url: str
+        +translate(lyrics, source_lang, target_lang)
+        -_fallback_result(lines, source, target)
+    }
+
+    class OpenAICompatibleTranslator {
+        -api_key: str
+        -model: str
+        -api_url: str
+        +translate(lyrics, source_lang, target_lang)
+    }
+
+    class TranslatorFactory {
+        +get_translator(settings)$ BaseTranslator
+    }
+
+    class LyricsTranslator {
+        -_translator: BaseTranslator
+        +settings: TranslationSettings
+        +translate(lyrics, source, target) str
+        +translate_with_pronunciation(lyrics, source, target) TranslationResult
+    }
+
+    class TranslationSettings {
+        +engine: Literal[gemini, openai, local]
+        +model: str
+        +api_key: str
+        +api_url: str
+        +target_language: str
+        +include_pronunciation: bool
+        +tone: Literal[literal, natural, poetic, casual, formal]
+        +temperature: float
+        +timeout: int
+    }
+
+    class TranslationResult {
+        +lines: list~TranslationLine~
+        +source_lang: str
+        +target_lang: str
+        +engine: str
+        +tone: str
+    }
+
+    class TranslationLine {
+        +original: str
+        +translation: str
+        +pronunciation: str?
+    }
+
+    BaseTranslator <|-- GeminiTranslator
+    BaseTranslator <|-- OpenAICompatibleTranslator
+    TranslatorFactory ..> BaseTranslator : creates
+    LyricsTranslator --> BaseTranslator
+    LyricsTranslator --> TranslationSettings
+    BaseTranslator --> TranslationSettings
+    BaseTranslator --> TranslationResult
+    TranslationResult --> TranslationLine
+
+    %% ===== Data Classes =====
+    class SyncResult {
+        +text: str
+        +start_time: float
+        +end_time: float
+        +confidence: float
+        +line_number: int?
+        +word_segments: list~WordSegment~?
+        +translation: str?
+        +pronunciation: str?
+    }
+
+    class WordSegment {
+        +word: str
+        +start: float
+        +end: float
+        +confidence: float
+    }
+
+    SyncResult --> WordSegment
+    SilenceHandler --> SyncResult
+    SegmentationProcessor --> SyncResult
+
+    %% Notes
     note for CTCEngine "권장 엔진\n- ja/ko/zh: HuggingFace wav2vec2\n- en/other: MMS_FA\n- 속도: 5초 (90x faster)"
+    note for SilenceHandler "무성 구간 처리\n- midpoint: 중간점 분할\n- extend_prev: 이전 확장\n- extend_next: 다음 확장"
+    note for SegmentationProcessor "자막 분할 모드\n- line: 줄 단위 (기본)\n- word: 단어 단위\n- character: 글자 단위"
+    note for TranslatorFactory "엔진 선택\n- gemini: Google Gemini\n- openai: OpenAI API\n- local: Ollama/LM Studio"

@@ -165,15 +165,15 @@ def sync(
     if cache_dir:
         settings.model.cache_dir = cache_dir
 
-    settings.translation.engine = translate_engine
+    settings.translation.engine = translate_engine  # pyright: ignore[reportAttributeAccessIssue]
     if translate_model:
         settings.translation.model = translate_model
     if translate_api_url:
         settings.translation.api_url = translate_api_url
-    settings.translation.tone = translate_tone
+    settings.translation.tone = translate_tone  # pyright: ignore[reportAttributeAccessIssue]
     settings.translation.include_pronunciation = pronunciation
 
-    settings.segmentation.mode = segment_mode
+    settings.segmentation.mode = segment_mode  # pyright: ignore[reportAttributeAccessIssue]
     settings.segmentation.min_silence_gap = min_silence_gap
 
     video_title: str | None = None
