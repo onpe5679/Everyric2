@@ -34,30 +34,16 @@ classDiagram
         +get_transcription_sets()
     }
 
-    class MFAEngine {
-        -_mfa_bin: str
-        -_last_matcher: LyricsMatcher
-        +_resolve_mfa_bin() str
-        +_mfa_env() dict
-        +_check_models_installed(lang) tuple
-        +align(audio, lyrics, language)
-        +get_transcription_sets()
-    }
-
-    class HybridEngine {
-        +whisperx: WhisperXEngine
-        +mfa: MFAEngine
-        -_transcription_sets: list
-        -_progress_lock: Lock
-        -_engine_status: dict
-        +align(audio, lyrics, language)
-        +get_transcription_sets()
-        +get_status_string() str
-    }
-
     class NeMoEngine {
         -_model
         -_current_lang: str
+        +align(audio, lyrics, language)
+        +get_transcription_sets()
+    }
+
+    class GPUHybridEngine {
+        -_ctc: CTCEngine
+        -_nemo: NeMoEngine
         +align(audio, lyrics, language)
         +get_transcription_sets()
     }
@@ -79,14 +65,12 @@ classDiagram
 
     BaseAlignmentEngine <|-- CTCEngine
     BaseAlignmentEngine <|-- WhisperXEngine
-    BaseAlignmentEngine <|-- MFAEngine
-    BaseAlignmentEngine <|-- HybridEngine
     BaseAlignmentEngine <|-- NeMoEngine
-    HybridEngine *-- WhisperXEngine
-    HybridEngine *-- MFAEngine
+    BaseAlignmentEngine <|-- GPUHybridEngine
+    GPUHybridEngine *-- CTCEngine
+    GPUHybridEngine *-- NeMoEngine
     CTCEngine --> LyricsMatcher
     WhisperXEngine --> LyricsMatcher
-    MFAEngine --> LyricsMatcher
     LyricsMatcher --> MatchStats
 
     note for CTCEngine "권장 엔진\n- ja/ko/zh: HuggingFace wav2vec2\n- en/other: MMS_FA\n- 속도: 5초 (90x faster)"

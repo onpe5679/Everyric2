@@ -5,20 +5,17 @@ flowchart LR
         A["Audio<br/>(Original)<br/>파형"]
         B["Audio<br/>(Vocals)<br/>파형"]
         C["Original<br/>Lyrics<br/>원본 가사"]
-        D["whisperx<br/>Transcription<br/>(match: N%)"]
-        E["mfa<br/>Transcription<br/>(match: N%)"]
+        D["Transcription<br/>(match: N%)<br/>전사 결과"]
         F["Translated<br/>번역된 가사"]
         G["Synced<br/>Output<br/>최종 결과"]
     end
 
     subgraph CONDITIONS["조건"]
         B1["--separate"]
-        B2["hybrid/whisperx"]
-        B3["hybrid/mfa"]
+        B2["ctc/whisperx"]
         B4["--translate"]
     end
 
     B1 -.->|있을 때| B
     B2 -.->|엔진 사용 시| D
-    B3 -.->|엔진 사용 시| E
     B4 -.->|있을 때| F

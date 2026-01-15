@@ -23,9 +23,8 @@ flowchart TD
             CTC_FA[forced_align<br/>GPU]
         end
         
-        subgraph HYBRID_ENG["HybridEngine"]
+        subgraph WX_ENG["WhisperXEngine"]
             J[WhisperX<br/>전사 + 매칭]
-            K[MFA<br/>강제 정렬]
         end
         
         I[결과 수집<br/>transcription_sets]
@@ -61,14 +60,12 @@ flowchart TD
     CTC_EN --> CTC_FA
     CTC_FA --> I
     
-    ENG -->|hybrid| J
-    ENG -->|hybrid| K
+    ENG -->|whisperx| J
     
     F -->|원본 가사| ENG
     F -->|원본 가사| G
     
     J --> I
-    K --> I
     
     G -->|Yes| H
     H --> T
