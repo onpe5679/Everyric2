@@ -91,8 +91,8 @@ def sync(
     ] = False,
     engine: Annotated[
         str,
-        typer.Option("--engine", "-e", help="Alignment engine (whisperx, mfa, hybrid, qwen)"),
-    ] = "hybrid",
+        typer.Option("--engine", "-e", help="Alignment engine (ctc, whisperx, nemo, qwen)"),
+    ] = "ctc",
     language: Annotated[
         str,
         typer.Option("--language", "-l", help="Language (auto, en, ja, ko)"),
@@ -104,10 +104,6 @@ def sync(
     cache_dir: Annotated[
         Optional[Path],
         typer.Option("--cache-dir", help="HuggingFace cache directory"),
-    ] = None,
-    chunk_duration: Annotated[
-        int | None,
-        typer.Option("--chunk-duration", "-c", help="Audio chunk duration in seconds (qwen only)"),
     ] = None,
 ) -> None:
     """Synchronize lyrics with audio.

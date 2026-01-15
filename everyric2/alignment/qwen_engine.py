@@ -69,5 +69,5 @@ class QwenEngine(BaseAlignmentEngine):
             self._engine = None
 
     @staticmethod
-    def get_engine_type() -> Literal["whisperx", "mfa", "hybrid", "qwen"]:
+    def get_engine_type() -> Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"]:
         return "qwen"

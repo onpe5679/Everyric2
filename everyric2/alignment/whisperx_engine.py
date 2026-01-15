@@ -234,5 +234,5 @@ class WhisperXEngine(BaseAlignmentEngine):
             torch.cuda.empty_cache()
 
     @staticmethod
-    def get_engine_type() -> Literal["whisperx", "mfa", "hybrid", "qwen"]:
+    def get_engine_type() -> Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"]:
         return "whisperx"

@@ -4,7 +4,7 @@ from everyric2.alignment.base import BaseAlignmentEngine, EngineNotAvailableErro
 from everyric2.config.settings import AlignmentSettings, get_settings
 
 
-EngineType = Literal["whisperx", "mfa", "hybrid", "qwen", "ctc", "nemo", "gpu-hybrid"]
+EngineType = Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"]
 
 
 class EngineFactory:
@@ -20,14 +20,6 @@ class EngineFactory:
             from everyric2.alignment.whisperx_engine import WhisperXEngine
 
             engine = WhisperXEngine(config)
-        elif engine_type == "mfa":
-            from everyric2.alignment.mfa_engine import MFAEngine
-
-            engine = MFAEngine(config)
-        elif engine_type == "hybrid":
-            from everyric2.alignment.hybrid_engine import HybridEngine
-
-            engine = HybridEngine(config)
         elif engine_type == "qwen":
             from everyric2.alignment.qwen_engine import QwenEngine
 
@@ -54,6 +46,26 @@ class EngineFactory:
         engines = []
 
         try:
+            from everyric2.alignment.ctc_engine import CTCEngine
+
+            engine = CTCEngine()
+            engines.append(
+                {
+                    "type": "ctc",
+                    "available": engine.is_available(),
+                    "description": "CTC forced aligner (GPU, recommended)",
+                }
+            )
+        except Exception:
+            engines.append(
+                {
+                    "type": "ctc",
+                    "available": False,
+                    "description": "CTC forced aligner (GPU, recommended)",
+                }
+            )
+
+        try:
             from everyric2.alignment.whisperx_engine import WhisperXEngine
 
             engine = WhisperXEngine()
@@ -61,7 +73,7 @@ class EngineFactory:
                 {
                     "type": "whisperx",
                     "available": engine.is_available(),
-                    "description": "WhisperX with word-level alignment (recommended)",
+                    "description": "WhisperX transcription-based alignment",
                 }
             )
         except Exception:
@@ -69,39 +81,29 @@ class EngineFactory:
                 {
                     "type": "whisperx",
                     "available": False,
-                    "description": "WhisperX with word-level alignment (recommended)",
+                    "description": "WhisperX transcription-based alignment",
                 }
             )
 
         try:
-            from everyric2.alignment.mfa_engine import MFAEngine
+            from everyric2.alignment.nemo_engine import NeMoEngine
 
-            engine = MFAEngine()
+            engine = NeMoEngine()
             engines.append(
                 {
-                    "type": "mfa",
+                    "type": "nemo",
                     "available": engine.is_available(),
-                    "description": "Montreal Forced Aligner (highest precision)",
+                    "description": "NeMo NFA (GPU, English only)",
                 }
             )
         except Exception:
             engines.append(
                 {
-                    "type": "mfa",
+                    "type": "nemo",
                     "available": False,
-                    "description": "Montreal Forced Aligner (highest precision)",
+                    "description": "NeMo NFA (GPU, English only)",
                 }
             )
-
-        engines.append(
-            {
-                "type": "hybrid",
-                "available": any(
-                    e["available"] for e in engines if e["type"] in ["whisperx", "mfa"]
-                ),
-                "description": "WhisperX + MFA hybrid (best of both)",
-            }
-        )
 
         try:
             from everyric2.alignment.qwen_engine import QwenEngine
@@ -123,54 +125,6 @@ class EngineFactory:
                 }
             )
 
-        try:
-            from everyric2.alignment.ctc_engine import CTCEngine
-
-            engine = CTCEngine()
-            engines.append(
-                {
-                    "type": "ctc",
-                    "available": engine.is_available(),
-                    "description": "CTC forced aligner (GPU, fast)",
-                }
-            )
-        except Exception:
-            engines.append(
-                {
-                    "type": "ctc",
-                    "available": False,
-                    "description": "CTC forced aligner (GPU, fast)",
-                }
-            )
-
-        try:
-            from everyric2.alignment.nemo_engine import NeMoEngine
-
-            engine = NeMoEngine()
-            engines.append(
-                {
-                    "type": "nemo",
-                    "available": engine.is_available(),
-                    "description": "NeMo NFA (GPU, NVIDIA)",
-                }
-            )
-        except Exception:
-            engines.append(
-                {
-                    "type": "nemo",
-                    "available": False,
-                    "description": "NeMo NFA (GPU, NVIDIA)",
-                }
-            )
-
-        engines.append(
-            {
-                "type": "gpu-hybrid",
-                "available": any(e["available"] for e in engines if e["type"] in ["ctc", "nemo"]),
-                "description": "CTC + NeMo GPU hybrid (best GPU performance)",
-            }
-        )
-
         return engines
 
     @staticmethod
@@ -179,7 +133,7 @@ class EngineFactory:
     ) -> BaseAlignmentEngine:
         config = config or get_settings().alignment
 
-        preferred_order = ["gpu-hybrid", "ctc", "nemo", "hybrid", "whisperx", "mfa", "qwen"]
+        preferred_order = ["ctc", "whisperx", "nemo", "qwen"]
 
         for engine_type in preferred_order:
             try:
@@ -190,5 +144,5 @@ class EngineFactory:
                 continue
 
         raise EngineNotAvailableError(
-            "No alignment engine available. Install WhisperX: pip install whisperx"
+            "No alignment engine available. Install: pip install transformers torchaudio"
         )

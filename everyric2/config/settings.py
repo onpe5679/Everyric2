@@ -74,8 +74,8 @@ class AudioSettings(BaseSettings):
 class AlignmentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_ALIGNMENT_")
 
-    engine: Literal["whisperx", "mfa", "hybrid", "qwen", "ctc", "nemo", "gpu-hybrid"] = Field(
-        default="hybrid", description="Alignment engine to use"
+    engine: Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"] = Field(
+        default="ctc", description="Alignment engine to use"
     )
     language: Literal["auto", "en", "ja", "ko"] = Field(
         default="auto", description="Language for transcription/alignment"
@@ -92,33 +92,13 @@ class AlignmentSettings(BaseSettings):
         default="silero", description="VAD method (silero is faster)"
     )
 
-    mfa_beam: int = Field(default=1000, description="MFA beam width for difficult alignments")
-    mfa_retry_beam: int = Field(default=4000, description="MFA retry beam width")
-    mfa_num_jobs: int = Field(default=0, description="MFA parallel jobs (0=auto, uses all cores)")
-    mfa_single_speaker: bool = Field(
-        default=True, description="Optimize for single speaker (lyrics)"
-    )
-
-    ctc_model: str = Field(
-        default="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        description="CTC model for forced alignment",
-    )
-
     nemo_model_en: str = Field(
         default="nvidia/stt_en_conformer_ctc_large",
         description="NeMo model for English",
     )
-    nemo_model_ja: str = Field(
-        default="nvidia/stt_ja_conformer_ctc_large",
-        description="NeMo model for Japanese",
-    )
-    nemo_model_ko: str = Field(
-        default="nvidia/stt_ko_conformer_ctc_large",
-        description="NeMo model for Korean",
-    )
 
     alignment_sample_rate: int = Field(
-        default=16000, description="Sample rate for alignment engines (WhisperX/MFA require 16kHz)"
+        default=16000, description="Sample rate for alignment engines"
     )
 
 

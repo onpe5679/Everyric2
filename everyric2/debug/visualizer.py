@@ -38,8 +38,6 @@ class DiagnosticsVisualizer:
         "original": "#FF6B6B",
         "vocals": "#4ECDC4",
         "final": "#45B7D1",
-        "chunks": "#96CEB4",
-        "llm_response": "#FFEAA7",
         "transcription": "#DDA0DD",
     }
 
@@ -66,7 +64,7 @@ class DiagnosticsVisualizer:
                 }
             ]
 
-        num_cols = 4
+        num_cols = 3
         if vocals_waveform is not None:
             num_cols += 1
         if translated_results:
@@ -115,9 +113,6 @@ class DiagnosticsVisualizer:
                 axes[col_idx], translated_results, duration, "Translated", self.COLORS["vocals"]
             )
             col_idx += 1
-
-        self._draw_chunks_column(axes[col_idx], debug_info.chunks, duration)
-        col_idx += 1
 
         self._draw_synced_column(
             axes[col_idx], results, duration, "Synced Output", self.COLORS["final"]
@@ -230,33 +225,6 @@ class DiagnosticsVisualizer:
                     rotation=0,
                 )
 
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, duration)
-        ax.invert_yaxis()
-        ax.set_xticks([])
-
-    def _draw_chunks_column(self, ax, chunks: list, duration: float) -> None:
-        ax.set_title("Chunk Processing", fontsize=12)
-        for chunk in chunks:
-            rect = mpatches.FancyBboxPatch(
-                (0.05, chunk.audio_start),
-                0.9,
-                chunk.audio_end - chunk.audio_start,
-                boxstyle="round,pad=0.02",
-                facecolor=self.COLORS["chunks"],
-                alpha=0.6,
-                edgecolor="black",
-                linewidth=0.5,
-            )
-            ax.add_patch(rect)
-            ax.text(
-                0.5,
-                (chunk.audio_start + chunk.audio_end) / 2,
-                f"Chunk {chunk.chunk_idx + 1}\n{chunk.audio_start:.1f}s-{chunk.audio_end:.1f}s",
-                ha="center",
-                va="center",
-                fontsize=8,
-            )
         ax.set_xlim(0, 1)
         ax.set_ylim(0, duration)
         ax.invert_yaxis()
