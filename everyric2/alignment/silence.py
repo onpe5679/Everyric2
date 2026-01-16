@@ -1,24 +1,46 @@
+from dataclasses import dataclass
+
 from everyric2.config.settings import SegmentationSettings, get_settings
 from everyric2.inference.prompt import SyncResult
+
+
+@dataclass
+class InterludeInfo:
+    start: float
+    end: float
+    duration: float
+    after_line: int
 
 
 class SilenceHandler:
     def __init__(self, settings: SegmentationSettings | None = None):
         self.settings = settings or get_settings().segmentation
+        self.detected_interludes: list[InterludeInfo] = []
 
     def process(self, results: list[SyncResult]) -> list[SyncResult]:
         if not results or len(results) < 2:
             return results
 
+        self.detected_interludes = []
         processed = [results[0]]
 
         for i in range(1, len(results)):
             prev = processed[-1]
             curr = results[i]
-
             gap = curr.start_time - prev.end_time
 
-            if gap < self.settings.min_silence_gap and gap >= 0:
+            if gap >= self.settings.interlude_gap:
+                self.detected_interludes.append(
+                    InterludeInfo(
+                        start=prev.end_time,
+                        end=curr.start_time,
+                        duration=gap,
+                        after_line=prev.line_number or i - 1,
+                    )
+                )
+                processed.append(curr)
+
+            elif gap < self.settings.min_silence_gap and gap >= 0:
                 merged_prev, merged_curr = self._merge_gap(prev, curr)
                 processed[-1] = merged_prev
                 processed.append(merged_curr)
@@ -91,6 +113,7 @@ class SilenceHandler:
             gap_duration = curr.start_time - prev.end_time
 
             if gap_duration > 0:
+                is_interlude = gap_duration >= self.settings.interlude_gap
                 gaps.append(
                     {
                         "index": i,
@@ -98,7 +121,11 @@ class SilenceHandler:
                         "end": curr.start_time,
                         "duration": gap_duration,
                         "is_short": gap_duration < self.settings.min_silence_gap,
+                        "is_interlude": is_interlude,
                     }
                 )
 
         return gaps
+
+    def get_interludes(self) -> list[InterludeInfo]:
+        return self.detected_interludes

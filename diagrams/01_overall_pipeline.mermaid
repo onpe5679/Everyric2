@@ -31,7 +31,7 @@ flowchart TD
     end
 
     subgraph POSTPROCESS["후처리 파이프라인"]
-        SH[SilenceHandler<br/>무성 구간 병합]
+        SH[SilenceHandler<br/>간주 감지 + 무성구간 병합]
         
         subgraph TRANSLATE["번역 (선택)"]
             G{--translate?}
@@ -39,19 +39,29 @@ flowchart TD
             TR_GEM[GeminiTranslator]
             TR_OAI[OpenAICompatibleTranslator]
             TR_LOC[Local LLM<br/>Ollama/LM Studio]
-            PRON{--pronunciation?}
             TR_RES[TranslationResult<br/>번역 + 발음]
         end
         
-        SEG[SegmentationProcessor<br/>line/word/character]
+        PF[ProjectFile<br/>.everyric.json 저장]
+        SEG[SegmentationProcessor<br/>+ Tokenizer MeCab]
     end
 
     subgraph OUTPUT["출력"]
         MOG[MultiOutputGenerator]
-        L1[output.srt<br/>원본 가사]
-        L2[output_translated.srt<br/>번역만]
-        L3[output_pronunciation.srt<br/>원본 + 발음]
-        L4[output_full.srt<br/>원본 + 발음 + 번역]
+        
+        subgraph LINE_OUT["line 모드"]
+            L1[output.srt]
+            L2[output_translated.srt]
+            L3[output_pronunciation.srt]
+            L4[output_full.srt]
+        end
+        
+        subgraph SEG_OUT["word/character 모드<br/>(트랙 분리)"]
+            S1[output_word.srt<br/>가사 정밀 타이밍]
+            S2[output_translation.srt<br/>번역 줄단위]
+            S3[output_pronunciation.srt<br/>발음 줄단위]
+        end
+        
         M[diagnostics.png]
         N[audio_vocals.wav]
     end
@@ -86,19 +96,16 @@ flowchart TD
     TR_FACT -->|gemini| TR_GEM
     TR_FACT -->|openai| TR_OAI
     TR_FACT -->|local| TR_LOC
-    TR_GEM --> PRON
-    TR_OAI --> PRON
-    TR_LOC --> PRON
-    PRON -->|Yes| TR_RES
-    PRON -->|No| TR_RES
-    TR_RES --> SEG
+    TR_GEM --> TR_RES
+    TR_OAI --> TR_RES
+    TR_LOC --> TR_RES
+    TR_RES --> PF
     
-    G -->|No| SEG
+    G -->|No| PF
     
+    PF --> SEG
     SEG --> MOG
-    MOG --> L1
-    MOG --> L2
-    MOG --> L3
-    MOG --> L4
+    MOG -->|line| LINE_OUT
+    MOG -->|word/char| SEG_OUT
     
     I --> M

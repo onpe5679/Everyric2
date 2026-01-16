@@ -9,6 +9,8 @@ GPU 가속 가사 싱크 도구. CTC / WhisperX 지원 + 번역/발음 표기/�
 - **다중 출력**: 원본/번역/발음/통합 SRT 동시 생성
 - **자막 분할 모드**: Line/Word/Character 단위 선택
 - **무성 구간 처리**: 짧은 간격 자동 병합
+- **간주 구간 감지**: 긴 공백(Interlude) 자동 식별 및 자막 제외
+- **프로젝트 파일 지원**: `.everyric.json`을 통한 데이터 보존 및 재처리
 - **로컬 LLM 지원**: Ollama, LM Studio 등 연동
 
 ## 엔진 비교
@@ -25,6 +27,9 @@ git clone https://github.com/onpe5679/Everyric2.git
 cd Everyric2
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
+
+# 일본어 단어 분할을 위한 MeCab 설치 (선택)
+pip install "fugashi[unidic-lite]"
 ```
 
 ## 사용법
@@ -85,6 +90,27 @@ everyric2 sync audio.wav lyrics.txt --segment-mode character
 ```bash
 # 0.5초 미만 간격 병합
 everyric2 sync audio.wav lyrics.txt --min-silence-gap 0.5
+
+### 간주 구간 처리
+
+```bash
+# 5초 이상의 공백을 간주 구간으로 설정 (해당 구간 자막 미출력)
+everyric2 sync audio.wav lyrics.txt --interlude-gap 5.0
+```
+
+### 재처리 (Reprocess)
+
+정렬 엔진을 다시 실행하지 않고 프로젝트 파일(`.everyric.json`)을 사용하여 자막 분할 설정을 변경할 수 있습니다.
+
+```bash
+# 프로젝트 파일로부터 단어 단위 재분할 (권장)
+everyric2 reprocess output.everyric.json --segment-mode word
+
+# 일본어 글자 단위 재분할
+everyric2 reprocess output.everyric.json --segment-mode character -l ja
+
+# 기존 SRT 파일로부터 재분할 (레거시 지원)
+everyric2 reprocess output.srt --max-chars 30
 ```
 
 ## 출력 구조
@@ -93,6 +119,7 @@ everyric2 sync audio.wav lyrics.txt --min-silence-gap 0.5
 
 ```
 output/20260115_234824/
+├── output.everyric.json           # 전체 프로젝트 데이터 (재처리용)
 ├── output.srt                    # 원본 가사
 ├── output_translated.srt         # 번역만
 ├── output_pronunciation.srt      # 원본 + 발음
@@ -104,6 +131,15 @@ output/20260115_234824/
 ├── diagnostics.png               # 시각화
 └── debug_info.json
 ```
+
+### 분리된 트랙 출력
+
+`--segment-mode`가 `word`나 `character`일 경우, 프리미어/애프터 이펙트 등에서의 편집 편의를 위해 자막 트랙이 분리되어 생성됩니다.
+
+- `output_word.srt` (또는 `_character.srt`): 정밀한 타이밍의 가사 자막
+- `output_translation.srt`: 줄 단위 타이밍의 번역 자막 (오버레이용)
+- `output_pronunciation.srt`: 줄 단위 타이밍의 원본+로마자 자막
+
 
 ### output_full.srt 예시
 
@@ -131,6 +167,8 @@ output/20260115_234824/
 | `--pronunciation` | 발음 표기 포함 | false |
 | `--segment-mode` | 분할 모드 (line, word, character) | line |
 | `--min-silence-gap` | 최소 무성 간격 (초) | 0.3 |
+| `--interlude-gap` | 간주 구간 인식 기준 (초) | 5.0 |
+| `--max-chars` | 자막 한 줄당 최대 글자 수 | 50 |
 | `--translate-engine` | 번역 엔진 (gemini, openai, local) | gemini |
 | `--translate-model` | 번역 모델명 | gemini-2.0-flash |
 | `--translate-api-url` | 로컬 LLM API URL | - |
@@ -201,9 +239,13 @@ everyric2/
 │   └── visualizer.py         # diagnostics.png
 ├── config/
 │   └── settings.py           # Settings (TranslationSettings, SegmentationSettings)
+├── io/
+│   └── project.py            # ProjectFile (.everyric.json) (NEW)
 ├── output/
 │   ├── formatters.py         # SRT/ASS/LRC/JSON
 │   └── multi_output.py       # MultiOutputGenerator (NEW)
+├── text/
+│   └── tokenizer.py          # MeCab/fugashi Tokenizer (NEW)
 └── translation/
     └── translator.py         # BaseTranslator, GeminiTranslator, OpenAICompatibleTranslator
 ```

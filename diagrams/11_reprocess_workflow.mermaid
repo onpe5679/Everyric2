@@ -1,0 +1,74 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4ECDC4', 'secondaryColor': '#FF6B6B'}}}%%
+flowchart TD
+    subgraph INPUT["입력"]
+        PJ[".everyric.json<br/>프로젝트 파일"]
+        SRT[".srt 파일<br/>(레거시 지원)"]
+    end
+    
+    subgraph LOAD["데이터 로드"]
+        PF[ProjectFile.load]
+        PARSE[SRT 파싱<br/>word_segments 없음]
+        
+        DATA[("line_results<br/>+ translations<br/>+ word_segments")]
+    end
+    
+    subgraph PROCESS["처리"]
+        SH[SilenceHandler<br/>--interlude-gap]
+        
+        subgraph TOK["Tokenizer (MeCab)"]
+            TOK_JA[일본어<br/>fugashi]
+            TOK_KO[한국어<br/>konlpy]
+            TOK_ZH[중국어<br/>jieba]
+            TOK_EN[영어<br/>whitespace]
+        end
+        
+        SEG[SegmentationProcessor]
+    end
+    
+    subgraph MODE["--segment-mode"]
+        M_LINE[line<br/>줄 단위]
+        M_WORD[word<br/>단어 단위]
+        M_CHAR[character<br/>글자 단위]
+    end
+    
+    subgraph OUTPUT["출력 (트랙 분리)"]
+        subgraph LYRICS_TRACK["가사 트랙<br/>(정밀 타이밍)"]
+            OUT_LINE[output.srt]
+            OUT_WORD[output_word.srt]
+            OUT_CHAR[output_character.srt]
+        end
+        
+        subgraph TRANS_TRACK["번역 트랙<br/>(줄단위 유지)"]
+            OUT_TRANS[output_translation.srt]
+            OUT_PRON[output_pronunciation.srt]
+        end
+    end
+    
+    PJ -->|권장| PF
+    SRT -->|레거시| PARSE
+    PF --> DATA
+    PARSE --> DATA
+    
+    DATA --> SH
+    SH --> SEG
+    
+    SEG --> TOK
+    TOK --> MODE
+    
+    MODE -->|line| M_LINE
+    MODE -->|word| M_WORD
+    MODE -->|character| M_CHAR
+    
+    M_LINE --> OUT_LINE
+    M_WORD --> OUT_WORD
+    M_CHAR --> OUT_CHAR
+    
+    M_LINE --> OUT_TRANS
+    M_LINE --> OUT_PRON
+    M_WORD -.->|별도 파일| OUT_TRANS
+    M_CHAR -.->|별도 파일| OUT_TRANS
+    
+    style PJ fill:#90EE90
+    style OUT_WORD fill:#FFD700
+    style OUT_CHAR fill:#FFD700
+    style OUT_TRANS fill:#87CEEB

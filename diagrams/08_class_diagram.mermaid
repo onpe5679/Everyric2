@@ -15,148 +15,159 @@ classDiagram
         -_model: Wav2Vec2ForCTC
         -_processor: Wav2Vec2Processor
         -_current_lang: str
-        -_device: torch.device
-        -_last_word_timestamps: list
-        -_last_match_stats: MatchStats
         +align(audio, lyrics, language)
-        +get_transcription_sets()
-        -_ensure_model_loaded(language)
         -_align_cjk(waveform, lyrics, language)
         -_align_mms(waveform, lyrics, language)
     }
 
-    class WhisperXEngine {
-        -_model
-        -_align_model
-        -_last_matcher: LyricsMatcher
-        -_last_match_stats: MatchStats
-        +transcribe(audio, language)
-        +align(audio, lyrics, language)
-        +get_transcription_sets()
-    }
-
     class LyricsMatcher {
         +last_match_stats: MatchStats
-        +last_transcription_words: list
         +match_lyrics_to_words(lyrics, words, lang)
-        +normalize_text(text, lang)
-        +tokenize(text, lang)
-    }
-
-    class MatchStats {
-        +total_lyrics: int
-        +matched_lyrics: int
-        +match_rate: float
-        +avg_confidence: float
     }
 
     BaseAlignmentEngine <|-- CTCEngine
-    BaseAlignmentEngine <|-- WhisperXEngine
     CTCEngine --> LyricsMatcher
-    WhisperXEngine --> LyricsMatcher
-    LyricsMatcher --> MatchStats
+
+    %% ===== Project File (NEW) =====
+    class ProjectFile {
+        +path: Path
+        +data: AlignmentData
+        +save(data) Path
+        +load() AlignmentData
+        +from_sync_results(results, path, meta, trans)$ ProjectFile
+        +get_line_results() list~SyncResult~
+        +apply_translations(results) list~SyncResult~
+        +get_translation_track() list~SyncResult~
+    }
+
+    class AlignmentData {
+        +metadata: ProjectMetadata
+        +results: list~SyncResult~
+        +translations: list~TranslationData~
+        +to_dict() dict
+        +from_dict(data)$ AlignmentData
+    }
+
+    class ProjectMetadata {
+        +version: str
+        +created_at: str
+        +source_audio: str
+        +source_lyrics: str
+        +language: str
+        +engine: str
+    }
+
+    class TranslationData {
+        +line_index: int
+        +original: str
+        +translation: str
+        +pronunciation: str
+    }
+
+    ProjectFile --> AlignmentData
+    AlignmentData --> ProjectMetadata
+    AlignmentData --> TranslationData
+
+    %% ===== Tokenizer (NEW) =====
+    class Tokenizer {
+        +language: str
+        +use_mecab: bool
+        +tokenize(text) list~TokenInfo~
+        +split_into_words(text) list~str~
+        +split_into_characters(text) list~str~
+        -_tokenize_japanese(text)
+        -_tokenize_japanese_mecab(text)
+        -_tokenize_chinese(text)
+        -_tokenize_korean(text)
+    }
+
+    class TokenInfo {
+        +surface: str
+        +pos: str
+        +reading: str
+        +is_content_word: bool
+    }
+
+    Tokenizer --> TokenInfo
 
     %% ===== Post-Processing =====
     class SilenceHandler {
         +settings: SegmentationSettings
+        +detected_interludes: list~InterludeInfo~
         +process(results) list~SyncResult~
         +detect_silence_gaps(results) list~dict~
-        -_merge_gap(prev, curr) tuple
+        +get_interludes() list~InterludeInfo~
+    }
+
+    class InterludeInfo {
+        +start: float
+        +end: float
+        +duration: float
+        +after_line: int
     }
 
     class SegmentationProcessor {
         +settings: SegmentationSettings
-        +process(results) list~SyncResult~
+        +language: str
+        +tokenizer: Tokenizer
+        +process(results, language) list~SyncResult~
         -_process_line_mode(results)
         -_process_word_mode(results)
         -_process_character_mode(results)
-        -_split_long_line(result)
-        -_split_by_word_segments(result, max_chars)
-        -_split_text_to_chars(result)
-        -_split_word_segment_to_chars(seg, line_num)
+        -_split_text_to_words(result)
     }
 
     class SegmentationSettings {
-        +mode: Literal[line, word, character]
+        +mode: line/word/character
         +min_silence_gap: float
-        +silence_merge_mode: str
+        +interlude_gap: float
         +max_chars_per_segment: int
-        +min_duration: float
+        +use_mecab: bool
     }
 
     SilenceHandler --> SegmentationSettings
+    SilenceHandler --> InterludeInfo
     SegmentationProcessor --> SegmentationSettings
+    SegmentationProcessor --> Tokenizer
+
+    %% ===== Output =====
+    class MultiOutputGenerator {
+        +format_type: str
+        +segment_mode: str
+        +generate_all_variants(results, trans, dir, name, line_results)
+        -_generate_separated_tracks(results, trans, dir, name, line_results)
+        -_generate_original(results, dir, name)
+        -_generate_translated(results, dir, name)
+    }
+
+    class OutputFile {
+        +variant: str
+        +path: Path
+        +content: str
+    }
+
+    MultiOutputGenerator --> OutputFile
 
     %% ===== Translation =====
     class BaseTranslator {
         <<abstract>>
         +settings: TranslationSettings
-        +translate(lyrics, source_lang, target_lang) TranslationResult
-        #_build_prompt(text, source, target, include_pron) str
-        #_parse_json_response(response, lines) list
-        #_parse_text_response(response, lines) list
+        +translate(lyrics, source, target) TranslationResult
     }
 
     class GeminiTranslator {
         -api_key: str
-        -model: str
-        -api_url: str
-        +translate(lyrics, source_lang, target_lang)
-        -_fallback_result(lines, source, target)
+        +translate(lyrics, source, target)
     }
 
     class OpenAICompatibleTranslator {
         -api_key: str
-        -model: str
         -api_url: str
-        +translate(lyrics, source_lang, target_lang)
-    }
-
-    class TranslatorFactory {
-        +get_translator(settings)$ BaseTranslator
-    }
-
-    class LyricsTranslator {
-        -_translator: BaseTranslator
-        +settings: TranslationSettings
-        +translate(lyrics, source, target) str
-        +translate_with_pronunciation(lyrics, source, target) TranslationResult
-    }
-
-    class TranslationSettings {
-        +engine: Literal[gemini, openai, local]
-        +model: str
-        +api_key: str
-        +api_url: str
-        +target_language: str
-        +include_pronunciation: bool
-        +tone: Literal[literal, natural, poetic, casual, formal]
-        +temperature: float
-        +timeout: int
-    }
-
-    class TranslationResult {
-        +lines: list~TranslationLine~
-        +source_lang: str
-        +target_lang: str
-        +engine: str
-        +tone: str
-    }
-
-    class TranslationLine {
-        +original: str
-        +translation: str
-        +pronunciation: str?
+        +translate(lyrics, source, target)
     }
 
     BaseTranslator <|-- GeminiTranslator
     BaseTranslator <|-- OpenAICompatibleTranslator
-    TranslatorFactory ..> BaseTranslator : creates
-    LyricsTranslator --> BaseTranslator
-    LyricsTranslator --> TranslationSettings
-    BaseTranslator --> TranslationSettings
-    BaseTranslator --> TranslationResult
-    TranslationResult --> TranslationLine
 
     %% ===== Data Classes =====
     class SyncResult {
@@ -164,10 +175,10 @@ classDiagram
         +start_time: float
         +end_time: float
         +confidence: float
-        +line_number: int?
-        +word_segments: list~WordSegment~?
-        +translation: str?
-        +pronunciation: str?
+        +line_number: int
+        +word_segments: list~WordSegment~
+        +translation: str
+        +pronunciation: str
     }
 
     class WordSegment {
@@ -178,11 +189,12 @@ classDiagram
     }
 
     SyncResult --> WordSegment
+    AlignmentData --> SyncResult
     SilenceHandler --> SyncResult
     SegmentationProcessor --> SyncResult
 
     %% Notes
-    note for CTCEngine "권장 엔진\n- ja/ko/zh: HuggingFace wav2vec2\n- en/other: MMS_FA\n- 속도: 5초 (90x faster)"
-    note for SilenceHandler "무성 구간 처리\n- midpoint: 중간점 분할\n- extend_prev: 이전 확장\n- extend_next: 다음 확장"
-    note for SegmentationProcessor "자막 분할 모드\n- line: 줄 단위 (기본)\n- word: 단어 단위\n- character: 글자 단위"
-    note for TranslatorFactory "엔진 선택\n- gemini: Google Gemini\n- openai: OpenAI API\n- local: Ollama/LM Studio"
+    note for ProjectFile "프로젝트 파일\n- 모든 정렬 데이터 보존\n- reprocess용 루트 데이터"
+    note for Tokenizer "언어별 토크나이저\n- ja: MeCab/fugashi\n- zh: jieba\n- ko: konlpy"
+    note for SilenceHandler "간주 감지 (interlude_gap)\n+ 짧은 무성구간 병합"
+    note for MultiOutputGenerator "분할 모드별 출력\n- line: 통합 자막\n- word/char: 트랙 분리"

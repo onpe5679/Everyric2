@@ -141,6 +141,10 @@ class SegmentationSettings(BaseSettings):
     silence_merge_mode: Literal["midpoint", "extend_prev", "extend_next"] = Field(
         default="midpoint", description="How to merge short silence gaps"
     )
+    interlude_gap: float = Field(
+        default=5.0, description="Gaps longer than this are treated as interludes (no subtitle)"
+    )
+    use_mecab: bool = Field(default=True, description="Use MeCab for Japanese word segmentation")
 
 
 class OutputSettings(BaseSettings):

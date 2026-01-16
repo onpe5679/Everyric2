@@ -115,8 +115,18 @@ def sync(
     ] = "line",
     min_silence_gap: Annotated[
         float,
-        typer.Option("--min-silence-gap", help="Minimum silence gap in seconds"),
+        typer.Option("--min-silence-gap", help="Minimum silence gap to merge (seconds)"),
     ] = 0.3,
+    interlude_gap: Annotated[
+        float,
+        typer.Option(
+            "--interlude-gap", help="Gaps longer than this are interludes - no subtitle (seconds)"
+        ),
+    ] = 5.0,
+    max_chars: Annotated[
+        int,
+        typer.Option("--max-chars", help="Maximum characters per subtitle line"),
+    ] = 50,
     translate_engine: Annotated[
         str,
         typer.Option("--translate-engine", help="Translation engine (gemini, openai, local)"),
@@ -175,6 +185,8 @@ def sync(
 
     settings.segmentation.mode = segment_mode  # pyright: ignore[reportAttributeAccessIssue]
     settings.segmentation.min_silence_gap = min_silence_gap
+    settings.segmentation.interlude_gap = interlude_gap
+    settings.segmentation.max_chars_per_segment = max_chars
 
     video_title: str | None = None
     audio_path: Path
@@ -186,6 +198,7 @@ def sync(
     translation_result = None
     translated_results: list | None = None
     results = None
+    line_results: list | None = None
     debug_info = None
     run_ctx = None
     output_manager = None
@@ -433,7 +446,23 @@ def sync(
                         result.translation = translation_result.lines[i].translation
                         result.pronunciation = translation_result.lines[i].pronunciation
 
-            segmentation_processor = SegmentationProcessor(settings.segmentation)
+            line_results = [r for r in results]
+
+            if debug and run_ctx:
+                from everyric2.io.project import ProjectFile, ProjectMetadata
+
+                project_meta = ProjectMetadata(
+                    source_audio=str(audio_path) if audio_path else None,
+                    source_lyrics=str(lyrics),
+                    language=language,
+                    engine=engine,
+                )
+                project = ProjectFile.from_sync_results(
+                    line_results, run_ctx.output_dir / "output", project_meta, translation_result
+                )
+                console.print(f"[green]Project file:[/green] {project.path}")
+
+            segmentation_processor = SegmentationProcessor(settings.segmentation, language=language)
             results = segmentation_processor.process(results)
 
         except Exception as e:
@@ -452,9 +481,13 @@ def sync(
                     from everyric2.inference.prompt import SyncResult
                     from everyric2.output.multi_output import MultiOutputGenerator
 
-                    multi_gen = MultiOutputGenerator(format)
+                    multi_gen = MultiOutputGenerator(format, segment_mode)
                     outputs = multi_gen.generate_all_variants(
-                        results, translation_result, run_ctx.output_dir, "output"
+                        results,
+                        translation_result,
+                        run_ctx.output_dir,
+                        "output",
+                        line_results=line_results,
                     )
                     for out in outputs:
                         if out.variant != "original":
@@ -516,6 +549,177 @@ def sync(
             raise typer.Exit(1)
 
         progress.update(task, description="Done!")
+
+
+@app.command()
+def reprocess(
+    input_file: Annotated[Path, typer.Argument(help="Input .everyric.json or .srt file")],
+    output_dir: Annotated[
+        Optional[Path],
+        typer.Option("--output-dir", "-o", help="Output directory"),
+    ] = None,
+    format: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format (srt, ass, lrc, json)"),
+    ] = "srt",
+    segment_mode: Annotated[
+        str,
+        typer.Option("--segment-mode", help="Segmentation mode (line, word, character)"),
+    ] = "line",
+    max_chars: Annotated[
+        int,
+        typer.Option("--max-chars", help="Maximum characters per subtitle line"),
+    ] = 50,
+    min_silence_gap: Annotated[
+        float,
+        typer.Option("--min-silence-gap", help="Minimum silence gap to merge (seconds)"),
+    ] = 0.3,
+    interlude_gap: Annotated[
+        float,
+        typer.Option("--interlude-gap", help="Gaps longer than this are interludes (seconds)"),
+    ] = 5.0,
+    language: Annotated[
+        str,
+        typer.Option("--language", "-l", help="Language for tokenization (ja, ko, en, zh)"),
+    ] = "ja",
+) -> None:
+    """Reprocess alignment data with different segmentation settings.
+
+    Supports .everyric.json (recommended) or .srt input files.
+    For word/character mode, outputs separate tracks for lyrics and translation.
+
+    Examples:
+        everyric2 reprocess output.everyric.json --segment-mode word
+        everyric2 reprocess output.everyric.json --segment-mode character -l ja
+        everyric2 reprocess output.srt --max-chars 30  # legacy SRT support
+    """
+    if not input_file.exists():
+        console.print(f"[red]Error:[/red] Input file not found: {input_file}")
+        raise typer.Exit(1)
+
+    settings = get_settings()
+    settings.segmentation.mode = segment_mode  # pyright: ignore[reportAttributeAccessIssue]
+    settings.segmentation.max_chars_per_segment = max_chars
+    settings.segmentation.min_silence_gap = min_silence_gap
+    settings.segmentation.interlude_gap = interlude_gap
+
+    from everyric2.inference.prompt import SyncResult
+    from everyric2.alignment.silence import SilenceHandler
+    from everyric2.alignment.segmentation import SegmentationProcessor
+    from everyric2.output.multi_output import MultiOutputGenerator
+
+    line_results: list[SyncResult] = []
+    translation_result = None
+
+    if input_file.suffix == ".json" or str(input_file).endswith(".everyric.json"):
+        from everyric2.io.project import ProjectFile
+        from everyric2.translation.translator import TranslationResult, TranslationLine
+
+        console.print(f"[cyan]Loading project:[/cyan] {input_file}")
+        project = ProjectFile(input_file)
+        data = project.load()
+
+        line_results = data.results
+        if data.translations:
+            trans_lines = [
+                TranslationLine(
+                    original=t.original,
+                    translation=t.translation or "",
+                    pronunciation=t.pronunciation,
+                )
+                for t in data.translations
+            ]
+            translation_result = TranslationResult(
+                lines=trans_lines,
+                source_lang=data.metadata.language,
+                target_lang="ko",
+                engine="cached",
+                tone="natural",
+            )
+        console.print(
+            f"[green]Loaded:[/green] {len(line_results)} lines, {len(data.translations)} translations"
+        )
+    else:
+        import re
+
+        console.print(
+            f"[cyan]Loading SRT:[/cyan] {input_file} [yellow](use .everyric.json for full features)[/yellow]"
+        )
+        content = input_file.read_text(encoding="utf-8")
+
+        srt_pattern = re.compile(
+            r"(\d+)\s*\n"
+            r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*\n"
+            r"((?:(?!\n\d+\n\d{2}:\d{2}:\d{2}).)*)",
+            re.DOTALL,
+        )
+
+        def parse_timestamp(ts: str) -> float:
+            h, m, rest = ts.split(":")
+            s, ms = rest.split(",")
+            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+        for match in srt_pattern.finditer(content):
+            idx = int(match.group(1))
+            start = parse_timestamp(match.group(2))
+            end = parse_timestamp(match.group(3))
+            text = match.group(4).strip()
+
+            lines = text.split("\n")
+            original_text = lines[0] if lines else text
+            pronunciation = None
+            translation = None
+
+            if len(lines) >= 2 and lines[1].startswith("(") and lines[1].endswith(")"):
+                pronunciation = lines[1][1:-1]
+                if len(lines) >= 3:
+                    translation = lines[2]
+            elif len(lines) >= 2:
+                translation = lines[1]
+
+            line_results.append(
+                SyncResult(
+                    text=original_text,
+                    start_time=start,
+                    end_time=end,
+                    confidence=1.0,
+                    line_number=idx,
+                    translation=translation,
+                    pronunciation=pronunciation,
+                )
+            )
+        console.print(f"[green]Loaded:[/green] {len(line_results)} subtitles")
+
+    silence_handler = SilenceHandler(settings.segmentation)
+    processed_results = silence_handler.process(line_results)
+
+    interludes = silence_handler.get_interludes()
+    if interludes:
+        console.print(f"[yellow]Detected {len(interludes)} interlude(s)[/yellow]")
+
+    segmentation_processor = SegmentationProcessor(settings.segmentation, language=language)
+    segmented_results = segmentation_processor.process(processed_results, language=language)
+
+    console.print(
+        f"[green]Processed:[/green] {len(segmented_results)} segments (mode: {segment_mode})"
+    )
+
+    if output_dir is None:
+        output_dir = input_file.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = input_file.stem.replace(".everyric", "")
+    multi_gen = MultiOutputGenerator(format, segment_mode)
+    outputs = multi_gen.generate_all_variants(
+        segmented_results,
+        translation_result,
+        output_dir,
+        base_name,
+        line_results=line_results,
+    )
+
+    for out in outputs:
+        console.print(f"[green]{out.variant}:[/green] {out.path}")
 
 
 @app.command()
