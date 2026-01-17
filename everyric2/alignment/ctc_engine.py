@@ -172,8 +172,9 @@ class CTCEngine(BaseAlignmentEngine):
 
         try:
             targets = torch.tensor([tokens], dtype=torch.int32, device=device)
-            aligned_tokens, alignment_scores = F.forced_align(logits, targets, blank=0)
-            token_spans = F.merge_tokens(aligned_tokens[0], alignment_scores[0])
+            blank_id = self._processor.tokenizer.pad_token_id  # pyright: ignore[reportAttributeAccessIssue,reportOptionalMemberAccess]
+            aligned_tokens, alignment_scores = F.forced_align(logits, targets, blank=blank_id)
+            token_spans = F.merge_tokens(aligned_tokens[0], alignment_scores[0], blank=blank_id)
         except Exception as e:
             raise AlignmentError(f"CTC forced alignment failed: {e}")
 
@@ -383,15 +384,7 @@ class CTCEngine(BaseAlignmentEngine):
 
         if resolved_lang in LANG_MODEL_MAP:
             results = self._align_cjk(waveform, lyrics, resolved_lang, progress_callback)
-            from everyric2.alignment.matcher import MatchStats
-
-            matched = sum(1 for r in results if r.word_segments)
-            self._last_match_stats = MatchStats(
-                total_lyrics=len(results),
-                matched_lyrics=matched,
-                match_rate=matched / len(results) if results else 0.0,
-                avg_confidence=1.0,
-            )
+            self._last_match_stats = self._calculate_match_stats(results)
             return results
         else:
             results = self._align_mms(waveform, lyrics, resolved_lang, progress_callback)
@@ -401,8 +394,49 @@ class CTCEngine(BaseAlignmentEngine):
             matched_results = matcher.match_lyrics_to_words(
                 lyrics, self._last_word_timestamps, resolved_lang
             )
-            self._last_match_stats = matcher.last_match_stats
+
+            self._last_match_stats = self._calculate_match_stats(matched_results)
             return matched_results
+
+    def _calculate_match_stats(self, results: list) -> "MatchStats":
+        """Calculate match stats consistently for both CJK and MMS paths.
+
+        Uses adaptive threshold: > 0 for positive confidence (CJK),
+        > -5 for log-probability confidence (MMS/English).
+        """
+        from everyric2.alignment.matcher import MatchStats
+
+        all_confidences = [
+            seg.confidence
+            for r in results
+            if r.word_segments
+            for seg in r.word_segments
+            if seg.confidence is not None
+        ]
+
+        if not all_confidences:
+            return MatchStats(
+                total_lyrics=len(results),
+                matched_lyrics=0,
+                match_rate=0.0,
+                avg_confidence=0.0,
+            )
+
+        avg_conf = sum(all_confidences) / len(all_confidences)
+
+        # Adaptive threshold: log-probs are negative, CTC scores can be positive
+        # For log-probs (avg < 0): use -5 as "good enough" threshold
+        # For CTC scores (avg >= 0): use 0 as threshold
+        threshold = -5.0 if avg_conf < 0 else 0.0
+        good_matches = sum(1 for c in all_confidences if c > threshold)
+        match_rate = good_matches / len(all_confidences)
+
+        return MatchStats(
+            total_lyrics=len(results),
+            matched_lyrics=sum(1 for r in results if r.word_segments),
+            match_rate=match_rate,
+            avg_confidence=avg_conf,
+        )
 
     def get_last_transcription_data(self) -> tuple[list[WordTimestamp], MatchStats | None, str]:
         return (self._last_word_timestamps, self._last_match_stats, "ctc")

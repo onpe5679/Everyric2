@@ -44,6 +44,36 @@ class DiagnosticsVisualizer:
         "word_segment": "#98D8C8",
     }
 
+    @staticmethod
+    def _confidence_to_color(
+        confidence: float | None, min_conf: float = -5.0, max_conf: float = 10.0
+    ) -> tuple[str, float]:
+        """Convert log-probability confidence to color and alpha.
+
+        Returns (color_hex, alpha) where:
+        - Red = low confidence
+        - Yellow = medium confidence
+        - Green = high confidence
+        """
+        if confidence is None:
+            return "#888888", 0.5
+
+        normalized = (confidence - min_conf) / (max_conf - min_conf)
+        normalized = max(0.0, min(1.0, normalized))
+
+        if normalized < 0.5:
+            r = 255
+            g = int(255 * (normalized * 2))
+            b = 0
+        else:
+            r = int(255 * (1 - (normalized - 0.5) * 2))
+            g = 255
+            b = 0
+
+        color = f"#{r:02x}{g:02x}{b:02x}"
+        alpha = 0.4 + 0.5 * normalized
+        return color, alpha
+
     def __init__(self, figsize: tuple[int, int] = (16, 20)):
         self.figsize = figsize
 
@@ -241,10 +271,17 @@ class DiagnosticsVisualizer:
         duration: float,
         engine_name: str,
     ) -> None:
-        title = f"{engine_name} Transcription"
+        all_confidences = [w.get("confidence") for w in words if w.get("confidence") is not None]
+        min_conf = min(all_confidences) if all_confidences else -5.0
+        max_conf = max(all_confidences) if all_confidences else 10.0
+        avg_conf = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
+
+        title = f"{engine_name}"
         if match_stats:
             rate = match_stats.get("match_rate", 0) * 100
-            title += f"\n(match: {rate:.0f}%)"
+            title += f"\n(match: {rate:.0f}%, avg: {avg_conf:.1f})"
+        else:
+            title += f"\n(avg conf: {avg_conf:.1f})"
 
         ax.set_title(title, fontsize=12)
 
@@ -255,14 +292,13 @@ class DiagnosticsVisualizer:
             confidence = word_data.get("confidence")
 
             height = max(0.1, end - start)
-
-            alpha = max(0.1, min(1.0, 0.5 + 0.4 * (confidence if confidence else 0.5)))
+            color, alpha = self._confidence_to_color(confidence, min_conf, max_conf)
             rect = mpatches.FancyBboxPatch(
                 (0.05, start),
                 0.9,
                 height,
                 boxstyle="round,pad=0.01",
-                facecolor=self.COLORS["transcription"],
+                facecolor=color,
                 alpha=alpha,
                 edgecolor="none",
             )
@@ -313,19 +349,31 @@ class DiagnosticsVisualizer:
     def _draw_word_segments_column(
         self, ax, results: list[SyncResult], duration: float, title: str
     ) -> None:
-        ax.set_title(title, fontsize=12)
+        all_confidences = [
+            seg.confidence
+            for r in results
+            if r.word_segments
+            for seg in r.word_segments
+            if seg.confidence is not None
+        ]
+        min_conf = min(all_confidences) if all_confidences else -5.0
+        max_conf = max(all_confidences) if all_confidences else 10.0
+        avg_conf = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
+
+        ax.set_title(f"{title}\n(avg conf: {avg_conf:.1f})", fontsize=12)
         for result in results:
             if not result.word_segments:
                 continue
             for seg in result.word_segments:
                 height = max(0.1, seg.end - seg.start)
+                color, alpha = self._confidence_to_color(seg.confidence, min_conf, max_conf)
                 rect = mpatches.FancyBboxPatch(
                     (0.05, seg.start),
                     0.9,
                     height,
                     boxstyle="round,pad=0.01",
-                    facecolor=self.COLORS["word_segment"],
-                    alpha=0.7,
+                    facecolor=color,
+                    alpha=alpha,
                     edgecolor="none",
                 )
                 ax.add_patch(rect)

@@ -523,7 +523,7 @@ def sync(
                         diag_path = run_ctx.output_dir / "diagnostics.png"
                         visualizer.create_diagnostics(
                             debug_info,
-                            results,
+                            line_results if line_results else results,
                             diag_path,
                             audio_waveform=original_audio.waveform
                             if original_audio
