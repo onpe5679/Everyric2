@@ -1,28 +1,47 @@
 %%{init: {'theme': 'base'}}%%
 flowchart TD
+    subgraph USAGE["사용 조건"]
+        LANG{Language?}
+        CJK[CJK 언어<br/>ja/ko/zh]
+        OTHER[non-CJK<br/>en 등]
+        SKIP[LyricsMatcher 미사용<br/>CTCEngine이 직접<br/>word_segments 생성]
+        USE[LyricsMatcher 사용<br/>fuzzy matching]
+    end
+
     subgraph MATCHER["LyricsMatcher.match_lyrics_to_words()"]
-        A[입력: lyrics, words] --> B[last_transcription_words = words 저장]
-        B --> C[각 가사 라인 토큰화]
-        C --> D[각 단어 텍스트 정규화]
-        D --> E[_find_best_matches 실행]
+        A[입력: lyrics, words] --> B[가사 토큰화]
+        B --> C[단어 텍스트 정규화]
+        C --> D[_find_best_matches]
         
-        E --> F[퍼지 매칭으로<br/>가사↔단어 연결]
-        F --> G[SyncResult 리스트 생성]
+        subgraph FUZZY["퍼지 매칭"]
+            D --> E[search window 설정]
+            E --> F[_calculate_match_score<br/>F1 + length_penalty]
+            F --> G{score > 0.3?}
+            G -->|Yes| H[match 저장]
+            G -->|No| I[다음 시도]
+        end
         
-        G --> H[MatchStats 계산]
-        H --> I["match_rate = matched / total"]
-        I --> J[last_match_stats 저장]
-        J --> K[결과 반환]
+        H --> J[_hybrid_interpolation]
+        J --> K[word_segments 포함<br/>SyncResult 생성]
+        K --> L[MatchStats 계산]
     end
 
     subgraph STATS["MatchStats"]
-        L["total_lyrics: 37"]
-        M["matched_lyrics: 15"]
-        N["match_rate: 0.41 (41%)"]
-        O["avg_confidence: 0.85"]
+        M["total_lyrics: 45"]
+        N["matched_lyrics: 40"]
+        O["match_rate: 0.89"]
+        P["avg_confidence: 0.85"]
     end
 
-    K --> L
-    K --> M
-    K --> N
-    K --> O
+    LANG -->|ja/ko/zh| CJK
+    LANG -->|en/other| OTHER
+    CJK --> SKIP
+    OTHER --> USE
+    USE --> A
+    L --> M
+    L --> N
+    L --> O
+    L --> P
+
+    style SKIP fill:#90EE90
+    style CJK fill:#FFD700

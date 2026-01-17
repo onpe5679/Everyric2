@@ -15,19 +15,28 @@ flowchart TD
     subgraph ENGINE["Alignment Engine"]
         ENG{--engine?}
         
-        subgraph CTC_ENG["CTCEngine (권장)"]
+        subgraph CTC_ENG["CTCEngine"]
+            CTC_AUTO{language=auto?}
+            CTC_DET[detect_language_from_text<br/>가사에서 언어 자동 감지<br/>히라가나→ja, 한글→ko, CJK→zh]
             CTC_LANG{Language?}
-            CTC_JA[HuggingFace<br/>wav2vec2-xlsr-ja]
-            CTC_KO[HuggingFace<br/>wav2vec2-xlsr-ko]
-            CTC_EN[torchaudio<br/>MMS_FA]
-            CTC_FA[forced_align<br/>GPU]
+            
+            subgraph CTC_CJK["CJK (ja/ko/zh)"]
+                CTC_JA[HuggingFace wav2vec2]
+                CTC_CHAR[문자별 forced_align<br/>char_info + token_spans]
+                CTC_WS[word_segments 직접 생성<br/>문자별 타이밍]
+            end
+            
+            subgraph CTC_OTHER["Other (en)"]
+                CTC_EN[torchaudio MMS_FA]
+                CTC_WORD[단어별 타이밍]
+                I_MMS[LyricsMatcher<br/>fuzzy matching]
+            end
         end
         
         subgraph WX_ENG["WhisperXEngine"]
-            J[WhisperX<br/>전사 + 매칭]
+            J[WhisperX 전사]
+            I_WX[LyricsMatcher]
         end
-        
-        I[LyricsMatcher<br/>가사 ↔ 타임스탬프 매칭]
     end
 
     subgraph POSTPROCESS["후처리 파이프라인"]
@@ -42,8 +51,14 @@ flowchart TD
             TR_RES[TranslationResult<br/>번역 + 발음]
         end
         
-        PF[ProjectFile<br/>.everyric.json 저장]
-        SEG[SegmentationProcessor<br/>+ Tokenizer MeCab]
+        PF[ProjectFile 저장<br/>.everyric.json<br/>word_segments 포함]
+        
+        subgraph SEG_PROC["SegmentationProcessor"]
+            SEG_MODE{--segment-mode?}
+            SEG_LINE[line: 긴 줄 분할]
+            SEG_WORD[word: Tokenizer로<br/>문자→단어 합산]
+            SEG_CHAR[character: 문자별 출력]
+        end
     end
 
     subgraph OUTPUT["출력"]
@@ -57,7 +72,7 @@ flowchart TD
         end
         
         subgraph SEG_OUT["word/character 모드<br/>(트랙 분리)"]
-            S1[output_word.srt<br/>가사 정밀 타이밍]
+            S1[output_word.srt / output_character.srt<br/>정밀 타이밍]
             S2[output_translation.srt<br/>번역 줄단위]
             S3[output_pronunciation.srt<br/>발음 줄단위]
         end
@@ -74,22 +89,26 @@ flowchart TD
     E --> ENG
     E --> N
     
-    ENG -->|ctc| CTC_LANG
-    CTC_LANG -->|ja| CTC_JA
-    CTC_LANG -->|ko| CTC_KO
+    ENG -->|ctc| CTC_AUTO
+    CTC_AUTO -->|Yes| CTC_DET
+    CTC_AUTO -->|No| CTC_LANG
+    CTC_DET --> CTC_LANG
+    CTC_LANG -->|ja/ko/zh| CTC_JA
+    CTC_JA --> CTC_CHAR
+    CTC_CHAR --> CTC_WS
+    CTC_WS -->|SyncResult + word_segments| SH
+    
     CTC_LANG -->|en/other| CTC_EN
-    CTC_JA --> CTC_FA
-    CTC_KO --> CTC_FA
-    CTC_EN --> CTC_FA
-    CTC_FA --> I
+    CTC_EN --> CTC_WORD
+    CTC_WORD --> I_MMS
+    I_MMS --> SH
     
     ENG -->|whisperx| J
+    J --> I_WX
+    I_WX --> SH
     
     F -->|원본 가사| ENG
     
-    J --> I
-    
-    I --> SH
     SH --> G
     
     G -->|Yes| TR_FACT
@@ -103,9 +122,16 @@ flowchart TD
     
     G -->|No| PF
     
-    PF --> SEG
-    SEG --> MOG
+    PF --> SEG_MODE
+    SEG_MODE -->|line| SEG_LINE
+    SEG_MODE -->|word| SEG_WORD
+    SEG_MODE -->|character| SEG_CHAR
+    
+    SEG_LINE --> MOG
+    SEG_WORD --> MOG
+    SEG_CHAR --> MOG
+    
     MOG -->|line| LINE_OUT
     MOG -->|word/char| SEG_OUT
     
-    I --> M
+    SH --> M

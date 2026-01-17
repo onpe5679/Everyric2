@@ -1,8 +1,7 @@
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4ECDC4', 'secondaryColor': '#FF6B6B'}}}%%
 flowchart TD
     subgraph INPUT["입력"]
-        SR[SyncResult 리스트<br/>타임스탬프 + 가사]
-        WS[word_segments<br/>단어별 타임스탬프]
+        SR[SyncResult 리스트<br/>word_segments 포함<br/>문자별 타이밍]
     end
 
     subgraph SILENCE["SilenceHandler"]
@@ -10,58 +9,62 @@ flowchart TD
         SH_GAP{gap < min_silence_gap?}
         SH_MERGE[갭 병합]
         SH_MODE{merge_mode?}
-        SH_MID[midpoint<br/>중간점에서 분할]
-        SH_PREV[extend_prev<br/>이전 자막 확장]
-        SH_NEXT[extend_next<br/>다음 자막 확장]
+        SH_MID[midpoint]
+        SH_PREV[extend_prev]
+        SH_NEXT[extend_next]
         SH_INTERLUDE{gap >= interlude_gap?}
-        SH_MARK[InterludeInfo 생성<br/>간주 구간 마킹]
-    end
-
-    subgraph TOKENIZER["Tokenizer (언어별)"]
-        TOK_LANG{language?}
-        TOK_JA[MeCab/fugashi<br/>형태소 분석]
-        TOK_ZH[jieba<br/>중국어 분할]
-        TOK_KO[konlpy<br/>한국어 분할]
-        TOK_EN[Whitespace<br/>공백 분할]
-        TOK_OUT[TokenInfo 리스트]
+        SH_MARK[InterludeInfo 생성]
     end
 
     subgraph SEGMENT["SegmentationProcessor"]
         SEG_MODE{--segment-mode?}
         
-        subgraph LINE_MODE["line (기본)"]
+        subgraph LINE_MODE["line 모드"]
             LM_CHECK{길이 > max_chars?}
-            LM_SPLIT[긴 줄 분할]
+            LM_SPLIT[_split_long_line<br/>긴 줄 분할]
             LM_PASS[그대로 유지]
         end
         
-        subgraph WORD_MODE["word"]
-            WM_CHECK{word_segments<br/>존재?}
-            WM_TOK[Tokenizer로 단어 분할]
-            WM_SPLIT[단어별 SyncResult 생성]
-            WM_FALLBACK[줄 단위 유지]
-            WM_DUR{duration ><br/>min_duration?}
+        subgraph WORD_MODE["word 모드"]
+            WM_CHECK{word_segments 존재?}
+            WM_COMBINE[_combine_chars_to_words<br/>문자 → 단어 합산]
+            WM_FALLBACK[_split_text_to_words<br/>균등 분할]
+            
+            subgraph WM_DETAIL["_combine_chars_to_words"]
+                WM_TOK[Tokenizer.split_into_words<br/>MeCab 단어 분할]
+                WM_MAP[문자 타이밍 매핑<br/>char_segments → word]
+                WM_SUM[타이밍 합산<br/>start=첫문자, end=끝문자]
+            end
         end
         
-        subgraph CHAR_MODE["character"]
-            CM_CHECK{word_segments<br/>존재?}
-            CM_TOK[Tokenizer로 단어 분할]
-            CM_WORD[단어 → 글자 분할]
-            CM_LINE[줄 → 글자 분할]
-            CM_CALC[글자별 duration 계산]
+        subgraph CHAR_MODE["character 모드"]
+            CM_CHECK{word_segments 존재?}
+            CM_DIRECT[word_segments 직접 출력<br/>문자별 SyncResult]
+            CM_SPLIT[_split_text_to_chars<br/>균등 분할]
+            CM_EXTEND[_extend_to_next_start<br/>end_time을 다음 글자 start까지 확장<br/>gap 제거]
         end
+    end
+
+    subgraph TOKENIZER["Tokenizer"]
+        TOK_LANG{language?}
+        TOK_JA[MeCab/fugashi<br/>ずっと → ずっと, 願っ, て...]
+        TOK_ZH[jieba]
+        TOK_KO[konlpy]
+        TOK_EN[whitespace split]
     end
 
     subgraph OUTPUT["출력"]
         OUT[처리된 SyncResult 리스트]
-        OUT_INT[InterludeInfo 리스트<br/>간주 구간 정보]
-        OUT_EX1["Line: '願いの歌'<br/>00:01.000 → 00:03.000"]
-        OUT_EX2["Word: '願い' → '歌'<br/>각각 타임스탬프"]
-        OUT_EX3["Char: '願' 'い' '歌'<br/>각각 타임스탬프"]
+        OUT_INT[InterludeInfo 리스트]
+        
+        subgraph EXAMPLES["출력 예시"]
+            EX_LINE["Line: 'ずっと願っていた奇跡は'<br/>18.18 → 19.46"]
+            EX_WORD["Word: 'ずっと' 18.18-18.36<br/>'願っ' 18.44-18.60<br/>'て' 18.68-18.70..."]
+            EX_CHAR["Char: 'ず' 18.18-18.44<br/>'っ' 18.44-18.50<br/>'と' 18.50-18.68...<br/>(end = 다음 글자 start)"]
+        end
     end
 
     SR --> SH_IN
-    WS -.-> SR
     
     SH_IN --> SH_GAP
     SH_GAP -->|Yes| SH_MERGE
@@ -86,31 +89,29 @@ flowchart TD
     LM_PASS --> OUT
     
     SEG_MODE -->|word| WM_CHECK
-    WM_CHECK -->|Yes| WM_TOK
+    WM_CHECK -->|Yes| WM_COMBINE
     WM_CHECK -->|No| WM_FALLBACK
+    WM_COMBINE --> WM_TOK
     WM_TOK --> TOK_LANG
     TOK_LANG -->|ja| TOK_JA
     TOK_LANG -->|zh| TOK_ZH
     TOK_LANG -->|ko| TOK_KO
-    TOK_LANG -->|en/other| TOK_EN
-    TOK_JA --> TOK_OUT
-    TOK_ZH --> TOK_OUT
-    TOK_KO --> TOK_OUT
-    TOK_EN --> TOK_OUT
-    TOK_OUT --> WM_SPLIT
-    WM_SPLIT --> WM_DUR
-    WM_DUR -->|Yes| OUT
-    WM_DUR -->|No| WM_SPLIT
+    TOK_LANG -->|en| TOK_EN
+    TOK_JA --> WM_MAP
+    TOK_ZH --> WM_MAP
+    TOK_KO --> WM_MAP
+    TOK_EN --> WM_MAP
+    WM_MAP --> WM_SUM
+    WM_SUM --> OUT
     WM_FALLBACK --> OUT
     
     SEG_MODE -->|character| CM_CHECK
-    CM_CHECK -->|Yes| CM_TOK
-    CM_CHECK -->|No| CM_LINE
-    CM_TOK --> TOK_LANG
-    CM_WORD --> CM_CALC
-    CM_LINE --> CM_CALC
-    CM_CALC --> OUT
+    CM_CHECK -->|Yes| CM_DIRECT
+    CM_CHECK -->|No| CM_SPLIT
+    CM_DIRECT --> CM_EXTEND
+    CM_SPLIT --> CM_EXTEND
+    CM_EXTEND --> OUT
     
-    OUT --> OUT_EX1
-    OUT --> OUT_EX2
-    OUT --> OUT_EX3
+    OUT --> EX_LINE
+    OUT --> EX_WORD
+    OUT --> EX_CHAR

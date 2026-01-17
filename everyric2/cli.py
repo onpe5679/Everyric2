@@ -496,7 +496,8 @@ def sync(
                             )
 
                     translated_results = []
-                    for result in results:
+                    source_results = line_results if line_results else results
+                    for result in source_results:
                         translated_results.append(
                             SyncResult(
                                 text=result.translation or result.text,

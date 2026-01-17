@@ -1,62 +1,106 @@
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#10B981', 'secondaryColor': '#3B82F6'}}}%%
 flowchart TD
     subgraph INPUT["입력"]
-        A[Audio 16kHz]
-        L[Lyrics Text]
+        A[Audio 16kHz<br/>waveform]
+        L[Lyrics<br/>list~LyricLine~]
     end
 
     subgraph LANG_SELECT["언어별 모델 선택"]
+        LANG_IN{language 파라미터?}
+        
+        subgraph AUTO_DETECT["자동 감지 (language=auto)"]
+            DET[detect_language_from_text]
+            DET_JA{히라가나/카타카나?}
+            DET_KO{한글?}
+            DET_ZH{CJK 한자?}
+            DET_EN[기본값: en]
+        end
+        
         LANG{Language?}
         
-        subgraph HF["HuggingFace Models"]
-            JA["ja: wav2vec2-xlsr-53-japanese<br/>2341 tokens (한자+가나)"]
-            KO["ko: wav2vec2-xlsr-korean<br/>한글 자모"]
+        subgraph HF["HuggingFace Models (CJK)"]
+            JA["ja: wav2vec2-xlsr-53-japanese"]
+            KO["ko: wav2vec2-xlsr-korean"]
             ZH["zh: wav2vec2-xlsr-53-chinese"]
         end
         
         subgraph MMS["torchaudio MMS_FA"]
-            EN["en/other: MMS_FA<br/>a-z 26자"]
+            EN["en/other: MMS_FA"]
         end
     end
 
-    subgraph PROCESS["GPU 처리"]
-        EMI[CTC Emissions<br/>logits shape: 1 x T x V]
-        TOK[Tokenize Lyrics<br/>문자 → token IDs]
-        FA[torchaudio.functional.forced_align<br/>GPU CUDA]
-        SPANS[Token Spans<br/>start/end frames]
+    subgraph CJK_PROCESS["_align_cjk (CJK 언어)"]
+        CJK_EMI[CTC Emissions<br/>logits]
+        CJK_TOK[문자별 토큰화<br/>char_info 생성]
+        CJK_FA[forced_align<br/>GPU CUDA]
+        CJK_SPANS[token_spans<br/>문자별 start/end frames]
+        CJK_CHAR[문자별 타이밍 추출<br/>line_char_timestamps]
+        CJK_WS[word_segments 직접 빌드<br/>WordSegment per character]
+        CJK_RES[SyncResult<br/>word_segments 포함]
     end
 
-    subgraph OUTPUT["출력"]
-        WT[Word Timestamps<br/>96 words]
-        MATCH[LyricsMatcher<br/>98.4% match rate]
-        RESULT[SyncResult<br/>61 lines]
+    subgraph MMS_PROCESS["_align_mms (영어 등)"]
+        MMS_EMI[CTC Emissions]
+        MMS_TOK[단어별 토큰화]
+        MMS_FA[forced_align]
+        MMS_SPANS[token_spans]
+        MMS_WT[WordTimestamp<br/>단어별]
+        MMS_MATCH[LyricsMatcher<br/>fuzzy matching]
+        MMS_RES[SyncResult<br/>word_segments from matcher]
     end
 
-    A --> LANG
+    subgraph OUTPUT["최종 출력"]
+        STATS[MatchStats<br/>match_rate, confidence]
+        RESULT[list~SyncResult~<br/>word_segments 포함]
+    end
+
+    A --> LANG_IN
+    L --> LANG_IN
+    
+    LANG_IN -->|"명시적 지정"| LANG
+    LANG_IN -->|"auto"| DET
+    DET --> DET_JA
+    DET_JA -->|Yes| LANG
+    DET_JA -->|No| DET_KO
+    DET_KO -->|Yes| LANG
+    DET_KO -->|No| DET_ZH
+    DET_ZH -->|Yes| LANG
+    DET_ZH -->|No| DET_EN
+    DET_EN --> LANG
+    
     LANG -->|ja| JA
     LANG -->|ko| KO
     LANG -->|zh| ZH
     LANG -->|en/other| EN
     
-    JA --> EMI
-    KO --> EMI
-    ZH --> EMI
-    EN --> EMI
+    JA --> CJK_EMI
+    KO --> CJK_EMI
+    ZH --> CJK_EMI
     
-    L --> TOK
+    L --> CJK_TOK
+    CJK_EMI --> CJK_FA
+    CJK_TOK --> CJK_FA
+    CJK_FA --> CJK_SPANS
+    CJK_SPANS --> CJK_CHAR
+    CJK_CHAR --> CJK_WS
+    CJK_WS --> CJK_RES
+    CJK_RES --> RESULT
+    CJK_RES --> STATS
     
-    EMI --> FA
-    TOK --> FA
-    
-    FA --> SPANS
-    SPANS --> WT
-    
-    WT --> MATCH
-    L --> MATCH
-    MATCH --> RESULT
+    EN --> MMS_EMI
+    L --> MMS_TOK
+    MMS_EMI --> MMS_FA
+    MMS_TOK --> MMS_FA
+    MMS_FA --> MMS_SPANS
+    MMS_SPANS --> MMS_WT
+    MMS_WT --> MMS_MATCH
+    L --> MMS_MATCH
+    MMS_MATCH --> MMS_RES
+    MMS_RES --> RESULT
+    MMS_MATCH --> STATS
 
-    subgraph BENCHMARK["벤치마크 (155초 일본어)"]
-        B1["CTC: 5초 ⚡"]
-        B2["WhisperX: 10초"]
-        B3["GPU 가속"]
+    subgraph EXAMPLE["예시: ずっと願っていた奇跡は"]
+        EX1["char_info:<br/>ず(0), っ(1), と(2), 願(3)..."]
+        EX2["token_spans:<br/>각 문자의 frame 위치"]
+        EX3["word_segments:<br/>ず: 18.18-18.20<br/>っ: 18.20-18.22<br/>と: 18.34-18.36<br/>..."]
     end

@@ -158,30 +158,51 @@ class SegmentationProcessor:
 
         for result in results:
             if result.word_segments:
-                for seg in result.word_segments:
-                    duration = seg.end - seg.start
-                    if duration < self.settings.min_duration:
-                        continue
-
-                    processed.append(
-                        SyncResult(
-                            text=seg.word,
-                            start_time=seg.start,
-                            end_time=seg.end,
-                            confidence=seg.confidence,
-                            line_number=result.line_number,
-                            word_segments=[
-                                WordSegment(seg.word, seg.start, seg.end, seg.confidence)
-                            ],
-                            translation=None,
-                            pronunciation=None,
-                        )
-                    )
+                word_results = self._combine_chars_to_words(result)
+                processed.extend(word_results)
             else:
                 word_results = self._split_text_to_words(result)
                 processed.extend(word_results)
 
         return processed
+
+    def _combine_chars_to_words(self, result: SyncResult) -> list[SyncResult]:
+        words = self.tokenizer.split_into_words(result.text)
+        if not words or not result.word_segments:
+            return [result]
+
+        char_segments = list(result.word_segments)
+        char_idx = 0
+        word_results = []
+
+        for word in words:
+            word_chars = list(word)
+            word_segs = []
+
+            for _ in word_chars:
+                if char_idx < len(char_segments):
+                    word_segs.append(char_segments[char_idx])
+                    char_idx += 1
+
+            if word_segs:
+                start_time = word_segs[0].start
+                end_time = word_segs[-1].end
+                avg_conf = sum(s.confidence for s in word_segs) / len(word_segs)
+
+                word_results.append(
+                    SyncResult(
+                        text=word,
+                        start_time=start_time,
+                        end_time=end_time,
+                        confidence=avg_conf,
+                        line_number=result.line_number,
+                        word_segments=[
+                            WordSegment(s.word, s.start, s.end, s.confidence) for s in word_segs
+                        ],
+                    )
+                )
+
+        return word_results if word_results else [result]
 
     def _split_text_to_words(self, result: SyncResult) -> list[SyncResult]:
         words = self.tokenizer.split_into_words(result.text)
@@ -215,14 +236,29 @@ class SegmentationProcessor:
 
         for result in results:
             if result.word_segments:
+                char_results = []
                 for seg in result.word_segments:
-                    char_results = self._split_word_segment_to_chars(seg, result.line_number)
-                    processed.extend(char_results)
+                    char_results.extend(self._split_word_segment_to_chars(seg, result.line_number))
+                char_results = self._extend_to_next_start(char_results, result.end_time)
+                processed.extend(char_results)
             else:
                 char_results = self._split_text_to_chars(result)
+                char_results = self._extend_to_next_start(char_results, result.end_time)
                 processed.extend(char_results)
 
         return processed
+
+    def _extend_to_next_start(
+        self, char_results: list[SyncResult], line_end_time: float
+    ) -> list[SyncResult]:
+        if not char_results:
+            return char_results
+
+        for i in range(len(char_results) - 1):
+            char_results[i].end_time = char_results[i + 1].start_time
+
+        char_results[-1].end_time = line_end_time
+        return char_results
 
     def _split_text_to_chars(self, result: SyncResult) -> list[SyncResult]:
         chars = self.tokenizer.split_into_characters(result.text)

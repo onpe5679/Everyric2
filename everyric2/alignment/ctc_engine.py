@@ -32,6 +32,30 @@ LANG_MODEL_MAP = {
 }
 
 
+def detect_language_from_text(text: str) -> str:
+    """Detect language from lyrics text. Returns 'ja', 'ko', 'zh', or 'en'."""
+    ja_count = 0
+    ko_count = 0
+    zh_count = 0
+
+    for char in text:
+        code = ord(char)
+        if 0x3040 <= code <= 0x309F or 0x30A0 <= code <= 0x30FF:  # Hiragana/Katakana
+            ja_count += 1
+        elif 0xAC00 <= code <= 0xD7AF or 0x1100 <= code <= 0x11FF:  # Hangul
+            ko_count += 1
+        elif 0x4E00 <= code <= 0x9FFF:  # CJK Ideographs
+            zh_count += 1
+
+    if ja_count > 0:
+        return "ja"
+    if ko_count > 0:
+        return "ko"
+    if zh_count > 0:
+        return "zh"
+    return "en"
+
+
 class CTCEngine(BaseAlignmentEngine):
     def __init__(self, config: AlignmentSettings | None = None):
         super().__init__(config)
@@ -120,32 +144,21 @@ class CTCEngine(BaseAlignmentEngine):
 
         tokens = []
         line_boundaries = []
-        word_info = []
+        char_info = []
         current_pos = 0
 
         for line_idx, line in enumerate(lyrics):
             line_start = current_pos
-            words = line.text.split()
-
-            for word_idx, word in enumerate(words):
-                word_start = current_pos
-                for char in word:
-                    if char in vocab:
-                        tokens.append(vocab[char])
-                        current_pos += 1
-                word_end = current_pos
-                if word_start < word_end:
-                    word_info.append(
+            for char in line.text:
+                if char in vocab:
+                    char_info.append(
                         {
-                            "word": word,
+                            "char": char,
                             "line_idx": line_idx,
-                            "token_start": word_start,
-                            "token_end": word_end,
+                            "token_idx": current_pos,
                         }
                     )
-
-                if "|" in vocab and word_idx < len(words) - 1:
-                    tokens.append(vocab["|"])
+                    tokens.append(vocab[char])
                     current_pos += 1
 
             if "|" in vocab:
@@ -172,44 +185,43 @@ class CTCEngine(BaseAlignmentEngine):
         ratio = audio_length / num_frames
 
         self._last_word_timestamps = []
-        for wi in word_info:
-            start_idx = wi["token_start"]
-            end_idx = wi["token_end"] - 1
+        line_char_timestamps: dict[int, list[WordTimestamp]] = {}
 
-            if start_idx < len(token_spans) and end_idx < len(token_spans):
-                start_frame = token_spans[start_idx].start
-                end_frame = token_spans[end_idx].end
-                start_time = start_frame * ratio
-                end_time = end_frame * ratio
-
-                scores = [
-                    token_spans[i].score
-                    for i in range(start_idx, end_idx + 1)
-                    if i < len(token_spans)
-                ]
-                avg_score = sum(scores) / len(scores) if scores else 0.0
-
-                self._last_word_timestamps.append(
-                    WordTimestamp(
-                        word=wi["word"],
-                        start=start_time,
-                        end=end_time,
-                        confidence=avg_score,
-                    )
+        for ci in char_info:
+            idx = ci["token_idx"]
+            line_idx = ci["line_idx"]
+            if idx < len(token_spans):
+                span = token_spans[idx]
+                start_time = span.start * ratio
+                end_time = span.end * ratio
+                wt = WordTimestamp(
+                    word=ci["char"],
+                    start=start_time,
+                    end=end_time,
+                    confidence=span.score,
                 )
+                self._last_word_timestamps.append(wt)
+                if line_idx not in line_char_timestamps:
+                    line_char_timestamps[line_idx] = []
+                line_char_timestamps[line_idx].append(wt)
+
+        from everyric2.inference.prompt import WordSegment
 
         results = []
         for line_idx, line in enumerate(lyrics):
-            start_idx, end_idx = line_boundaries[line_idx]
+            char_ts = line_char_timestamps.get(line_idx, [])
 
-            if start_idx < len(token_spans) and end_idx < len(token_spans):
-                start_frame = token_spans[start_idx].start
-                end_frame = token_spans[min(end_idx, len(token_spans) - 1)].end
-                start_time = start_frame * ratio
-                end_time = end_frame * ratio
+            if char_ts:
+                start_time = char_ts[0].start
+                end_time = char_ts[-1].end
+                word_segments = [
+                    WordSegment(word=wt.word, start=wt.start, end=wt.end, confidence=wt.confidence)
+                    for wt in char_ts
+                ]
             else:
                 start_time = line_idx * audio_length / len(lyrics)
                 end_time = (line_idx + 1) * audio_length / len(lyrics)
+                word_segments = None
 
             results.append(
                 SyncResult(
@@ -217,6 +229,7 @@ class CTCEngine(BaseAlignmentEngine):
                     text=line.text,
                     start_time=start_time,
                     end_time=end_time,
+                    word_segments=word_segments,
                 )
             )
 
@@ -348,7 +361,12 @@ class CTCEngine(BaseAlignmentEngine):
         language: str | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[SyncResult]:
-        resolved_lang = self._resolve_language(language)
+        if language and language != "auto":
+            resolved_lang = language
+        else:
+            lyrics_text = " ".join(line.text for line in lyrics)
+            resolved_lang = detect_language_from_text(lyrics_text)
+            logger.info(f"Auto-detected language from lyrics: {resolved_lang}")
         self._ensure_model_loaded(resolved_lang)
 
         if progress_callback:
@@ -365,16 +383,26 @@ class CTCEngine(BaseAlignmentEngine):
 
         if resolved_lang in LANG_MODEL_MAP:
             results = self._align_cjk(waveform, lyrics, resolved_lang, progress_callback)
+            from everyric2.alignment.matcher import MatchStats
+
+            matched = sum(1 for r in results if r.word_segments)
+            self._last_match_stats = MatchStats(
+                total_lyrics=len(results),
+                matched_lyrics=matched,
+                match_rate=matched / len(results) if results else 0.0,
+                avg_confidence=1.0,
+            )
+            return results
         else:
             results = self._align_mms(waveform, lyrics, resolved_lang, progress_callback)
+            from everyric2.alignment.matcher import LyricsMatcher
 
-        from everyric2.alignment.matcher import LyricsMatcher
-
-        matcher = LyricsMatcher()
-        _ = matcher.match_lyrics_to_words(lyrics, self._last_word_timestamps, resolved_lang)
-        self._last_match_stats = matcher.last_match_stats
-
-        return results
+            matcher = LyricsMatcher()
+            matched_results = matcher.match_lyrics_to_words(
+                lyrics, self._last_word_timestamps, resolved_lang
+            )
+            self._last_match_stats = matcher.last_match_stats
+            return matched_results
 
     def get_last_transcription_data(self) -> tuple[list[WordTimestamp], MatchStats | None, str]:
         return (self._last_word_timestamps, self._last_match_stats, "ctc")
