@@ -23,6 +23,23 @@ classDiagram
         +get_last_transcription_data() tuple
     }
 
+    class SOFAEngine {
+        -_model: LitForcedAlignmentTask
+        -_g2p: SimpleG2P
+        -_get_melspec: MelSpecExtractor
+        -_current_lang: str
+        +align(audio, lyrics, language) list~SyncResult~
+        -_match_words_to_lines(lyrics, words, conf) list~SyncResult~
+        +SUPPORTED_LANGUAGES: en only
+    }
+
+    class SimpleG2P {
+        +dictionary: dict
+        +convert(text) tuple~ph_seq, word_seq, ph_idx_to_word_idx~
+        -_normalize_word(word) str
+        -_load_dictionary(path)
+    }
+
     class LyricsMatcher {
         +last_match_stats: MatchStats
         +match_lyrics_to_words(lyrics, words, lang) list~SyncResult~
@@ -38,7 +55,9 @@ classDiagram
     }
 
     BaseAlignmentEngine <|-- CTCEngine
-    CTCEngine ..> LyricsMatcher : non-CJK only
+    BaseAlignmentEngine <|-- SOFAEngine
+    CTCEngine ..> LyricsMatcher : fallback only
+    SOFAEngine --> SimpleG2P
     LyricsMatcher --> MatchStats
 
     %% ===== Project File =====
@@ -221,7 +240,8 @@ classDiagram
     CTCEngine --> WordTimestamp
 
     %% Notes
-    note for CTCEngine "CJK: 문자별 타이밍 직접 생성\nnon-CJK: LyricsMatcher 사용"
+    note for CTCEngine "ja: wav2vec2-xlsr-53-japanese\nko/en: MMS 1B-all + adapter\nzh: wav2vec2-xlsr-53-chinese"
+    note for SOFAEngine "노래 전용 Forced Aligner\n영어만 지원 (tgm_en_v100)"
     note for ProjectFile ".everyric.json\nword_segments 포함 저장"
     note for SegmentationProcessor "word mode:\n_combine_chars_to_words로\n문자 타이밍 → 단어 타이밍"
     note for Tokenizer "ja: MeCab/fugashi\nzh: jieba\nko: konlpy"

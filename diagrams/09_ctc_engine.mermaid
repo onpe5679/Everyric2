@@ -18,18 +18,15 @@ flowchart TD
         
         LANG{Language?}
         
-        subgraph HF["HuggingFace Models (CJK)"]
-            JA["ja: wav2vec2-xlsr-53-japanese"]
-            KO["ko: wav2vec2-xlsr-korean"]
-            ZH["zh: wav2vec2-xlsr-53-chinese"]
-        end
-        
-        subgraph MMS["torchaudio MMS_FA"]
-            EN["en/other: MMS_FA"]
+        subgraph MODELS["LANG_MODEL_MAP"]
+            JA["ja: jonatasgrosman/wav2vec2-xlsr-53-japanese"]
+            KO["ko: facebook/mms-1b-all + kor adapter"]
+            ZH["zh: jonatasgrosman/wav2vec2-xlsr-53-chinese"]
+            EN["en: facebook/mms-1b-all + eng adapter"]
         end
     end
 
-    subgraph CJK_PROCESS["_align_cjk (CJK 언어)"]
+    subgraph CJK_PROCESS["_align_cjk (모든 LANG_MODEL_MAP 언어)"]
         CJK_EMI[CTC Emissions<br/>logits]
         CJK_TOK[문자별 토큰화<br/>char_info 생성]
         CJK_FA[forced_align<br/>GPU CUDA]
@@ -39,7 +36,8 @@ flowchart TD
         CJK_RES[SyncResult<br/>word_segments 포함]
     end
 
-    subgraph MMS_PROCESS["_align_mms (영어 등)"]
+    subgraph MMS_PROCESS["_align_mms (기타 언어 fallback)"]
+        MMS_MODEL[torchaudio MMS_FA]
         MMS_EMI[CTC Emissions]
         MMS_TOK[단어별 토큰화]
         MMS_FA[forced_align]
@@ -71,11 +69,13 @@ flowchart TD
     LANG -->|ja| JA
     LANG -->|ko| KO
     LANG -->|zh| ZH
-    LANG -->|en/other| EN
+    LANG -->|en| EN
+    LANG -->|other| MMS_MODEL
     
     JA --> CJK_EMI
     KO --> CJK_EMI
     ZH --> CJK_EMI
+    EN --> CJK_EMI
     
     L --> CJK_TOK
     CJK_EMI --> CJK_FA
@@ -87,7 +87,7 @@ flowchart TD
     CJK_RES --> RESULT
     CJK_RES --> STATS
     
-    EN --> MMS_EMI
+    MMS_MODEL --> MMS_EMI
     L --> MMS_TOK
     MMS_EMI --> MMS_FA
     MMS_TOK --> MMS_FA

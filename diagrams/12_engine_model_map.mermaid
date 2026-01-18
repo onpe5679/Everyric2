@@ -1,0 +1,50 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#6366F1', 'secondaryColor': '#10B981'}}}%%
+flowchart LR
+    subgraph ENGINES["Alignment Engines"]
+        CTC["🎯 CTCEngine<br/>(권장)"]
+        SOFA["🎤 SOFAEngine<br/>(노래 전용)"]
+        WX["WhisperXEngine"]
+        NEMO["NeMoEngine"]
+    end
+
+    subgraph CTC_MODELS["CTC 모델 매핑"]
+        CTC_JA["🇯🇵 일본어<br/>jonatasgrosman/wav2vec2-xlsr-53-japanese"]
+        CTC_KO["🇰🇷 한국어<br/>facebook/mms-1b-all<br/>+ kor adapter"]
+        CTC_ZH["🇨🇳 중국어<br/>jonatasgrosman/wav2vec2-xlsr-53-chinese"]
+        CTC_EN["🇺🇸 영어<br/>facebook/mms-1b-all<br/>+ eng adapter"]
+        CTC_OTHER["기타<br/>torchaudio MMS_FA"]
+    end
+
+    subgraph SOFA_MODELS["SOFA 모델"]
+        SOFA_EN["🇺🇸 영어<br/>tgm_en_v100.ckpt"]
+        SOFA_JA["🇯🇵 일본어<br/>❌ URL 깨짐"]
+        SOFA_KO["🇰🇷 한국어<br/>❌ 모델 없음"]
+    end
+
+    subgraph MMS["Meta MMS 1B-all"]
+        MMS_INFO["1162개 언어 지원<br/>언어별 어댑터 교체<br/>CTC Forced Alignment"]
+    end
+
+    CTC --> CTC_JA
+    CTC --> CTC_KO
+    CTC --> CTC_ZH
+    CTC --> CTC_EN
+    CTC --> CTC_OTHER
+
+    SOFA --> SOFA_EN
+    SOFA -.-> SOFA_JA
+    SOFA -.-> SOFA_KO
+
+    CTC_KO --> MMS_INFO
+    CTC_EN --> MMS_INFO
+
+    subgraph RECOMMEND["권장 조합"]
+        R_JA["🇯🇵 일본어 → CTC"]
+        R_KO["🇰🇷 한국어 → CTC (MMS)"]
+        R_EN["🇺🇸 영어 → CTC (MMS)"]
+        R_ZH["🇨🇳 중국어 → CTC"]
+    end
+
+    subgraph PERFORMANCE["성능"]
+        PERF["262초 오디오 기준<br/>CTC: ~10초 (GPU)<br/>SOFA: ~3초 (GPU)<br/>보컬분리: +7초"]
+    end
