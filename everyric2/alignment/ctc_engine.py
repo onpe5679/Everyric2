@@ -27,7 +27,7 @@ from everyric2.inference.prompt import LyricLine, SyncResult
 logger = logging.getLogger(__name__)
 
 LANG_MODEL_MAP = {
-    "ja": "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
+    "ja": "facebook/mms-1b-all",
     "ko": "facebook/mms-1b-all",
     "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
     "en": "facebook/mms-1b-all",

@@ -163,9 +163,11 @@ class SegmentationProcessor:
                     word_results = self._combine_chars_to_words(result)
                 else:
                     word_results = self._use_word_segments_directly(result)
+                word_results = self._extend_to_next_start(word_results, result.end_time)
                 processed.extend(word_results)
             else:
                 word_results = self._split_text_to_words(result)
+                word_results = self._extend_to_next_start(word_results, result.end_time)
                 processed.extend(word_results)
 
         return processed
