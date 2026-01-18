@@ -5,7 +5,8 @@ For other languages: Uses torchaudio MMS_FA with Latin alphabet.
 """
 
 import logging
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 import torch
 import torchaudio
@@ -27,8 +28,17 @@ logger = logging.getLogger(__name__)
 
 LANG_MODEL_MAP = {
     "ja": "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
-    "ko": "kresnik/wav2vec2-large-xlsr-korean",
+    "ko": "facebook/mms-1b-all",
     "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+    "en": "facebook/mms-1b-all",
+}
+
+# MMS 1B-all language codes (ISO 639-3)
+MMS_LANG_CODES = {
+    "ko": "kor",
+    "ja": "jpn",
+    "zh": "cmn-script_simplified",
+    "en": "eng",
 }
 
 
@@ -68,8 +78,8 @@ class CTCEngine(BaseAlignmentEngine):
 
     def is_available(self) -> bool:
         try:
-            import torchaudio
-            from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+            import torchaudio  # noqa: F401
+            from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor  # noqa: F401
 
             return True
         except ImportError:
@@ -92,14 +102,27 @@ class CTCEngine(BaseAlignmentEngine):
         device = self._get_device()
 
         if language in LANG_MODEL_MAP:
-            from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
-
             model_name = LANG_MODEL_MAP[language]
-            logger.info(f"Loading HuggingFace model: {model_name}")
 
-            self._processor = Wav2Vec2Processor.from_pretrained(model_name)
-            self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
-            self._model.eval()
+            if model_name == "facebook/mms-1b-all":
+                from transformers import AutoProcessor, Wav2Vec2ForCTC
+
+                logger.info(f"Loading MMS 1B-all with {language} adapter")
+                self._processor = AutoProcessor.from_pretrained(model_name)
+                self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)
+                self._model.eval()
+
+                mms_lang_code = MMS_LANG_CODES.get(language, "eng")
+                self._processor.tokenizer.set_target_lang(mms_lang_code)
+                self._model.load_adapter(mms_lang_code)
+                logger.info(f"MMS adapter loaded: {mms_lang_code}")
+            else:
+                from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+
+                logger.info(f"Loading HuggingFace model: {model_name}")
+                self._processor = Wav2Vec2Processor.from_pretrained(model_name)
+                self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
+                self._model.eval()
         else:
             logger.info("Loading torchaudio MMS_FA model")
             bundle = torchaudio.pipelines.MMS_FA
@@ -140,7 +163,6 @@ class CTCEngine(BaseAlignmentEngine):
             progress_callback(3, 5)
 
         vocab = self._processor.tokenizer.get_vocab()  # pyright: ignore[reportAttributeAccessIssue,reportOptionalMemberAccess]
-        id2char = {v: k for k, v in vocab.items()}
 
         tokens = []
         line_boundaries = []

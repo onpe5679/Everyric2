@@ -1,7 +1,5 @@
 import logging
-import re
 from dataclasses import dataclass
-from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +15,9 @@ class TokenInfo:
 
 
 class Tokenizer:
+    _konlpy_warned: bool = False
+    _jieba_warned: bool = False
+
     def __init__(self, language: str = "ja", use_mecab: bool = True):
         self.language = language
         self.use_mecab = use_mecab
@@ -91,7 +92,9 @@ class Tokenizer:
             words = jieba.cut(text)
             return [TokenInfo(surface=w) for w in words if w.strip()]
         except ImportError:
-            logger.warning("jieba not installed for Chinese. Using character-level.")
+            if not Tokenizer._jieba_warned:
+                logger.warning("jieba not installed for Chinese. Using character-level.")
+                Tokenizer._jieba_warned = True
             return self._tokenize_characters(text)
 
     def _tokenize_korean(self, text: str) -> list[TokenInfo]:
@@ -102,7 +105,9 @@ class Tokenizer:
             morphs = okt.morphs(text)
             return [TokenInfo(surface=m) for m in morphs if m.strip()]
         except ImportError:
-            logger.warning("konlpy not installed for Korean. Using whitespace.")
+            if not Tokenizer._konlpy_warned:
+                logger.warning("konlpy not installed for Korean. Using whitespace.")
+                Tokenizer._konlpy_warned = True
             return self._tokenize_whitespace(text)
 
     def _tokenize_whitespace(self, text: str) -> list[TokenInfo]:

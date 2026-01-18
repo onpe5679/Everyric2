@@ -2,14 +2,13 @@
 
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable
 
 from everyric2.alignment.base import (
     AlignmentError,
     BaseAlignmentEngine,
     TranscriptionResult,
-    WordTimestamp,
 )
 from everyric2.alignment.ctc_engine import CTCEngine
 from everyric2.alignment.nemo_engine import NeMoEngine

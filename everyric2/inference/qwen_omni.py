@@ -1,12 +1,12 @@
 """Qwen-Omni inference engine for lyrics synchronization."""
 
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import torch
 
-from everyric2.audio.loader import AudioChunk, AudioData, AudioLoader
+from everyric2.audio.loader import AudioData, AudioLoader
 from everyric2.config.settings import ModelSettings, get_settings
 from everyric2.inference.prompt import LyricLine, PromptBuilder, SyncResult
 
@@ -80,11 +80,15 @@ class QwenOmniEngine:
             if model_type == "qwen3_omni_moe":
                 from transformers import (
                     Qwen3OmniMoeForConditionalGeneration as ModelClass,
+                )
+                from transformers import (
                     Qwen3OmniMoeProcessor as ProcessorClass,
                 )
             elif model_type == "qwen2_5_omni":
                 from transformers import (
                     Qwen2_5OmniForConditionalGeneration as ModelClass,
+                )
+                from transformers import (
                     Qwen2_5OmniProcessor as ProcessorClass,
                 )
             else:

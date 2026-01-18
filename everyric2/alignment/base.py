@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable, Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from everyric2.audio.loader import AudioData
 from everyric2.config.settings import AlignmentSettings

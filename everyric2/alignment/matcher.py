@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from everyric2.alignment.base import WordTimestamp
 from everyric2.inference.prompt import LyricLine, SyncResult, WordSegment
 
-
 MIN_LINE_DURATION = 1.5
 
 

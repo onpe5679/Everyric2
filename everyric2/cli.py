@@ -28,7 +28,7 @@ except ImportError:
 
 import threading
 from pathlib import Path
-from typing import Annotated, Optional, cast, Literal
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -70,7 +70,7 @@ def sync(
     source: Annotated[str, typer.Argument(help="YouTube URL or local audio file path")],
     lyrics: Annotated[Path, typer.Argument(help="Path to lyrics text file")],
     output: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--output", "-o", help="Output file path"),
     ] = None,
     format: Annotated[
@@ -102,11 +102,11 @@ def sync(
         typer.Option("--language", "-l", help="Language (auto, en, ja, ko)"),
     ] = "auto",
     model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--model", "-m", help="Model path override (for qwen engine)"),
     ] = None,
     cache_dir: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--cache-dir", help="HuggingFace cache directory"),
     ] = None,
     segment_mode: Annotated[
@@ -132,11 +132,11 @@ def sync(
         typer.Option("--translate-engine", help="Translation engine (gemini, openai, local)"),
     ] = "gemini",
     translate_model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--translate-model", help="Translation model name"),
     ] = None,
     translate_api_url: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--translate-api-url", help="Custom API URL for local LLM translation"),
     ] = None,
     translate_tone: Annotated[
@@ -154,7 +154,6 @@ def sync(
         everyric2 sync "https://youtube.com/..." lyrics.txt -f lrc
     """
     import json
-    import shutil
     import sys
 
     supported_formats = FormatterFactory.get_supported_formats()
@@ -188,6 +187,10 @@ def sync(
     settings.segmentation.interlude_gap = interlude_gap
     settings.segmentation.max_chars_per_segment = max_chars
 
+    # Enable vocal separation by default when debug mode is on
+    if debug and not separate:
+        separate = True
+
     video_title: str | None = None
     audio_path: Path
     audio = None
@@ -212,9 +215,10 @@ def sync(
         task = progress.add_task("Loading audio...", total=None)
 
         try:
+            import time as time_module
+
             from everyric2.audio.downloader import YouTubeDownloader
             from everyric2.audio.loader import AudioLoader
-            import time as time_module
 
             step_start = time_module.time()
             loader = AudioLoader()
@@ -246,8 +250,8 @@ def sync(
             raise typer.Exit(1)
 
         if debug:
-            from everyric2.debug.output_manager import OutputManager
             from everyric2.debug.debug_info import DebugInfo, StepTiming
+            from everyric2.debug.output_manager import OutputManager
 
             output_manager = OutputManager()
             command_str = " ".join(sys.argv)
@@ -433,8 +437,8 @@ def sync(
 
         progress.update(task, description="Post-processing...")
         try:
-            from everyric2.alignment.silence import SilenceHandler
             from everyric2.alignment.segmentation import SegmentationProcessor
+            from everyric2.alignment.silence import SilenceHandler
 
             silence_handler = SilenceHandler(settings.segmentation)
             silence_gaps = silence_handler.detect_silence_gaps(results)
@@ -556,7 +560,7 @@ def sync(
 def reprocess(
     input_file: Annotated[Path, typer.Argument(help="Input .everyric.json or .srt file")],
     output_dir: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--output-dir", "-o", help="Output directory"),
     ] = None,
     format: Annotated[
@@ -604,9 +608,9 @@ def reprocess(
     settings.segmentation.min_silence_gap = min_silence_gap
     settings.segmentation.interlude_gap = interlude_gap
 
-    from everyric2.inference.prompt import SyncResult
-    from everyric2.alignment.silence import SilenceHandler
     from everyric2.alignment.segmentation import SegmentationProcessor
+    from everyric2.alignment.silence import SilenceHandler
+    from everyric2.inference.prompt import SyncResult
     from everyric2.output.multi_output import MultiOutputGenerator
 
     line_results: list[SyncResult] = []
@@ -614,7 +618,7 @@ def reprocess(
 
     if input_file.suffix == ".json" or str(input_file).endswith(".everyric.json"):
         from everyric2.io.project import ProjectFile
-        from everyric2.translation.translator import TranslationResult, TranslationLine
+        from everyric2.translation.translator import TranslationLine, TranslationResult
 
         console.print(f"[cyan]Loading project:[/cyan] {input_file}")
         project = ProjectFile(input_file)
@@ -851,7 +855,7 @@ def engines() -> None:
 def transcribe(
     source: Annotated[str, typer.Argument(help="YouTube URL or local audio file path")],
     output: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--output", "-o", help="Output file path for transcribed lyrics"),
     ] = None,
     separate: Annotated[

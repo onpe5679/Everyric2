@@ -2,8 +2,8 @@
 
 import base64
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import torch
 

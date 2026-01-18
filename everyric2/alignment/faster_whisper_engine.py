@@ -1,7 +1,6 @@
 import gc
-from typing import Callable, Literal
-
-import numpy as np
+from collections.abc import Callable
+from typing import Literal
 
 from everyric2.alignment.base import (
     BaseAlignmentEngine,
@@ -23,7 +22,7 @@ class FasterWhisperEngine(BaseAlignmentEngine):
 
     def is_available(self) -> bool:
         try:
-            import faster_whisper
+            import faster_whisper  # noqa: F401
 
             return True
         except ImportError:

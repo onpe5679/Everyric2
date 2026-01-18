@@ -9,7 +9,6 @@ import yaml
 
 from everyric2.audio.downloader import YouTubeDownloader
 from everyric2.audio.loader import AudioLoader
-from everyric2.config.settings import get_settings
 from everyric2.inference.prompt import LyricLine
 from everyric2.inference.qwen_omni import QwenOmniEngine
 from everyric2.output.formatters import FormatterFactory
@@ -111,7 +110,7 @@ class BatchRunner:
             return results
 
         if log_callback:
-            log_callback(f"Loading model (this takes ~10 minutes)...")
+            log_callback("Loading model (this takes ~10 minutes)...")
 
         self.engine = QwenOmniEngine()
         self.engine.load_model()

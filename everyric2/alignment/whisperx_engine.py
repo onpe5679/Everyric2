@@ -1,11 +1,8 @@
 import gc
-from pathlib import Path
-from typing import Callable, Literal
-
-import numpy as np
+from collections.abc import Callable
+from typing import Literal
 
 from everyric2.alignment.base import (
-    AlignmentError,
     BaseAlignmentEngine,
     EngineNotAvailableError,
     TranscriptionResult,
@@ -61,7 +58,7 @@ class WhisperXEngine(BaseAlignmentEngine):
 
     def is_available(self) -> bool:
         try:
-            import whisperx
+            import whisperx  # noqa: F401
 
             return True
         except ImportError:

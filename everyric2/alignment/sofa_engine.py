@@ -324,56 +324,121 @@ class SOFAEngine(BaseAlignmentEngine):
             melspec, "B C T -> B C (T N)", N=self._model.melspec_config["scale_factor"]
         )
 
-        # Run alignment
+        # Run alignment with frame-level confidence extraction
         if progress_callback:
             progress_callback(1, 3)
 
+        frame_length = self._model.melspec_config["hop_length"] / (
+            self._model.melspec_config["sample_rate"] * self._model.melspec_config["scale_factor"]
+        )
+
         with torch.no_grad():
-            (
-                ph_seq_pred,
-                ph_intervals,
-                word_seq_pred,
-                word_intervals,
-                confidence,
-                _,
-                _,
-            ) = self._model._infer_once(
-                melspec,
-                wav_length,
-                ph_seq,
-                word_seq,
-                np.array(ph_idx_to_word_idx),
-                return_ctc=False,
-                return_plot=False,
+            # Get raw model outputs
+            ph_seq_id = np.array([self._model.vocab[ph] for ph in ph_seq])
+            ph_mask = np.zeros(self._model.vocab["<vocab_size>"])
+            ph_mask[ph_seq_id] = 1
+            ph_mask[0] = 1
+            ph_mask_tensor = torch.from_numpy(ph_mask)
+
+            ph_frame_logits, ph_edge_logits, _ = self._model.forward(melspec.transpose(1, 2))
+
+            num_frames = int(
+                (
+                    wav_length
+                    * self._model.melspec_config["scale_factor"]
+                    * self._model.melspec_config["sample_rate"]
+                    + 0.5
+                )
+                / self._model.melspec_config["hop_length"]
             )
+            ph_frame_logits = ph_frame_logits[:, :num_frames, :]
+            ph_edge_logits = ph_edge_logits[:, :num_frames]
+
+            ph_mask_expanded = (
+                ph_mask_tensor.to(torch.float32)
+                .to(ph_frame_logits.device)
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .logical_not()
+                * 1e9
+            )
+
+            ph_prob_log = (
+                torch.log_softmax(ph_frame_logits.float() - ph_mask_expanded.float(), dim=-1)
+                .squeeze(0)
+                .cpu()
+                .numpy()
+                .astype("float32")
+            )
+            ph_edge_pred = (
+                ((torch.nn.functional.sigmoid(ph_edge_logits.float()) - 0.1) / 0.8)
+                .clamp(0.0, 1.0)
+                .squeeze(0)
+                .cpu()
+                .numpy()
+                .astype("float32")
+            )
+
+            edge_prob = (ph_edge_pred + np.concatenate(([0], ph_edge_pred[:-1]))).clip(0, 1)
+
+            # Call _decode to get frame_confidence
+            ph_idx_seq, ph_time_int, frame_confidence = self._model._decode(
+                ph_seq_id, ph_prob_log, edge_prob
+            )
+
+            # Build phoneme intervals
+            edge_diff = np.concatenate((np.diff(ph_edge_pred, axis=0), [0]), axis=0)
+            num_log_frames = ph_prob_log.shape[0]
+            ph_time_fractional = (edge_diff[ph_time_int] / 2).clip(-0.5, 0.5)
+            ph_time_pred = frame_length * np.concatenate(
+                [ph_time_int.astype("float32") + ph_time_fractional, [num_log_frames]]
+            )
+            ph_intervals_raw = np.stack([ph_time_pred[:-1], ph_time_pred[1:]], axis=1)
+
+            # Build word intervals with per-word confidence
+            word_seq_pred = []
+            word_intervals = []
+            word_confidences = []
+            word_idx_last = -1
+            current_word_conf = []
+
+            for i, ph_idx in enumerate(ph_idx_seq):
+                if ph_seq[ph_idx] == "SP":
+                    continue
+                word_idx = ph_idx_to_word_idx[ph_idx]
+                if word_idx == word_idx_last:
+                    word_intervals[-1][1] = ph_intervals_raw[i, 1]
+                    current_word_conf.append(frame_confidence[i])
+                else:
+                    if current_word_conf:
+                        word_confidences.append(np.mean(current_word_conf))
+                    word_seq_pred.append(word_seq[word_idx])
+                    word_intervals.append([ph_intervals_raw[i, 0], ph_intervals_raw[i, 1]])
+                    current_word_conf = [frame_confidence[i]]
+                    word_idx_last = word_idx
+
+            if current_word_conf:
+                word_confidences.append(np.mean(current_word_conf))
+
+            word_intervals = np.array(word_intervals).clip(min=0)
+            confidence = np.exp(np.mean(np.log(frame_confidence + 1e-6)) / 3)
 
         if progress_callback:
             progress_callback(2, 3)
 
-        # Convert to WordTimestamp with duration-based confidence
-        # SOFA returns global confidence; use duration for per-word variation
-        word_durations = [
-            float(end - start) for _, (start, end) in zip(word_seq_pred, word_intervals)
-        ]
-        if word_durations:
-            avg_duration = sum(word_durations) / len(word_durations)
-            for word, (start, end) in zip(word_seq_pred, word_intervals):
-                duration = float(end - start)
-                # Duration ratio: 1.0 = average, <0.3 or >3.0 = suspicious
-                duration_ratio = duration / avg_duration if avg_duration > 0 else 1.0
-                # Convert to confidence: closer to 1.0 = higher confidence
-                if duration_ratio < 1.0:
-                    word_conf = float(confidence) * max(0.3, duration_ratio)
-                else:
-                    word_conf = float(confidence) * max(0.3, 2.0 - min(duration_ratio, 2.0))
-                all_word_timestamps.append(
-                    WordTimestamp(
-                        word=str(word),
-                        start=float(start),
-                        end=float(end),
-                        confidence=word_conf,
-                    )
+        # Convert to WordTimestamp with real per-word confidence
+        for i, (word, (start, end)) in enumerate(zip(word_seq_pred, word_intervals)):
+            word_conf = (
+                float(word_confidences[i]) if i < len(word_confidences) else float(confidence)
+            )
+            all_word_timestamps.append(
+                WordTimestamp(
+                    word=str(word),
+                    start=float(start),
+                    end=float(end),
+                    confidence=word_conf,
                 )
+            )
 
         self._last_word_timestamps = all_word_timestamps
 

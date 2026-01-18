@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from everyric2 import __version__
 from everyric2.config.settings import get_settings
-from everyric2.inference.prompt import LyricLine, SyncResult
+from everyric2.inference.prompt import LyricLine
 from everyric2.output.formatters import FormatterFactory
 
 # Global engine instance (loaded on startup)

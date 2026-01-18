@@ -1,8 +1,8 @@
 """NeMo Forced Aligner (NFA) engine for GPU-accelerated alignment."""
 
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import torch
 
@@ -43,7 +43,7 @@ class NeMoEngine(BaseAlignmentEngine):
 
     def is_available(self) -> bool:
         try:
-            from nemo.collections.asr.models import EncDecCTCModel
+            from nemo.collections.asr.models import EncDecCTCModel  # noqa: F401
 
             return True
         except ImportError:
@@ -161,11 +161,6 @@ class NeMoEngine(BaseAlignmentEngine):
         language: str,
     ) -> list[WordTimestamp]:
         """Run NeMo forced alignment and parse CTM output."""
-        try:
-            from nemo.collections.asr.parts.utils.transcribe_utils import transcribe_partial_audio
-        except ImportError:
-            pass
-
         transcriptions = self._model.transcribe(
             [str(manifest_path.parent / "audio.wav")],
             return_hypotheses=True,

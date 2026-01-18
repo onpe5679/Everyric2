@@ -1,4 +1,5 @@
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 from everyric2.alignment.base import (
     BaseAlignmentEngine,
@@ -17,7 +18,7 @@ class QwenEngine(BaseAlignmentEngine):
 
     def is_available(self) -> bool:
         try:
-            from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
+            from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine  # noqa: F401
 
             return True
         except ImportError:
@@ -30,8 +31,8 @@ class QwenEngine(BaseAlignmentEngine):
         if not self.is_available():
             raise EngineNotAvailableError("Qwen-Omni engine not available")
 
-        from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
         from everyric2.config.settings import get_settings
+        from everyric2.inference.qwen_omni_gguf import QwenOmniGGUFEngine
 
         self._engine = QwenOmniGGUFEngine(get_settings().model)
         self._engine.load_model()

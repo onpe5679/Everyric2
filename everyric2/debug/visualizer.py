@@ -1,8 +1,8 @@
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import matplotlib.font_manager as fm
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import numpy as np
 
 from everyric2.debug.debug_info import DebugInfo

@@ -1,14 +1,13 @@
 """GGUF-based Qwen-Omni inference engine using llama.cpp server."""
 
 import base64
-import math
 import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import requests
 

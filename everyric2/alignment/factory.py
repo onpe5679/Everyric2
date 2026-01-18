@@ -3,7 +3,6 @@ from typing import Literal
 from everyric2.alignment.base import BaseAlignmentEngine, EngineNotAvailableError
 from everyric2.config.settings import AlignmentSettings, get_settings
 
-
 EngineType = Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid", "sofa"]
 
 
