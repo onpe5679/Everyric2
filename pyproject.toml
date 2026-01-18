@@ -65,6 +65,13 @@ whisperx = [
 mfa = [
     "praatio>=6.0.0",
 ]
+sofa = [
+    "lightning>=2.0.0",
+    "einops>=0.6.1",
+    "numba>=0.57.0",
+    "textgrid>=1.5",
+    "h5py>=3.0.0",
+]
 alignment = [
     "everyric2[whisperx,mfa]",
 ]
@@ -72,7 +79,7 @@ vllm = [
     "vllm>=0.4.0",
 ]
 all = [
-    "everyric2[dev,separator,alignment]",
+    "everyric2[dev,separator,alignment,sofa]",
 ]
 
 [project.scripts]

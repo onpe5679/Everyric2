@@ -74,7 +74,7 @@ class BaseAlignmentEngine(ABC):
         return self.config.language if self.config.language != "auto" else "en"
 
     @staticmethod
-    def get_engine_type() -> Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"]:
+    def get_engine_type() -> Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid", "sofa"]:
         raise NotImplementedError
 
     # Optional methods - subclasses can override these

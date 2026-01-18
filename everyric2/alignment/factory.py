@@ -4,7 +4,7 @@ from everyric2.alignment.base import BaseAlignmentEngine, EngineNotAvailableErro
 from everyric2.config.settings import AlignmentSettings, get_settings
 
 
-EngineType = Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"]
+EngineType = Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid", "sofa"]
 
 
 class EngineFactory:
@@ -36,6 +36,10 @@ class EngineFactory:
             from everyric2.alignment.gpu_hybrid_engine import GPUHybridEngine
 
             engine = GPUHybridEngine(config)
+        elif engine_type == "sofa":
+            from everyric2.alignment.sofa_engine import SOFAEngine
+
+            engine = SOFAEngine(config)
         else:
             raise ValueError(f"Unknown engine type: {engine_type}")
 
@@ -122,6 +126,26 @@ class EngineFactory:
                     "type": "qwen",
                     "available": False,
                     "description": "Qwen-Omni multimodal (legacy)",
+                }
+            )
+
+        try:
+            from everyric2.alignment.sofa_engine import SOFAEngine
+
+            engine = SOFAEngine()
+            engines.append(
+                {
+                    "type": "sofa",
+                    "available": engine.is_available(),
+                    "description": "SOFA singing-oriented forced aligner (English/Japanese)",
+                }
+            )
+        except Exception:
+            engines.append(
+                {
+                    "type": "sofa",
+                    "available": False,
+                    "description": "SOFA singing-oriented forced aligner (English/Japanese)",
                 }
             )
 

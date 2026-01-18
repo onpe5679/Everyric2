@@ -48,7 +48,7 @@ class DiagnosticsVisualizer:
     def _confidence_to_color(
         confidence: float | None, min_conf: float = -5.0, max_conf: float = 10.0
     ) -> tuple[str, float]:
-        """Convert log-probability confidence to color and alpha.
+        """Convert confidence to color and alpha.
 
         Returns (color_hex, alpha) where:
         - Red = low confidence
@@ -58,7 +58,10 @@ class DiagnosticsVisualizer:
         if confidence is None:
             return "#888888", 0.5
 
-        normalized = (confidence - min_conf) / (max_conf - min_conf)
+        if max_conf == min_conf:
+            normalized = 0.5 if confidence == min_conf else (1.0 if confidence > min_conf else 0.0)
+        else:
+            normalized = (confidence - min_conf) / (max_conf - min_conf)
         normalized = max(0.0, min(1.0, normalized))
 
         if normalized < 0.5:

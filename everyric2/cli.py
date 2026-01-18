@@ -95,7 +95,7 @@ def sync(
     ] = False,
     engine: Annotated[
         str,
-        typer.Option("--engine", "-e", help="Alignment engine (ctc, whisperx, nemo, qwen)"),
+        typer.Option("--engine", "-e", help="Alignment engine (ctc, whisperx, nemo, sofa, qwen)"),
     ] = "ctc",
     language: Annotated[
         str,

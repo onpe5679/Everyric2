@@ -436,6 +436,184 @@ output/20260115_231500/
 
 ---
 
+---
+
+## 5. SOFA 엔진 통합 (Singing-Oriented Forced Aligner)
+
+### 배경
+- 현재 CTC 엔진(torchaudio)이 2.9에서 deprecated 예정
+- SOFA는 노래 전용으로 설계되어 MFA보다 더 좋은 성능
+- MIT 라이선스, 영어/일본어/중국어/프랑스어 모델 제공
+
+### 목표
+- `--engine sofa` 옵션으로 SOFA 엔진 사용 가능
+- 영어 alignment 정확도 개선
+- CTC 엔진의 torchaudio 의존성 대체 준비
+
+### SOFA 아키텍처
+
+```
+Audio (WAV) + Lyrics (text)
+       │
+       ▼
+┌─────────────────┐
+│  G2P Module     │ → 텍스트 → 음소 시퀀스 변환
+│  (Dictionary)   │   "I am" → ["ay", "ae", "m"]
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  MelSpec        │ → 44100Hz, 128 mel bins
+│  Extractor      │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  SOFA Model     │ → Lightning checkpoint (.ckpt)
+│  (Zipformer)    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  CTC Alignment  │ → 음소/단어별 [start, end] 타임스탬프
+└─────────────────┘
+```
+
+### 사용 가능한 모델
+
+| 언어 | 모델명 | 사전 파일 |
+|------|--------|----------|
+| 영어 | `tgm_en_v100` | `tgm_sofa_dict.txt` (Arpabet) |
+| 일본어 | `akm_ja_v0.0.1` | 일본어 음소 사전 |
+| 중국어 | `mandarin_*.ckpt` | `opencpop-extension.txt` |
+| 프랑스어 | `Millefeuille_b001` | 프랑스어 사전 |
+
+### 입력/출력 포맷
+
+**입력**:
+- Audio: WAV, 44100Hz, Mono
+- Text: 공백으로 구분된 단어 ("I am a student")
+
+**출력**:
+```python
+{
+    "phonemes": ["ay", "ae", "m", "ah", ...],
+    "phoneme_intervals": [[0.0, 0.15], [0.15, 0.30], ...],  # seconds
+    "words": ["I", "am", "a", ...],
+    "word_intervals": [[0.0, 0.15], [0.15, 0.45], ...],  # seconds
+    "confidence": 0.85,
+}
+```
+
+### 의존성
+
+```
+# SOFA 전용 (requirements_sofa.txt)
+lightning>=2.0.0
+einops==0.6.1
+librosa<0.10.0
+textgrid
+numba
+pandas
+```
+
+### SOFAEngine 구현
+
+```python
+class SOFAEngine(BaseAlignmentEngine):
+    SUPPORTED_LANGUAGES = ["en", "ja", "zh", "fr"]
+    
+    def __init__(self, config: AlignmentSettings | None = None):
+        super().__init__(config)
+        self._model = None
+        self._g2p = None
+        self._melspec = None
+    
+    def is_available(self) -> bool:
+        try:
+            import lightning
+            from einops import repeat
+            return True
+        except ImportError:
+            return False
+    
+    def _ensure_model_loaded(self, language: str) -> None:
+        # 모델 및 사전 다운로드/로드
+        pass
+    
+    def align(
+        self,
+        audio: AudioData,
+        lyrics: list[LyricLine],
+        language: str | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[SyncResult]:
+        # 1. G2P로 텍스트 → 음소 변환
+        # 2. MelSpec 추출
+        # 3. SOFA 모델로 정렬
+        # 4. 결과를 SyncResult로 변환
+        pass
+    
+    @staticmethod
+    def get_engine_type() -> Literal["sofa"]:
+        return "sofa"
+```
+
+### 모델 다운로드 위치
+
+```
+~/.cache/everyric2/sofa/
+├── models/
+│   ├── tgm_en_v100.ckpt
+│   ├── akm_ja_v0.0.1.ckpt
+│   └── ...
+└── dictionaries/
+    ├── tgm_sofa_dict.txt
+    ├── opencpop-extension.txt
+    └── ...
+```
+
+### CLI 사용
+
+```bash
+# 영어 SOFA 엔진
+everyric2 sync audio.wav lyrics.txt --engine sofa --language en
+
+# 자동 언어 감지
+everyric2 sync audio.wav lyrics.txt --engine sofa
+
+# 보컬 분리 + SOFA
+everyric2 sync audio.wav lyrics.txt --engine sofa --separate --debug
+```
+
+### CTC vs SOFA 비교 (예상)
+
+| 항목 | CTC (현재) | SOFA |
+|------|-----------|------|
+| 노래 최적화 | ❌ 범용 | ✅ 노래 전용 |
+| 영어 정확도 | 보통 | 높음 (예상) |
+| torchaudio 의존 | ⚠️ 2.9 제거 | ✅ 독립적 |
+| 일본어 | jonatasgrosman | ✅ 전용 모델 |
+| 한국어 | kresnik | ❌ 미지원 |
+
+### 구현 순서
+
+1. **Phase 1**: SOFA 코드 통합
+   - SOFA 모듈을 `everyric2/alignment/sofa/`에 복사
+   - 의존성 추가 (`pyproject.toml`)
+
+2. **Phase 2**: SOFAEngine 구현
+   - `sofa_engine.py` 생성
+   - 모델 다운로드 로직
+   - G2P 및 정렬 로직
+
+3. **Phase 3**: 통합
+   - `factory.py`에 등록
+   - CLI 옵션 추가
+   - 테스트
+
+---
+
 ## 테스트 계획
 
 ### Unit Tests
