@@ -158,13 +158,50 @@ class SegmentationProcessor:
 
         for result in results:
             if result.word_segments:
-                word_results = self._combine_chars_to_words(result)
+                is_char_level = self._is_character_level_segments(result.word_segments)
+                if is_char_level:
+                    word_results = self._combine_chars_to_words(result)
+                else:
+                    word_results = self._use_word_segments_directly(result)
                 processed.extend(word_results)
             else:
                 word_results = self._split_text_to_words(result)
                 processed.extend(word_results)
 
         return processed
+
+    def _is_character_level_segments(self, segments: list[WordSegment]) -> bool:
+        if not segments:
+            return False
+
+        avg_segment_len = sum(len(seg.word) for seg in segments) / len(segments)
+
+        is_cjk = self.language in ("ja", "zh", "ko")
+        if is_cjk:
+            # CJK char segments: avg ~1, word segments: avg > 2
+            return avg_segment_len < 2.0
+
+        # Non-CJK: char segments avg < 1.5, word segments avg > 1.5
+        return avg_segment_len < 1.5
+
+    def _use_word_segments_directly(self, result: SyncResult) -> list[SyncResult]:
+        if not result.word_segments:
+            return [result]
+
+        word_results = []
+        for seg in result.word_segments:
+            word_results.append(
+                SyncResult(
+                    text=seg.word,
+                    start_time=seg.start,
+                    end_time=seg.end,
+                    confidence=seg.confidence,
+                    line_number=result.line_number,
+                    word_segments=[WordSegment(seg.word, seg.start, seg.end, seg.confidence)],
+                )
+            )
+
+        return word_results if word_results else [result]
 
     def _combine_chars_to_words(self, result: SyncResult) -> list[SyncResult]:
         words = self.tokenizer.split_into_words(result.text)
