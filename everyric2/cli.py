@@ -111,7 +111,7 @@ def sync(
     ] = None,
     segment_mode: Annotated[
         str,
-        typer.Option("--segment-mode", help="Segmentation mode (line, word, character)"),
+        typer.Option("--segment-mode", help="Segmentation mode (line, word, character, all)"),
     ] = "line",
     min_silence_gap: Annotated[
         float,
@@ -436,11 +436,43 @@ def sync(
             raise typer.Exit(1)
 
         progress.update(task, description="Post-processing...")
+        vad_result = None
+        vocal_regions = None
         try:
             from everyric2.alignment.segmentation import SegmentationProcessor
             from everyric2.alignment.silence import SilenceHandler
 
-            silence_handler = SilenceHandler(settings.segmentation)
+            if vocals_audio:
+                progress.update(task, description="Detecting vocal activity...")
+                try:
+                    from everyric2.audio.vad import VocalActivityDetector
+
+                    vad = VocalActivityDetector()
+                    vad_result = vad.detect(vocals_audio)
+                    vocal_regions = [
+                        {"start": r.start, "end": r.end, "energy": r.energy}
+                        for r in vad_result.regions
+                    ]
+                    console.print(
+                        f"[green]VAD:[/green] {len(vad_result.regions)} vocal regions detected"
+                    )
+
+                    from everyric2.alignment.timing_postprocess import TimingPostProcessor
+
+                    timing_processor = TimingPostProcessor(settings.segmentation)
+                    pp_result = timing_processor.process(results, vad_result, segment_mode)
+                    results = pp_result.results
+                    if pp_result.stats.get("total_adjustments", 0) > 0:
+                        console.print(
+                            f"[green]Timing adjusted:[/green] "
+                            f"{pp_result.stats['extended_to_vocal']} extended, "
+                            f"{pp_result.stats['shrunk_to_vocal']} shrunk, "
+                            f"{pp_result.stats['reading_buffer_added']} buffered"
+                        )
+                except Exception as e:
+                    console.print(f"[yellow]Warning:[/yellow] VAD/timing post-process failed: {e}")
+
+            silence_handler = SilenceHandler(settings.segmentation, vad_result=vad_result)
             silence_gaps = silence_handler.detect_silence_gaps(results)
             results = silence_handler.process(results)
 
@@ -467,7 +499,27 @@ def sync(
                 console.print(f"[green]Project file:[/green] {project.path}")
 
             segmentation_processor = SegmentationProcessor(settings.segmentation, language=language)
-            results = segmentation_processor.process(results)
+
+            if segment_mode == "all":
+                all_segment_results = {}
+                for mode in ("line", "word", "character"):
+                    settings.segmentation.mode = mode
+                    seg_proc = SegmentationProcessor(settings.segmentation, language=language)
+                    mode_results = seg_proc.process(list(results))
+                    if vad_result and mode in ("word", "character"):
+                        from everyric2.alignment.timing_postprocess import TimingPostProcessor
+
+                        segment_timing = TimingPostProcessor(settings.segmentation)
+                        mode_results = segment_timing.process_segments(mode_results, vad_result)
+                    all_segment_results[mode] = mode_results
+                results = all_segment_results["line"]
+            else:
+                results = segmentation_processor.process(results)
+                if vad_result and segment_mode in ("word", "character"):
+                    from everyric2.alignment.timing_postprocess import TimingPostProcessor
+
+                    segment_timing = TimingPostProcessor(settings.segmentation)
+                    results = segment_timing.process_segments(results, vad_result)
 
         except Exception as e:
             console.print(f"[yellow]Warning:[/yellow] Post-processing failed: {e}")
@@ -480,6 +532,13 @@ def sync(
             if debug and run_ctx:
                 final_output = run_ctx.output_dir / f"output.{format}"
                 final_output.write_text(formatted, encoding="utf-8")
+
+                if segment_mode == "all" and "all_segment_results" in dir():
+                    for mode, mode_results in all_segment_results.items():
+                        mode_output = run_ctx.output_dir / f"output_{mode}.{format}"
+                        mode_formatted = formatter.format(mode_results)
+                        mode_output.write_text(mode_formatted, encoding="utf-8")
+                        console.print(f"[green]{mode.title()} mode:[/green] {mode_output}")
 
                 if (translated_text or translation_result) and results:
                     from everyric2.inference.prompt import SyncResult
@@ -527,7 +586,7 @@ def sync(
                         diag_path = run_ctx.output_dir / "diagnostics.png"
                         visualizer.create_diagnostics(
                             debug_info,
-                            line_results if line_results else results,
+                            results,
                             diag_path,
                             audio_waveform=original_audio.waveform
                             if original_audio
@@ -537,6 +596,7 @@ def sync(
                             sample_rate=audio.sample_rate,
                             silence_gaps=silence_gaps,
                             segment_mode=segment_mode,
+                            vocal_regions=vocal_regions,
                         )
                         console.print(f"[green]Diagnostics:[/green] {diag_path}")
                     except Exception as e:

@@ -1,7 +1,8 @@
 import pytest
-from everyric2.alignment.matcher import LyricsMatcher
+
 from everyric2.alignment.base import WordTimestamp
-from everyric2.inference.prompt import LyricLine, SyncResult
+from everyric2.alignment.matcher import LyricsMatcher
+from everyric2.inference.prompt import LyricLine
 
 
 @pytest.fixture

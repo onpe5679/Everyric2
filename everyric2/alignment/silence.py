@@ -1,7 +1,14 @@
+import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from everyric2.config.settings import SegmentationSettings, get_settings
 from everyric2.inference.prompt import SyncResult
+
+if TYPE_CHECKING:
+    from everyric2.audio.vad import VADResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -10,11 +17,17 @@ class InterludeInfo:
     end: float
     duration: float
     after_line: int
+    verified_by_vad: bool = False
 
 
 class SilenceHandler:
-    def __init__(self, settings: SegmentationSettings | None = None):
+    def __init__(
+        self,
+        settings: SegmentationSettings | None = None,
+        vad_result: "VADResult | None" = None,
+    ):
         self.settings = settings or get_settings().segmentation
+        self.vad_result = vad_result
         self.detected_interludes: list[InterludeInfo] = []
 
     def process(self, results: list[SyncResult]) -> list[SyncResult]:
@@ -29,13 +42,16 @@ class SilenceHandler:
             curr = results[i]
             gap = curr.start_time - prev.end_time
 
-            if gap >= self.settings.interlude_gap:
+            is_true_silence = self._is_silence_in_range(prev.end_time, curr.start_time)
+
+            if gap >= self.settings.interlude_gap and is_true_silence:
                 self.detected_interludes.append(
                     InterludeInfo(
                         start=prev.end_time,
                         end=curr.start_time,
                         duration=gap,
                         after_line=prev.line_number or i - 1,
+                        verified_by_vad=self.vad_result is not None,
                     )
                 )
                 processed.append(curr)
@@ -47,7 +63,21 @@ class SilenceHandler:
             else:
                 processed.append(curr)
 
+        if self.detected_interludes:
+            logger.info(f"Detected {len(self.detected_interludes)} interlude(s)")
+
         return processed
+
+    def _is_silence_in_range(self, start: float, end: float) -> bool:
+        if self.vad_result is None:
+            return True
+
+        for region in self.vad_result.regions:
+            if region.end > start and region.start < end:
+                overlap = min(region.end, end) - max(region.start, start)
+                if overlap > 0.2:
+                    return False
+        return True
 
     def _merge_gap(self, prev: SyncResult, curr: SyncResult) -> tuple[SyncResult, SyncResult]:
         mode = self.settings.silence_merge_mode
@@ -113,7 +143,8 @@ class SilenceHandler:
             gap_duration = curr.start_time - prev.end_time
 
             if gap_duration > 0:
-                is_interlude = gap_duration >= self.settings.interlude_gap
+                is_true_silence = self._is_silence_in_range(prev.end_time, curr.start_time)
+                is_interlude = gap_duration >= self.settings.interlude_gap and is_true_silence
                 gaps.append(
                     {
                         "index": i,
@@ -122,6 +153,7 @@ class SilenceHandler:
                         "duration": gap_duration,
                         "is_short": gap_duration < self.settings.min_silence_gap,
                         "is_interlude": is_interlude,
+                        "has_vocal": not is_true_silence,
                     }
                 )
 
@@ -129,3 +161,10 @@ class SilenceHandler:
 
     def get_interludes(self) -> list[InterludeInfo]:
         return self.detected_interludes
+
+    def get_vocal_regions(self) -> list[dict] | None:
+        if self.vad_result is None:
+            return None
+        return [
+            {"start": r.start, "end": r.end, "energy": r.energy} for r in self.vad_result.regions
+        ]

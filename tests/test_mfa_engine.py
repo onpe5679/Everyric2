@@ -1,12 +1,13 @@
-import pytest
-from unittest.mock import MagicMock, patch, call
-from pathlib import Path
 import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import pytest
 from everyric2.alignment.mfa_engine import MFAEngine
+
 from everyric2.alignment.base import AlignmentError, EngineNotAvailableError
-from everyric2.inference.prompt import LyricLine, SyncResult
 from everyric2.audio.loader import AudioData
+from everyric2.inference.prompt import LyricLine, SyncResult
 
 
 @pytest.fixture

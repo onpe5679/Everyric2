@@ -42,6 +42,9 @@ class DiagnosticsVisualizer:
         "pronunciation": "#FFD93D",
         "silence_gap": "#FF0000",
         "word_segment": "#98D8C8",
+        "vocal_region": "#00CC66",
+        "silence_region": "#CCCCCC",
+        "interlude": "#FF4444",
     }
 
     @staticmethod
@@ -91,6 +94,7 @@ class DiagnosticsVisualizer:
         sample_rate: int = 16000,
         silence_gaps: list[dict] | None = None,
         segment_mode: str = "line",
+        vocal_regions: list[dict] | None = None,
     ) -> Path:
         transcription_sets = debug_info.transcription_sets or []
         if not transcription_sets and debug_info.transcription_words:
@@ -133,12 +137,18 @@ class DiagnosticsVisualizer:
             "Audio (Original)",
             self.COLORS["original"],
             silence_gaps=silence_gaps,
+            vocal_regions=vocal_regions,
         )
         col_idx += 1
 
         if vocals_waveform is not None:
             self._draw_waveform(
-                axes[col_idx], vocals_waveform, duration, "Audio (Vocals)", self.COLORS["vocals"]
+                axes[col_idx],
+                vocals_waveform,
+                duration,
+                "Audio (Vocals)",
+                self.COLORS["vocals"],
+                vocal_regions=vocal_regions,
             )
             col_idx += 1
 
@@ -201,16 +211,53 @@ class DiagnosticsVisualizer:
         title: str,
         color: str,
         silence_gaps: list[dict] | None = None,
+        vocal_regions: list[dict] | None = None,
     ) -> None:
         ax.set_title(title, fontsize=12)
+
+        # Draw vocal regions as background (green for vocal, light gray for silence)
+        if vocal_regions:
+            # Fill entire background with silence color first
+            ax.axvspan(0, 1, ymin=0, ymax=1, color=self.COLORS["silence_region"], alpha=0.2)
+
+            # Overlay vocal regions in green
+            for region in vocal_regions:
+                # Convert time to y-axis position (inverted)
+                y_start = region["start"]
+                y_end = region["end"]
+                height = y_end - y_start
+                rect = mpatches.Rectangle(
+                    (0, y_start),
+                    1,
+                    height,
+                    facecolor=self.COLORS["vocal_region"],
+                    alpha=0.25,
+                    edgecolor="none",
+                )
+                ax.add_patch(rect)
+
+        # Draw waveform on top
         if waveform is not None:
             times = np.linspace(0, duration, len(waveform))
             step = max(1, len(waveform) // 10000)
             ax.fill_betweenx(times[::step], 0, np.abs(waveform[::step]), alpha=0.7, color=color)
 
+        # Draw silence gaps
         if silence_gaps:
             for gap in silence_gaps:
-                if gap.get("is_short", False):
+                if gap.get("is_interlude", False):
+                    # Draw interlude markers (red horizontal band)
+                    rect = mpatches.Rectangle(
+                        (0, gap["start"]),
+                        1,
+                        gap["end"] - gap["start"],
+                        facecolor=self.COLORS["interlude"],
+                        alpha=0.3,
+                        edgecolor=self.COLORS["interlude"],
+                        linewidth=1,
+                    )
+                    ax.add_patch(rect)
+                elif gap.get("is_short", False):
                     ax.axhline(
                         y=gap["start"],
                         color=self.COLORS["silence_gap"],

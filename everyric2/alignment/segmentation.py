@@ -205,27 +205,38 @@ class SegmentationProcessor:
 
     def _combine_chars_to_words(self, result: SyncResult) -> list[SyncResult]:
         words = self.tokenizer.split_into_words(result.text)
-        if not words or not result.word_segments:
+        if not words:
             return [result]
 
+        if not result.word_segments:
+            return self._split_text_to_words(result)
+
         char_segments = list(result.word_segments)
-        char_idx = 0
+        total_chars_in_words = sum(len(word) for word in words)
+        total_segments = len(char_segments)
+
         word_results = []
+        seg_idx = 0
 
-        for word in words:
-            word_chars = list(word)
+        for i, word in enumerate(words):
+            word_char_count = len(word)
+
+            if total_chars_in_words > 0 and total_segments > 0:
+                ratio = word_char_count / total_chars_in_words
+                segs_for_word = max(1, round(total_segments * ratio))
+            else:
+                segs_for_word = 1
+
             word_segs = []
-
-            for _ in word_chars:
-                if char_idx < len(char_segments):
-                    word_segs.append(char_segments[char_idx])
-                    char_idx += 1
+            for _ in range(segs_for_word):
+                if seg_idx < len(char_segments):
+                    word_segs.append(char_segments[seg_idx])
+                    seg_idx += 1
 
             if word_segs:
                 start_time = word_segs[0].start
                 end_time = word_segs[-1].end
-                avg_conf = sum(s.confidence for s in word_segs) / len(word_segs)
-
+                avg_conf = sum(s.confidence for s in word_segs if s.confidence) / len(word_segs)
                 word_results.append(
                     SyncResult(
                         text=word,
@@ -238,8 +249,22 @@ class SegmentationProcessor:
                         ],
                     )
                 )
+            else:
+                duration = result.end_time - result.start_time
+                word_duration = duration / len(words)
+                start_time = result.start_time + i * word_duration
+                end_time = result.start_time + (i + 1) * word_duration
+                word_results.append(
+                    SyncResult(
+                        text=word,
+                        start_time=start_time,
+                        end_time=end_time,
+                        confidence=result.confidence,
+                        line_number=result.line_number,
+                    )
+                )
 
-        return word_results if word_results else [result]
+        return word_results
 
     def _split_text_to_words(self, result: SyncResult) -> list[SyncResult]:
         words = self.tokenizer.split_into_words(result.text)
@@ -247,26 +272,23 @@ class SegmentationProcessor:
             return [result]
 
         duration = result.end_time - result.start_time
-        word_duration = max(self.settings.min_duration, duration / len(words))
+        word_duration = duration / len(words)
 
         word_results = []
-        current_time = result.start_time
-
-        for word in words:
-            end_time = min(current_time + word_duration, result.end_time)
-            if end_time - current_time >= self.settings.min_duration:
-                word_results.append(
-                    SyncResult(
-                        text=word,
-                        start_time=current_time,
-                        end_time=end_time,
-                        confidence=result.confidence,
-                        line_number=result.line_number,
-                    )
+        for i, word in enumerate(words):
+            start_time = result.start_time + i * word_duration
+            end_time = result.start_time + (i + 1) * word_duration
+            word_results.append(
+                SyncResult(
+                    text=word,
+                    start_time=start_time,
+                    end_time=end_time,
+                    confidence=result.confidence,
+                    line_number=result.line_number,
                 )
-            current_time = end_time
+            )
 
-        return word_results if word_results else [result]
+        return word_results
 
     def _process_character_mode(self, results: list[SyncResult]) -> list[SyncResult]:
         processed = []
@@ -303,23 +325,21 @@ class SegmentationProcessor:
             return [result]
 
         duration = result.end_time - result.start_time
-        char_duration = max(self.settings.min_duration, duration / len(chars))
+        char_duration = duration / len(chars)
 
         char_results = []
-        current_time = result.start_time
-
-        for char in chars:
-            end_time = min(current_time + char_duration, result.end_time)
+        for i, char in enumerate(chars):
+            start_time = result.start_time + i * char_duration
+            end_time = result.start_time + (i + 1) * char_duration
             char_results.append(
                 SyncResult(
                     text=char,
-                    start_time=current_time,
+                    start_time=start_time,
                     end_time=end_time,
                     confidence=result.confidence,
                     line_number=result.line_number,
                 )
             )
-            current_time = end_time
 
         return char_results
 
@@ -328,25 +348,31 @@ class SegmentationProcessor:
     ) -> list[SyncResult]:
         chars = self.tokenizer.split_into_characters(seg.word)
         if not chars:
-            return []
+            return [
+                SyncResult(
+                    text=seg.word,
+                    start_time=seg.start,
+                    end_time=seg.end,
+                    confidence=seg.confidence,
+                    line_number=line_number,
+                )
+            ]
 
         duration = seg.end - seg.start
-        char_duration = max(self.settings.min_duration, duration / len(chars))
+        char_duration = duration / len(chars)
 
         char_results = []
-        current_time = seg.start
-
-        for char in chars:
-            end_time = min(current_time + char_duration, seg.end)
+        for i, char in enumerate(chars):
+            start_time = seg.start + i * char_duration
+            end_time = seg.start + (i + 1) * char_duration
             char_results.append(
                 SyncResult(
                     text=char,
-                    start_time=current_time,
+                    start_time=start_time,
                     end_time=end_time,
                     confidence=seg.confidence,
                     line_number=line_number,
                 )
             )
-            current_time = end_time
 
         return char_results

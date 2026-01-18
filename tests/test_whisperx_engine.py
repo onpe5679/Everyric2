@@ -1,13 +1,13 @@
 import sys
-import pytest
-from unittest.mock import MagicMock, patch, ANY
-import numpy as np
-import torch
+from unittest.mock import ANY, MagicMock, patch
 
-from everyric2.alignment.whisperx_engine import WhisperXEngine
+import numpy as np
+import pytest
+
 from everyric2.alignment.base import EngineNotAvailableError
-from everyric2.config.settings import AlignmentSettings
+from everyric2.alignment.whisperx_engine import WhisperXEngine
 from everyric2.audio.loader import AudioData
+from everyric2.config.settings import AlignmentSettings
 from everyric2.inference.prompt import LyricLine
 
 # Fixtures

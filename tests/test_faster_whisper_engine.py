@@ -1,12 +1,13 @@
 import sys
-import pytest
 from unittest.mock import MagicMock, patch
-import numpy as np
 
-from everyric2.alignment.faster_whisper_engine import FasterWhisperEngine
+import numpy as np
+import pytest
+
 from everyric2.alignment.base import EngineNotAvailableError
-from everyric2.config.settings import AlignmentSettings
+from everyric2.alignment.faster_whisper_engine import FasterWhisperEngine
 from everyric2.audio.loader import AudioData
+from everyric2.config.settings import AlignmentSettings
 from everyric2.inference.prompt import LyricLine
 
 
