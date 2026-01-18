@@ -33,7 +33,6 @@ LANG_MODEL_MAP = {
     "en": "facebook/mms-1b-all",
 }
 
-# MMS 1B-all language codes (ISO 639-3)
 MMS_LANG_CODES = {
     "ko": "kor",
     "ja": "jpn",
@@ -42,11 +41,18 @@ MMS_LANG_CODES = {
 }
 
 
-def detect_language_from_text(text: str) -> str:
-    """Detect language from lyrics text. Returns 'ja', 'ko', 'zh', or 'en'."""
+def detect_language_from_text(text: str) -> tuple[str, bool]:
+    """Detect language from lyrics text.
+
+    Returns:
+        Tuple of (primary_language, is_multilingual)
+        - primary_language: 'ja', 'ko', 'zh', or 'en' (dominant language)
+        - is_multilingual: True if multiple scripts detected → recommends MMS 1B-all
+    """
     ja_count = 0
     ko_count = 0
     zh_count = 0
+    en_count = 0
 
     for char in text:
         code = ord(char)
@@ -56,14 +62,35 @@ def detect_language_from_text(text: str) -> str:
             ko_count += 1
         elif 0x4E00 <= code <= 0x9FFF:  # CJK Ideographs
             zh_count += 1
+        elif 0x0041 <= code <= 0x007A:  # Basic Latin (A-Za-z)
+            en_count += 1
+
+    detected = []
+    if ja_count > 0:
+        detected.append(("ja", ja_count))
+    if ko_count > 0:
+        detected.append(("ko", ko_count))
+    if zh_count > 0 and ja_count == 0:  # CJK without kana = Chinese
+        detected.append(("zh", zh_count))
+    if en_count > 10:
+        detected.append(("en", en_count))
+
+    is_multilingual = len(detected) >= 2
+
+    if is_multilingual:
+        dominant = max(detected, key=lambda x: x[1])
+        logger.info(
+            f"Multiple languages detected: {[d[0] for d in detected]} → primary: {dominant[0]}, using MMS 1B-all"
+        )
+        return (dominant[0], True)
 
     if ja_count > 0:
-        return "ja"
+        return ("ja", False)
     if ko_count > 0:
-        return "ko"
+        return ("ko", False)
     if zh_count > 0:
-        return "zh"
-    return "en"
+        return ("zh", False)
+    return ("en", False)
 
 
 class CTCEngine(BaseAlignmentEngine):
@@ -90,8 +117,9 @@ class CTCEngine(BaseAlignmentEngine):
             self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return self._device
 
-    def _ensure_model_loaded(self, language: str) -> None:
-        if self._model is not None and self._current_lang == language:
+    def _ensure_model_loaded(self, language: str, force_mms: bool = False) -> None:
+        cache_key = f"{language}_mms" if force_mms else language
+        if self._model is not None and self._current_lang == cache_key:
             return
 
         if not self.is_available():
@@ -101,35 +129,37 @@ class CTCEngine(BaseAlignmentEngine):
 
         device = self._get_device()
 
-        if language in LANG_MODEL_MAP:
+        use_mms = force_mms or (
+            language in LANG_MODEL_MAP and LANG_MODEL_MAP[language] == "facebook/mms-1b-all"
+        )
+
+        if use_mms:
+            from transformers import AutoProcessor, Wav2Vec2ForCTC
+
+            logger.info(f"Loading MMS 1B-all with {language} adapter (force_mms={force_mms})")
+            self._processor = AutoProcessor.from_pretrained("facebook/mms-1b-all")
+            self._model = Wav2Vec2ForCTC.from_pretrained("facebook/mms-1b-all").to(device)
+            self._model.eval()
+
+            mms_lang_code = MMS_LANG_CODES.get(language, "eng")
+            self._processor.tokenizer.set_target_lang(mms_lang_code)
+            self._model.load_adapter(mms_lang_code)
+            logger.info(f"MMS adapter loaded: {mms_lang_code}")
+        elif language in LANG_MODEL_MAP:
+            from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+
             model_name = LANG_MODEL_MAP[language]
-
-            if model_name == "facebook/mms-1b-all":
-                from transformers import AutoProcessor, Wav2Vec2ForCTC
-
-                logger.info(f"Loading MMS 1B-all with {language} adapter")
-                self._processor = AutoProcessor.from_pretrained(model_name)
-                self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)
-                self._model.eval()
-
-                mms_lang_code = MMS_LANG_CODES.get(language, "eng")
-                self._processor.tokenizer.set_target_lang(mms_lang_code)
-                self._model.load_adapter(mms_lang_code)
-                logger.info(f"MMS adapter loaded: {mms_lang_code}")
-            else:
-                from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
-
-                logger.info(f"Loading HuggingFace model: {model_name}")
-                self._processor = Wav2Vec2Processor.from_pretrained(model_name)
-                self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
-                self._model.eval()
+            logger.info(f"Loading HuggingFace model: {model_name}")
+            self._processor = Wav2Vec2Processor.from_pretrained(model_name)
+            self._model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
+            self._model.eval()
         else:
             logger.info("Loading torchaudio MMS_FA model")
             bundle = torchaudio.pipelines.MMS_FA
             self._model = bundle.get_model(with_star=False).to(device)
             self._processor = bundle
 
-        self._current_lang = language
+        self._current_lang = cache_key
 
     def transcribe(
         self,
@@ -384,13 +414,16 @@ class CTCEngine(BaseAlignmentEngine):
         language: str | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[SyncResult]:
+        force_mms = False
         if language and language != "auto":
             resolved_lang = language
         else:
             lyrics_text = " ".join(line.text for line in lyrics)
-            resolved_lang = detect_language_from_text(lyrics_text)
-            logger.info(f"Auto-detected language from lyrics: {resolved_lang}")
-        self._ensure_model_loaded(resolved_lang)
+            resolved_lang, is_multilingual = detect_language_from_text(lyrics_text)
+            if is_multilingual:
+                force_mms = True
+            logger.info(f"Auto-detected language: {resolved_lang}, multilingual: {is_multilingual}")
+        self._ensure_model_loaded(resolved_lang, force_mms=force_mms)
 
         if progress_callback:
             progress_callback(1, 5)
