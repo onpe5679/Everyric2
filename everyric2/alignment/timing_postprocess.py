@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
-from everyric2.audio.vad import VADResult, VocalActivityDetector, VocalRegion
+from everyric2.audio.vad import VADResult, VocalRegion
 from everyric2.config.settings import SegmentationSettings, get_settings
 from everyric2.inference.prompt import SyncResult
 
@@ -316,7 +316,51 @@ class TimingPostProcessor:
             else:
                 processed.append(result)
 
-        return self._fix_segment_overlaps(processed)
+        processed = self._fix_segment_overlaps(processed)
+        return self._fill_vocal_gaps(processed, vad_result)
+
+    def _fill_vocal_gaps(
+        self, results: list[SyncResult], vad_result: VADResult
+    ) -> list[SyncResult]:
+        if len(results) < 2:
+            return results
+
+        filled = [results[0]]
+        for i in range(1, len(results)):
+            prev = filled[-1]
+            curr = results[i]
+            gap_start = prev.end_time
+            gap_end = curr.start_time
+            gap = gap_end - gap_start
+
+            if gap > 0.05 and gap < 1.0:
+                is_vocal_gap = self._is_vocal_active_in_range(vad_result, gap_start, gap_end)
+                if is_vocal_gap:
+                    mid = (gap_start + gap_end) / 2
+                    filled[-1] = SyncResult(
+                        text=prev.text,
+                        start_time=prev.start_time,
+                        end_time=mid,
+                        confidence=prev.confidence,
+                        line_number=prev.line_number,
+                        word_segments=prev.word_segments,
+                        translation=prev.translation,
+                        pronunciation=prev.pronunciation,
+                    )
+                    curr = SyncResult(
+                        text=curr.text,
+                        start_time=mid,
+                        end_time=curr.end_time,
+                        confidence=curr.confidence,
+                        line_number=curr.line_number,
+                        word_segments=curr.word_segments,
+                        translation=curr.translation,
+                        pronunciation=curr.pronunciation,
+                    )
+
+            filled.append(curr)
+
+        return filled
 
     def _find_vocal_regions_in_range(
         self, vad_result: VADResult, start: float, end: float

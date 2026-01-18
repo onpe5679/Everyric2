@@ -328,13 +328,11 @@ def sync(
                 from everyric2.translation.translator import LyricsTranslator
 
                 translator = LyricsTranslator(settings=settings.translation)
-                if pronunciation:
-                    translation_result = translator.translate_with_pronunciation(lyric_lines)
-                    translated_text = "\n".join(
-                        line.translation for line in translation_result.lines
-                    )
-                else:
-                    translated_text = translator.translate(lyric_lines)
+                translation_result = translator.translate_with_pronunciation(lyric_lines)
+                translated_text = "\n".join(line.translation for line in translation_result.lines)
+                if not pronunciation:
+                    for line in translation_result.lines:
+                        line.pronunciation = None
                 trans_time = time_module.time() - trans_start
                 console.print(f"[green]Translation complete[/green] ({trans_time:.1f}s)")
 
@@ -544,9 +542,15 @@ def sync(
                     from everyric2.inference.prompt import SyncResult
                     from everyric2.output.multi_output import MultiOutputGenerator
 
-                    multi_gen = MultiOutputGenerator(format, segment_mode)
+                    multi_mode = "line" if segment_mode == "all" else segment_mode
+                    multi_results = (
+                        all_segment_results["line"]
+                        if segment_mode == "all" and "all_segment_results" in dir()
+                        else results
+                    )
+                    multi_gen = MultiOutputGenerator(format, multi_mode)
                     outputs = multi_gen.generate_all_variants(
-                        results,
+                        multi_results,
                         translation_result,
                         run_ctx.output_dir,
                         "output",
@@ -584,6 +588,11 @@ def sync(
 
                         visualizer = DiagnosticsVisualizer()
                         diag_path = run_ctx.output_dir / "diagnostics.png"
+                        diag_all_results = (
+                            all_segment_results
+                            if segment_mode == "all" and "all_segment_results" in dir()
+                            else None
+                        )
                         visualizer.create_diagnostics(
                             debug_info,
                             results,
@@ -597,6 +606,7 @@ def sync(
                             silence_gaps=silence_gaps,
                             segment_mode=segment_mode,
                             vocal_regions=vocal_regions,
+                            all_segment_results=diag_all_results,
                         )
                         console.print(f"[green]Diagnostics:[/green] {diag_path}")
                     except Exception as e:

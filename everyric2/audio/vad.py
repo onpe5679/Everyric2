@@ -36,7 +36,7 @@ class VocalActivityDetector:
         frame_duration: float = 0.02,
         energy_threshold_percentile: float = 40.0,
         min_region_duration: float = 0.2,
-        merge_gap: float = 0.3,
+        merge_gap: float = 0.5,
     ):
         self.frame_duration = frame_duration
         self.energy_threshold_percentile = energy_threshold_percentile

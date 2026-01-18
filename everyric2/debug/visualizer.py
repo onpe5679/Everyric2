@@ -95,6 +95,7 @@ class DiagnosticsVisualizer:
         silence_gaps: list[dict] | None = None,
         segment_mode: str = "line",
         vocal_regions: list[dict] | None = None,
+        all_segment_results: dict[str, list[SyncResult]] | None = None,
     ) -> Path:
         transcription_sets = debug_info.transcription_sets or []
         if not transcription_sets and debug_info.transcription_words:
@@ -114,12 +115,15 @@ class DiagnosticsVisualizer:
         num_cols += len(transcription_sets)
 
         has_word_segments = any(r.word_segments for r in results)
-        if has_word_segments and segment_mode != "line":
+        if has_word_segments and segment_mode != "line" and not all_segment_results:
             num_cols += 1
 
         has_pronunciation = any(r.pronunciation for r in results)
         if has_pronunciation:
             num_cols += 1
+
+        if all_segment_results:
+            num_cols += 2
 
         fig_width = 4 * num_cols
         fig, axes = plt.subplots(1, num_cols, figsize=(fig_width, 20), sharey=True)
@@ -171,7 +175,7 @@ class DiagnosticsVisualizer:
             )
             col_idx += 1
 
-        if has_word_segments and segment_mode != "line":
+        if has_word_segments and segment_mode != "line" and not all_segment_results:
             self._draw_word_segments_column(
                 axes[col_idx], results, duration, f"Word Segments ({segment_mode})"
             )
@@ -187,9 +191,21 @@ class DiagnosticsVisualizer:
             )
             col_idx += 1
 
-        self._draw_synced_column(
-            axes[col_idx], results, duration, "Synced Output", self.COLORS["final"]
-        )
+        if all_segment_results:
+            for mode in ("line", "word", "character"):
+                if mode in all_segment_results:
+                    self._draw_synced_column(
+                        axes[col_idx],
+                        all_segment_results[mode],
+                        duration,
+                        f"Output ({mode})",
+                        self.COLORS["final"],
+                    )
+                    col_idx += 1
+        else:
+            self._draw_synced_column(
+                axes[col_idx], results, duration, "Synced Output", self.COLORS["final"]
+            )
 
         axes[0].set_ylabel("Time (seconds)")
         tick_interval = 10 if duration <= 120 else 30 if duration <= 300 else 60
