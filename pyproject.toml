@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "everyric2"
 version = "0.1.0"
-description = "Lyrics synchronization using Qwen3-Omni multimodal LLM"
+description = "Lyrics synchronization using CTC forced alignment"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Everyric Team" }
 ]
-keywords = ["lyrics", "synchronization", "multimodal", "qwen", "audio"]
+keywords = ["lyrics", "synchronization", "ctc", "forced-alignment", "audio"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -37,13 +37,16 @@ dependencies = [
     "torchvision>=0.15.0",
     "transformers>=4.40.0",
     "accelerate>=0.25.0",
-    "qwen-omni-utils>=0.0.2",
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     "python-multipart>=0.0.6",
     "matplotlib>=3.7.0",
     "deep-translator>=1.11.0",
     "requests>=2.31.0",
+    # Database
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "aiosqlite>=0.19.0",
 ]
 
 [project.optional-dependencies]
@@ -58,10 +61,7 @@ dev = [
 separator = [
     "demucs>=4.0.0",
 ]
-whisperx = [
-    "whisperx>=3.1.0",
-    "faster-whisper>=1.0.0",
-]
+
 mfa = [
     "praatio>=6.0.0",
 ]
@@ -73,7 +73,7 @@ sofa = [
     "h5py>=3.0.0",
 ]
 alignment = [
-    "everyric2[whisperx,mfa]",
+    "everyric2[mfa]",
 ]
 vllm = [
     "vllm>=0.4.0",

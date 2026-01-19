@@ -7,10 +7,12 @@ from pathlib import Path
 
 import yaml
 
+from everyric2.alignment.base import BaseAlignmentEngine
+from everyric2.alignment.factory import EngineFactory
 from everyric2.audio.downloader import YouTubeDownloader
 from everyric2.audio.loader import AudioLoader
+from everyric2.config.settings import get_settings
 from everyric2.inference.prompt import LyricLine
-from everyric2.inference.qwen_omni import QwenOmniEngine
 from everyric2.output.formatters import FormatterFactory
 
 
@@ -64,7 +66,7 @@ class BatchConfig:
 class BatchRunner:
     def __init__(self, config: BatchConfig):
         self.config = config
-        self.engine: QwenOmniEngine | None = None
+        self.engine: BaseAlignmentEngine | None = None
         self.downloader = YouTubeDownloader()
         self.audio_loader = AudioLoader()
         self.completed_file = config.output_dir / ".completed"
@@ -110,13 +112,13 @@ class BatchRunner:
             return results
 
         if log_callback:
-            log_callback("Loading model (this takes ~10 minutes)...")
+            log_callback("Loading CTC engine...")
 
-        self.engine = QwenOmniEngine()
-        self.engine.load_model()
+        settings = get_settings()
+        self.engine = EngineFactory.get_engine("ctc", settings.alignment)
 
         if log_callback:
-            log_callback(f"Model loaded. Running {len(tests_to_run)} tests...")
+            log_callback(f"Engine loaded. Running {len(tests_to_run)} tests...")
 
         for i, test in enumerate(tests_to_run):
             if progress_callback:
@@ -158,7 +160,7 @@ class BatchRunner:
         audio_data = self.audio_loader.load(audio_path)
         log(f"Audio loaded: {audio_data.duration:.1f}s")
 
-        sync_results = self.engine.sync_lyrics(audio_data, test.lyrics)
+        sync_results = self.engine.align(audio_data, test.lyrics)
         log(f"Sync complete: {len(sync_results)} results")
 
         for fmt in test.formats:

@@ -74,22 +74,11 @@ class AudioSettings(BaseSettings):
 class AlignmentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_ALIGNMENT_")
 
-    engine: Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid"] = Field(
+    engine: Literal["ctc", "nemo", "gpu-hybrid", "sofa"] = Field(
         default="ctc", description="Alignment engine to use"
     )
     language: Literal["auto", "en", "ja", "ko"] = Field(
         default="auto", description="Language for transcription/alignment"
-    )
-
-    whisperx_model: Literal["tiny", "base", "small", "medium", "large-v2", "large-v3"] = Field(
-        default="large-v3", description="WhisperX model size"
-    )
-    whisperx_batch_size: int = Field(default=16, description="Batch size for WhisperX")
-    whisperx_compute_type: Literal["float16", "float32", "int8"] = Field(
-        default="float16", description="Compute type for WhisperX"
-    )
-    whisperx_vad_method: Literal["silero", "pyannote"] = Field(
-        default="silero", description="VAD method (silero is faster)"
     )
 
     nemo_model_en: str = Field(

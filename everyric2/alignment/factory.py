@@ -3,7 +3,7 @@ from typing import Literal
 from everyric2.alignment.base import BaseAlignmentEngine, EngineNotAvailableError
 from everyric2.config.settings import AlignmentSettings, get_settings
 
-EngineType = Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid", "sofa"]
+EngineType = Literal["ctc", "nemo", "gpu-hybrid", "sofa"]
 
 
 class EngineFactory:
@@ -15,15 +15,7 @@ class EngineFactory:
         config = config or get_settings().alignment
         engine_type = engine_type or config.engine
 
-        if engine_type == "whisperx":
-            from everyric2.alignment.whisperx_engine import WhisperXEngine
-
-            engine = WhisperXEngine(config)
-        elif engine_type == "qwen":
-            from everyric2.alignment.qwen_engine import QwenEngine
-
-            engine = QwenEngine(config)
-        elif engine_type == "ctc":
+        if engine_type == "ctc":
             from everyric2.alignment.ctc_engine import CTCEngine
 
             engine = CTCEngine(config)
@@ -69,26 +61,6 @@ class EngineFactory:
             )
 
         try:
-            from everyric2.alignment.whisperx_engine import WhisperXEngine
-
-            engine = WhisperXEngine()
-            engines.append(
-                {
-                    "type": "whisperx",
-                    "available": engine.is_available(),
-                    "description": "WhisperX transcription-based alignment",
-                }
-            )
-        except Exception:
-            engines.append(
-                {
-                    "type": "whisperx",
-                    "available": False,
-                    "description": "WhisperX transcription-based alignment",
-                }
-            )
-
-        try:
             from everyric2.alignment.nemo_engine import NeMoEngine
 
             engine = NeMoEngine()
@@ -105,26 +77,6 @@ class EngineFactory:
                     "type": "nemo",
                     "available": False,
                     "description": "NeMo NFA (GPU, English only)",
-                }
-            )
-
-        try:
-            from everyric2.alignment.qwen_engine import QwenEngine
-
-            engine = QwenEngine()
-            engines.append(
-                {
-                    "type": "qwen",
-                    "available": engine.is_available(),
-                    "description": "Qwen-Omni multimodal (legacy)",
-                }
-            )
-        except Exception:
-            engines.append(
-                {
-                    "type": "qwen",
-                    "available": False,
-                    "description": "Qwen-Omni multimodal (legacy)",
                 }
             )
 
@@ -156,7 +108,7 @@ class EngineFactory:
     ) -> BaseAlignmentEngine:
         config = config or get_settings().alignment
 
-        preferred_order = ["ctc", "whisperx", "nemo", "qwen"]
+        preferred_order = ["ctc", "nemo", "sofa"]
 
         for engine_type in preferred_order:
             try:
