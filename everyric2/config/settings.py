@@ -63,6 +63,15 @@ class AudioSettings(BaseSettings):
         default=Path("/tmp/everyric2"), description="Temporary directory for processing"
     )
 
+    # YouTube cookie settings
+    cookies_from_browser: str | None = Field(
+        default=None,
+        description="Browser to extract cookies from (chrome, firefox, edge, brave, opera, chromium)",
+    )
+    cookie_file: Path | None = Field(
+        default=None, description="Path to Netscape format cookie file"
+    )
+
     @field_validator("temp_dir", mode="after")
     @classmethod
     def ensure_temp_dir_exists(cls, v: Path) -> Path:

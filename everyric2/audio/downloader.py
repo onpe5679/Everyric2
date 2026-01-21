@@ -82,6 +82,24 @@ class YouTubeDownloader:
                 "ffmpeg is required but not found. Install it with: sudo apt install ffmpeg"
             )
 
+    def _add_cookie_options(self, ydl_opts: dict[str, Any]) -> None:
+        if self.config.cookies_from_browser:
+            ydl_opts["cookiesfrombrowser"] = (self.config.cookies_from_browser,)
+        elif self.config.cookie_file and self.config.cookie_file.exists():
+            ydl_opts["cookiefile"] = str(self.config.cookie_file)
+        else:
+            default_cookie_file = Path("/tmp/everyric2/youtube_cookies.txt")
+            if default_cookie_file.exists():
+                ydl_opts["cookiefile"] = str(default_cookie_file)
+
+    def _add_ejs_options(self, ydl_opts: dict[str, Any]) -> None:
+        import os
+
+        deno_path = Path.home() / ".deno" / "bin"
+        if deno_path.exists():
+            os.environ["PATH"] = f"{deno_path}:{os.environ.get('PATH', '')}"
+        ydl_opts["allowed_remote_components"] = ["ejs:github"]
+
     def validate_url(self, url: str) -> bool:
         """Check if URL is a valid YouTube URL.
 
@@ -132,6 +150,9 @@ class YouTubeDownloader:
                 "no_warnings": True,
                 "extract_flat": False,
             }
+
+            self._add_cookie_options(ydl_opts)
+            self._add_ejs_options(ydl_opts)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -199,7 +220,11 @@ class YouTubeDownloader:
                 "outtmpl": outtmpl,
                 "quiet": True,
                 "no_warnings": True,
+                "compat_opts": ["allow-unsafe-ext"],
             }
+
+            self._add_cookie_options(ydl_opts)
+            self._add_ejs_options(ydl_opts)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)

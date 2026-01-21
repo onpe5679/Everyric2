@@ -1,0 +1,7 @@
+<ExtensionList>
+  <Extension Id="com.everyric.ae.panel">
+    <HostList>
+      <Host Name="AEFT" Port="8088"/>
+    </HostList>
+  </Extension>
+</ExtensionList>
