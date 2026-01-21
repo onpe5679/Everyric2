@@ -1,9 +1,17 @@
 import asyncio
+import hashlib
 import logging
-import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def compute_audio_hash(file_path: Path) -> str:
+    md5 = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            md5.update(chunk)
+    return md5.hexdigest()
 
 
 async def process_job(job_id: str) -> None:
@@ -21,15 +29,34 @@ async def process_job(job_id: str) -> None:
         await job_repo.update_status(job_id, "processing", progress=10)
 
     try:
+        lyrics_hash_value = hash_lyrics(job.lyrics)
+
+        download_result = await asyncio.get_event_loop().run_in_executor(
+            None, _download_and_hash, job.video_id
+        )
+        audio_hash = download_result["audio_hash"]
+        audio_path = download_result["audio_path"]
+
+        async with get_session() as session:
+            sync_repo = SyncRepository(session)
+            existing = await sync_repo.get_by_audio_and_lyrics_hash(audio_hash, lyrics_hash_value)
+            if existing:
+                job_repo = JobRepository(session)
+                await job_repo.update_status(
+                    job_id, "completed", progress=100, result_id=existing.id
+                )
+                logger.info(f"Job {job_id} reused existing sync (audio_hash match)")
+                Path(audio_path).unlink(missing_ok=True)
+                return
+
         result = await asyncio.get_event_loop().run_in_executor(
-            None, _sync_process, job.video_id, job.lyrics, job.language
+            None, _run_alignment, audio_path, job.lyrics, job.language
         )
 
         async with get_session() as session:
             job_repo = JobRepository(session)
             sync_repo = SyncRepository(session)
 
-            lyrics_hash_value = hash_lyrics(job.lyrics)
             sync_result = await sync_repo.create(
                 video_id=job.video_id,
                 lyrics_hash=lyrics_hash_value,
@@ -37,6 +64,7 @@ async def process_job(job_id: str) -> None:
                 language=result.get("language"),
                 engine="ctc",
                 quality_score=result.get("quality_score"),
+                audio_hash=audio_hash,
             )
 
             await job_repo.update_status(
@@ -51,22 +79,32 @@ async def process_job(job_id: str) -> None:
             await job_repo.update_status(job_id, "failed", error=str(e))
 
 
-def _sync_process(video_id: str, lyrics: str, language: str | None) -> dict:
-    from everyric2.alignment.factory import EngineFactory
+def _download_and_hash(video_id: str) -> dict:
     from everyric2.audio.downloader import YouTubeDownloader
+
+    downloader = YouTubeDownloader()
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    dl_result = downloader.download(youtube_url)
+    audio_hash = compute_audio_hash(dl_result.audio_path)
+
+    return {
+        "audio_path": str(dl_result.audio_path),
+        "audio_hash": audio_hash,
+    }
+
+
+def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
+    from everyric2.alignment.factory import EngineFactory
     from everyric2.audio.loader import AudioLoader
     from everyric2.config.settings import get_settings
     from everyric2.inference.prompt import LyricLine
 
     settings = get_settings()
-    downloader = YouTubeDownloader()
     loader = AudioLoader()
-
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-    dl_result = downloader.download(youtube_url)
+    audio_path_obj = Path(audio_path)
 
     try:
-        audio = loader.load(dl_result.audio_path)
+        audio = loader.load(audio_path_obj)
         lyric_lines = LyricLine.from_text(lyrics)
 
         engine = EngineFactory.get_engine("ctc", settings.alignment)
@@ -86,7 +124,8 @@ def _sync_process(video_id: str, lyrics: str, language: str | None) -> dict:
                 seg["confidence"] = r.confidence
             if r.word_segments:
                 seg["words"] = [
-                    {"word": w.word, "start": w.start, "end": w.end} for w in r.word_segments
+                    {"word": w.word, "start": w.start, "end": w.end, "confidence": w.confidence}
+                    for w in r.word_segments
                 ]
             timestamps.append(seg)
 
@@ -105,5 +144,4 @@ def _sync_process(video_id: str, lyrics: str, language: str | None) -> dict:
             "quality_score": avg_confidence,
         }
     finally:
-        if dl_result.audio_path.exists():
-            dl_result.audio_path.unlink()
+        audio_path_obj.unlink(missing_ok=True)

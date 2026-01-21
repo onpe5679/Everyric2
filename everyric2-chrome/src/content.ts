@@ -160,7 +160,11 @@ function getDefaultSettings(): Settings {
     showTranslation: false,
     translationLanguage: 'ko',
     useMusixmatch: false,
-    theme: 'auto'
+    theme: 'auto',
+    debugMode: false,
+    showWordTiming: false,
+    showCharTiming: false,
+    showMiniSubtitle: false
   };
 }
 

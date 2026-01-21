@@ -5,9 +5,19 @@ export interface SongInfo {
   duration: number;
 }
 
+export interface WordSegment {
+  word: string;
+  start: number;
+  end: number;
+  confidence?: number;
+}
+
 export interface LyricLine {
   time: number | null;
+  endTime?: number | null;
   text: string;
+  confidence?: number;
+  words?: WordSegment[];
 }
 
 export interface LRCLibResponse {
@@ -32,12 +42,22 @@ export interface LyricsResult {
   duration?: number;
 }
 
+export interface TimestampSegment {
+  text: string;
+  start: number;
+  end: number;
+  confidence?: number;
+  words?: WordSegment[];
+}
+
 export interface EveryricSyncResponse {
   found: boolean;
   sync_id?: string;
-  timestamps?: Array<{ start: number; end: number }>;
+  timestamps?: TimestampSegment[];
   lyrics_source?: string;
   quality_score?: number;
+  audio_hash?: string;
+  language?: string;
   created_at?: string;
   plain_lyrics_available?: boolean;
   suggested_source?: string;
@@ -52,6 +72,10 @@ export interface Settings {
   translationLanguage: string;
   useMusixmatch: boolean;
   theme: 'auto' | 'dark' | 'light';
+  debugMode: boolean;
+  showWordTiming: boolean;
+  showCharTiming: boolean;
+  showMiniSubtitle: boolean;
 }
 
 export type MessageType =

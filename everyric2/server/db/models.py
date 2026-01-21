@@ -17,6 +17,7 @@ class SyncResult(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     video_id: Mapped[str] = mapped_column(String(32), index=True)
     lyrics_hash: Mapped[str] = mapped_column(String(64), index=True)
+    audio_hash: Mapped[str | None] = mapped_column(String(32), index=True)
     timestamps: Mapped[dict[str, Any]] = mapped_column(JSON)
     language: Mapped[str | None] = mapped_column(String(8))
     engine: Mapped[str] = mapped_column(String(16), default="ctc")

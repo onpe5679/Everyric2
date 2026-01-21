@@ -43,6 +43,7 @@
   display: flex;
   flex-direction: column;
   backdrop-filter: blur(10px);
+  position: relative; /* For resize handles */
 }
 
 .everyric-container.theme-light {
@@ -673,6 +674,118 @@
   color: rgba(0, 0, 0, 0.9);
 }
 
+.everyric-line[data-confidence="low"] {
+  border-left: 3px solid #ef4444;
+}
+
+.everyric-line[data-confidence="medium"] {
+  border-left: 3px solid #eab308;
+}
+
+.everyric-line[data-confidence="high"] {
+  border-left: 3px solid #22c55e;
+}
+
+.everyric-word {
+  display: inline-block;
+  margin-right: 4px;
+  position: relative;
+}
+
+.everyric-word:hover .everyric-word-time {
+  opacity: 1;
+  visibility: visible;
+}
+
+.everyric-word-time {
+  position: absolute;
+  top: -16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.everyric-edit-container {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.everyric-edit-textarea {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #fff;
+  padding: 12px;
+  border-radius: 8px;
+  resize: none;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.theme-light .everyric-edit-textarea {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #0f0f0f;
+}
+
+.everyric-import-dialog {
+  padding: 20px;
+}
+
+.everyric-input-group {
+  margin-bottom: 16px;
+}
+
+.everyric-input {
+  width: 100%;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 14px;
+}
+
+.theme-light .everyric-input {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #0f0f0f;
+}
+
+.everyric-header-actions {
+  gap: 2px;
+}
+
+.everyric-btn.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.theme-light .everyric-btn.active {
+  color: #0f0f0f;
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.pip-mode .everyric-container {
+  height: 100vh;
+  width: 100vw;
+  border-radius: 0;
+}
+
 /* Progress Bar */
 .everyric-progress {
   width: 100%;
@@ -762,4 +875,329 @@
 .theme-light .everyric-warning {
   background: rgba(255, 193, 7, 0.1);
   color: rgba(0, 0, 0, 0.7);
+}
+
+.everyric-sync-list {
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 16px 0;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.theme-light .everyric-sync-list {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.everyric-sync-item {
+  padding: 12px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  transition: background 0.2s;
+}
+
+.everyric-sync-item:last-child {
+  border-bottom: none;
+}
+
+.everyric-sync-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.theme-light .everyric-sync-item {
+  border-bottom-color: rgba(0, 0, 0, 0.05);
+}
+
+.theme-light .everyric-sync-item:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.everyric-sync-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.theme-light .everyric-sync-title {
+  color: #0f0f0f;
+}
+
+.everyric-sync-preview {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.theme-light .everyric-sync-preview {
+  color: rgba(0, 0, 0, 0.5);
+}
+
+.everyric-form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.everyric-form-actions .everyric-secondary-btn {
+  margin-top: 0;
+}
+
+.everyric-info-label {
+  color: rgba(255, 255, 255, 0.5);
+  min-width: 70px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.theme-light .everyric-info-label {
+  color: rgba(0, 0, 0, 0.5);
+}
+
+.everyric-info-value {
+  color: rgba(255, 255, 255, 0.8);
+  word-break: break-all;
+  font-size: 11px;
+  flex: 1;
+}
+
+.theme-light .everyric-info-value {
+  color: rgba(0, 0, 0, 0.7);
+}
+
+.everyric-copy-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.everyric-copy-btn:hover {
+  opacity: 1;
+}
+
+.everyric-copy-lyrics {
+  width: 100%;
+  margin-top: 8px;
+  justify-content: center;
+}
+
+.everyric-form-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 12px;
+}
+
+.theme-light .everyric-form-title {
+  color: #0f0f0f;
+}
+
+.everyric-manual-input {
+  margin-top: 8px;
+}
+
+/* SETTINGS PANEL */
+.everyric-settings-panel {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  color: #fff;
+}
+
+.theme-light .everyric-settings-panel {
+  color: #0f0f0f;
+}
+
+.everyric-settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.everyric-settings-header h3, .everyric-settings-header h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.everyric-btn-text {
+  background: transparent;
+  border: none;
+  color: #4285f4;
+  font-weight: 500;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.everyric-btn-text:hover {
+  background: rgba(66, 133, 244, 0.1);
+}
+
+.everyric-settings-group {
+  margin-bottom: 12px;
+}
+
+.everyric-settings-group label {
+  display: block;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 6px;
+}
+
+.theme-light .everyric-settings-group label {
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.everyric-select {
+  width: 100%;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.theme-light .everyric-select {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.15);
+  color: #0f0f0f;
+}
+
+.everyric-setting-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.theme-light .everyric-setting-toggle {
+  border-bottom-color: rgba(0, 0, 0, 0.05);
+}
+
+.everyric-setting-toggle:last-child {
+  border-bottom: none;
+}
+
+.everyric-setting-toggle label {
+  font-size: 13px;
+  flex: 1;
+  cursor: pointer;
+}
+
+.everyric-setting-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.everyric-setting-toggle.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.everyric-settings-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 12px 0;
+}
+
+.theme-light .everyric-settings-divider {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.everyric-settings-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.everyric-settings-actions .everyric-btn-text {
+  text-align: left;
+  padding: 8px;
+  color: rgba(255, 255, 255, 0.8);
+  border-radius: 6px;
+}
+
+.theme-light .everyric-settings-actions .everyric-btn-text {
+  color: rgba(0, 0, 0, 0.8);
+}
+
+.everyric-settings-actions .everyric-btn-text:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.theme-light .everyric-settings-actions .everyric-btn-text:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: #0f0f0f;
+}
+
+/* RESIZE HANDLES */
+.everyric-resize-handle {
+  position: absolute;
+  background: transparent;
+  z-index: 100;
+}
+
+.everyric-resize-e { top: 0; right: 0; bottom: 0; width: 6px; cursor: e-resize; }
+.everyric-resize-s { bottom: 0; left: 0; right: 0; height: 6px; cursor: s-resize; }
+.everyric-resize-se { bottom: 0; right: 0; width: 12px; height: 12px; cursor: se-resize; }
+.everyric-resize-w { top: 0; left: 0; bottom: 0; width: 6px; cursor: w-resize; }
+.everyric-resize-sw { bottom: 0; left: 0; width: 12px; height: 12px; cursor: sw-resize; }
+
+/* MINI SUBTITLE */
+.everyric-mini-subtitle {
+  position: absolute;
+  z-index: 2000;
+  text-align: center;
+  pointer-events: auto; /* draggable */
+  cursor: grab;
+  /* Default position (can be overridden by drag) */
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: auto;
+  min-width: 300px;
+  max-width: 80%;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  transition: opacity 0.2s;
+  user-select: none;
+}
+
+.everyric-mini-subtitle:hover {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.everyric-mini-current {
+  font-size: 24px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1.3;
+}
+
+.everyric-mini-next {
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.7);
+  margin-top: 4px;
 }

@@ -24,11 +24,54 @@ class SyncRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_audio_hash(self, audio_hash: str) -> SyncResult | None:
+        result = await self.session.execute(
+            select(SyncResult)
+            .where(SyncResult.audio_hash == audio_hash)
+            .order_by(SyncResult.created_at.desc())
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_audio_and_lyrics_hash(
+        self, audio_hash: str, lyrics_hash: str
+    ) -> SyncResult | None:
+        result = await self.session.execute(
+            select(SyncResult).where(
+                SyncResult.audio_hash == audio_hash,
+                SyncResult.lyrics_hash == lyrics_hash,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_video(self, video_id: str) -> list[SyncResult]:
         result = await self.session.execute(
             select(SyncResult)
             .where(SyncResult.video_id == video_id)
             .order_by(SyncResult.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_all_unique_videos(self, limit: int = 50) -> list[SyncResult]:
+        """Get one sync result per unique video_id, ordered by most recent."""
+        from sqlalchemy import func
+
+        # Subquery to get max created_at for each video_id
+        subquery = (
+            select(SyncResult.video_id, func.max(SyncResult.created_at).label("max_created"))
+            .group_by(SyncResult.video_id)
+            .subquery()
+        )
+
+        # Join to get full SyncResult rows
+        result = await self.session.execute(
+            select(SyncResult)
+            .join(
+                subquery,
+                (SyncResult.video_id == subquery.c.video_id)
+                & (SyncResult.created_at == subquery.c.max_created),
+            )
+            .order_by(SyncResult.created_at.desc())
+            .limit(limit)
         )
         return list(result.scalars().all())
 
@@ -40,10 +83,12 @@ class SyncRepository:
         language: str | None = None,
         engine: str = "ctc",
         quality_score: float | None = None,
+        audio_hash: str | None = None,
     ) -> SyncResult:
         sync_result = SyncResult(
             video_id=video_id,
             lyrics_hash=lyrics_hash,
+            audio_hash=audio_hash,
             timestamps={"segments": timestamps},
             language=language,
             engine=engine,
