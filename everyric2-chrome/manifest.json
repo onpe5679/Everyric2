@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "Everyric - Synced Lyrics for YouTube",
+  "version": "1.0.0",
+  "description": "Display time-synced lyrics for any song on YouTube. Karaoke-style lyric highlighting with community-powered lyrics timing.",
+  
+  "permissions": ["storage"],
+  
+  "host_permissions": [
+    "https://lrclib.net/*",
+    "https://api.everyric.com/*"
+  ],
+  
+  "content_scripts": [{
+    "matches": [
+      "https://www.youtube.com/*",
+      "https://music.youtube.com/*"
+    ],
+    "js": ["src/content.ts"],
+    "css": ["content.css"],
+    "run_at": "document_idle"
+  }],
+  
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  
+  "externally_connectable": {
+    "matches": ["https://everyric.com/*", "https://*.everyric.com/*"]
+  },
+  
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "Everyric Lyrics"
+  },
+  
+  "web_accessible_resources": [{
+    "resources": ["icons/*"],
+    "matches": ["https://www.youtube.com/*", "https://music.youtube.com/*"]
+  }]
+}

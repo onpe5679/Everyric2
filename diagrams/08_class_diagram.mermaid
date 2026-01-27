@@ -1,0 +1,247 @@
+%%{init: {'theme': 'base'}}%%
+classDiagram
+    %% ===== Alignment Engines =====
+    class BaseAlignmentEngine {
+        <<abstract>>
+        +config: AlignmentSettings
+        +align(audio, lyrics, language) list~SyncResult~
+        +transcribe(audio, language) TranscriptionResult
+        +is_available() bool
+        +get_transcription_sets() list
+        +get_engine_type() str
+    }
+
+    class CTCEngine {
+        -_model: Wav2Vec2ForCTC
+        -_processor: Wav2Vec2Processor
+        -_current_lang: str
+        -_last_word_timestamps: list~WordTimestamp~
+        -_last_match_stats: MatchStats
+        +align(audio, lyrics, language) list~SyncResult~
+        -_align_cjk(waveform, lyrics, language) list~SyncResult~
+        -_align_mms(waveform, lyrics, language) list~SyncResult~
+        +get_last_transcription_data() tuple
+    }
+
+    class SOFAEngine {
+        -_model: LitForcedAlignmentTask
+        -_g2p: SimpleG2P
+        -_get_melspec: MelSpecExtractor
+        -_current_lang: str
+        +align(audio, lyrics, language) list~SyncResult~
+        -_match_words_to_lines(lyrics, words, conf) list~SyncResult~
+        +SUPPORTED_LANGUAGES: en only
+    }
+
+    class SimpleG2P {
+        +dictionary: dict
+        +convert(text) tuple~ph_seq, word_seq, ph_idx_to_word_idx~
+        -_normalize_word(word) str
+        -_load_dictionary(path)
+    }
+
+    class LyricsMatcher {
+        +last_match_stats: MatchStats
+        +match_lyrics_to_words(lyrics, words, lang) list~SyncResult~
+        -_find_best_matches(lyric_tokens, word_texts, words)
+        -_hybrid_interpolation(lyrics, matches, words, duration)
+    }
+
+    class MatchStats {
+        +total_lyrics: int
+        +matched_lyrics: int
+        +match_rate: float
+        +avg_confidence: float
+    }
+
+    BaseAlignmentEngine <|-- CTCEngine
+    BaseAlignmentEngine <|-- SOFAEngine
+    CTCEngine ..> LyricsMatcher : fallback only
+    SOFAEngine --> SimpleG2P
+    LyricsMatcher --> MatchStats
+
+    %% ===== Project File =====
+    class ProjectFile {
+        +path: Path
+        +data: AlignmentData
+        +save(data) Path
+        +load() AlignmentData
+        +from_sync_results(results, path, meta, trans)$ ProjectFile
+        +get_line_results() list~SyncResult~
+        +apply_translations(results) list~SyncResult~
+        +get_translation_track() list~SyncResult~
+    }
+
+    class AlignmentData {
+        +metadata: ProjectMetadata
+        +results: list~SyncResult~
+        +translations: list~TranslationData~
+        +to_dict() dict
+        +from_dict(data)$ AlignmentData
+        -_sync_result_to_dict(r) dict
+    }
+
+    class ProjectMetadata {
+        +version: str
+        +created_at: str
+        +source_audio: str
+        +source_lyrics: str
+        +language: str
+        +engine: str
+    }
+
+    class TranslationData {
+        +line_index: int
+        +original: str
+        +translation: str
+        +pronunciation: str
+    }
+
+    ProjectFile --> AlignmentData
+    AlignmentData --> ProjectMetadata
+    AlignmentData --> TranslationData
+
+    %% ===== Tokenizer =====
+    class Tokenizer {
+        +language: str
+        +use_mecab: bool
+        -_tagger: MeCab Tagger
+        +tokenize(text) list~TokenInfo~
+        +split_into_words(text) list~str~
+        +split_into_characters(text) list~str~
+        -_tokenize_japanese(text)
+        -_tokenize_japanese_mecab(text)
+        -_tokenize_chinese(text)
+        -_tokenize_korean(text)
+    }
+
+    class TokenInfo {
+        +surface: str
+        +pos: str
+        +reading: str
+        +is_content_word: bool
+    }
+
+    Tokenizer --> TokenInfo
+
+    %% ===== Post-Processing =====
+    class SilenceHandler {
+        +settings: SegmentationSettings
+        +detected_interludes: list~InterludeInfo~
+        +process(results) list~SyncResult~
+        +detect_silence_gaps(results) list~dict~
+        +get_interludes() list~InterludeInfo~
+        -_merge_gap(prev, curr) tuple
+    }
+
+    class InterludeInfo {
+        +start: float
+        +end: float
+        +duration: float
+        +after_line: int
+    }
+
+    class SegmentationProcessor {
+        +settings: SegmentationSettings
+        +language: str
+        +tokenizer: Tokenizer
+        +process(results, language) list~SyncResult~
+        -_process_line_mode(results) list~SyncResult~
+        -_process_word_mode(results) list~SyncResult~
+        -_process_character_mode(results) list~SyncResult~
+        -_combine_chars_to_words(result) list~SyncResult~
+        -_split_text_to_words(result) list~SyncResult~
+        -_split_text_to_chars(result) list~SyncResult~
+    }
+
+    class SegmentationSettings {
+        +mode: line/word/character
+        +min_silence_gap: float
+        +interlude_gap: float
+        +max_chars_per_segment: int
+        +min_duration: float
+        +use_mecab: bool
+    }
+
+    SilenceHandler --> SegmentationSettings
+    SilenceHandler --> InterludeInfo
+    SegmentationProcessor --> SegmentationSettings
+    SegmentationProcessor --> Tokenizer
+
+    %% ===== Output =====
+    class MultiOutputGenerator {
+        +format_type: str
+        +segment_mode: str
+        +generate_all_variants(results, trans, dir, name, line_results) list~OutputFile~
+        -_generate_separated_tracks(results, trans, dir, name, line_results)
+        -_generate_original(results, dir, name)
+        -_generate_translated(results, dir, name)
+    }
+
+    class OutputFile {
+        +variant: str
+        +path: Path
+        +content: str
+    }
+
+    MultiOutputGenerator --> OutputFile
+
+    %% ===== Translation =====
+    class BaseTranslator {
+        <<abstract>>
+        +settings: TranslationSettings
+        +translate(lyrics, source, target) TranslationResult
+    }
+
+    class GeminiTranslator {
+        -api_key: str
+        +translate(lyrics, source, target)
+    }
+
+    class OpenAICompatibleTranslator {
+        -api_key: str
+        -api_url: str
+        +translate(lyrics, source, target)
+    }
+
+    BaseTranslator <|-- GeminiTranslator
+    BaseTranslator <|-- OpenAICompatibleTranslator
+
+    %% ===== Data Classes =====
+    class SyncResult {
+        +text: str
+        +start_time: float
+        +end_time: float
+        +confidence: float
+        +line_number: int
+        +word_segments: list~WordSegment~
+        +translation: str
+        +pronunciation: str
+    }
+
+    class WordSegment {
+        +word: str
+        +start: float
+        +end: float
+        +confidence: float
+    }
+
+    class WordTimestamp {
+        +word: str
+        +start: float
+        +end: float
+        +confidence: float
+    }
+
+    SyncResult --> WordSegment
+    AlignmentData --> SyncResult
+    SilenceHandler --> SyncResult
+    SegmentationProcessor --> SyncResult
+    CTCEngine --> WordTimestamp
+
+    %% Notes
+    note for CTCEngine "ja: wav2vec2-xlsr-53-japanese\nko/en: MMS 1B-all + adapter\nzh: wav2vec2-xlsr-53-chinese"
+    note for SOFAEngine "노래 전용 Forced Aligner\n영어만 지원 (tgm_en_v100)"
+    note for ProjectFile ".everyric.json\nword_segments 포함 저장"
+    note for SegmentationProcessor "word mode:\n_combine_chars_to_words로\n문자 타이밍 → 단어 타이밍"
+    note for Tokenizer "ja: MeCab/fugashi\nzh: jieba\nko: konlpy"

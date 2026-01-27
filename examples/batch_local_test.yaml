@@ -1,0 +1,15 @@
+output_dir: output
+create_timestamped_folder: true
+default_formats:
+  - srt
+  - ass
+  - lrc
+  - json
+
+tasks:
+  - audio: "examples/audio/test_tone.wav"
+    lyrics: |
+      Hello world
+      This is a test
+      One two three
+      Testing lyrics sync

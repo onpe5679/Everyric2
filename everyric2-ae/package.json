@@ -1,0 +1,23 @@
+{
+  "name": "everyric2-ae",
+  "version": "1.0.0",
+  "description": "Everyric2 After Effects Plugin - Automatic lyrics synchronization",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:panel",
+    "build:panel": "esbuild src/panel/main.ts --bundle --outfile=dist/js/main.js --format=iife --platform=node --target=es2020 --external:child_process --external:fs --external:os --external:path",
+    "build:jsx": "esbuild src/jsx/host.ts --bundle --outfile=dist/jsx/host.jsx --format=iife --target=es5 --charset=utf8",
+    "watch": "npm run watch:panel & npm run watch:jsx",
+    "watch:panel": "esbuild src/panel/main.ts --bundle --outfile=dist/js/main.js --format=iife --platform=browser --target=es2020 --watch",
+    "watch:jsx": "esbuild src/jsx/host.ts --bundle --outfile=dist/jsx/host.jsx --format=iife --target=es5 --charset=utf8 --watch",
+    "install-plugin": "node scripts/install.js",
+    "dev": "npm run build && npm run install-plugin",
+    "release": "npm run build && rm -rf release && mkdir -p release/com.everyric.ae && cp -r CSXS dist css lib release/com.everyric.ae/ && cp index.html .debug release/com.everyric.ae/"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.3.0"
+  }
+}

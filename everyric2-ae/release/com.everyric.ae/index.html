@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Everyric2</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <h1>Everyric2</h1>
+      <button id="settingsBtn" class="icon-btn" title="Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+        </svg>
+      </button>
+    </header>
+
+    <main class="main-content">
+      <section class="section" id="audioSection">
+        <label class="section-label">Audio Source</label>
+        <div class="audio-selector">
+          <div id="audioInfo" class="audio-info">
+            <span class="placeholder">No audio layer selected</span>
+          </div>
+          <button id="selectAudioBtn" class="btn btn-secondary">Select</button>
+        </div>
+      </section>
+
+      <section class="section" id="lyricsSection">
+        <label class="section-label">Lyrics</label>
+        <textarea id="lyricsInput" class="lyrics-input" placeholder="Paste lyrics here or search LRCLIB..."></textarea>
+        <div class="lyrics-actions">
+          <button id="searchLrcBtn" class="btn btn-text">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+            </svg>
+            Search LRCLIB
+          </button>
+          <button id="loadLrcBtn" class="btn btn-text">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/>
+            </svg>
+            Load LRC
+          </button>
+        </div>
+      </section>
+
+      <section class="section" id="outputSection">
+        <label class="section-label">Output Format</label>
+        <div class="radio-group">
+          <label class="radio-label">
+            <input type="radio" name="outputType" value="markers">
+            <span>Markers</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="outputType" value="textLayers">
+            <span>Text Layers</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="outputType" value="both" checked>
+            <span>Both</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="section" id="segmentSection">
+        <label class="section-label">Segment Mode</label>
+        <div class="radio-group">
+          <label class="radio-label">
+            <input type="radio" name="segmentMode" value="line" checked>
+            <span>Line</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="segmentMode" value="word">
+            <span>Word</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="segmentMode" value="character">
+            <span>Character</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="section" id="modeSection">
+        <label class="section-label">Processing Mode</label>
+        <div class="radio-group">
+          <label class="radio-label">
+            <input type="radio" name="processMode" value="local" checked>
+            <span>Local (everyric2 CLI)</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="processMode" value="cloud">
+            <span>Cloud API</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="section" id="optionsSection">
+        <label class="section-label">Options</label>
+        <div class="options-grid">
+          <label class="checkbox-label">
+            <input type="checkbox" id="translateCheck">
+            <span>Translate to Korean</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="pronunciationCheck">
+            <span>Include pronunciation</span>
+          </label>
+        </div>
+        <div class="select-row">
+          <label for="languageSelect">Language:</label>
+          <select id="languageSelect">
+            <option value="auto">Auto detect</option>
+            <option value="ja">Japanese</option>
+            <option value="en">English</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+          </select>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <button id="generateBtn" class="btn btn-primary btn-large">Generate Sync</button>
+      <div id="statusBar" class="status-bar">
+        <span id="statusText">Ready</span>
+      </div>
+    </footer>
+
+    <div id="progressOverlay" class="overlay hidden">
+      <div class="progress-content">
+        <div class="spinner"></div>
+        <p id="progressText">Processing...</p>
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <button id="cancelBtn" class="btn btn-secondary">Cancel</button>
+      </div>
+    </div>
+
+    <div id="resultOverlay" class="overlay hidden">
+      <div class="result-content">
+        <div class="result-icon success">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+          </svg>
+        </div>
+        <h2>Sync Complete!</h2>
+        <div id="resultStats" class="result-stats"></div>
+        <div class="result-actions">
+          <button id="saveLrcBtn" class="btn btn-secondary">Save LRC</button>
+          <button id="saveSrtBtn" class="btn btn-secondary">Save SRT</button>
+          <button id="newTaskBtn" class="btn btn-primary">New Task</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="settingsOverlay" class="overlay hidden">
+      <div class="settings-content">
+        <h2>Settings</h2>
+        <div class="settings-form">
+          <div class="form-group">
+            <label for="cliPathInput">everyric2 CLI Path</label>
+            <input type="text" id="cliPathInput" placeholder="everyric2 (auto-detect)">
+          </div>
+          <div class="form-group">
+            <label for="apiUrlInput">Cloud API URL</label>
+            <input type="text" id="apiUrlInput" placeholder="https://api.everyric.com">
+          </div>
+          <div class="form-group">
+            <label for="markerColorSelect">Marker Color</label>
+            <select id="markerColorSelect">
+              <option value="green">Green</option>
+              <option value="red">Red</option>
+              <option value="blue">Blue</option>
+              <option value="yellow">Yellow</option>
+              <option value="orange">Orange</option>
+              <option value="purple">Purple</option>
+              <option value="cyan">Cyan</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="fontSizeInput">Text Layer Font Size</label>
+            <input type="number" id="fontSizeInput" value="60" min="12" max="200">
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button id="settingsCancelBtn" class="btn btn-secondary">Cancel</button>
+          <button id="settingsSaveBtn" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="searchOverlay" class="overlay hidden">
+      <div class="search-content">
+        <h2>Search LRCLIB</h2>
+        <div class="search-form">
+          <input type="text" id="searchQueryInput" placeholder="Song title or artist...">
+          <button id="searchExecuteBtn" class="btn btn-primary">Search</button>
+        </div>
+        <div id="searchResults" class="search-results">
+          <p class="placeholder">Enter a search query above</p>
+        </div>
+        <div class="search-actions">
+          <button id="searchCancelBtn" class="btn btn-secondary">Cancel</button>
+          <button id="searchSelectBtn" class="btn btn-primary" disabled>Select</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="lib/CSInterface.js"></script>
+  <script src="dist/js/main.js"></script>
+</body>
+</html>

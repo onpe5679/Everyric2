@@ -1,0 +1,47 @@
+%%{init: {'theme': 'base'}}%%
+flowchart TD
+    subgraph USAGE["사용 조건"]
+        LANG{Language?}
+        CJK[CJK 언어<br/>ja/ko/zh]
+        OTHER[non-CJK<br/>en 등]
+        SKIP[LyricsMatcher 미사용<br/>CTCEngine이 직접<br/>word_segments 생성]
+        USE[LyricsMatcher 사용<br/>fuzzy matching]
+    end
+
+    subgraph MATCHER["LyricsMatcher.match_lyrics_to_words()"]
+        A[입력: lyrics, words] --> B[가사 토큰화]
+        B --> C[단어 텍스트 정규화]
+        C --> D[_find_best_matches]
+        
+        subgraph FUZZY["퍼지 매칭"]
+            D --> E[search window 설정]
+            E --> F[_calculate_match_score<br/>F1 + length_penalty]
+            F --> G{score > 0.3?}
+            G -->|Yes| H[match 저장]
+            G -->|No| I[다음 시도]
+        end
+        
+        H --> J[_hybrid_interpolation]
+        J --> K[word_segments 포함<br/>SyncResult 생성]
+        K --> L[MatchStats 계산]
+    end
+
+    subgraph STATS["MatchStats"]
+        M["total_lyrics: 45"]
+        N["matched_lyrics: 40"]
+        O["match_rate: 0.89"]
+        P["avg_confidence: 0.85"]
+    end
+
+    LANG -->|ja/ko/zh| CJK
+    LANG -->|en/other| OTHER
+    CJK --> SKIP
+    OTHER --> USE
+    USE --> A
+    L --> M
+    L --> N
+    L --> O
+    L --> P
+
+    style SKIP fill:#90EE90
+    style CJK fill:#FFD700

@@ -1,0 +1,52 @@
+%%{init: {'theme': 'base'}}%%
+flowchart TD
+    subgraph OUTPUT["output/YYYYMMDD_HHMMSS/"]
+        subgraph CORE["핵심 파일"]
+            PJ["output.everyric.json<br/>📦 프로젝트 파일<br/>(재분할용 루트 데이터)"]
+            E["output.srt<br/>기본 줄단위 자막"]
+        end
+        
+        subgraph AUDIO["오디오"]
+            A["audio_original.wav<br/>원본 오디오"]
+            B["audio_vocals.wav<br/>분리된 보컬<br/>(--separate)"]
+        end
+        
+        subgraph LYRICS["가사"]
+            C["lyrics_original.txt<br/>원본 가사"]
+            D["lyrics_translated_ko.txt<br/>번역된 가사<br/>(--translate)"]
+        end
+        
+        subgraph LINE_MODE["line 모드 출력<br/>(--translate 시)"]
+            F["output_translated.srt<br/>번역만"]
+            F2["output_pronunciation.srt<br/>원본 + 발음"]
+            F3["output_full.srt<br/>원본 + 발음 + 번역"]
+        end
+        
+        subgraph DEBUG["디버그 (--debug)"]
+            G["diagnostics.png<br/>진단 이미지"]
+            H["debug_info.json<br/>상세 디버그 데이터"]
+            I["settings.json<br/>실행 설정"]
+        end
+    end
+
+    subgraph REPROCESS["reprocess 출력<br/>(word/character 모드)"]
+        R1["output_word.srt<br/>🎯 단어별 정밀 타이밍"]
+        R2["output_character.srt<br/>🎯 글자별 정밀 타이밍"]
+        R3["output_translation.srt<br/>📝 번역 (줄단위 유지)"]
+        R4["output_pronunciation.srt<br/>📝 발음 (줄단위 유지)"]
+    end
+
+    subgraph FLAGS["CLI 플래그"]
+        F1["--debug"]
+        F2b["--separate"]
+        F3b["--translate"]
+        F4["--segment-mode word/char"]
+    end
+
+    F1 -.-> DEBUG
+    F2b -.-> B
+    F3b -.-> D
+    F3b -.-> LINE_MODE
+    F4 -.-> REPROCESS
+    
+    PJ -->|"reprocess 명령"| REPROCESS

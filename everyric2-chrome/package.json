@@ -1,0 +1,20 @@
+{
+  "name": "everyric2-chrome",
+  "version": "1.0.0",
+  "description": "Display time-synced lyrics for any song on YouTube",
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch --mode development",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.25",
+    "@types/chrome": "^0.0.268",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.12"
+  },
+  "dependencies": {
+    "playwright": "^1.57.0"
+  }
+}

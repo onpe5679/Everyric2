@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES3",
+    "module": "None",
+    "lib": ["ES5"],
+    "strict": false,
+    "noImplicitAny": false,
+    "esModuleInterop": false,
+    "skipLibCheck": true,
+    "declaration": false,
+    "noEmit": true,
+    "isolatedModules": true
+  },
+  "include": ["src/jsx/**/*", "src/types/extendscript.d.ts"],
+  "exclude": ["node_modules", "dist"]
+}

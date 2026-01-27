@@ -1,0 +1,148 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4ECDC4', 'secondaryColor': '#FF6B6B'}}}%%
+flowchart TD
+    subgraph INPUT["입력"]
+        A[오디오 파일<br/>audio.wav]
+        B[가사 파일<br/>lyrics.txt]
+    end
+
+    subgraph PREPROCESS["전처리"]
+        C[AudioLoader<br/>44.1kHz → 16kHz]
+        D{--separate?}
+        E[Demucs<br/>보컬 분리]
+        F[LyricLine.from_file<br/>원본 가사 파싱]
+    end
+
+    subgraph ENGINE["Alignment Engine"]
+        ENG{--engine?}
+        
+        subgraph CTC_ENG["CTCEngine (권장)"]
+            CTC_AUTO{language=auto?}
+            CTC_DET[detect_language_from_text<br/>가사에서 언어 자동 감지<br/>히라가나→ja, 한글→ko, CJK→zh]
+            CTC_LANG{Language?}
+            
+            subgraph CTC_MODELS["LANG_MODEL_MAP"]
+                CTC_JA[ja: wav2vec2-xlsr-53-japanese]
+                CTC_KO[ko: MMS 1B-all + kor adapter]
+                CTC_ZH[zh: wav2vec2-xlsr-53-chinese]
+                CTC_EN[en: MMS 1B-all + eng adapter]
+            end
+            
+            CTC_CHAR[문자별 forced_align<br/>char_info + token_spans]
+            CTC_WS[word_segments 직접 생성<br/>문자별 타이밍]
+        end
+        
+        subgraph SOFA_ENG["SOFAEngine (노래 전용)"]
+            SOFA_G2P[SimpleG2P<br/>Grapheme to Phoneme]
+            SOFA_MODEL[SOFA Model<br/>tgm_en_v100.ckpt]
+            SOFA_ALIGN[Phoneme Alignment<br/>+ frame_confidence]
+            SOFA_NOTE[⚠️ 영어만 지원]
+        end
+        
+        subgraph WX_ENG["WhisperXEngine"]
+            J[WhisperX 전사]
+            I_WX[LyricsMatcher]
+        end
+    end
+
+    subgraph POSTPROCESS["후처리 파이프라인"]
+        SH[SilenceHandler<br/>간주 감지 + 무성구간 병합]
+        
+        subgraph TRANSLATE["번역 (선택)"]
+            G{--translate?}
+            TR_FACT{TranslatorFactory}
+            TR_GEM[GeminiTranslator]
+            TR_OAI[OpenAICompatibleTranslator]
+            TR_LOC[Local LLM<br/>Ollama/LM Studio]
+            TR_RES[TranslationResult<br/>번역 + 발음]
+        end
+        
+        PF[ProjectFile 저장<br/>.everyric.json<br/>word_segments 포함]
+        
+        subgraph SEG_PROC["SegmentationProcessor"]
+            SEG_MODE{--segment-mode?}
+            SEG_LINE[line: 긴 줄 분할]
+            SEG_WORD[word: Tokenizer로<br/>문자→단어 합산]
+            SEG_CHAR[character: 문자별 출력]
+        end
+    end
+
+    subgraph OUTPUT["출력"]
+        MOG[MultiOutputGenerator]
+        
+        subgraph LINE_OUT["line 모드"]
+            L1[output.srt]
+            L2[output_translated.srt]
+            L3[output_pronunciation.srt]
+            L4[output_full.srt]
+        end
+        
+        subgraph SEG_OUT["word/character 모드<br/>(트랙 분리)"]
+            S1[output_word.srt / output_character.srt<br/>정밀 타이밍]
+            S2[output_translation.srt<br/>번역 줄단위]
+            S3[output_pronunciation.srt<br/>발음 줄단위]
+        end
+        
+        M[diagnostics.png]
+        N[audio_vocals.wav]
+    end
+
+    A --> C
+    B --> F
+    C --> D
+    D -->|Yes| E
+    D -->|No| ENG
+    E --> ENG
+    E --> N
+    
+    ENG -->|ctc| CTC_AUTO
+    CTC_AUTO -->|Yes| CTC_DET
+    CTC_AUTO -->|No| CTC_LANG
+    CTC_DET --> CTC_LANG
+    CTC_LANG -->|ja| CTC_JA
+    CTC_LANG -->|ko| CTC_KO
+    CTC_LANG -->|zh| CTC_ZH
+    CTC_LANG -->|en| CTC_EN
+    CTC_JA --> CTC_CHAR
+    CTC_KO --> CTC_CHAR
+    CTC_ZH --> CTC_CHAR
+    CTC_EN --> CTC_CHAR
+    CTC_CHAR --> CTC_WS
+    CTC_WS -->|SyncResult + word_segments| SH
+    
+    ENG -->|sofa| SOFA_G2P
+    SOFA_G2P --> SOFA_MODEL
+    SOFA_MODEL --> SOFA_ALIGN
+    SOFA_ALIGN -->|SyncResult + word_segments| SH
+    
+    ENG -->|whisperx| J
+    J --> I_WX
+    I_WX --> SH
+    
+    F -->|원본 가사| ENG
+    
+    SH --> G
+    
+    G -->|Yes| TR_FACT
+    TR_FACT -->|gemini| TR_GEM
+    TR_FACT -->|openai| TR_OAI
+    TR_FACT -->|local| TR_LOC
+    TR_GEM --> TR_RES
+    TR_OAI --> TR_RES
+    TR_LOC --> TR_RES
+    TR_RES --> PF
+    
+    G -->|No| PF
+    
+    PF --> SEG_MODE
+    SEG_MODE -->|line| SEG_LINE
+    SEG_MODE -->|word| SEG_WORD
+    SEG_MODE -->|character| SEG_CHAR
+    
+    SEG_LINE --> MOG
+    SEG_WORD --> MOG
+    SEG_CHAR --> MOG
+    
+    MOG -->|line| LINE_OUT
+    MOG -->|word/char| SEG_OUT
+    
+    SH --> M

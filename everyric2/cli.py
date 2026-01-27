@@ -1,0 +1,1040 @@
+"""Command-line interface for Everyric2."""
+
+import warnings
+
+warnings.filterwarnings("ignore", message=".*torchaudio._backend.*")
+warnings.filterwarnings("ignore", message=".*Passing.*gradient_checkpointing.*")
+
+try:
+    import torch
+
+    # Enable TF32 for RTX 30/40/50 series - MUST be before any model loading
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
+    # Monkey-patch torch.load to fix weights_only=True issue with pyannote/whisperx
+    _original_load = torch.load
+
+    def _patched_load(*args, **kwargs):
+        if "weights_only" in kwargs:
+            kwargs["weights_only"] = False
+        return _original_load(*args, **kwargs)
+
+    torch.load = _patched_load
+except ImportError:
+    pass
+
+import threading
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+
+from everyric2 import __version__
+from everyric2.config.settings import get_settings
+from everyric2.output.formatters import FormatterFactory
+
+app = typer.Typer(
+    name="everyric2",
+    help="Lyrics synchronization using Qwen3-Omni multimodal LLM",
+    no_args_is_help=True,
+)
+console = Console()
+
+
+def version_callback(value: bool) -> None:
+    """Print version and exit."""
+    if value:
+        console.print(f"everyric2 version {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option("--version", "-v", callback=version_callback, is_eager=True),
+    ] = False,
+) -> None:
+    """Everyric2 - Lyrics synchronization using Qwen3-Omni."""
+    pass
+
+
+@app.command()
+def sync(
+    source: Annotated[str, typer.Argument(help="YouTube URL or local audio file path")],
+    lyrics: Annotated[Path, typer.Argument(help="Path to lyrics text file")],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Output file path"),
+    ] = None,
+    format: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format (srt, ass, lrc, json)"),
+    ] = "srt",
+    separate: Annotated[
+        bool,
+        typer.Option("--separate", "-s", help="Use Demucs vocal separation"),
+    ] = False,
+    translate: Annotated[
+        bool,
+        typer.Option("--translate", "-t", help="Translate lyrics to Korean"),
+    ] = False,
+    pronunciation: Annotated[
+        bool,
+        typer.Option("--pronunciation", "-p", help="Include pronunciation transcription"),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option("--debug", "-d", help="Save debug files (prompts, responses, diagnostics)"),
+    ] = False,
+    engine: Annotated[
+        str,
+        typer.Option("--engine", "-e", help="Alignment engine (ctc, whisperx, nemo, sofa, qwen)"),
+    ] = "ctc",
+    language: Annotated[
+        str,
+        typer.Option("--language", "-l", help="Language (auto, en, ja, ko)"),
+    ] = "auto",
+    model: Annotated[
+        str | None,
+        typer.Option("--model", "-m", help="Model path override (for qwen engine)"),
+    ] = None,
+    cache_dir: Annotated[
+        Path | None,
+        typer.Option("--cache-dir", help="HuggingFace cache directory"),
+    ] = None,
+    segment_mode: Annotated[
+        str,
+        typer.Option("--segment-mode", help="Segmentation mode (line, word, character, all)"),
+    ] = "line",
+    min_silence_gap: Annotated[
+        float,
+        typer.Option("--min-silence-gap", help="Minimum silence gap to merge (seconds)"),
+    ] = 0.3,
+    interlude_gap: Annotated[
+        float,
+        typer.Option(
+            "--interlude-gap", help="Gaps longer than this are interludes - no subtitle (seconds)"
+        ),
+    ] = 5.0,
+    max_chars: Annotated[
+        int,
+        typer.Option("--max-chars", help="Maximum characters per subtitle line"),
+    ] = 50,
+    translate_engine: Annotated[
+        str,
+        typer.Option("--translate-engine", help="Translation engine (gemini, openai, local)"),
+    ] = "gemini",
+    translate_model: Annotated[
+        str | None,
+        typer.Option("--translate-model", help="Translation model name"),
+    ] = None,
+    translate_api_url: Annotated[
+        str | None,
+        typer.Option("--translate-api-url", help="Custom API URL for local LLM translation"),
+    ] = None,
+    translate_tone: Annotated[
+        str,
+        typer.Option(
+            "--translate-tone", help="Translation tone (literal, natural, poetic, casual, formal)"
+        ),
+    ] = "natural",
+) -> None:
+    """Synchronize lyrics with audio.
+
+    Examples:
+        everyric2 sync song.mp3 lyrics.txt -o output.srt
+        everyric2 sync song.mp3 lyrics.txt --translate --debug
+        everyric2 sync "https://youtube.com/..." lyrics.txt -f lrc
+    """
+    import json
+    import sys
+
+    supported_formats = FormatterFactory.get_supported_formats()
+    if format.lower() not in supported_formats:
+        console.print(
+            f"[red]Error:[/red] Unsupported format '{format}'. "
+            f"Supported: {', '.join(supported_formats)}"
+        )
+        raise typer.Exit(1)
+
+    if not lyrics.exists():
+        console.print(f"[red]Error:[/red] Lyrics file not found: {lyrics}")
+        raise typer.Exit(1)
+
+    settings = get_settings()
+    if model:
+        settings.model.path = model
+    if cache_dir:
+        settings.model.cache_dir = cache_dir
+
+    settings.translation.engine = translate_engine  # pyright: ignore[reportAttributeAccessIssue]
+    if translate_model:
+        settings.translation.model = translate_model
+    if translate_api_url:
+        settings.translation.api_url = translate_api_url
+    settings.translation.tone = translate_tone  # pyright: ignore[reportAttributeAccessIssue]
+    settings.translation.include_pronunciation = pronunciation
+
+    settings.segmentation.mode = segment_mode  # pyright: ignore[reportAttributeAccessIssue]
+    settings.segmentation.min_silence_gap = min_silence_gap
+    settings.segmentation.interlude_gap = interlude_gap
+    settings.segmentation.max_chars_per_segment = max_chars
+
+    # Enable vocal separation by default when debug mode is on
+    if debug and not separate:
+        separate = True
+
+    video_title: str | None = None
+    audio_path: Path
+    audio = None
+    original_audio = None
+    vocals_audio = None
+    lyric_lines = None
+    translated_text: str | None = None
+    translation_result = None
+    translated_results: list | None = None
+    results = None
+    line_results: list | None = None
+    debug_info = None
+    run_ctx = None
+    output_manager = None
+    silence_gaps = None
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Loading audio...", total=None)
+
+        try:
+            import time as time_module
+
+            from everyric2.audio.downloader import YouTubeDownloader
+            from everyric2.audio.loader import AudioLoader
+
+            step_start = time_module.time()
+            loader = AudioLoader()
+            downloader = YouTubeDownloader()
+
+            if downloader.validate_url(source):
+                progress.update(task, description="Downloading from YouTube...")
+                dl_result = downloader.download(source)
+                audio_path = dl_result.audio_path
+                video_title = dl_result.title
+                console.print(f"[green]Downloaded:[/green] {video_title}")
+            else:
+                source_path = Path(source)
+                if not source_path.exists():
+                    console.print(f"[red]Error:[/red] Audio file not found: {source}")
+                    raise typer.Exit(1)
+                audio_path = source_path
+
+            progress.update(task, description="Loading audio...")
+            audio = loader.load(audio_path)
+            original_audio = audio
+            audio_load_time = time_module.time() - step_start
+            console.print(
+                f"[green]Audio loaded:[/green] {audio.duration:.1f}s ({audio_load_time:.1f}s)"
+            )
+
+        except Exception as e:
+            console.print(f"[red]Error loading audio:[/red] {e}")
+            raise typer.Exit(1)
+
+        if debug:
+            from everyric2.debug.debug_info import DebugInfo, StepTiming
+            from everyric2.debug.output_manager import OutputManager
+
+            output_manager = OutputManager()
+            command_str = " ".join(sys.argv)
+            run_ctx = output_manager.create_run_context(
+                title=video_title,
+                source=source,
+                command=command_str,
+                settings=settings.model_dump() if hasattr(settings, "model_dump") else {},
+            )
+            debug_info = DebugInfo(
+                source=source,
+                title=video_title,
+                command=command_str,
+                settings=settings.model_dump() if hasattr(settings, "model_dump") else {},
+                output_dir=run_ctx.output_dir,
+            )
+            debug_info.audio_duration = audio.duration
+            output_manager.save_settings(run_ctx)
+            output_manager.save_audio(run_ctx, audio, "audio_original.wav")
+            debug_info.steps.append(
+                StepTiming(
+                    name="audio_load", start_time=step_start, end_time=step_start + audio_load_time
+                )
+            )
+            console.print(f"[cyan]Debug output:[/cyan] {run_ctx.output_dir}")
+
+        if separate:
+            progress.update(task, description="Separating vocals...")
+            sep_start = time_module.time()
+            try:
+                from everyric2.audio.separator import VocalSeparator
+
+                separator = VocalSeparator()
+                if separator.is_available():
+                    sep_result = separator.separate(audio)
+                    vocals_audio = sep_result.vocals
+                    audio = vocals_audio
+                    sep_time = time_module.time() - sep_start
+                    console.print(f"[green]Vocal separation complete[/green] ({sep_time:.1f}s)")
+                    if debug and run_ctx and output_manager:
+                        output_manager.save_audio(run_ctx, vocals_audio, "audio_vocals.wav")
+                        if debug_info:
+                            from everyric2.debug.debug_info import StepTiming
+
+                            debug_info.steps.append(
+                                StepTiming("vocal_separation", sep_start, time_module.time())
+                            )
+                else:
+                    console.print("[yellow]Warning:[/yellow] Demucs not installed.")
+            except Exception as e:
+                console.print(f"[yellow]Warning:[/yellow] Vocal separation failed: {e}")
+
+        progress.update(task, description="Loading lyrics...")
+        try:
+            from everyric2.inference.prompt import LyricLine
+
+            lyric_lines = LyricLine.from_file(lyrics)
+            lyrics_text = lyrics.read_text(encoding="utf-8")
+            console.print(f"[green]Lyrics loaded:[/green] {len(lyric_lines)} lines")
+
+            if debug and run_ctx and output_manager:
+                output_manager.save_lyrics(run_ctx, lyrics_text, "lyrics_original.txt")
+                if debug_info:
+                    debug_info.original_lyrics = lyrics_text
+
+        except Exception as e:
+            console.print(f"[red]Error loading lyrics:[/red] {e}")
+            raise typer.Exit(1)
+
+        if translate or pronunciation:
+            progress.update(task, description="Translating lyrics...")
+            trans_start = time_module.time()
+            try:
+                from everyric2.translation.translator import LyricsTranslator
+
+                translator = LyricsTranslator(settings=settings.translation)
+                translation_result = translator.translate_with_pronunciation(lyric_lines)
+                translated_text = "\n".join(line.translation for line in translation_result.lines)
+                if not pronunciation:
+                    for line in translation_result.lines:
+                        line.pronunciation = None
+                trans_time = time_module.time() - trans_start
+                console.print(f"[green]Translation complete[/green] ({trans_time:.1f}s)")
+
+                if debug and run_ctx and output_manager:
+                    output_manager.save_translated_lyrics(run_ctx, translated_text)
+                    if debug_info:
+                        debug_info.translated_lyrics = translated_text
+                        from everyric2.debug.debug_info import StepTiming
+
+                        debug_info.steps.append(
+                            StepTiming("translation", trans_start, time_module.time())
+                        )
+
+            except Exception as e:
+                console.print(f"[yellow]Warning:[/yellow] Translation failed: {e}")
+
+        progress.update(task, description=f"Loading {engine} engine...")
+        model_start = time_module.time()
+        try:
+            from everyric2.alignment.factory import EngineFactory
+
+            alignment_engine = EngineFactory.get_engine(engine, settings.alignment)
+            if not alignment_engine.is_available():
+                console.print(f"[red]Error:[/red] Engine '{engine}' is not available.")
+                console.print(
+                    "[yellow]Hint:[/yellow] Try 'everyric2 engines' to see available engines."
+                )
+                raise typer.Exit(1)
+
+            model_time = time_module.time() - model_start
+            console.print(f"[green]Engine ready:[/green] {engine} ({model_time:.1f}s)")
+
+            if debug_info:
+                from everyric2.debug.debug_info import StepTiming
+
+                debug_info.steps.append(StepTiming("engine_load", model_start, time_module.time()))
+
+            last_status = {"value": ""}
+            status_lock = threading.Lock()
+            sync_done = threading.Event()
+
+            def progress_callback(current: int, total: int) -> None:
+                if hasattr(alignment_engine, "get_status_string"):
+                    status = alignment_engine.get_status_string()
+                    with status_lock:
+                        last_status["value"] = status
+
+            def status_printer():
+                printed_status = ""
+                while not sync_done.is_set():
+                    with status_lock:
+                        current_status = last_status["value"]
+                    if current_status and current_status != printed_status:
+                        sys.stdout.write(f"\r\033[36mSync:\033[0m {current_status}    ")
+                        sys.stdout.flush()
+                        printed_status = current_status
+                    time_module.sleep(0.3)
+                if printed_status:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+
+            progress.update(task, description="Synchronizing lyrics...")
+            sync_start = time_module.time()
+
+            status_thread = threading.Thread(target=status_printer, daemon=True)
+            status_thread.start()
+
+            try:
+                results = alignment_engine.align(
+                    audio, lyric_lines, language=language, progress_callback=progress_callback
+                )
+            finally:
+                sync_done.set()
+                status_thread.join(timeout=1.0)
+            sync_time = time_module.time() - sync_start
+            console.print(f"[green]Synchronized:[/green] {len(results)} lines ({sync_time:.1f}s)")
+
+            if debug_info:
+                from everyric2.debug.debug_info import StepTiming
+
+                debug_info.steps.append(StepTiming("sync", sync_start, time_module.time()))
+
+                if hasattr(alignment_engine, "get_transcription_sets"):
+                    sets = alignment_engine.get_transcription_sets()
+                    for words, stats, engine_name in sets:
+                        if words:
+                            debug_info.add_transcription_data(words, stats, engine_name)
+                elif hasattr(alignment_engine, "get_last_transcription_data"):
+                    words, stats, engine_name = alignment_engine.get_last_transcription_data()
+                    if words:
+                        debug_info.add_transcription_data(words, stats, engine_name)
+                elif hasattr(alignment_engine, "get_last_transcription_data"):
+                    words, stats, engine_name = alignment_engine.get_last_transcription_data()
+                    if words:
+                        debug_info.add_transcription_data(words, stats, engine_name)
+
+        except Exception as e:
+            console.print(f"[red]Error during synchronization:[/red] {e}")
+            raise typer.Exit(1)
+
+        progress.update(task, description="Post-processing...")
+        vad_result = None
+        vocal_regions = None
+        try:
+            from everyric2.alignment.segmentation import SegmentationProcessor
+            from everyric2.alignment.silence import SilenceHandler
+
+            if vocals_audio:
+                progress.update(task, description="Detecting vocal activity...")
+                try:
+                    from everyric2.audio.vad import VocalActivityDetector
+
+                    vad = VocalActivityDetector()
+                    vad_result = vad.detect(vocals_audio)
+                    vocal_regions = [
+                        {"start": r.start, "end": r.end, "energy": r.energy}
+                        for r in vad_result.regions
+                    ]
+                    console.print(
+                        f"[green]VAD:[/green] {len(vad_result.regions)} vocal regions detected"
+                    )
+
+                    from everyric2.alignment.timing_postprocess import TimingPostProcessor
+
+                    timing_processor = TimingPostProcessor(settings.segmentation)
+                    pp_result = timing_processor.process(results, vad_result, segment_mode)
+                    results = pp_result.results
+                    if pp_result.stats.get("total_adjustments", 0) > 0:
+                        console.print(
+                            f"[green]Timing adjusted:[/green] "
+                            f"{pp_result.stats['extended_to_vocal']} extended, "
+                            f"{pp_result.stats['shrunk_to_vocal']} shrunk, "
+                            f"{pp_result.stats['reading_buffer_added']} buffered"
+                        )
+                except Exception as e:
+                    console.print(f"[yellow]Warning:[/yellow] VAD/timing post-process failed: {e}")
+
+            silence_handler = SilenceHandler(settings.segmentation, vad_result=vad_result)
+            silence_gaps = silence_handler.detect_silence_gaps(results)
+            results = silence_handler.process(results)
+
+            if translation_result:
+                for i, result in enumerate(results):
+                    if i < len(translation_result.lines):
+                        result.translation = translation_result.lines[i].translation
+                        result.pronunciation = translation_result.lines[i].pronunciation
+
+            line_results = [r for r in results]
+
+            if debug and run_ctx:
+                from everyric2.io.project import ProjectFile, ProjectMetadata
+
+                project_meta = ProjectMetadata(
+                    source_audio=str(audio_path) if audio_path else None,
+                    source_lyrics=str(lyrics),
+                    language=language,
+                    engine=engine,
+                )
+                project = ProjectFile.from_sync_results(
+                    line_results, run_ctx.output_dir / "output", project_meta, translation_result
+                )
+                console.print(f"[green]Project file:[/green] {project.path}")
+
+            segmentation_processor = SegmentationProcessor(settings.segmentation, language=language)
+
+            if segment_mode == "all":
+                all_segment_results = {}
+                for mode in ("line", "word", "character"):
+                    settings.segmentation.mode = mode
+                    seg_proc = SegmentationProcessor(settings.segmentation, language=language)
+                    mode_results = seg_proc.process(list(results))
+                    if vad_result and mode in ("word", "character"):
+                        from everyric2.alignment.timing_postprocess import TimingPostProcessor
+
+                        segment_timing = TimingPostProcessor(settings.segmentation)
+                        mode_results = segment_timing.process_segments(mode_results, vad_result)
+                    all_segment_results[mode] = mode_results
+                results = all_segment_results["line"]
+            else:
+                results = segmentation_processor.process(results)
+                if vad_result and segment_mode in ("word", "character"):
+                    from everyric2.alignment.timing_postprocess import TimingPostProcessor
+
+                    segment_timing = TimingPostProcessor(settings.segmentation)
+                    results = segment_timing.process_segments(results, vad_result)
+
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Post-processing failed: {e}")
+
+        progress.update(task, description="Saving output...")
+        try:
+            formatter = FormatterFactory.get_formatter(format)
+            formatted = formatter.format(results)
+
+            if debug and run_ctx:
+                final_output = run_ctx.output_dir / f"output.{format}"
+                final_output.write_text(formatted, encoding="utf-8")
+
+                if segment_mode == "all" and "all_segment_results" in dir():
+                    for mode, mode_results in all_segment_results.items():
+                        mode_output = run_ctx.output_dir / f"output_{mode}.{format}"
+                        mode_formatted = formatter.format(mode_results)
+                        mode_output.write_text(mode_formatted, encoding="utf-8")
+                        console.print(f"[green]{mode.title()} mode:[/green] {mode_output}")
+
+                if (translated_text or translation_result) and results:
+                    from everyric2.inference.prompt import SyncResult
+                    from everyric2.output.multi_output import MultiOutputGenerator
+
+                    multi_mode = "line" if segment_mode == "all" else segment_mode
+                    multi_results = (
+                        all_segment_results["line"]
+                        if segment_mode == "all" and "all_segment_results" in dir()
+                        else results
+                    )
+                    multi_gen = MultiOutputGenerator(format, multi_mode)
+                    outputs = multi_gen.generate_all_variants(
+                        multi_results,
+                        translation_result,
+                        run_ctx.output_dir,
+                        "output",
+                        line_results=line_results,
+                    )
+                    for out in outputs:
+                        if out.variant != "original":
+                            console.print(
+                                f"[green]{out.variant.title()} output:[/green] {out.path}"
+                            )
+
+                    translated_results = []
+                    source_results = line_results if line_results else results
+                    for result in source_results:
+                        translated_results.append(
+                            SyncResult(
+                                text=result.translation or result.text,
+                                start_time=result.start_time,
+                                end_time=result.end_time,
+                            )
+                        )
+
+                if debug_info:
+                    debug_info.finalize(results)
+                    debug_json = run_ctx.output_dir / "debug_info.json"
+                    debug_json.write_text(
+                        json.dumps(debug_info.to_dict(), indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                if debug_info:
+                    progress.update(task, description="Generating diagnostics...")
+                    try:
+                        from everyric2.debug.visualizer import DiagnosticsVisualizer
+
+                        visualizer = DiagnosticsVisualizer()
+                        diag_path = run_ctx.output_dir / "diagnostics.png"
+                        diag_all_results = (
+                            all_segment_results
+                            if segment_mode == "all" and "all_segment_results" in dir()
+                            else None
+                        )
+                        visualizer.create_diagnostics(
+                            debug_info,
+                            results,
+                            diag_path,
+                            audio_waveform=original_audio.waveform
+                            if original_audio
+                            else audio.waveform,
+                            vocals_waveform=vocals_audio.waveform if vocals_audio else None,
+                            translated_results=translated_results,
+                            sample_rate=audio.sample_rate,
+                            silence_gaps=silence_gaps,
+                            segment_mode=segment_mode,
+                            vocal_regions=vocal_regions,
+                            all_segment_results=diag_all_results,
+                        )
+                        console.print(f"[green]Diagnostics:[/green] {diag_path}")
+                    except Exception as e:
+                        console.print(f"[yellow]Warning:[/yellow] Diagnostics failed: {e}")
+
+                console.print(f"[green]Saved:[/green] {final_output}")
+            else:
+                if output is None:
+                    output = lyrics.with_suffix(f".{formatter.get_extension()}")
+                output.write_text(formatted, encoding="utf-8")
+                console.print(f"[green]Saved:[/green] {output}")
+
+        except Exception as e:
+            console.print(f"[red]Error saving output:[/red] {e}")
+            raise typer.Exit(1)
+
+        progress.update(task, description="Done!")
+
+
+@app.command()
+def reprocess(
+    input_file: Annotated[Path, typer.Argument(help="Input .everyric.json or .srt file")],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", "-o", help="Output directory"),
+    ] = None,
+    format: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format (srt, ass, lrc, json)"),
+    ] = "srt",
+    segment_mode: Annotated[
+        str,
+        typer.Option("--segment-mode", help="Segmentation mode (line, word, character)"),
+    ] = "line",
+    max_chars: Annotated[
+        int,
+        typer.Option("--max-chars", help="Maximum characters per subtitle line"),
+    ] = 50,
+    min_silence_gap: Annotated[
+        float,
+        typer.Option("--min-silence-gap", help="Minimum silence gap to merge (seconds)"),
+    ] = 0.3,
+    interlude_gap: Annotated[
+        float,
+        typer.Option("--interlude-gap", help="Gaps longer than this are interludes (seconds)"),
+    ] = 5.0,
+    language: Annotated[
+        str,
+        typer.Option("--language", "-l", help="Language for tokenization (ja, ko, en, zh)"),
+    ] = "ja",
+) -> None:
+    """Reprocess alignment data with different segmentation settings.
+
+    Supports .everyric.json (recommended) or .srt input files.
+    For word/character mode, outputs separate tracks for lyrics and translation.
+
+    Examples:
+        everyric2 reprocess output.everyric.json --segment-mode word
+        everyric2 reprocess output.everyric.json --segment-mode character -l ja
+        everyric2 reprocess output.srt --max-chars 30  # legacy SRT support
+    """
+    if not input_file.exists():
+        console.print(f"[red]Error:[/red] Input file not found: {input_file}")
+        raise typer.Exit(1)
+
+    settings = get_settings()
+    settings.segmentation.mode = segment_mode  # pyright: ignore[reportAttributeAccessIssue]
+    settings.segmentation.max_chars_per_segment = max_chars
+    settings.segmentation.min_silence_gap = min_silence_gap
+    settings.segmentation.interlude_gap = interlude_gap
+
+    from everyric2.alignment.segmentation import SegmentationProcessor
+    from everyric2.alignment.silence import SilenceHandler
+    from everyric2.inference.prompt import SyncResult
+    from everyric2.output.multi_output import MultiOutputGenerator
+
+    line_results: list[SyncResult] = []
+    translation_result = None
+
+    if input_file.suffix == ".json" or str(input_file).endswith(".everyric.json"):
+        from everyric2.io.project import ProjectFile
+        from everyric2.translation.translator import TranslationLine, TranslationResult
+
+        console.print(f"[cyan]Loading project:[/cyan] {input_file}")
+        project = ProjectFile(input_file)
+        data = project.load()
+
+        line_results = data.results
+        if data.translations:
+            trans_lines = [
+                TranslationLine(
+                    original=t.original,
+                    translation=t.translation or "",
+                    pronunciation=t.pronunciation,
+                )
+                for t in data.translations
+            ]
+            translation_result = TranslationResult(
+                lines=trans_lines,
+                source_lang=data.metadata.language,
+                target_lang="ko",
+                engine="cached",
+                tone="natural",
+            )
+        console.print(
+            f"[green]Loaded:[/green] {len(line_results)} lines, {len(data.translations)} translations"
+        )
+    else:
+        import re
+
+        console.print(
+            f"[cyan]Loading SRT:[/cyan] {input_file} [yellow](use .everyric.json for full features)[/yellow]"
+        )
+        content = input_file.read_text(encoding="utf-8")
+
+        srt_pattern = re.compile(
+            r"(\d+)\s*\n"
+            r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*\n"
+            r"((?:(?!\n\d+\n\d{2}:\d{2}:\d{2}).)*)",
+            re.DOTALL,
+        )
+
+        def parse_timestamp(ts: str) -> float:
+            h, m, rest = ts.split(":")
+            s, ms = rest.split(",")
+            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+        for match in srt_pattern.finditer(content):
+            idx = int(match.group(1))
+            start = parse_timestamp(match.group(2))
+            end = parse_timestamp(match.group(3))
+            text = match.group(4).strip()
+
+            lines = text.split("\n")
+            original_text = lines[0] if lines else text
+            pronunciation = None
+            translation = None
+
+            if len(lines) >= 2 and lines[1].startswith("(") and lines[1].endswith(")"):
+                pronunciation = lines[1][1:-1]
+                if len(lines) >= 3:
+                    translation = lines[2]
+            elif len(lines) >= 2:
+                translation = lines[1]
+
+            line_results.append(
+                SyncResult(
+                    text=original_text,
+                    start_time=start,
+                    end_time=end,
+                    confidence=1.0,
+                    line_number=idx,
+                    translation=translation,
+                    pronunciation=pronunciation,
+                )
+            )
+        console.print(f"[green]Loaded:[/green] {len(line_results)} subtitles")
+
+    silence_handler = SilenceHandler(settings.segmentation)
+    processed_results = silence_handler.process(line_results)
+
+    interludes = silence_handler.get_interludes()
+    if interludes:
+        console.print(f"[yellow]Detected {len(interludes)} interlude(s)[/yellow]")
+
+    segmentation_processor = SegmentationProcessor(settings.segmentation, language=language)
+    segmented_results = segmentation_processor.process(processed_results, language=language)
+
+    console.print(
+        f"[green]Processed:[/green] {len(segmented_results)} segments (mode: {segment_mode})"
+    )
+
+    if output_dir is None:
+        output_dir = input_file.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = input_file.stem.replace(".everyric", "")
+    multi_gen = MultiOutputGenerator(format, segment_mode)
+    outputs = multi_gen.generate_all_variants(
+        segmented_results,
+        translation_result,
+        output_dir,
+        base_name,
+        line_results=line_results,
+    )
+
+    for out in outputs:
+        console.print(f"[green]{out.variant}:[/green] {out.path}")
+
+
+@app.command()
+def batch(
+    config_file: Annotated[Path, typer.Argument(help="YAML config file for batch tests")],
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", "-r", help="Resume from last completed test"),
+    ] = False,
+) -> None:
+    """Run batch tests from YAML config.
+
+    Example config (batch.yaml):
+        output_dir: ./output
+        formats: [srt, ass, lrc, json]
+        tests:
+          - title: "Song Name"
+            source: "https://youtube.com/watch?v=..."
+            lyrics: |
+              First line
+              Second line
+          - title: "Another Song"
+            source: "./song.mp3"
+            lyrics_file: "./lyrics.txt"
+
+    Usage:
+        everyric2 batch batch.yaml
+        everyric2 batch batch.yaml --resume
+    """
+    if not config_file.exists():
+        console.print(f"[red]Error:[/red] Config file not found: {config_file}")
+        raise typer.Exit(1)
+
+    try:
+        from everyric2.batch import BatchConfig, BatchRunner
+
+        config = BatchConfig.from_yaml(config_file)
+        config.resume = resume
+        runner = BatchRunner(config)
+
+        console.print(f"[cyan]Batch config loaded:[/cyan] {len(config.tests)} tests")
+        console.print(f"[cyan]Output directory:[/cyan] {config.output_dir}")
+        console.print(f"[cyan]Formats:[/cyan] {', '.join(config.formats)}")
+
+        def progress_cb(current: int, total: int, title: str) -> None:
+            console.print(f"\n[cyan][{current}/{total}][/cyan] {title}")
+
+        def log_cb(msg: str) -> None:
+            console.print(f"  {msg}")
+
+        results = runner.run(progress_callback=progress_cb, log_callback=log_cb)
+
+        console.print("\n[green]Batch complete![/green]")
+        for title, path in results.items():
+            if path:
+                console.print(f"  [green]✓[/green] {title} → {path}")
+            else:
+                console.print(f"  [red]✗[/red] {title} (failed)")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def serve(
+    host: Annotated[
+        str,
+        typer.Option("--host", "-h", help="Server host"),
+    ] = "0.0.0.0",
+    port: Annotated[
+        int,
+        typer.Option("--port", "-p", help="Server port"),
+    ] = 8000,
+    reload: Annotated[
+        bool,
+        typer.Option("--reload", "-r", help="Enable auto-reload"),
+    ] = False,
+    workers: Annotated[
+        int,
+        typer.Option("--workers", "-w", help="Number of workers"),
+    ] = 1,
+) -> None:
+    """Start the API server.
+
+    Example:
+        everyric2 serve --port 8000
+    """
+    try:
+        import uvicorn
+
+        console.print(f"[green]Starting server on {host}:{port}[/green]")
+        uvicorn.run(
+            "everyric2.server.main:app",
+            host=host,
+            port=port,
+            reload=reload,
+            workers=workers if not reload else 1,
+        )
+    except ImportError:
+        console.print(
+            "[red]Error:[/red] uvicorn not installed. Install with: pip install uvicorn[standard]"
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
+def engines() -> None:
+    """List available alignment engines."""
+    from everyric2.alignment.factory import EngineFactory
+
+    table = Table(title="Available Alignment Engines")
+    table.add_column("Engine", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Description")
+
+    for eng in EngineFactory.get_available_engines():
+        status = "[green]✓ Available[/green]" if eng["available"] else "[red]✗ Not installed[/red]"
+        table.add_row(eng["type"], status, eng["description"])
+
+    console.print(table)
+    console.print(
+        "\n[dim]Use --engine/-e option to select: everyric2 sync song.mp3 lyrics.txt -e whisperx[/dim]"
+    )
+
+
+@app.command()
+def formats() -> None:
+    """List supported output formats."""
+    table = Table(title="Supported Output Formats")
+    table.add_column("Format", style="cyan")
+    table.add_column("Extension", style="green")
+    table.add_column("Description")
+
+    formats_info = [
+        ("srt", "SubRip subtitle format - widely supported"),
+        ("ass", "Advanced SubStation Alpha - supports styling"),
+        ("lrc", "LRC lyrics format - common for music players"),
+        ("json", "JSON format - for programmatic access"),
+    ]
+
+    for fmt, desc in formats_info:
+        formatter = FormatterFactory.get_formatter(fmt)
+        table.add_row(fmt, f".{formatter.get_extension()}", desc)
+
+    console.print(table)
+
+
+@app.command()
+def info(
+    source: Annotated[str, typer.Argument(help="YouTube URL or local audio file")],
+) -> None:
+    """Show audio/video information."""
+    from everyric2.audio.downloader import YouTubeDownloader
+    from everyric2.audio.loader import AudioLoader
+
+    downloader = YouTubeDownloader()
+
+    if downloader.validate_url(source):
+        # YouTube URL
+        try:
+            info = downloader.get_video_info(source)
+            table = Table(title="Video Information")
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="green")
+
+            table.add_row("Title", info.title)
+            table.add_row("Duration", f"{info.duration:.1f}s ({info.duration / 60:.1f}m)")
+            table.add_row("Channel", info.channel or "N/A")
+            table.add_row("URL", info.url)
+
+            console.print(table)
+
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+    else:
+        # Local file
+        try:
+            loader = AudioLoader()
+            path = Path(source)
+            if not path.exists():
+                console.print(f"[red]Error:[/red] File not found: {source}")
+                raise typer.Exit(1)
+
+            duration = loader.get_duration(path)
+
+            table = Table(title="Audio Information")
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="green")
+
+            table.add_row("File", path.name)
+            table.add_row("Path", str(path.absolute()))
+            table.add_row("Duration", f"{duration:.1f}s ({duration / 60:.1f}m)")
+            table.add_row("Format", path.suffix)
+
+            console.print(table)
+
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1)
+
+
+@app.command()
+def config() -> None:
+    """Show current configuration."""
+    settings = get_settings()
+
+    table = Table(title="Current Configuration")
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value", style="green")
+
+    # Model settings
+    table.add_row("Model Path", settings.model.path)
+    table.add_row(
+        "Cache Dir", str(settings.model.cache_dir) if settings.model.cache_dir else "Default"
+    )
+    table.add_row("Device Map", settings.model.device_map)
+    table.add_row("Torch Dtype", settings.model.torch_dtype)
+    table.add_row("Flash Attention", str(settings.model.use_flash_attention))
+    table.add_row("Max Audio Duration", f"{settings.model.max_audio_duration}s")
+    table.add_row("Chunk Duration", f"{settings.model.chunk_duration}s")
+
+    # Audio settings
+    table.add_row("Sample Rate", f"{settings.audio.target_sample_rate}Hz")
+    table.add_row("Demucs Model", settings.audio.demucs_model)
+    table.add_row("Temp Dir", str(settings.audio.temp_dir))
+
+    # Output settings
+    table.add_row("Default Format", settings.output.default_format)
+
+    # Server settings
+    table.add_row("Server Host", settings.server.host)
+    table.add_row("Server Port", str(settings.server.port))
+
+    console.print(table)
+
+    console.print("\n[dim]Set environment variables with EVERYRIC_ prefix to override.[/dim]")
+    console.print("[dim]Example: EVERYRIC_MODEL__CACHE_DIR=/mnt/d/huggingface_cache[/dim]")
+
+
+if __name__ == "__main__":
+    app()
