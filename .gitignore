@@ -66,3 +66,7 @@ separated/
 # for test
 output/
 ftest1/
+
+# Spec Kit
+
+.opencode/

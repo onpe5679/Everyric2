@@ -1,5 +1,5 @@
 import { fetchLyrics } from './lib/lrclib';
-import { getSettings, saveSettings } from './lib/settings';
+import { getSettingsFromStorage, saveSettingsToStorage } from './lib/settings';
 import type { SongInfo, Settings, EveryricSyncResponse, LyricsResult, MessageResponse } from './types';
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -30,10 +30,10 @@ async function handleMessage(message: { type: string; payload?: unknown }): Prom
       return handleFetchEveryricSync(message.payload as { videoId: string; lyricsHash?: string });
     
     case 'GET_SETTINGS':
-      return { data: await getSettings() };
+      return { data: await getSettingsFromStorage() };
     
     case 'SAVE_SETTINGS':
-      await saveSettings(message.payload as Settings);
+      await saveSettingsToStorage(message.payload as Partial<Settings>);
       return { success: true };
     
     default:
