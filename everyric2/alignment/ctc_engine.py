@@ -299,11 +299,9 @@ class CTCEngine(BaseAlignmentEngine):
 
         # 1) 줄별 정렬 결과 수집 (정렬 실패 = 시각 None)
         line_times: list[list] = []
-        aligned_idxs: set[int] = set()
         for line_idx, line in enumerate(lyrics):
             char_ts = line_char_timestamps.get(line_idx, [])
             if char_ts:
-                aligned_idxs.add(line_idx)
                 word_segments = [
                     WordSegment(word=wt.word, start=wt.start, end=wt.end, confidence=wt.confidence)
                     for wt in char_ts
@@ -315,7 +313,7 @@ class CTCEngine(BaseAlignmentEngine):
 
         # 2) 정렬 실패 줄 보간. 균등 배치(line_idx*total/N)는 실제 정렬 시각과 뒤섞여
         #    순서가 깨지므로(역순·겹침), 앞뒤 정렬 줄 사이 간격에 끼워넣어 순서를 보존한다.
-        self._interpolate_unaligned(line_times, aligned_idxs, audio_length)
+        self._interpolate_unaligned(line_times, audio_length)
 
         # 3) SyncResult 생성
         results = [
@@ -337,7 +335,6 @@ class CTCEngine(BaseAlignmentEngine):
     @staticmethod
     def _interpolate_unaligned(
         line_times: list[list],
-        aligned_idxs: set[int],
         total_duration: float,
     ) -> None:
         """정렬 실패(시각 None) 줄을 앞뒤 정렬 줄 사이 간격에 균등 분배(순서 보존).
