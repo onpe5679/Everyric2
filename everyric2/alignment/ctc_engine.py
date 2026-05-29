@@ -93,6 +93,40 @@ def detect_language_from_text(text: str) -> tuple[str, bool]:
     return ("en", False)
 
 
+_HANGUL_CHO = list("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
+_HANGUL_JUNG = list("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ")
+_TENSE_TO_PLAIN = {"ㄲ": "ㄱ", "ㄸ": "ㄷ", "ㅃ": "ㅂ", "ㅆ": "ㅅ", "ㅉ": "ㅈ"}
+_GLIDE_TO_PLAIN = {"ㅑ": "ㅏ", "ㅒ": "ㅐ", "ㅕ": "ㅓ", "ㅖ": "ㅔ", "ㅛ": "ㅗ", "ㅠ": "ㅜ"}
+
+
+def _oov_substitute(char: str, vocab) -> str | None:
+    """vocab에 없는 한글 음절을 발음이 가까운 vocab 음절로 치환(정렬 전용).
+
+    된소리→예사소리(ㅃ→ㅂ), 활음 제거(ㅛ→ㅗ), 종성 제거를 점진 적용해 vocab에 있는
+    첫 후보를 반환. 한글 음절이 아니거나(괄호·기호) 후보가 없으면 None → 정렬에서 제외.
+    예) 뿅(ㅃㅛㅇ)→뽕→봉, 얍(ㅇㅑㅂ)→얌→압. 출력 글자는 원본을 유지하고 타이밍만 차용한다.
+    """
+    code = ord(char)
+    if not (0xAC00 <= code <= 0xD7A3):  # 한글 완성형 음절이 아님
+        return None
+    s = code - 0xAC00
+    cho_i, jung_i, jong_i = s // 588, (s % 588) // 28, s % 28
+    cho, jung = _HANGUL_CHO[cho_i], _HANGUL_JUNG[jung_i]
+    cho_alts = [cho, _TENSE_TO_PLAIN.get(cho, cho)]
+    jung_alts = [jung, _GLIDE_TO_PLAIN.get(jung, jung)]
+    seen: set[str] = set()
+    for c in cho_alts:
+        for j in jung_alts:
+            for jo in (jong_i, 0):  # 원래 종성 유지 → 종성 제거 순
+                cand = chr(0xAC00 + _HANGUL_CHO.index(c) * 588 + _HANGUL_JUNG.index(j) * 28 + jo)
+                if cand == char or cand in seen:
+                    continue
+                seen.add(cand)
+                if cand in vocab:
+                    return cand
+    return None
+
+
 class CTCEngine(BaseAlignmentEngine):
     def __init__(self, config: AlignmentSettings | None = None):
         super().__init__(config)
@@ -202,7 +236,10 @@ class CTCEngine(BaseAlignmentEngine):
         for line_idx, line in enumerate(lyrics):
             line_start = current_pos
             for char in line.text:
-                if char in vocab:
+                # vocab에 있으면 그대로, 없으면(OOV) 발음이 가까운 음절로 치환해 정렬.
+                # 출력 word는 원본 글자를 유지하고, 타이밍만 치환 음절의 정렬에서 가져온다.
+                tok_char = char if char in vocab else _oov_substitute(char, vocab)
+                if tok_char is not None:
                     char_info.append(
                         {
                             "char": char,
@@ -210,7 +247,7 @@ class CTCEngine(BaseAlignmentEngine):
                             "token_idx": current_pos,
                         }
                     )
-                    tokens.append(vocab[char])
+                    tokens.append(vocab[tok_char])
                     current_pos += 1
 
             if "|" in vocab:
@@ -260,36 +297,82 @@ class CTCEngine(BaseAlignmentEngine):
 
         from everyric2.inference.prompt import WordSegment
 
-        results = []
+        # 1) 줄별 정렬 결과 수집 (정렬 실패 = 시각 None)
+        line_times: list[list] = []
+        aligned_idxs: set[int] = set()
         for line_idx, line in enumerate(lyrics):
             char_ts = line_char_timestamps.get(line_idx, [])
-
             if char_ts:
-                start_time = char_ts[0].start
-                end_time = char_ts[-1].end
+                aligned_idxs.add(line_idx)
                 word_segments = [
                     WordSegment(word=wt.word, start=wt.start, end=wt.end, confidence=wt.confidence)
                     for wt in char_ts
                 ]
+                line_times.append([char_ts[0].start, char_ts[-1].end, word_segments])
             else:
-                start_time = line_idx * audio_length / len(lyrics)
-                end_time = (line_idx + 1) * audio_length / len(lyrics)
-                word_segments = None
+                # OOV 등으로 정렬된 글자가 0개 → 아래에서 이웃 사이로 보간
+                line_times.append([None, None, None])
 
-            results.append(
-                SyncResult(
-                    line_number=line.line_number,
-                    text=line.text,
-                    start_time=start_time,
-                    end_time=end_time,
-                    word_segments=word_segments,
-                )
+        # 2) 정렬 실패 줄 보간. 균등 배치(line_idx*total/N)는 실제 정렬 시각과 뒤섞여
+        #    순서가 깨지므로(역순·겹침), 앞뒤 정렬 줄 사이 간격에 끼워넣어 순서를 보존한다.
+        self._interpolate_unaligned(line_times, aligned_idxs, audio_length)
+
+        # 3) SyncResult 생성
+        results = [
+            SyncResult(
+                line_number=line.line_number,
+                text=line.text,
+                start_time=line_times[i][0],
+                end_time=line_times[i][1],
+                word_segments=line_times[i][2],
             )
+            for i, line in enumerate(lyrics)
+        ]
 
         if progress_callback:
             progress_callback(5, 5)
 
         return results
+
+    @staticmethod
+    def _interpolate_unaligned(
+        line_times: list[list],
+        aligned_idxs: set[int],
+        total_duration: float,
+    ) -> None:
+        """정렬 실패(시각 None) 줄을 앞뒤 정렬 줄 사이 간격에 균등 분배(순서 보존).
+
+        line_times: 각 줄 [start, end, word_segments] (정렬 실패는 [None, None, None]).
+        제자리에서 start/end를 채운다. 전부 실패면 전체 구간에 균등 분배.
+        """
+        n = len(line_times)
+        i = 0
+        while i < n:
+            if line_times[i][0] is not None:
+                i += 1
+                continue
+            group_start = i
+            group_end = i
+            while group_end < n and line_times[group_end][0] is None:
+                group_end += 1
+            group_end -= 1
+
+            prev_end = line_times[group_start - 1][1] if group_start > 0 else 0.0
+            if group_end < n - 1 and line_times[group_end + 1][0] is not None:
+                next_start = line_times[group_end + 1][0]
+            else:
+                next_start = total_duration
+
+            available = max(0.0, next_start - prev_end)
+            num = group_end - group_start + 1
+            seg = available / num if num else 0.0
+            if seg < 0.1:  # 빈틈이 거의 없을 때도 최소 길이 보장(근사치)
+                seg = 0.1
+            for j in range(group_start, group_end + 1):
+                off = j - group_start
+                line_times[j][0] = prev_end + off * seg
+                line_times[j][1] = prev_end + (off + 1) * seg
+            i = group_end + 1
 
     def _align_mms(
         self,
