@@ -1,5 +1,15 @@
 """Command-line interface for Everyric2."""
 
+import sys
+
+# Windows cp949 등 비(非)UTF-8 콘솔에서 Rich 스피너(유니코드)·한글 출력이
+# UnicodeEncodeError로 죽지 않도록 표준 출력을 UTF-8로 재설정(가능할 때만).
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 import warnings
 
 warnings.filterwarnings("ignore", message=".*torchaudio._backend.*")
