@@ -1,133 +1,136 @@
-import { fetchLyrics } from './lib/lrclib';
-import { getSettingsFromStorage, saveSettingsToStorage } from './lib/settings';
-import type { SongInfo, Settings, EveryricSyncResponse, LyricsResult, MessageResponse } from './types';
+import { fetchFromLrclib } from './lib/lrclib';
+import { checkHealth, generateSync, getJobStatus, lookupSync, translateLyrics, type ServerConfig } from './lib/everyric-api';
+import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
+import { fetchSongPage, vocaroLookup } from './lib/vocaro';
+import { getSettings } from './lib/settings';
+import type { BgRequest, LyricsData, MessageResponse, SongInfo } from './types';
+
+async function getServerConfig(): Promise<ServerConfig> {
+  const { serverUrl, apiKey } = await getSettings();
+  return { serverUrl, apiKey };
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  handleMessage(message)
+  handleMessage(message as BgRequest)
     .then(sendResponse)
-    .catch(error => sendResponse({ error: error.message }));
+    .catch((error: unknown) => {
+      sendResponse({ error: error instanceof Error ? error.message : String(error) });
+    });
   return true;
 });
 
+// everyric.com 웹사이트에서 싱크 생성 완료 알림 (기존 플로우 유지)
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
-  const origin = sender.origin || '';
-  const isEveryric = origin.includes('everyric.com');
-  
-  if (isEveryric && message.type === 'SYNC_COMPLETE') {
-    broadcastToYouTubeTabs(message.payload);
+  const origin = sender.origin ?? '';
+  const isEveryric = origin === 'https://everyric.com' || origin.endsWith('.everyric.com');
+  const videoId = (message?.payload as { videoId?: unknown } | undefined)?.videoId;
+  if (isEveryric && message?.type === 'SYNC_COMPLETE' && typeof videoId === 'string') {
+    void broadcastToYouTubeTabs({ videoId });
     sendResponse({ success: true });
   }
-  
   return true;
 });
 
-async function handleMessage(message: { type: string; payload?: unknown }): Promise<MessageResponse> {
+// 툴바 아이콘 클릭 → 해당 탭의 오버레이 토글
+chrome.action.onClicked.addListener(tab => {
+  if (tab.id !== undefined) {
+    chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_OVERLAY' }).catch(() => {
+      /* content script가 없는 탭(비 YouTube)은 무시 */
+    });
+  }
+});
+
+async function handleMessage(message: BgRequest): Promise<MessageResponse> {
   switch (message.type) {
     case 'FETCH_LYRICS':
-      return handleFetchLyrics(message.payload as SongInfo);
-    
-    case 'FETCH_EVERYRIC_SYNC':
-      return handleFetchEveryricSync(message.payload as { videoId: string; lyricsHash?: string });
-    
-    case 'GET_SETTINGS':
-      return { data: await getSettingsFromStorage() };
-    
-    case 'SAVE_SETTINGS':
-      await saveSettingsToStorage(message.payload as Partial<Settings>);
-      return { success: true };
-    
+      return { data: await fetchLyricsChain(message.payload) };
+
+    case 'GENERATE_SYNC': {
+      const res = await generateSync(await getServerConfig(), {
+        video_id: message.payload.videoId,
+        lyrics: message.payload.lyrics,
+        language: message.payload.language,
+        line_meta: message.payload.lineMeta,
+      });
+      return res ? { data: res } : { error: 'generate_request_failed' };
+    }
+
+    case 'JOB_STATUS': {
+      const res = await getJobStatus(await getServerConfig(), message.payload.jobId);
+      return res ? { data: res } : { error: 'job_status_failed' };
+    }
+
+    case 'TRANSLATE': {
+      const res = await translateLyrics(await getServerConfig(), message.payload.text, message.payload.targetLang);
+      return res ? { data: res } : { error: 'translate_failed' };
+    }
+
+    case 'SERVER_HEALTH': {
+      return { data: { ok: await checkHealth(await getServerConfig()) } };
+    }
+
+    case 'VOCARO_LOOKUP':
+      return { data: await vocaroLookup(message.payload.title) };
+
+    case 'VOCARO_PAGE':
+      return { data: await fetchSongPage(message.payload.slug) };
+
     default:
-      return { error: 'Unknown message type' };
+      return { error: 'unknown_message_type' };
   }
 }
 
-async function handleFetchLyrics(songInfo: SongInfo): Promise<MessageResponse<LyricsResult[]>> {
-  const results: LyricsResult[] = [];
-  
-  try {
-    const everyricResult = await fetchFromEveryricServer(songInfo.videoId);
-    if (everyricResult) {
-      results.push(everyricResult);
-      return { data: results };
-    }
-  } catch (error) {
-    console.log('[Everyric] Local server not available, falling back to LRCLIB');
-  }
-  
-  try {
-    const lrclibResult = await fetchLyrics(songInfo);
-    if (lrclibResult) {
-      results.push(lrclibResult);
-    }
-  } catch (error) {
-    console.error('[Everyric] Error fetching lyrics:', error);
-  }
-  
-  return { data: results };
-}
+// E2E 스모크 테스트가 SW 컨텍스트에서 직접 호출하기 위한 노출 — 프로덕션 동작에는 영향 없음
+(globalThis as { __vocaroLookup?: typeof vocaroLookup }).__vocaroLookup = vocaroLookup;
 
-async function fetchFromEveryricServer(videoId: string): Promise<LyricsResult | null> {
-  const response = await fetch(`http://localhost:8000/api/sync/${videoId}`, {
-    signal: AbortSignal.timeout(2000)
-  });
-  
-  if (!response.ok) return null;
-  
-  const data = await response.json();
-  if (!data.found || !data.timestamps) return null;
-  
-  const syncedLyrics = data.timestamps
-    .map((t: { text: string; start: number }) => `[${formatTime(t.start)}]${t.text}`)
-    .join('\n');
-  
-  return {
-    type: 'synced',
-    source: 'everyric',
-    syncedLyrics,
-    plainLyrics: data.timestamps.map((t: { text: string }) => t.text).join('\n')
-  };
-}
-
-function formatTime(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 100);
-  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
-}
-
-async function handleFetchEveryricSync(params: { videoId: string; lyricsHash?: string }): Promise<MessageResponse<EveryricSyncResponse>> {
-  try {
-    const url = new URL(`https://api.everyric.com/api/sync/${params.videoId}`);
-    if (params.lyricsHash) {
-      url.searchParams.set('lyrics_hash', params.lyricsHash);
+/** 우선순위: Everyric 서버(단어 타이밍 보존) → LRCLIB 싱크 → LRCLIB 일반 */
+async function fetchLyricsChain(song: SongInfo): Promise<LyricsData | null> {
+  const sync = await lookupSync(await getServerConfig(), song.videoId);
+  if (sync?.found && sync.timestamps && sync.timestamps.length > 0) {
+    const lines = segmentsToLines(sync.timestamps);
+    if (lines.length > 0) {
+      return {
+        source: 'everyric',
+        synced: true,
+        lines,
+        plainText: lines.map(l => l.text).join('\n'),
+        // 서버가 사람 번역(위키 병합분)을 내려줬으면 기계번역으로 덮어쓰지 않는다
+        humanTranslated: lines.some(l => l.translation),
+        debugMeta: sync.debug ?? undefined,
+      };
     }
-    
-    const response = await fetch(url.toString());
-    
-    if (response.ok) {
-      return { data: await response.json() };
-    }
-    
-    return { data: { found: false } };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return { data: { found: false, error: message } };
   }
+
+  const track = await fetchFromLrclib(song);
+  if (track?.syncedLyrics) {
+    const lines = parseLRC(track.syncedLyrics);
+    if (lines.length > 0) {
+      return {
+        source: 'lrclib',
+        synced: true,
+        lines,
+        plainText: track.plainLyrics ?? lines.map(l => l.text).join('\n'),
+      };
+    }
+  }
+  if (track?.plainLyrics) {
+    const lines = parsePlainLyrics(track.plainLyrics);
+    if (lines.length > 0) {
+      return { source: 'lrclib', synced: false, lines, plainText: track.plainLyrics };
+    }
+  }
+  return null;
 }
 
 async function broadcastToYouTubeTabs(payload: { videoId: string }): Promise<void> {
   const tabs = await chrome.tabs.query({
-    url: ['*://www.youtube.com/*', '*://music.youtube.com/*']
+    url: ['*://www.youtube.com/*', '*://music.youtube.com/*'],
   });
-  
   for (const tab of tabs) {
-    if (tab.id) {
-      chrome.tabs.sendMessage(tab.id, {
-        type: 'SYNC_GENERATED',
-        payload
-      }).catch(() => {});
+    if (tab.id !== undefined) {
+      chrome.tabs.sendMessage(tab.id, { type: 'SYNC_GENERATED', payload }).catch(() => {
+        /* content script 미주입 탭은 무시 */
+      });
     }
   }
 }
-
-console.log('[Everyric] Background service worker initialized');

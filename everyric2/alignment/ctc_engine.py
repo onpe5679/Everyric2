@@ -5,6 +5,7 @@ For other languages: Uses torchaudio MMS_FA with Latin alphabet.
 """
 
 import logging
+import math
 from collections.abc import Callable
 from typing import Literal
 
@@ -136,6 +137,8 @@ class CTCEngine(BaseAlignmentEngine):
         self._device = None
         self._last_word_timestamps: list[WordTimestamp] = []
         self._last_match_stats = None
+        # 직전 정렬에서 star 토큰이 흡수한 (start, end) 구간들 — 디버그/진단용
+        self._last_star_spans: list[tuple[float, float]] = []
 
     def is_available(self) -> bool:
         try:
@@ -228,10 +231,33 @@ class CTCEngine(BaseAlignmentEngine):
 
         vocab = self._processor.tokenizer.get_vocab()  # pyright: ignore[reportAttributeAccessIssue,reportOptionalMemberAccess]
 
+        # 가사에 없는 가창(추임새/애드립/반복 후렴)을 흡수하는 와일드카드 star 채널.
+        # forced_align은 정규화된 log_probs를 기대하며, star의 0.0(=log 1.0) 트릭은
+        # log_softmax 정규화 후에만 작동한다 (raw logits에서는 0이 평범한 값이라 무효 —
+        # 실측 검증됨). star 없이는 정규화가 Viterbi 경로에 영향을 주지 않으므로(프레임별
+        # 상수 상쇄) 기존 결과와 동일하다.
+        use_star = getattr(self.config, "star_tokens", False)
+        emission = torch.nn.functional.log_softmax(logits.float(), dim=-1)
+        star_id = emission.shape[-1]
+        if use_star:
+            star_col = torch.zeros(
+                (emission.shape[0], emission.shape[1], 1),
+                dtype=emission.dtype,
+                device=emission.device,
+            )
+            emission = torch.cat([emission, star_col], dim=2)
+
         tokens = []
         line_boundaries = []
         char_info = []
+        star_positions: list[int] = []
         current_pos = 0
+
+        if use_star:
+            # 인트로(첫 라인 전) 애드립 흡수용 선행 star
+            star_positions.append(current_pos)
+            tokens.append(star_id)
+            current_pos += 1
 
         for line_idx, line in enumerate(lyrics):
             line_start = current_pos
@@ -254,6 +280,14 @@ class CTCEngine(BaseAlignmentEngine):
                 tokens.append(vocab["|"])
                 current_pos += 1
 
+            if use_star:
+                # 라인 사이·마지막 라인 뒤의 가사 밖 가창 흡수.
+                # 일본어 MMS 어댑터는 vocab에 "|"가 없어 star가 유일한 라인 간 완충이다.
+                # star span은 char_info에 없으므로 라인 시각 계산에서 자동 제외된다.
+                star_positions.append(current_pos)
+                tokens.append(star_id)
+                current_pos += 1
+
             line_boundaries.append((line_start, current_pos - 1))
 
         if not tokens:
@@ -262,7 +296,7 @@ class CTCEngine(BaseAlignmentEngine):
         try:
             targets = torch.tensor([tokens], dtype=torch.int32, device=device)
             blank_id = self._processor.tokenizer.pad_token_id  # pyright: ignore[reportAttributeAccessIssue,reportOptionalMemberAccess]
-            aligned_tokens, alignment_scores = F.forced_align(logits, targets, blank=blank_id)
+            aligned_tokens, alignment_scores = F.forced_align(emission, targets, blank=blank_id)
             token_spans = F.merge_tokens(aligned_tokens[0], alignment_scores[0], blank=blank_id)
         except Exception as e:
             raise AlignmentError(f"CTC forced alignment failed: {e}")
@@ -274,6 +308,15 @@ class CTCEngine(BaseAlignmentEngine):
         audio_length = waveform.shape[0] / 16000
         ratio = audio_length / num_frames
 
+        # star가 실제로 흡수한 구간 기록 (1프레임=20ms짜리 형식적 흡수는 제외)
+        self._last_star_spans = []
+        for idx in star_positions:
+            if idx < len(token_spans):
+                span = token_spans[idx]
+                s, e = span.start * ratio, span.end * ratio
+                if e - s >= 0.1:
+                    self._last_star_spans.append((round(s, 2), round(e, 2)))
+
         self._last_word_timestamps = []
         line_char_timestamps: dict[int, list[WordTimestamp]] = {}
 
@@ -284,11 +327,14 @@ class CTCEngine(BaseAlignmentEngine):
                 span = token_spans[idx]
                 start_time = span.start * ratio
                 end_time = span.end * ratio
+                # emission이 log_softmax라 span.score는 평균 로그확률(음수) — 그대로
+                # 내보내면 클라이언트 신뢰도 표시가 전부 '낮음'으로 찍힌다.
+                # exp로 기하평균 확률(0~1)로 변환해 저장한다.
                 wt = WordTimestamp(
                     word=ci["char"],
                     start=start_time,
                     end=end_time,
-                    confidence=span.score,
+                    confidence=round(math.exp(min(0.0, float(span.score))), 6),
                 )
                 self._last_word_timestamps.append(wt)
                 if line_idx not in line_char_timestamps:

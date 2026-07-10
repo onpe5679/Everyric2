@@ -134,11 +134,14 @@ class VocalSeparator:
 
             cmd.append(str(input_path))
 
-            # Run Demucs
+            # Run Demucs — Windows 기본 콘솔 인코딩(cp949)로는 demucs의 유니코드
+            # 진행 표시를 못 읽어 reader thread가 죽으므로 utf-8을 명시한다
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,  # 10 minute timeout
             )
 

@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from everyric2.server.db.connection import get_session
@@ -18,6 +18,16 @@ class SyncLookupResponse(BaseModel):
     audio_hash: str | None = None
     language: str | None = None
     created_at: str | None = None
+    # 곡 단위 진단 정보 (star 흡수 구간, VAD 발성 구간) — 확장 디버그 스트립용
+    debug: dict[str, Any] | None = None
+
+
+class LineMeta(BaseModel):
+    """라인별 부가 정보 — 발음 표기/사람 번역 (보카로 가사 위키 등). 텍스트로 세그먼트에 매칭된다."""
+
+    text: str
+    pronunciation: str | None = None
+    translation: str | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -25,6 +35,7 @@ class GenerateRequest(BaseModel):
     lyrics: str
     lyrics_source: str = "user_input"
     language: str | None = None
+    line_meta: list[LineMeta] | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -48,6 +59,17 @@ class RegenerateRequest(BaseModel):
     lyrics: str
     language: str | None = None
     force: bool = False
+    line_meta: list[LineMeta] | None = None
+
+
+def _merge_meta_into_sync(sync_result, line_meta: list[LineMeta]) -> None:
+    """이미 존재하는 싱크에 발음/번역 메타를 병합 (세션 커밋은 호출부의 컨텍스트가 수행)."""
+    from everyric2.server.worker import merge_line_meta
+
+    segs = [dict(s) for s in sync_result.timestamps.get("segments", [])]
+    if merge_line_meta(segs, [m.model_dump() for m in line_meta]):
+        # JSON 컬럼은 재할당해야 변경이 감지된다
+        sync_result.timestamps = {**sync_result.timestamps, "segments": segs}
 
 
 @router.get("/{video_id}", response_model=SyncLookupResponse)
@@ -67,6 +89,7 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
                     audio_hash=result.audio_hash,
                     language=result.language,
                     created_at=result.created_at.isoformat() if result.created_at else None,
+                    debug=result.timestamps.get("debug"),
                 )
         else:
             results = await repo.get_by_video(video_id)
@@ -81,6 +104,7 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
                     audio_hash=result.audio_hash,
                     language=result.language,
                     created_at=result.created_at.isoformat() if result.created_at else None,
+                    debug=result.timestamps.get("debug"),
                 )
 
         return SyncLookupResponse(found=False)
@@ -94,6 +118,9 @@ async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTa
         sync_repo = SyncRepository(session)
         existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
         if existing:
+            # 정렬은 재사용하되 새로 들어온 발음/번역 메타는 반영한다
+            if request.line_meta:
+                _merge_meta_into_sync(existing, request.line_meta)
             return GenerateResponse(
                 job_id=existing.id,
                 status="completed",
@@ -108,8 +135,10 @@ async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTa
         )
         job_id = job.id
 
-    from everyric2.server.worker import process_job
+    from everyric2.server.worker import process_job, stash_line_meta
 
+    if request.line_meta:
+        stash_line_meta(job_id, [m.model_dump() for m in request.line_meta])
     background_tasks.add_task(process_job, job_id)
 
     return GenerateResponse(
@@ -202,6 +231,8 @@ async def regenerate_sync(request: RegenerateRequest, background_tasks: Backgrou
             sync_repo = SyncRepository(session)
             existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
             if existing:
+                if request.line_meta:
+                    _merge_meta_into_sync(existing, request.line_meta)
                 return GenerateResponse(
                     job_id=existing.id,
                     status="completed",
@@ -216,8 +247,13 @@ async def regenerate_sync(request: RegenerateRequest, background_tasks: Backgrou
         )
         job_id = job.id
 
-    from everyric2.server.worker import process_job
+    from everyric2.server.worker import process_job, stash_force, stash_line_meta
 
+    if request.force:
+        # 워커의 (audio_hash, lyrics_hash) 재사용 검사까지 건너뛰어야 진짜 재생성이 된다
+        stash_force(job_id)
+    if request.line_meta:
+        stash_line_meta(job_id, [m.model_dump() for m in request.line_meta])
     background_tasks.add_task(process_job, job_id)
 
     return GenerateResponse(

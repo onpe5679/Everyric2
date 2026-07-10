@@ -14,7 +14,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    emptyDirBeforeWrite: true,
+    emptyOutDir: true,
   },
   publicDir: 'public',
 });

@@ -63,6 +63,9 @@ Thumbs.db
 # Demucs output
 separated/
 
+# Downloaded model weights (e.g. RMVPE rmvpe.pt) — fetched on demand, not committed
+models/
+
 # for test
 output/
 ftest1/
@@ -70,3 +73,18 @@ ftest1/
 # Spec Kit
 
 .opencode/
+# Chrome extension smoke test artifacts
+everyric2-chrome/smoke-result.png
+everyric2-chrome/smoke.log
+everyric2-chrome/smoke-pip.png
+
+# Node
+node_modules/
+
+# OMC runtime state
+.omc/
+
+# E2E test artifacts
+everyric2-chrome/e2e-*.png
+everyric2-chrome/fresh-pip.png
+everyric2-chrome/pip-wide-video.png

@@ -16,13 +16,16 @@ class SyncRepository:
         self.session = session
 
     async def get_by_video_and_hash(self, video_id: str, lyrics_hash: str) -> SyncResult | None:
+        # force 재생성은 같은 (video_id, lyrics_hash) 행을 여러 개 만들 수 있다 — 최신 우선
         result = await self.session.execute(
-            select(SyncResult).where(
+            select(SyncResult)
+            .where(
                 SyncResult.video_id == video_id,
                 SyncResult.lyrics_hash == lyrics_hash,
             )
+            .order_by(SyncResult.created_at.desc())
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def get_by_audio_hash(self, audio_hash: str) -> SyncResult | None:
         result = await self.session.execute(
@@ -35,13 +38,16 @@ class SyncRepository:
     async def get_by_audio_and_lyrics_hash(
         self, audio_hash: str, lyrics_hash: str
     ) -> SyncResult | None:
+        # force 재생성으로 동일 해시 행이 복수 존재할 수 있다 — 최신 우선
         result = await self.session.execute(
-            select(SyncResult).where(
+            select(SyncResult)
+            .where(
                 SyncResult.audio_hash == audio_hash,
                 SyncResult.lyrics_hash == lyrics_hash,
             )
+            .order_by(SyncResult.created_at.desc())
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def get_by_video(self, video_id: str) -> list[SyncResult]:
         result = await self.session.execute(
@@ -84,12 +90,14 @@ class SyncRepository:
         engine: str = "ctc",
         quality_score: float | None = None,
         audio_hash: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> SyncResult:
         sync_result = SyncResult(
             video_id=video_id,
             lyrics_hash=lyrics_hash,
             audio_hash=audio_hash,
-            timestamps={"segments": timestamps},
+            # extra: segments 밖의 곡 단위 부가정보 (예: {"debug": {...}})
+            timestamps={"segments": timestamps, **(extra or {})},
             language=language,
             engine=engine,
             quality_score=quality_score,

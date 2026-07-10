@@ -99,6 +99,13 @@ class AlignmentSettings(BaseSettings):
         default=16000, description="Sample rate for alignment engines"
     )
 
+    star_tokens: bool = Field(
+        default=True,
+        description="Insert wildcard <star> tokens between lyric lines during CTC alignment "
+        "so ad-libs/repeats not present in the lyrics are absorbed instead of "
+        "stretching neighboring lines",
+    )
+
 
 class TranslationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_TRANSLATE_")
@@ -145,6 +152,66 @@ class SegmentationSettings(BaseSettings):
     use_mecab: bool = Field(default=True, description="Use MeCab for Japanese word segmentation")
 
 
+class MelodySettings(BaseSettings):
+    """Vocal melody extraction (karaoke pitch bar) configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="EVERYRIC_MELODY_")
+
+    enabled: bool = Field(
+        default=True, description="Annotate word timestamps with MIDI notes"
+    )
+    separate_vocals: bool = Field(
+        default=True,
+        description="Run demucs vocal separation before f0 extraction "
+        "(mix tracks bleed accompaniment pitch into notes; falls back to mix if unavailable)",
+    )
+    device: str = Field(default="auto", description="Inference device: auto, cpu, cuda")
+    f0_model: Literal["fcpe", "rmvpe"] = Field(
+        default="rmvpe",
+        description="f0 estimation backend. rmvpe (DeepUnet+BiGRU, singing-pitch SOTA) "
+        "measured lower subharmonic lock-on (-12 semitone mass ratio 0.44 vs FCPE's 0.69) "
+        "and fewer large frame-to-frame jumps on a real karaoke track A/B; falls back to "
+        "FCPE automatically if the rmvpe.pt weights are missing or fail to load.",
+    )
+    rmvpe_model_path: Path = Field(
+        default=Path(__file__).resolve().parents[2] / "models" / "rmvpe" / "rmvpe.pt",
+        description="Path to RMVPE weights (rmvpe.pt, ~180MB, MIT-licensed inference code "
+        "ported from RVC-Project, weights from HuggingFace lj1995/VoiceConversionWebUI). "
+        "Not bundled with the repo; download separately.",
+    )
+    rmvpe_threshold: float = Field(
+        default=0.01,
+        description="RMVPE unvoiced salience cutoff (0-1 sigmoid). Lower than the RVC "
+        "default of 0.03 — measured to raise line-span voiced coverage to ~FCPE parity "
+        "(0.90 vs 0.905 mean) without degrading octave-lock-on or jump-rate metrics.",
+    )
+    threshold: float = Field(
+        default=0.006, description="FCPE unvoiced detection threshold"
+    )
+    f0_min: float = Field(default=65.0, description="Minimum f0 in Hz (~C2)")
+    f0_max: float = Field(default=1100.0, description="Maximum f0 in Hz (~C6)")
+    octave_snap: bool = Field(
+        default=True,
+        description="Fold octave/harmonic jumps (>7 semitones vs previous voiced frame) "
+        "back toward the melodic trajectory before note quantization "
+        "(fixes FCPE octave lock-on; measured 37%→5% large-jump rate)",
+    )
+    anchor_to_words: bool = Field(
+        default=True,
+        description="Cut notes at aligned character (syllable) boundaries instead of free "
+        "f0-stability runs, so note timing locks to the lyric alignment the user sees",
+    )
+    min_note_sec: float = Field(
+        default=0.08, description="Minimum stable duration for a note segment"
+    )
+    max_gap_sec: float = Field(
+        default=0.12, description="Unvoiced gap shorter than this stays in the same note"
+    )
+    min_voiced_ratio: float = Field(
+        default=0.15, description="Skip spans whose voiced frame ratio is below this"
+    )
+
+
 class OutputSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_OUTPUT_")
 
@@ -183,6 +250,7 @@ class Settings(BaseSettings):
     alignment: AlignmentSettings = Field(default_factory=AlignmentSettings)
     translation: TranslationSettings = Field(default_factory=TranslationSettings)
     segmentation: SegmentationSettings = Field(default_factory=SegmentationSettings)
+    melody: MelodySettings = Field(default_factory=MelodySettings)
     output: OutputSettings = Field(default_factory=OutputSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
 

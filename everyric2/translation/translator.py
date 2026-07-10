@@ -233,11 +233,25 @@ class GeminiTranslator(BaseTranslator):
     def _fallback_result(
         self, original_lines: list[str], source_lang: str, target_lang: str
     ) -> TranslationResult:
+        # API 키가 없거나 연결이 안 되면 무료 웹 번역(deep-translator)으로 폴백.
+        # 플레이스홀더 텍스트를 번역인 척 반환하면 클라이언트 UI에 그대로 노출되므로 금지 —
+        # 여기서도 실패하면 예외를 올려 API가 5xx로 응답하게 한다(확장은 '번역 실패' 표시).
+        from deep_translator import GoogleTranslator
+
+        target = {"zh": "zh-CN"}.get(target_lang, target_lang)
+        translator = GoogleTranslator(source="auto", target=target)
+
+        translated = translator.translate("\n".join(original_lines)) or ""
+        parts = [p.strip() for p in translated.split("\n")]
+        if len(parts) != len(original_lines):
+            # 웹 번역이 줄 수를 보존하지 못한 경우 — 줄 단위로 재시도 (느리지만 정확)
+            parts = [(t or "").strip() for t in translator.translate_batch(original_lines)]
+
         lines = [
-            TranslationLine(original=line, translation=f"[NO API KEY] {line}", pronunciation=None)
-            for line in original_lines
+            TranslationLine(original=orig, translation=trans, pronunciation=None)
+            for orig, trans in zip(original_lines, parts)
         ]
-        return TranslationResult(lines, source_lang, target_lang, "gemini", self.settings.tone)
+        return TranslationResult(lines, source_lang, target_lang, "google-web", self.settings.tone)
 
 
 class OpenAICompatibleTranslator(BaseTranslator):
