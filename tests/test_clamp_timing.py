@@ -10,10 +10,11 @@ b2NTglk9tvI(熱異常) 곡에서 (B) 반복 훅 라인 하나만 7초 outlier로
 import pytest
 
 from everyric2.audio.vad import VADResult, VocalRegion
-from everyric2.inference.prompt import SyncResult
+from everyric2.inference.prompt import SyncResult, WordSegment
 from everyric2.server.worker import (
     _clamp_repeated_outliers,
     _clamp_stretched_lines,
+    _extend_phrase_final_tails,
     _pull_post_interlude_starts,
 )
 
@@ -186,6 +187,78 @@ def test_pull_skipped_when_region_not_early_enough():
     _pull_post_interlude_starts(results, vad, clamped)
     assert clamped == set()
     assert results[1].start_time == pytest.approx(20.0)
+
+
+# --- 규칙 3: 소절 끝 늘임음 연장 --------------------------------------------
+
+
+def test_phrase_final_tail_extended_to_vad_end():
+    # 소절 끝 라인(뒤 갭 1.5초)이 VAD 리전 안에서 0.6초 일찍 끝남 → 리전 끝까지 연장
+    results = [
+        SyncResult(
+            text="늘임음 라인", start_time=10.0, end_time=12.0,
+            word_segments=[WordSegment("늘", 10.0, 11.0), WordSegment("임", 11.0, 12.0)],
+        ),
+        SyncResult(text="다음 라인", start_time=13.5, end_time=15.0),
+    ]
+    vad = _vad((9.8, 12.6), (13.4, 15.2))
+    clamped: set[int] = set()
+    _extend_phrase_final_tails(results, vad, clamped)
+
+    assert results[0].end_time == pytest.approx(12.6)  # 리전 끝
+    assert results[0].word_segments[-1].end == pytest.approx(12.6)  # 마지막 글자도 함께
+    assert results[0].word_segments[0].end == pytest.approx(11.0)  # 앞 글자는 불변
+
+
+def test_butted_line_is_not_extended():
+    # 다음 라인이 0.3초 이내로 붙어 있으면(소절 중간) 건드리지 않는다
+    results = [
+        SyncResult(text="중간 라인", start_time=10.0, end_time=12.0),
+        SyncResult(text="바로 다음", start_time=12.1, end_time=14.0),
+    ]
+    vad = _vad((9.8, 14.2))
+    clamped: set[int] = set()
+    _extend_phrase_final_tails(results, vad, clamped)
+    assert results[0].end_time == pytest.approx(12.0)
+
+
+def test_tail_extension_capped_and_bounded_by_next_start():
+    # 리전이 길게 이어져도 +1.5초 캡, 다음 라인 시작 -0.05초를 넘지 않는다
+    results = [
+        SyncResult(text="캡 라인", start_time=10.0, end_time=12.0),
+        SyncResult(text="다음", start_time=13.0, end_time=15.0),
+    ]
+    vad = _vad((9.8, 30.0))
+    clamped: set[int] = set()
+    _extend_phrase_final_tails(results, vad, clamped)
+    assert results[0].end_time == pytest.approx(12.95)  # min(30.0, 13.0-0.05, 12.0+1.5)
+
+    # 마지막 라인: 다음 라인이 없으면 캡(+1.5)까지
+    solo = [SyncResult(text="마지막", start_time=40.0, end_time=41.0)]
+    _extend_phrase_final_tails(solo, _vad((39.5, 60.0)), set())
+    assert solo[0].end_time == pytest.approx(42.5)
+
+
+def test_tail_extension_skipped_outside_vad():
+    # 라인 끝이 발성 리전 밖(이미 리전 끝을 지나침)이면 따라갈 꼬리가 없다 → 유지
+    results = [SyncResult(text="밖 라인", start_time=10.0, end_time=12.0)]
+    vad = _vad((9.8, 11.5))
+    _extend_phrase_final_tails(results, vad, set())
+    assert results[0].end_time == pytest.approx(12.0)
+
+
+def test_clamped_line_is_not_re_extended():
+    # 반복행 클램프로 잘라낸 라인은 늘임음 연장이 도로 늘리면 안 된다
+    results = [
+        _line("훅", 10.0, 12.0),
+        _line("훅", 12.0, 14.0),
+        _line("훅", 14.0, 21.0),  # outlier → 16.0으로 클램프될 라인
+        _line("한참 뒤", 40.0, 44.0),
+    ]
+    vad = _vad((10.0, 21.0), (39.8, 44.0))
+    results, clamped = _clamp_stretched_lines(results, vad)
+    assert 2 in clamped
+    assert results[2].end_time == pytest.approx(16.0)  # 연장 없이 클램프 값 유지
 
 
 # --- 통합: 기존 규칙 보존 + 새 규칙 공존 -----------------------------------

@@ -354,14 +354,42 @@ def _pull_post_interlude_starts(results, vad_result, clamped: set[int]) -> None:
         clamped.add(i)
 
 
+def _extend_phrase_final_tails(results, vad_result, clamped: set[int]) -> None:
+    """소절 끝(뒤에 0.3초 이상 갭) 라인의 끝을 실제 발성 끝까지 연장한다.
+
+    CTC는 마지막 음절을 온셋에서 끊어 늘임음(held note)의 감쇠를 따라가지 않는다 —
+    SRT/VAD 이중 실측으로 phrase-final 라인의 86~100%가 median 0.4~0.66초 일찍
+    끝남이 확인됨. 라인 끝이 속한 VAD 리전의 끝까지(단 다음 라인 시작 -0.05초,
+    +1.5초 캡 이내) 라인과 마지막 글자의 end를 함께 연장한다.
+    소절 중간(butted) 라인과 이미 클램프로 잘라낸 라인은 건드리지 않는다.
+    """
+    for i, r in enumerate(results):
+        if i in clamped:
+            continue
+        next_start = results[i + 1].start_time if i + 1 < len(results) else float("inf")
+        if next_start - r.end_time <= 0.3:
+            continue  # butted — 다음 음절이 바로 이어지는 라인은 그대로
+        region = next(
+            (reg for reg in vad_result.regions if reg.start <= r.end_time < reg.end), None
+        )
+        if region is None:
+            continue  # 라인 끝이 발성 리전 밖 — 따라갈 꼬리가 없다
+        new_end = min(region.end, next_start - 0.05, r.end_time + 1.5)
+        if new_end <= r.end_time + 0.05:
+            continue
+        r.end_time = new_end
+        if r.word_segments:
+            r.word_segments[-1].end = new_end
+
+
 def _clamp_stretched_lines(results, vad_result):
     """가사에 없는 반복 가창(라인 내부 퍼짐)으로 병적으로 길어진 라인을 잘라낸다.
 
     CTC는 같은 가사가 여러 번 불리면 글자들을 여러 렌디션에 걸쳐 흩뿌릴 수 있다
     (라인 사이 star로는 못 잡는 케이스). 지속 8초 초과 + 발성 커버리지 50% 미만인
     라인만 첫 발성 구간 끝으로 클램프한다 — 정상 라인은 건드리지 않는다.
-    여기에 더해 반복행 outlier 클램프와 간주 후 시작 앵커 당기기를 함께 적용한다.
-    반환: (results, 클램프된 라인 인덱스 집합)
+    여기에 더해 반복행 outlier 클램프·간주 후 시작 앵커 당기기·소절 끝 늘임음
+    연장을 함께 적용한다. 반환: (results, 클램프된 라인 인덱스 집합)
     """
     clamped: set[int] = set()
     for i, r in enumerate(results):
@@ -383,6 +411,8 @@ def _clamp_stretched_lines(results, vad_result):
     # 반복행 형제 대비 outlier로 늘어난 라인 + 간주 뒤 늦게 시작한 라인도 보정
     _clamp_repeated_outliers(results, clamped)
     _pull_post_interlude_starts(results, vad_result, clamped)
+    # 소절 끝 늘임음은 실제 발성 끝까지 연장 (클램프된 라인 제외)
+    _extend_phrase_final_tails(results, vad_result, clamped)
     if clamped:
         logger.info(f"Clamped {len(clamped)} pathologically stretched lines")
     return results, clamped
