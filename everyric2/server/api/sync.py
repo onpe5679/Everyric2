@@ -20,6 +20,10 @@ class SyncLookupResponse(BaseModel):
     created_at: str | None = None
     # 곡 단위 진단 정보 (star 흡수 구간, VAD 발성 구간) — 확장 디버그 스트립용
     debug: dict[str, Any] | None = None
+    # 가사 출처 표기 (예: 보카로 가사 위키) — 푸터 병기용
+    attribution: dict[str, Any] | None = None
+    # 곡 템포 {bpm, beat_offset} — 가라오케 레인 마디 창/비트 격자용
+    tempo: dict[str, Any] | None = None
 
 
 class LineMeta(BaseModel):
@@ -30,12 +34,20 @@ class LineMeta(BaseModel):
     translation: str | None = None
 
 
+class Attribution(BaseModel):
+    """가사 출처 표기 (예: 보카로 가사 위키 CC BY) — 싱크에 저장돼 조회 시 그대로 반환된다."""
+
+    name: str
+    url: str | None = None
+
+
 class GenerateRequest(BaseModel):
     video_id: str
     lyrics: str
     lyrics_source: str = "user_input"
     language: str | None = None
     line_meta: list[LineMeta] | None = None
+    attribution: Attribution | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -60,16 +72,28 @@ class RegenerateRequest(BaseModel):
     language: str | None = None
     force: bool = False
     line_meta: list[LineMeta] | None = None
+    attribution: Attribution | None = None
 
 
-def _merge_meta_into_sync(sync_result, line_meta: list[LineMeta]) -> None:
-    """이미 존재하는 싱크에 발음/번역 메타를 병합 (세션 커밋은 호출부의 컨텍스트가 수행)."""
+def _merge_meta_into_sync(
+    sync_result, line_meta: list[LineMeta] | None, attribution: Attribution | None = None
+) -> None:
+    """이미 존재하는 싱크에 발음/번역 메타·출처를 병합 (세션 커밋은 호출부의 컨텍스트가 수행)."""
     from everyric2.server.worker import merge_line_meta
 
-    segs = [dict(s) for s in sync_result.timestamps.get("segments", [])]
-    if merge_line_meta(segs, [m.model_dump() for m in line_meta]):
+    updated = dict(sync_result.timestamps)
+    changed = False
+    if line_meta:
+        segs = [dict(s) for s in updated.get("segments", [])]
+        if merge_line_meta(segs, [m.model_dump() for m in line_meta]):
+            updated["segments"] = segs
+            changed = True
+    if attribution is not None:
+        updated["attribution"] = attribution.model_dump()
+        changed = True
+    if changed:
         # JSON 컬럼은 재할당해야 변경이 감지된다
-        sync_result.timestamps = {**sync_result.timestamps, "segments": segs}
+        sync_result.timestamps = updated
 
 
 @router.get("/{video_id}", response_model=SyncLookupResponse)
@@ -90,6 +114,8 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
                     language=result.language,
                     created_at=result.created_at.isoformat() if result.created_at else None,
                     debug=result.timestamps.get("debug"),
+                    attribution=result.timestamps.get("attribution"),
+                    tempo=result.timestamps.get("tempo"),
                 )
         else:
             results = await repo.get_by_video(video_id)
@@ -105,6 +131,8 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
                     language=result.language,
                     created_at=result.created_at.isoformat() if result.created_at else None,
                     debug=result.timestamps.get("debug"),
+                    attribution=result.timestamps.get("attribution"),
+                    tempo=result.timestamps.get("tempo"),
                 )
 
         return SyncLookupResponse(found=False)
@@ -118,9 +146,9 @@ async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTa
         sync_repo = SyncRepository(session)
         existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
         if existing:
-            # 정렬은 재사용하되 새로 들어온 발음/번역 메타는 반영한다
-            if request.line_meta:
-                _merge_meta_into_sync(existing, request.line_meta)
+            # 정렬은 재사용하되 새로 들어온 발음/번역 메타·출처는 반영한다
+            if request.line_meta or request.attribution:
+                _merge_meta_into_sync(existing, request.line_meta, request.attribution)
             return GenerateResponse(
                 job_id=existing.id,
                 status="completed",
@@ -135,10 +163,12 @@ async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTa
         )
         job_id = job.id
 
-    from everyric2.server.worker import process_job, stash_line_meta
+    from everyric2.server.worker import process_job, stash_attribution, stash_line_meta
 
     if request.line_meta:
         stash_line_meta(job_id, [m.model_dump() for m in request.line_meta])
+    if request.attribution:
+        stash_attribution(job_id, request.attribution.model_dump())
     background_tasks.add_task(process_job, job_id)
 
     return GenerateResponse(
@@ -231,8 +261,8 @@ async def regenerate_sync(request: RegenerateRequest, background_tasks: Backgrou
             sync_repo = SyncRepository(session)
             existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
             if existing:
-                if request.line_meta:
-                    _merge_meta_into_sync(existing, request.line_meta)
+                if request.line_meta or request.attribution:
+                    _merge_meta_into_sync(existing, request.line_meta, request.attribution)
                 return GenerateResponse(
                     job_id=existing.id,
                     status="completed",
@@ -247,13 +277,15 @@ async def regenerate_sync(request: RegenerateRequest, background_tasks: Backgrou
         )
         job_id = job.id
 
-    from everyric2.server.worker import process_job, stash_force, stash_line_meta
+    from everyric2.server.worker import process_job, stash_attribution, stash_force, stash_line_meta
 
     if request.force:
         # 워커의 (audio_hash, lyrics_hash) 재사용 검사까지 건너뛰어야 진짜 재생성이 된다
         stash_force(job_id)
     if request.line_meta:
         stash_line_meta(job_id, [m.model_dump() for m in request.line_meta])
+    if request.attribution:
+        stash_attribution(job_id, request.attribution.model_dump())
     background_tasks.add_task(process_job, job_id)
 
     return GenerateResponse(

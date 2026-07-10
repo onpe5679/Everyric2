@@ -58,6 +58,10 @@ export interface LyricsData {
   humanTranslated?: boolean;
   /** 곡 단위 정렬 진단 (everyric 소스만) */
   debugMeta?: SyncDebugMeta;
+  /** 가사 원출처 (서버 저장분 또는 vocaro 직접 조회) — 푸터에 병기 */
+  attribution?: SourceAttribution;
+  /** 곡 템포 (everyric 소스만) — 레인 마디 창/비트 격자 */
+  tempo?: SongTempo;
 }
 
 export interface LRCLibTrack {
@@ -86,6 +90,19 @@ export interface EveryricSegment {
   debug?: { active_ratio?: number; clamped?: boolean };
 }
 
+/** 가사 출처 표기 (예: 보카로 가사 위키 CC BY) */
+export interface SourceAttribution {
+  name: string;
+  url?: string | null;
+}
+
+/** 서버(librosa)가 추정한 곡 템포 — 레인의 마디 단위 고정 창과 비트/마디 격자용 */
+export interface SongTempo {
+  bpm: number;
+  /** 첫 비트 시각(초) — 격자를 실제 박에 맞춰 정렬 */
+  beat_offset?: number | null;
+}
+
 /** 곡 단위 정렬 진단 메타 (서버 debug 필드) */
 export interface SyncDebugMeta {
   /** star 토큰이 흡수한 가사 밖 가창 구간들 */
@@ -111,6 +128,8 @@ export interface EveryricSyncResponse {
   created_at?: string;
   error?: string;
   debug?: SyncDebugMeta | null;
+  attribution?: SourceAttribution | null;
+  tempo?: SongTempo | null;
 }
 
 export interface GenerateResponse {
@@ -140,6 +159,8 @@ export interface Settings {
   translationLanguage: string;
   /** 원문 밑에 한국어 발음 표기(있을 때만) 표시 — 패널·PiP 공통 */
   showPronunciation: boolean;
+  /** 서버 싱크가 없을 때 어느 가사 소스를 먼저 찾을지 — 보카로 위키는 발음·사람 번역 제공 */
+  lyricsSourcePriority: 'vocaro' | 'lrclib';
   pipKeepPanel: boolean;
   pipShowVideo: boolean;
   /** 빈 문자열이면 헤더 생략 */
@@ -148,6 +169,10 @@ export interface Settings {
   pipVideoRatio: number;
   /** 가라오케 레인 높이(px) — 레인 위 디바이더 드래그로 조절 */
   pitchLaneHeight: number;
+  /** 가라오케 레인 표시 구간(마디 수) — 서버 BPM 기준, 템포 없으면 120BPM 가정 폴백 */
+  pitchWindowMeasures: number;
+  /** 긴 묵음 뒤 가사 시작 전 4·3·2·1 카운트다운 표시 */
+  pitchCountdown: boolean;
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */
   pitchGuide: boolean;
   /** 패널 하단에 내부 상태(비디오 바인딩, 싱크 소스 등) 표시 */
@@ -197,9 +222,17 @@ export interface PanelGeometry {
   collapsed: boolean;
 }
 
+/** 수동 검색에서 사용자가 직접 고를 수 있는 후보 (소스별) */
+export type SearchCandidate =
+  | { source: 'lrclib'; id: number; title: string; artist: string; duration: number; synced: boolean }
+  | { source: 'vocaro'; slug: string; title: string; url: string };
+
 export type BgRequest =
-  | { type: 'FETCH_LYRICS'; payload: SongInfo }
-  | { type: 'GENERATE_SYNC'; payload: { videoId: string; lyrics: string; language?: string; lineMeta?: LineMeta[] } }
+  | { type: 'FETCH_LYRICS'; payload: SongInfo & { skipLrclib?: boolean } }
+  | { type: 'FETCH_LRCLIB'; payload: SongInfo }
+  | { type: 'SEARCH_CANDIDATES'; payload: { title: string; artist: string; duration: number } }
+  | { type: 'PICK_LRCLIB'; payload: { id: number } }
+  | { type: 'GENERATE_SYNC'; payload: { videoId: string; lyrics: string; language?: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string } }
   | { type: 'SERVER_HEALTH' }

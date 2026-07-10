@@ -1,4 +1,4 @@
-import type { LyricLine } from '../types';
+import type { LyricLine, SongTempo } from '../types';
 import { h, icon } from './dom';
 import { appendKaraokeSpans } from './karaoke';
 
@@ -17,6 +17,10 @@ export interface PipOptions {
   pitchEnabled: boolean;
   /** 가라오케 레인 높이(px) — 디바이더 드래그로 조절, 설정에 저장 */
   pitchLaneHeight: number;
+  /** 레인 표시 구간(마디 수) — 서버 BPM 기준, 템포 없으면 120BPM 가정 폴백 */
+  pitchWindowMeasures: number;
+  /** 긴 묵음 뒤 가사 시작 전 4·3·2·1 카운트다운 */
+  pitchCountdown: boolean;
   /** 디버그: 글자별 CTC 신뢰도를 색으로 표시 */
   showConfidence: boolean;
   /** 레인 높이 드래그 조절 완료 시 */
@@ -49,18 +53,33 @@ interface PitchNote {
   midi: number;
   start: number;
   end: number;
+  /** 이 노트(음절)에 대응하는 발음 표기 — 계이름처럼 노트에 직접 붙여 그린다 */
+  pron?: string;
 }
 
-/** 오선지 레인 한 페이지 = 가사 한 라인 (노트에 가사/발음/번역을 정렬해 그린다) */
-interface PitchLine {
-  line: LyricLine;
-  notes: PitchNote[];
-  /** 페이지 시간 범위 — 노트·가사 토큰·라인 타임스탬프를 모두 포함 */
+interface PitchWord {
+  word: string;
   start: number;
   end: number;
-  /** 페이지 내 고정 세로 매핑값 — 노트 midi 중앙과 범위(반음) */
-  centerMidi: number;
-  span: number;
+  confidence?: number;
+}
+
+/** 라인 메타 (카운트다운·현재 라인 번역/발음 폴백용) — lines 배열과 인덱스 1:1 */
+interface PitchLine {
+  line: LyricLine;
+  start: number;
+  end: number;
+  hasNotes: boolean;
+}
+
+/** setLines에서 미리 평탄화해 두는 레인 데이터 (렌더는 시간 창으로 필터만) */
+interface PitchData {
+  pages: PitchLine[];
+  notes: PitchNote[];
+  words: PitchWord[];
+  /** 곡 전체 고정 세로 스케일 (라인마다 출렁이지 않게) */
+  lo: number;
+  hi: number;
 }
 
 interface PitchColors {
@@ -106,9 +125,12 @@ export class PipController {
   private onSeek: (time: number) => void = () => {};
   private pitchCanvas: HTMLCanvasElement | null = null;
   private pitchDividerEl: HTMLDivElement | null = null;
-  private pitchLines: PitchLine[] = [];
+  private pitch: PitchData = { pages: [], notes: [], words: [], lo: 57, hi: 71 };
   private pitchEnabled = true;
   private pitchLaneHeight = 170;
+  private pitchWindowMeasures = 4;
+  private pitchCountdown = true;
+  private tempo: SongTempo | null = null;
   private showConfidence = false;
   private pitchColors: PitchColors | null = null;
 
@@ -137,6 +159,8 @@ export class PipController {
     this.videoRatio = opts.initialVideoRatio;
     this.pitchEnabled = opts.pitchEnabled;
     this.pitchLaneHeight = opts.pitchLaneHeight;
+    this.pitchWindowMeasures = opts.pitchWindowMeasures;
+    this.pitchCountdown = opts.pitchCountdown;
     this.showConfidence = opts.showConfidence;
 
     const doc = win.document;
@@ -290,9 +314,24 @@ export class PipController {
   setLines(lines: LyricLine[]): void {
     this.lines = lines;
     this.index = -1;
-    this.pitchLines = collectPitchLines(lines);
+    this.pitch = collectPitchData(lines);
     this.applyPitchVisibility();
     this.renderLines();
+  }
+
+  /** 레인 표시 구간(마디 수) 설정 즉시 반영 */
+  setPitchWindow(measures: number): void {
+    this.pitchWindowMeasures = Math.min(16, Math.max(1, measures));
+  }
+
+  /** 서버가 추정한 곡 템포 — 마디 창 폭·비트 격자에 사용, null이면 초 단위 폴백 */
+  setTempo(tempo: SongTempo | null): void {
+    this.tempo = tempo && tempo.bpm > 0 ? tempo : null;
+  }
+
+  /** 카운트다운 설정 즉시 반영 */
+  setPitchCountdown(enabled: boolean): void {
+    this.pitchCountdown = enabled;
   }
 
   /** 현재 라인 인덱스 변경 시 호출 */
@@ -320,7 +359,7 @@ export class PipController {
 
   /** 레인 표시 조건 = 설정 on + 노트 데이터 있음. 레인이 켜지면 스테이지는 숨긴다(중복 표시). */
   private applyPitchVisibility(): void {
-    const show = this.pitchEnabled && this.pitchLines.some(p => p.notes.length > 0);
+    const show = this.pitchEnabled && this.pitch.notes.length > 0;
     if (this.pitchCanvas) this.pitchCanvas.style.display = show ? '' : 'none';
     if (this.pitchDividerEl) this.pitchDividerEl.style.display = show ? '' : 'none';
     this.win?.document.body.classList.toggle('ey-lane-active', show);
@@ -397,11 +436,15 @@ export class PipController {
     }
   }
 
-  /** 음정 레인 렌더 — TJ노래방식 오선지: 현재 가사 라인을 한 페이지로 펼쳐 그린다 */
+  /**
+   * 음정 레인 렌더 — 고정 px/sec 스크롤 오선지.
+   * 창 폭이 N마디(서버 추정 BPM 기준)로 일정해 라인마다 폭이 출렁이지 않고,
+   * 간주는 빈 오선이 그대로 흘러간다. 발음은 계이름처럼 각 노트에 직접 붙는다.
+   */
   private renderPitch(now: number): void {
     const canvas = this.pitchCanvas;
     const win = this.win;
-    if (!canvas || !win || !this.pitchEnabled || this.pitchLines.length === 0) return;
+    if (!canvas || !win || !this.pitchEnabled || this.pitch.notes.length === 0) return;
 
     const dpr = win.devicePixelRatio || 1;
     const cw = canvas.clientWidth;
@@ -418,56 +461,68 @@ export class PipController {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
 
-    // 현재 페이지 — 패널과 같은 엔진 라인 인덱스로 구동해 두 표시가 절대 어긋나지 않게 한다.
-    // 현재 라인이 끝난 간주 구간에서는 다음 라인을 미리 보여준다.
-    let pageIdx = this.index >= 0 ? Math.min(this.index, this.pitchLines.length - 1) : 0;
-    if (pageIdx < this.pitchLines.length - 1 && now > this.pitchLines[pageIdx].end + 0.25) {
-      pageIdx += 1;
-    }
-    const page = this.pitchLines[pageIdx];
-    if (!page) return;
-
     const colors = this.pitchColors ?? (this.pitchColors = readPitchColors(win));
+    const { pages, notes, words, lo, hi } = this.pitch;
 
-    // ── 세로 레이아웃: 위 오선지 영역 + 아래 가사/발음/번역 줄 (줄 수는 곡 단위 고정)
-    const hasPron = this.pitchLines.some(p => p.line.pronunciation);
-    const hasTr = this.pitchLines.some(p => p.line.translation);
-    // 레인이 클수록 가사도 크게 — 참조(TJ)처럼 음절이 주인공급 크기
-    const lyricH = Math.max(16, Math.min(26, Math.round(ch * 0.16)));
-    const lyricPx = Math.max(13, Math.round(lyricH * 0.72));
-    // 발음은 가사 음절 바로 아래 같은 시간축에 붙는다 — 가사와 크기 균형
-    const pronPx = Math.max(11, Math.round(lyricPx * 0.8));
-    const pronH = hasPron ? pronPx + 7 : 0;
-    const trPx = Math.max(12, Math.min(16, Math.round(ch * 0.09)));
+    // ── 세로 레이아웃: 오선 영역 + 가사 줄 + (발음 폴백 줄) + 번역 줄
+    const hasSegs = pages.some(p => p.line.pronSegments && p.line.pronSegments.length > 0);
+    const hasPronRow = !hasSegs && pages.some(p => p.line.pronunciation);
+    const hasTr = pages.some(p => p.line.translation);
+    const lyricH = Math.max(16, Math.min(26, Math.round(ch * 0.15)));
+    const lyricPx = Math.max(13, Math.round(lyricH * 0.7));
+    const pronPx = Math.max(10, Math.round(lyricPx * 0.72));
+    const pronRowH = hasPronRow ? pronPx + 6 : 0;
+    const trPx = Math.max(12, Math.min(16, Math.round(ch * 0.085)));
     const trH = hasTr ? trPx + 7 : 0;
-    const padTop = 3;
-    const staffH = Math.max(24, ch - padTop - lyricH - pronH - trH - 3);
-    const g = staffH / 8; // 오선 간격 — 5선 4칸 + 위아래 덧줄 여백 2칸씩
-    const staffTop = padTop + 2 * g;
+    const padTop = 2;
+    const staffH = Math.max(30, ch - padTop - lyricH - pronRowH - trH - 2);
 
-    // 오선 5줄
+    // ── 고정 시간 스케일: 창 폭 = N마디(4/4 가정) — 템포 없으면 120BPM 가정 폴백
+    const secPerBeat = this.tempo ? 60 / this.tempo.bpm : 0.5;
+    const W = this.pitchWindowMeasures * 4 * secPerBeat;
+    const t0 = now - W * 0.28;
+    const x = (t: number) => ((t - t0) / W) * cw;
+
+    // ── 곡 전체 고정 세로 스케일 (위아래 덧줄 여백 포함)
+    const marginY = staffH * 0.16;
+    const usable = staffH - marginY * 2;
+    const semiPx = usable / Math.max(1, hi - lo);
+    const y = (midi: number) => padTop + marginY + usable - (midi - lo) * semiPx;
+
+    // 오선 5줄 — 음역을 4등분한 시각 기준선
     ctx.fillStyle = colors.faint;
     for (let i = 0; i < 5; i++) {
-      ctx.fillRect(0, staffTop + i * g - 0.5, cw, 1);
+      ctx.fillRect(0, padTop + marginY + (usable / 4) * i - 0.5, cw, 1);
     }
+    // 세로 눈금: 템포가 있으면 첫 비트에 정렬된 비트(옅게)/마디(진하게) 격자,
+    // 없으면 1초 간격 폴백
+    if (this.tempo) {
+      const offset = this.tempo.beat_offset ?? 0;
+      for (let b = Math.ceil((t0 - offset) / secPerBeat); ; b++) {
+        const t = offset + b * secPerBeat;
+        if (t >= t0 + W) break;
+        const isMeasure = ((b % 4) + 4) % 4 === 0;
+        ctx.globalAlpha = isMeasure ? 0.55 : 0.18;
+        ctx.fillRect(x(t) - (isMeasure ? 0.75 : 0.5), padTop, isMeasure ? 1.5 : 1, staffH);
+      }
+    } else {
+      ctx.globalAlpha = 0.3;
+      for (let t = Math.ceil(t0); t < t0 + W; t++) {
+        ctx.fillRect(x(t) - 0.5, padTop, 1, staffH);
+      }
+    }
+    ctx.globalAlpha = 1;
 
-    // 시간→x: 페이지(현재 라인)를 레인 전체 폭에 펼친다
-    const padX = 10;
-    const pageSpan = Math.max(0.001, page.end - page.start);
-    const x = (t: number) => padX + ((t - page.start) / pageSpan) * (cw - padX * 2);
-
-    // midi→y: 반음당 g/2 (온음 ≈ 오선 한 칸), 라인 음역이 오선을 넘으면 영역에 맞게 압축
-    const semiPx = Math.min(g / 2, (staffH - g) / Math.max(1, page.span));
-    const staffMidY = staffTop + 2 * g;
-    const y = (midi: number) => staffMidY - (midi - page.centerMidi) * semiPx;
-
-    // ── 노트 막대: 듀레이션 반영 가로 길이 + 부른 부분 accent 필
-    const noteH = Math.max(5, Math.min(12, g * 0.8));
+    // ── 노트 막대 + 계이름(위) + 발음(아래) — 시간 창 안의 노트만
+    const vis = notes.filter(n => n.end > t0 - 0.5 && n.start < t0 + W + 0.5);
+    const noteH = Math.max(5, Math.min(13, semiPx * 1.6));
     const noteR = Math.min(noteH / 2, 4);
-    for (const n of page.notes) {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const n of vis) {
       const x1 = x(n.start);
       const x2 = x(n.end);
-      const w = Math.max(3, x2 - x1 - 1); // 인접 노트와 1px 간격
+      const w = Math.max(3, x2 - x1 - 1);
       const top = y(n.midi) - noteH / 2;
       const isCurrent = n.start <= now && now < n.end;
 
@@ -495,48 +550,70 @@ export class PipController {
         ctx.restore();
       }
 
-      // 계이름 라벨 — 막대 위 (위 공간이 없으면 아래)
-      if (x2 - x1 >= 18) {
-        let labelY = top - 7;
-        if (labelY < 6) labelY = top + noteH + 8;
+      const cx = (x1 + x2) / 2;
+      // 계이름 — 항상 노트 위
+      if (w >= 16) {
         ctx.font = 'bold 10px system-ui, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
         ctx.fillStyle = isCurrent ? colors.text : colors.dim;
-        ctx.fillText(PITCH_NAMES_KO[((n.midi % 12) + 12) % 12], (x1 + x2) / 2, labelY);
+        ctx.fillText(PITCH_NAMES_KO[((n.midi % 12) + 12) % 12], cx, Math.max(7, top - 7));
+      }
+      // 발음 — 계이름처럼 노트 바로 아래에 부착 (사용자 요구: 노트마다 붙일 것)
+      if (n.pron) {
+        ctx.font = `${pronPx}px system-ui, sans-serif`;
+        ctx.fillStyle = n.start <= now ? colors.accent : colors.dim;
+        ctx.fillText(n.pron, cx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
       }
     }
 
-    // ── 시간 위치 기반 라벨 배치 + 충돌 회피: 좌→우로 최소 간격을 보장하고,
-    //    우측으로 밀린 만큼은 뒤에서부터 되민다 — 타이밍이 몰린 음절이 뭉치지 않게
+    // ── 카운트다운: 긴 묵음(5s+) 뒤 라인 시작 4초 전부터 4·3·2·1
+    if (this.pitchCountdown) {
+      const next = pages.find(p => p.start > now + 0.05 && p.hasNotes);
+      if (next) {
+        const prevEnd = pages.reduce(
+          (acc, p) => (p.end <= next.start + 0.01 && p.end > acc ? p.end : acc), 0);
+        const remain = next.start - now;
+        if (remain <= 4 && next.start - prevEnd >= 5 && now >= prevEnd) {
+          const num = Math.max(1, Math.ceil(remain));
+          // 숫자를 라인 시작 시각 위치에 그려 스크롤과 함께 플레이헤드로 다가오게 한다
+          const nx = Math.max(cw * 0.28 + 30, Math.min(cw - 30, x(next.start)));
+          ctx.font = `bold ${Math.round(staffH * 0.5)}px system-ui, sans-serif`;
+          ctx.fillStyle = colors.accent;
+          ctx.globalAlpha = 0.9;
+          ctx.fillText(String(num), nx, padTop + staffH / 2);
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+
+    // ── 라벨 충돌 회피 (좌→우 최소 간격 + 우측 되밀기)
     const placeRow = (items: { cx: number; w: number }[]): number[] => {
       const gap = 3;
       const xs = items.map(it => it.cx);
       for (let i = 0; i < xs.length; i++) {
         const minCx = i === 0
-          ? padX + items[i].w / 2
+          ? items[i].w / 2 + 2
           : xs[i - 1] + items[i - 1].w / 2 + gap + items[i].w / 2;
         if (xs[i] < minCx) xs[i] = minCx;
       }
       for (let i = xs.length - 1; i >= 0; i--) {
         const maxCx = i === xs.length - 1
-          ? cw - padX - items[i].w / 2
+          ? cw - items[i].w / 2 - 2
           : xs[i + 1] - items[i + 1].w / 2 - gap - items[i].w / 2;
         if (xs[i] > maxCx) xs[i] = maxCx;
       }
       return xs;
     };
-    const idealCx = (s: number, e: number) =>
-      Math.max(padX, Math.min(cw - padX, (x(s) + x(e)) / 2));
 
-    // ── 노트 아래 가사: word 토큰을 시간 위치에 정렬(충돌 회피), 부른 토큰은 accent
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    // ── 노트 아래 가사: 창 안의 글자 토큰을 시간 위치 + 충돌 회피로
     let ty = padTop + staffH;
     ctx.font = `bold ${lyricPx}px system-ui, sans-serif`;
-    const words = page.line.words;
-    if (words && words.length > 0) {
-      const items = words.map(w => ({ w, cx: idealCx(w.start, w.end), width: ctx.measureText(w.word).width }));
+    const visWords = words.filter(w => w.end > t0 - 0.5 && w.start < t0 + W + 0.5);
+    if (visWords.length > 0) {
+      const items = visWords.map(w => ({
+        w,
+        cx: (x(w.start) + x(w.end)) / 2,
+        width: ctx.measureText(w.word).width,
+      }));
       const xs = placeRow(items.map(it => ({ cx: it.cx, w: it.width })));
       items.forEach((it, i) => {
         let color = it.w.start <= now ? colors.accent : colors.text;
@@ -547,64 +624,46 @@ export class PipController {
         ctx.fillStyle = color;
         ctx.fillText(it.w.word, xs[i], ty + lyricH * 0.55);
       });
-    } else {
-      // word 타이밍이 없는 라인 — 라인 텍스트 통째 중앙 폴백
-      ctx.fillStyle = page.start <= now ? colors.accent : colors.text;
-      ctx.fillText(page.line.text, cw / 2, ty + lyricH * 0.55, cw - padX * 2);
     }
     ty += lyricH;
-    if (hasPron) {
-      const segs = page.line.pronSegments;
-      if (segs && segs.length > 0) {
-        // 발음 음절도 같은 시간축 + 충돌 회피 — 노트/원문 바로 아래에서 대응이 읽힌다
-        ctx.font = `${pronPx}px system-ui, sans-serif`;
-        const items = segs.map(seg => ({ seg, cx: idealCx(seg.start, seg.end), width: ctx.measureText(seg.text).width }));
-        const xs = placeRow(items.map(it => ({ cx: it.cx, w: it.width })));
-        items.forEach((it, i) => {
-          ctx.fillStyle = it.seg.start <= now ? colors.accent : colors.dim;
-          ctx.fillText(it.seg.text, xs[i], ty + pronH * 0.5);
-        });
-      } else if (page.line.pronunciation) {
-        this.renderPron(ctx, page, now, cw, padX, ty + pronH * 0.5, colors, x, pronPx);
+
+    // ── 발음 폴백 줄 (음절 타이밍이 아예 없는 곡): 현재 라인 발음 그라데이션
+    const page = this.index >= 0 ? pages[Math.min(this.index, pages.length - 1)] : undefined;
+    if (hasPronRow) {
+      if (page?.line.pronunciation) {
+        this.renderPronFallback(ctx, page, now, cw, ty + pronRowH * 0.5, colors, pronPx);
       }
-      ty += pronH;
+      ty += pronRowH;
     }
-    if (hasTr && page.line.translation) {
+
+    // ── 번역: 현재 라인 번역을 하단 중앙에
+    if (hasTr && page?.line.translation) {
       ctx.font = `${trPx}px system-ui, sans-serif`;
       ctx.fillStyle = colors.dim;
-      ctx.fillText(page.line.translation, cw / 2, ty + trH * 0.5, cw - padX * 2);
+      ctx.fillText(page.line.translation, cw / 2, ty + trH * 0.5, cw - 16);
     }
 
-    // ── 현재 위치 수직 스위프 — 페이지 재생 중일 때만 (간주 미리보기에선 숨김)
-    if (now >= page.start && now <= page.end) {
-      const px = x(now);
-      ctx.fillStyle = colors.dim;
-      ctx.fillRect(px - 0.75, 0, 1.5, padTop + staffH);
-      ctx.fillStyle = colors.accent;
-      ctx.beginPath();
-      ctx.moveTo(px - 4, 0);
-      ctx.lineTo(px + 4, 0);
-      ctx.lineTo(px, 6);
-      ctx.closePath();
-      ctx.fill();
-    }
+    // ── 고정 플레이헤드 (좌측 28%)
+    const px = cw * 0.28;
+    ctx.fillStyle = colors.dim;
+    ctx.fillRect(px - 0.75, padTop, 1.5, staffH);
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath();
+    ctx.moveTo(px - 4, padTop);
+    ctx.lineTo(px + 4, padTop);
+    ctx.lineTo(px, padTop + 6);
+    ctx.closePath();
+    ctx.fill();
   }
 
-  /**
-   * 발음 줄 렌더 — 부른 만큼 accent로 칠한다.
-   * 음절 타이밍(pronSegments)이 있으면 각 음절을 가사 음절과 **같은 시간축 위치**에
-   * 배치해 노트·원문 바로 아래에서 대응이 읽히게 하고, 없으면 가운데 정렬
-   * 문자열에 라인 진행률 그라데이션으로 폴백한다.
-   */
-  private renderPron(
+  /** 발음 폴백 (음절 타이밍 없는 곡) — 현재 라인 발음을 가운데 정렬 + 진행률 그라데이션 */
+  private renderPronFallback(
     ctx: CanvasRenderingContext2D,
     page: PitchLine,
     now: number,
     cw: number,
-    padX: number,
     py: number,
     colors: PitchColors,
-    x: (t: number) => number,
     fontPx: number,
   ): void {
     const pron = page.line.pronunciation ?? '';
@@ -612,19 +671,7 @@ export class PipController {
     ctx.font = `${fontPx}px system-ui, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const maxW = cw - padX * 2;
-
-    const segs = page.line.pronSegments;
-    if (segs && segs.length > 0) {
-      for (const seg of segs) {
-        const sx = Math.max(padX, Math.min(cw - padX, (x(seg.start) + x(seg.end)) / 2));
-        ctx.fillStyle = seg.start <= now ? colors.accent : colors.dim;
-        ctx.fillText(seg.text, sx, py);
-      }
-      return;
-    }
-
-    // 폴백: 가운데 정렬 + 진행률 비례 그라데이션 필
+    const maxW = cw - 16;
     ctx.fillStyle = colors.dim;
     ctx.fillText(pron, cw / 2, py, maxW);
     const span = Math.max(0.001, page.end - page.start);
@@ -721,53 +768,74 @@ export class PipController {
 }
 
 /**
- * 라인별 페이지 구조 수집 — 라인 배열과 인덱스가 1:1로 정렬된다.
- * (renderPitch가 엔진 라인 인덱스로 페이지를 고르므로, 노트가 없는 라인도
- * 빈 오선 페이지로 포함해야 패널 하이라이트와 어긋나지 않는다.)
+ * 라인 배열에서 레인 데이터를 평탄화한다.
+ * - pages: 라인 인덱스와 1:1 (카운트다운·현재 라인 번역/발음 폴백용)
+ * - notes: 전 곡 노트, 각 노트에 대응 발음 음절(pron)을 최대 겹침 기준으로 부착
+ * - words: 전 곡 글자 토큰
+ * - lo/hi: 곡 전체 고정 세로 스케일 (최소 14반음)
  */
-function collectPitchLines(lines: LyricLine[]): PitchLine[] {
-  return lines.map((line, i) => {
-    const notes: PitchNote[] = [];
+function collectPitchData(lines: LyricLine[]): PitchData {
+  const pages: PitchLine[] = [];
+  const notes: PitchNote[] = [];
+  const words: PitchWord[] = [];
+  let lo = Infinity;
+  let hi = -Infinity;
+
+  lines.forEach((line, i) => {
+    const lineNotes: PitchNote[] = [];
     if (line.words) {
       for (const word of line.words) {
+        words.push({ word: word.word, start: word.start, end: word.end, confidence: word.confidence });
         if (!word.notes) continue;
-        for (const n of word.notes) notes.push({ midi: n.midi, start: n.start, end: n.end });
+        for (const n of word.notes) lineNotes.push({ midi: n.midi, start: n.start, end: n.end });
       }
     }
     if (line.notes) {
-      for (const n of line.notes) notes.push({ midi: n.midi, start: n.start, end: n.end });
+      for (const n of line.notes) lineNotes.push({ midi: n.midi, start: n.start, end: n.end });
     }
-    notes.sort((a, b) => a.start - b.start);
+    lineNotes.sort((a, b) => a.start - b.start);
 
-    let start = line.time ?? notes[0]?.start ?? 0;
-    let end = line.endTime ?? lines[i + 1]?.time ?? (notes.length > 0 ? notes[notes.length - 1].end : start + 4);
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const n of notes) {
+    // 발음 음절을 최대 겹침 노트에 부착 — 계이름처럼 노트에 직접 그린다
+    if (line.pronSegments) {
+      for (const seg of line.pronSegments) {
+        let best: PitchNote | null = null;
+        let bestOv = 0;
+        for (const n of lineNotes) {
+          const ov = Math.min(n.end, seg.end) - Math.max(n.start, seg.start);
+          if (ov > bestOv) {
+            bestOv = ov;
+            best = n;
+          }
+        }
+        if (best) best.pron = best.pron ? best.pron + seg.text : seg.text;
+      }
+    }
+
+    let start = line.time ?? lineNotes[0]?.start ?? 0;
+    let end = line.endTime ?? lines[i + 1]?.time ?? start + 4;
+    for (const n of lineNotes) {
       start = Math.min(start, n.start);
       end = Math.max(end, n.end);
       lo = Math.min(lo, n.midi);
       hi = Math.max(hi, n.midi);
     }
-    if (line.words) {
-      for (const w of line.words) {
-        start = Math.min(start, w.start);
-        end = Math.max(end, w.end);
-      }
-    }
-    if (notes.length === 0) {
-      lo = 62;
-      hi = 66;
-    }
-    return {
-      line,
-      notes,
-      start,
-      end: Math.max(end, start + 0.5),
-      centerMidi: (lo + hi) / 2,
-      span: hi - lo,
-    };
+    pages.push({ line, start, end: Math.max(end, start + 0.5), hasNotes: lineNotes.length > 0 });
+    notes.push(...lineNotes);
   });
+
+  notes.sort((a, b) => a.start - b.start);
+  words.sort((a, b) => a.start - b.start);
+  if (!Number.isFinite(lo)) {
+    lo = 57;
+    hi = 71;
+  }
+  lo -= 1;
+  hi += 1;
+  while (hi - lo < 14) {
+    lo -= 1;
+    hi += 1;
+  }
+  return { pages, notes, words, lo, hi };
 }
 
 function readPitchColors(win: Window): PitchColors {

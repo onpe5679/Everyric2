@@ -419,6 +419,58 @@
   max-width: 260px;
 }
 
+/* ── 수동 검색 후보 리스트 ────────────────────────────────────── */
+
+.ey-search-state { justify-content: flex-start; }
+
+.ey-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 280px;
+}
+
+.ey-result-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--ey-border);
+  border-radius: 8px;
+  background: var(--ey-elev);
+  color: var(--ey-text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.ey-result-item:hover { background: var(--ey-elev-hover); border-color: var(--ey-accent); }
+
+.ey-result-src {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--ey-elev-hover);
+  color: var(--ey-text-dim);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.ey-result-src.vocaro { background: rgba(255, 122, 61, 0.18); color: var(--ey-accent); }
+
+.ey-result-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ey-result-meta { flex-shrink: 0; color: var(--ey-text-dim); font-size: 10px; }
+
 /* ── 푸터 ─────────────────────────────────────────────────────── */
 
 .ey-footer {

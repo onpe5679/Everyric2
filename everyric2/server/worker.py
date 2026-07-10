@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import logging
+import re
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,14 @@ _PENDING_FORCE: set[str] = set()
 
 def stash_line_meta(job_id: str, line_meta: list[dict[str, Any]]) -> None:
     _PENDING_LINE_META[job_id] = line_meta
+
+
+# 잡별 가사 출처 표기 (예: 보카로 가사 위키) — 완성된 싱크에 함께 저장된다
+_PENDING_ATTRIBUTION: dict[str, dict[str, Any]] = {}
+
+
+def stash_attribution(job_id: str, attribution: dict[str, Any]) -> None:
+    _PENDING_ATTRIBUTION[job_id] = attribution
 
 
 def stash_force(job_id: str) -> None:
@@ -114,11 +124,20 @@ async def process_job(job_id: str) -> None:
             existing = await sync_repo.get_by_audio_and_lyrics_hash(audio_hash, lyrics_hash_value)
             if existing and not forced:
                 meta = _PENDING_LINE_META.pop(job_id, None)
+                attr = _PENDING_ATTRIBUTION.pop(job_id, None)
+                updated = dict(existing.timestamps)
+                changed = False
                 if meta:
-                    segs = [dict(s) for s in existing.timestamps.get("segments", [])]
+                    segs = [dict(s) for s in updated.get("segments", [])]
                     if merge_line_meta(segs, meta):
-                        # JSON 컬럼은 재할당해야 변경이 감지된다
-                        existing.timestamps = {**existing.timestamps, "segments": segs}
+                        updated["segments"] = segs
+                        changed = True
+                if attr is not None:
+                    updated["attribution"] = attr
+                    changed = True
+                if changed:
+                    # JSON 컬럼은 재할당해야 변경이 감지된다
+                    existing.timestamps = updated
                 job_repo = JobRepository(session)
                 await job_repo.update_status(
                     job_id, "completed", progress=100, result_id=existing.id
@@ -148,7 +167,7 @@ async def process_job(job_id: str) -> None:
                 engine="ctc",
                 quality_score=result.get("quality_score"),
                 audio_hash=audio_hash,
-                extra={"debug": result["debug"]} if result.get("debug") else None,
+                extra=_build_extra(result, _PENDING_ATTRIBUTION.pop(job_id, None)),
             )
 
             await job_repo.update_status(
@@ -159,6 +178,7 @@ async def process_job(job_id: str) -> None:
     except Exception as e:
         logger.exception(f"Job failed: {job_id}")
         _PENDING_LINE_META.pop(job_id, None)
+        _PENDING_ATTRIBUTION.pop(job_id, None)
         _PENDING_FORCE.discard(job_id)
         async with get_session() as session:
             job_repo = JobRepository(session)
@@ -179,6 +199,45 @@ def _download_and_hash(video_id: str) -> dict:
     }
 
 
+def _build_extra(result: dict[str, Any], attribution: dict[str, Any] | None) -> dict[str, Any] | None:
+    """싱크 JSON의 segments 밖 부가정보(디버그 메타, 출처 표기, 템포) 조립."""
+    extra: dict[str, Any] = {}
+    if result.get("debug"):
+        extra["debug"] = result["debug"]
+    if result.get("tempo"):
+        extra["tempo"] = result["tempo"]
+    if attribution is not None:
+        extra["attribution"] = attribution
+    return extra or None
+
+
+def _estimate_tempo(audio) -> dict[str, Any] | None:
+    """librosa로 BPM·첫 비트 시각 추정 — 가라오케 레인의 박자/마디 격자용.
+
+    보컬로이드 곡은 대부분 고정 BPM이라 (bpm, beat_offset)만으로 전 곡 격자를
+    재구성할 수 있다. 실패는 치명적이지 않으므로 None으로 조용히 폴백.
+    """
+    try:
+        import librosa
+        import numpy as np
+
+        y = np.asarray(audio.waveform, dtype=np.float32)
+        sr = int(audio.sample_rate)
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr, trim=False)
+        bpm = float(np.atleast_1d(tempo)[0])
+        if not (30.0 <= bpm <= 300.0) or len(beats) < 8:
+            return None
+        beat_times = librosa.frames_to_time(beats, sr=sr)
+        # 첫 비트 위상 — 비트 간격의 중앙값으로 격자를 안정화
+        interval = float(np.median(np.diff(beat_times)))
+        if interval > 0:
+            bpm = 60.0 / interval
+        return {"bpm": round(bpm, 2), "beat_offset": round(float(beat_times[0]), 3)}
+    except Exception:
+        logger.exception("Tempo estimation failed; lane falls back to seconds grid")
+        return None
+
+
 def _separate_vocals(audio):
     """demucs 보컬 분리 (실패/미설치 시 None) — VAD 클램프와 멜로디 f0가 공유한다."""
     try:
@@ -196,12 +255,83 @@ def _separate_vocals(audio):
         return None
 
 
+def _repeat_key(text: str) -> str:
+    """반복행 판정용 키 — 공백/기호를 지우고 대소문자를 무시한 텍스트."""
+    return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE).casefold()
+
+
+def _clamp_repeated_outliers(results, clamped: set[int]) -> None:
+    """같은 가사가 3번 이상 반복될 때, 형제 라인 duration 중앙값 대비 병적으로 긴
+    라인을 중앙값 길이로 잘라낸다(시작 유지, end = start + 중앙값).
+
+    CTC가 같은 훅을 반복해 부를 때 글자를 특정 렌디션에 몰아 흩뿌려, 같은 텍스트의
+    다른 반복 라인은 ~2초인데 한 라인만 7초 outlier로 늘어나는 케이스를 잡는다.
+    형제가 2개 이하이거나 중앙값 자체가 비정상(<0.5s)이면 건드리지 않는다.
+    """
+    groups: dict[str, list[int]] = {}
+    for i, r in enumerate(results):
+        key = _repeat_key(r.text)
+        if key:
+            groups.setdefault(key, []).append(i)
+    for idxs in groups.values():
+        if len(idxs) < 3:
+            continue
+        median = statistics.median(results[i].end_time - results[i].start_time for i in idxs)
+        if median < 0.5:
+            continue
+        limit = max(median * 2.5, 4.0)
+        for i in idxs:
+            if i in clamped:
+                continue  # 기존 규칙이 이미 처리한 라인은 그대로 둔다
+            r = results[i]
+            if r.end_time - r.start_time > limit:
+                r.end_time = r.start_time + median
+                clamped.add(i)
+
+
+def _pull_post_interlude_starts(results, vad_result, clamped: set[int]) -> None:
+    """긴 간주(직전 라인 end와 8초 이상 벌어짐) 뒤 첫 라인의 시작이 실제 보컬 시작보다
+    늦게 잡히면, 라인이 속한 가창 블록의 시작으로 라인 start를 당긴다.
+
+    앵커는 "간주 이후 첫 리전"이 아니라 **라인과 겹치는 첫 리전에서 뒤로(≤2s 간격)
+    이어지는 리전 체인의 시작**이다 — 간주 초입의 고립된 잔향/애드립 리전(체인 밖)에
+    끌려가 3배 가드에 걸리는 오탐을 막는다 (熱異常 실측: 40초 간주 초입 0.6초 잔향).
+    end는 유지하고, 당긴 결과 duration이 원래의 3배를 넘으면 오탐으로 보고 건너뛴다.
+    """
+    for i in range(1, len(results)):
+        r = results[i]
+        prev_end = results[i - 1].end_time
+        if r.start_time - prev_end < 8.0:
+            continue
+        # 간주~라인 구간의 발성 리전 (시간순)
+        regions = sorted(
+            (reg for reg in vad_result.regions if reg.end > prev_end and reg.start < r.end_time),
+            key=lambda reg: reg.start,
+        )
+        j = next((k for k, reg in enumerate(regions) if reg.end > r.start_time), None)
+        if j is None:
+            continue
+        # 라인과 겹치는 첫 리전에서 뒤로 이어지는 가창 블록의 시작까지 역추적
+        while j > 0 and regions[j].start - regions[j - 1].end <= 2.0:
+            j -= 1
+        anchor = regions[j].start
+        if anchor > r.start_time - 1.5:
+            continue
+        new_start = anchor - 0.15
+        orig_dur = r.end_time - r.start_time
+        if r.end_time - new_start > 3.0 * orig_dur:
+            continue  # 3배 초과로 늘어나면 오탐 — 적용하지 않는다
+        r.start_time = new_start
+        clamped.add(i)
+
+
 def _clamp_stretched_lines(results, vad_result):
     """가사에 없는 반복 가창(라인 내부 퍼짐)으로 병적으로 길어진 라인을 잘라낸다.
 
     CTC는 같은 가사가 여러 번 불리면 글자들을 여러 렌디션에 걸쳐 흩뿌릴 수 있다
     (라인 사이 star로는 못 잡는 케이스). 지속 8초 초과 + 발성 커버리지 50% 미만인
     라인만 첫 발성 구간 끝으로 클램프한다 — 정상 라인은 건드리지 않는다.
+    여기에 더해 반복행 outlier 클램프와 간주 후 시작 앵커 당기기를 함께 적용한다.
     반환: (results, 클램프된 라인 인덱스 집합)
     """
     clamped: set[int] = set()
@@ -221,6 +351,9 @@ def _clamp_stretched_lines(results, vad_result):
         if new_end < r.end_time:
             r.end_time = new_end
             clamped.add(i)
+    # 반복행 형제 대비 outlier로 늘어난 라인 + 간주 뒤 늦게 시작한 라인도 보정
+    _clamp_repeated_outliers(results, clamped)
+    _pull_post_interlude_starts(results, vad_result, clamped)
     if clamped:
         logger.info(f"Clamped {len(clamped)} pathologically stretched lines")
     return results, clamped
@@ -331,6 +464,8 @@ def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
             "language": detected_lang,
             "quality_score": avg_confidence,
             "debug": debug_meta,
+            # 가라오케 레인의 마디 단위 고정 창·비트 격자용 — 실패해도 None으로 계속
+            "tempo": _estimate_tempo(audio),
         }
     finally:
         audio_path_obj.unlink(missing_ok=True)

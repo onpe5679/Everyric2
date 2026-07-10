@@ -16,8 +16,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# 루트 고정 — everyric2-chrome/src/lib(확장 핵심 소스)를 삼키지 않도록
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -88,3 +89,5 @@ node_modules/
 everyric2-chrome/e2e-*.png
 everyric2-chrome/fresh-pip.png
 everyric2-chrome/pip-wide-video.png
+everyric2-chrome/countdown.png
+everyric2-chrome/search-ui.png

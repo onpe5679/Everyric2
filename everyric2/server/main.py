@@ -10,6 +10,7 @@ from everyric2.server.api.cookies import router as cookies_router
 from everyric2.server.api.job import router as job_router
 from everyric2.server.api.sync import router as sync_router
 from everyric2.server.api.translate import router as translate_router
+from everyric2.server.api.vocaro import router as vocaro_router
 from everyric2.server.db.connection import close_db, init_db
 
 
@@ -39,6 +40,7 @@ app.include_router(sync_router)
 app.include_router(job_router)
 app.include_router(translate_router)
 app.include_router(cookies_router)
+app.include_router(vocaro_router)
 
 
 class HealthResponse(BaseModel):

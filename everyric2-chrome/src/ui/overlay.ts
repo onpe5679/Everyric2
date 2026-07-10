@@ -1,4 +1,4 @@
-import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, Settings, SongInfo } from '../types';
+import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, Settings, SongInfo } from '../types';
 import { h, icon, ICONS } from './dom';
 import { appendKaraokeSpans } from './karaoke';
 
@@ -10,9 +10,13 @@ export interface OverlayCallbacks {
   onSettingsChange: (patch: Partial<Settings>) => void;
   onPipToggle: () => void;
   onGeometryChange: (geometry: PanelGeometry) => void;
+  /** 수동 검색: 후보 리스트 요청 — 결과는 showSearchResults로 되돌아온다 */
+  onCandidateSearch: (query: { title: string; artist: string }) => void;
+  /** 후보 리스트에서 사용자가 직접 선택 */
+  onPickCandidate: (candidate: SearchCandidate) => void;
 }
 
-type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip';
+type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search';
 
 const DEFAULT_WIDTH = 340;
 const DEFAULT_HEIGHT = 480;
@@ -57,6 +61,9 @@ export class LyricsOverlay {
   private plainTextForGenerate = '';
   private pipEnabled = false;
   private sourceUrl: string | null = null;
+  private attributionName: string | null = null;
+  private lastSong: SongInfo | null = null;
+  private searchResultsEl: HTMLDivElement | null = null;
 
   private geometry: PanelGeometry;
   private applyingGeometry = false;
@@ -81,6 +88,7 @@ export class LyricsOverlay {
 
     this.pipBtn = this.headerButton(ICONS.pip, 'PiP 창으로 보기', () => this.callbacks.onPipToggle());
     this.pipBtn.style.display = 'none';
+    const searchBtn = this.headerButton(ICONS.search, '가사 다시 검색 (다른 결과 선택)', () => this.openSearch());
     const gearBtn = this.headerButton(ICONS.gear, '설정', () => this.toggleSettings());
     this.collapseBtn = this.headerButton(ICONS.collapse, '접기', () => this.setCollapsed(!this.geometry.collapsed));
     const closeBtn = this.headerButton(ICONS.close, '닫기 (툴바 아이콘으로 다시 열기)', () => this.setVisible(false));
@@ -90,7 +98,7 @@ export class LyricsOverlay {
         icon(ICONS.note),
         h('div', { className: 'ey-song' }, this.songTitleEl, this.songArtistEl),
       ),
-      h('div', { className: 'ey-actions' }, this.pipBtn, gearBtn, this.collapseBtn, closeBtn),
+      h('div', { className: 'ey-actions' }, this.pipBtn, searchBtn, gearBtn, this.collapseBtn, closeBtn),
     );
 
     this.banner = h('div', { className: 'ey-banner' });
@@ -330,6 +338,77 @@ export class LyricsOverlay {
     );
   }
 
+  /** 상시 재검색: 현재 곡 정보를 초기값으로 검색 폼 + 소스별 후보 리스트를 연다 */
+  openSearch(): void {
+    this.stateKind = 'search';
+    this.resetBody();
+
+    const titleInput = h('input', { className: 'ey-input', attrs: { placeholder: '곡 제목' } });
+    titleInput.value = this.lastSong?.title ?? '';
+    const artistInput = h('input', { className: 'ey-input', attrs: { placeholder: '아티스트 (선택)' } });
+    artistInput.value = this.lastSong?.artist ?? '';
+
+    this.searchResultsEl = h('div', { className: 'ey-result-list' });
+    const doSearch = () => {
+      const title = titleInput.value.trim();
+      if (!title) return;
+      this.setSearchStatus('검색 중…');
+      this.callbacks.onCandidateSearch({ title, artist: artistInput.value.trim() });
+    };
+    titleInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    artistInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+    this.body.append(
+      h('div', { className: 'ey-state ey-search-state' },
+        h('div', { className: 'ey-state-text', text: '가사 검색 — 결과에서 직접 선택할 수 있어요' }),
+        h('div', { className: 'ey-search-form' },
+          titleInput,
+          artistInput,
+          h('button', { className: 'ey-primary-btn', text: '검색', on: { click: doSearch } }),
+        ),
+        this.searchResultsEl,
+        h('div', { className: 'ey-divider' }),
+        h('button', {
+          className: 'ey-secondary-btn',
+          text: '자동 검색으로 되돌리기',
+          on: { click: () => this.callbacks.onRetrySearch() },
+        }),
+      ),
+    );
+    if (titleInput.value) doSearch();
+  }
+
+  /** SEARCH_CANDIDATES 응답 반영 — 검색 상태가 아니면 무시 (stale 응답 방지) */
+  showSearchResults(candidates: SearchCandidate[]): void {
+    if (this.stateKind !== 'search' || !this.searchResultsEl) return;
+    if (candidates.length === 0) {
+      this.setSearchStatus('결과가 없어요 — 제목을 줄이거나 원제(일본어)로 시도해 보세요');
+      return;
+    }
+    const fmt = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
+    this.searchResultsEl.replaceChildren(...candidates.map(c => {
+      const isWiki = c.source === 'vocaro';
+      const label = isWiki ? c.title : `${c.title}${c.artist ? ' — ' + c.artist : ''}`;
+      const meta = isWiki
+        ? '발음·번역'
+        : `${c.synced ? '싱크' : '일반'}${c.duration > 0 ? ` · ${fmt(c.duration)}` : ''}`;
+      const btn = h('button', {
+        className: 'ey-result-item',
+        on: { click: () => this.callbacks.onPickCandidate(c) },
+      },
+        h('span', { className: `ey-result-src${isWiki ? ' vocaro' : ''}`, text: isWiki ? '보카로 위키' : 'LRCLIB' }),
+        h('span', { className: 'ey-result-title', text: label }),
+        h('span', { className: 'ey-result-meta', text: meta }),
+      );
+      btn.title = isWiki ? c.url : label;
+      return btn;
+    }));
+  }
+
+  private setSearchStatus(message: string): void {
+    this.searchResultsEl?.replaceChildren(h('div', { className: 'ey-state-sub', text: message }));
+  }
+
   showGenerating(progress: number, label?: string): void {
     const pct = Math.max(0, Math.min(100, Math.round(progress)));
     const text = label ?? `싱크 생성 중… ${pct}%`;
@@ -410,6 +489,7 @@ export class LyricsOverlay {
   // ── 외부 상태 주입 ─────────────────────────────────────────────
 
   setSong(song: SongInfo | null): void {
+    this.lastSong = song;
     if (song) {
       this.songTitleEl.textContent = song.title;
       this.songTitleEl.title = song.title;
@@ -533,6 +613,7 @@ export class LyricsOverlay {
     this.userScrollUntil = 0;
     this.progressBar = null;
     this.progressText = null;
+    this.searchResultsEl = null;
     this.closeSettings();
   }
 
@@ -543,10 +624,20 @@ export class LyricsOverlay {
   }
 
   private setSourceBadge(source: LyricsSource, synced: boolean): void {
-    this.sourceBadge.textContent =
-      source === 'everyric' ? 'Everyric' : source === 'vocaro' ? '보카로 가사 위키' : 'LRCLIB';
-    this.sourceBadge.title = this.sourceUrl ? '출처 페이지 열기' : synced ? '싱크 가사' : '일반 가사';
+    const base = source === 'everyric' ? 'Everyric' : source === 'vocaro' ? '보카로 가사 위키' : 'LRCLIB';
+    // 가사 원출처(위키 등)를 병기 — 전사는 서버가 했어도 가사의 출처는 따로 표기
+    const extra = this.attributionName && this.attributionName !== base ? ` · ${this.attributionName}` : '';
+    this.sourceBadge.textContent = base + extra;
+    // 출처 상세: 무엇을 어디서 가져왔는지 — 클릭 전에 툴팁으로도 확인 가능
+    const kind = synced ? '싱크 가사' : '일반 가사';
+    this.sourceBadge.title = this.sourceUrl ? `${kind} · 출처 페이지 열기\n${this.sourceUrl}` : kind;
     this.sourceBadge.classList.toggle('everyric', source === 'everyric');
+  }
+
+  /** 가사 원출처 표기 (이름+링크). show* 호출 전에 설정해야 배지에 반영된다. */
+  setAttribution(attr: { name: string; url?: string | null } | null): void {
+    this.attributionName = attr?.name ?? null;
+    this.setSourceUrl(attr?.url ?? null);
   }
 
   /** 출처 페이지 링크 (보카로 위키 등 CC BY 출처 표기) — null이면 배지는 단순 라벨 */
@@ -639,6 +730,12 @@ export class LyricsOverlay {
     showPronunciation.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ showPronunciation: showPronunciation.checked }));
 
+    const sourcePriority = this.buildSelect(
+      [['vocaro', '보카로 위키 우선'], ['lrclib', 'LRCLIB 우선']],
+      this.settings.lyricsSourcePriority,
+      v => this.callbacks.onSettingsChange({ lyricsSourcePriority: v as Settings['lyricsSourcePriority'] }),
+    );
+
     const pipKeepPanel = h('input', { attrs: { type: 'checkbox' } });
     pipKeepPanel.checked = this.settings.pipKeepPanel;
     pipKeepPanel.addEventListener('change', () =>
@@ -653,6 +750,17 @@ export class LyricsOverlay {
     pitchGuide.checked = this.settings.pitchGuide;
     pitchGuide.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ pitchGuide: pitchGuide.checked }));
+
+    const pitchWindow = this.buildSelect(
+      [['2', '2마디'], ['4', '4마디'], ['8', '8마디']],
+      String(this.settings.pitchWindowMeasures),
+      v => this.callbacks.onSettingsChange({ pitchWindowMeasures: Number(v) }),
+    );
+
+    const pitchCountdown = h('input', { attrs: { type: 'checkbox' } });
+    pitchCountdown.checked = this.settings.pitchCountdown;
+    pitchCountdown.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ pitchCountdown: pitchCountdown.checked }));
 
     const debugInfo = h('input', { attrs: { type: 'checkbox' } });
     debugInfo.checked = this.settings.debugInfo;
@@ -681,9 +789,12 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' }, h('label', { text: '가사 번역 표시' }), showTranslation),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '번역 언어' }), langSelect),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '발음 표기 표시 (있을 때)' }), showPronunciation),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: '가사 소스 우선순위' }), sourcePriority),
       h('div', { className: 'ey-settings-row' }, h('label', { text: 'PiP 중에도 패널 가사 유지' }), pipKeepPanel),
       h('div', { className: 'ey-settings-row' }, h('label', { text: 'PiP에 영상 함께 표시' }), pipShowVideo),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '가라오케 음정 바 (PiP)' }), pitchGuide),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 표시 구간' }), pitchWindow),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: '가사 시작 카운트다운' }), pitchCountdown),
       h('div', { className: 'ey-settings-row ey-settings-col' },
         h('label', {}, '싱크 서버 URL ', dot),
         serverInput,

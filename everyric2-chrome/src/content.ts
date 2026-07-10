@@ -12,6 +12,7 @@ import type {
   LyricsData,
   MessageResponse,
   PanelGeometry,
+  SearchCandidate,
   Settings,
   SongInfo,
   TranslateResult,
@@ -141,6 +142,8 @@ function ensureOverlay(): LyricsOverlay {
     onSettingsChange: patch => void handleSettingsChange(patch),
     onPipToggle: () => void handlePipToggle(),
     onGeometryChange: geometry => void saveGeometry(geometry),
+    onCandidateSearch: query => void handleCandidateSearch(query),
+    onPickCandidate: candidate => void handlePickCandidate(candidate),
   }, initialGeometry);
   return overlay;
 }
@@ -178,6 +181,14 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
   // 디버그 토글 → 레인 신뢰도 색상도 함께
   if (patch.debugInfo !== undefined) {
     pip.setShowConfidence(patch.debugInfo);
+  }
+
+  // 레인 표시 구간/카운트다운 즉시 반영
+  if (patch.pitchWindowMeasures !== undefined) {
+    pip.setPitchWindow(patch.pitchWindowMeasures);
+  }
+  if (patch.pitchCountdown !== undefined) {
+    pip.setPitchCountdown(patch.pitchCountdown);
   }
 
   // 가라오케 음정 바 토글 즉시 반영
@@ -352,7 +363,13 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
   currentSong = song;
   panel.setSong(song);
 
-  const res = await sendToBackground<LyricsData | null>({ type: 'FETCH_LYRICS', payload: song });
+  // 소스 우선순위: 서버 싱크는 항상 최우선, 그 다음은 설정에 따라
+  // 보카로 위키(발음·사람 번역) → LRCLIB 순서 또는 그 반대
+  const wikiFirst = settings.lyricsSourcePriority === 'vocaro';
+  const res = await sendToBackground<LyricsData | null>({
+    type: 'FETCH_LYRICS',
+    payload: { ...song, skipLrclib: wikiFirst },
+  });
   if (seq !== searchSeq || videoId !== currentVideoId) return;
   if (res.error) {
     panel.showError('가사를 불러오지 못했어요');
@@ -361,7 +378,6 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
 
   let data = res.data ?? null;
   currentSourceUrl = null;
-  // 공개 라이브러리에 없으면 보카로 가사 위키에서 찾아본다 (원문+번역 동시 제공)
   if (!data) {
     const vocaro = await sendToBackground<VocaroResult | null>({
       type: 'VOCARO_LOOKUP',
@@ -369,21 +385,14 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     });
     if (seq !== searchSeq || videoId !== currentVideoId) return;
     if (vocaro.data && vocaro.data.lines.length > 0) {
-      const lines: LyricLine[] = vocaro.data.lines.map(l => ({
-        time: null,
-        endTime: null,
-        text: l.text,
-        translation: l.translation,
-        pronunciation: l.pronunciation,
-      }));
-      data = { source: 'vocaro', synced: false, lines, plainText: lines.map(l => l.text).join('\n') };
-      currentSourceUrl = vocaro.data.pageUrl;
-      // 이 곡의 위키 페이지를 기억 — 싱크 생성 뒤에도 발음/번역을 다시 입힐 수 있게
-      lastVocaro = { videoId, lines: vocaro.data.lines };
-      try {
-        void chrome.storage.local.set({ [`vocaroRef:${videoId}`]: vocaro.data.slug });
-      } catch { /* 저장 실패는 무시 — 세션 내 캐시로도 동작 */ }
+      data = adoptVocaroResult(videoId, vocaro.data);
     }
+  }
+  // 위키 우선 모드에서 위키까지 미스면 후순위 LRCLIB 시도
+  if (!data && wikiFirst) {
+    const lr = await sendToBackground<LyricsData | null>({ type: 'FETCH_LRCLIB', payload: song });
+    if (seq !== searchSeq || videoId !== currentVideoId) return;
+    data = lr.data ?? null;
   }
   // 서버 싱크(위키 가사로 생성된 것)에 위키의 발음/사람 번역을 텍스트 매칭으로 병합
   if (data && data.source === 'everyric' && data.synced) {
@@ -393,12 +402,80 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
   applyLyricsData(data);
 }
 
+/** 위키 조회 결과를 LyricsData로 변환하고 출처·재병합 캐시를 채운다 */
+function adoptVocaroResult(videoId: string, vocaro: VocaroResult): LyricsData {
+  const lines: LyricLine[] = vocaro.lines.map(l => ({
+    time: null,
+    endTime: null,
+    text: l.text,
+    translation: l.translation,
+    pronunciation: l.pronunciation,
+  }));
+  currentSourceUrl = vocaro.pageUrl;
+  // 이 곡의 위키 페이지를 기억 — 싱크 생성 뒤에도 발음/번역을 다시 입힐 수 있게
+  lastVocaro = { videoId, lines: vocaro.lines };
+  try {
+    void chrome.storage.local.set({ [`vocaroRef:${videoId}`]: vocaro.slug });
+  } catch { /* 저장 실패는 무시 — 세션 내 캐시로도 동작 */ }
+  return { source: 'vocaro', synced: false, lines, plainText: lines.map(l => l.text).join('\n') };
+}
+
+/** 수동 검색: 소스별 후보 리스트를 모아 패널에 전달 */
+async function handleCandidateSearch(query: { title: string; artist: string }): Promise<void> {
+  const videoId = currentVideoId;
+  if (!videoId) return;
+  const res = await sendToBackground<SearchCandidate[]>({
+    type: 'SEARCH_CANDIDATES',
+    payload: { ...query, duration: currentSong?.duration ?? 0 },
+  });
+  if (videoId !== currentVideoId) return;
+  ensureOverlay().showSearchResults(res.data ?? []);
+}
+
+/** 후보 선택: 해당 소스에서 가사를 받아 현재 가사를 교체한다 (잘못 가져온 가사 롤백 경로) */
+async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
+  const videoId = currentVideoId;
+  if (!videoId) return;
+  const seq = ++searchSeq; // 진행 중이던 자동 검색/생성 흐름은 폐기
+  stopPolling();
+  generatingJob = null;
+  engine.stop();
+  const panel = ensureOverlay();
+  panel.showLoading('선택한 가사를 불러오는 중…');
+
+  let data: LyricsData | null = null;
+  currentSourceUrl = null;
+  if (candidate.source === 'vocaro') {
+    const page = await sendToBackground<VocaroResult | null>({
+      type: 'VOCARO_PAGE',
+      payload: { slug: candidate.slug },
+    });
+    if (seq !== searchSeq || videoId !== currentVideoId) return;
+    if (page.data && page.data.lines.length > 0) data = adoptVocaroResult(videoId, page.data);
+  } else {
+    const res = await sendToBackground<LyricsData | null>({
+      type: 'PICK_LRCLIB',
+      payload: { id: candidate.id },
+    });
+    if (seq !== searchSeq || videoId !== currentVideoId) return;
+    data = res.data ?? null;
+  }
+
+  if (!data) {
+    panel.showError('선택한 가사를 불러오지 못했어요');
+    return;
+  }
+  applyLyricsData(data);
+}
+
 function applyLyricsData(data: LyricsData | null): void {
   const panel = ensureOverlay();
   currentData = data;
   lastLineIndex = -1;
   engine.stop();
-  panel.setSourceUrl(data?.source === 'vocaro' ? currentSourceUrl : null);
+  const attribution = data?.attribution
+    ?? (data?.source === 'vocaro' ? { name: '보카로 가사 위키', url: currentSourceUrl } : null);
+  panel.setAttribution(attribution ?? null);
 
   if (!data) {
     if (pip.isOpen()) pip.close();
@@ -407,6 +484,7 @@ function applyLyricsData(data: LyricsData | null): void {
   }
   if (data.synced) {
     if (pip.isOpen()) {
+      pip.setTempo(data.tempo ?? null);
       pip.setLines(data.lines);
       if (settings.pipKeepPanel) {
         panel.showSyncedLyrics(data.lines, data.source);
@@ -490,11 +568,21 @@ async function handleGenerate(lyricsText: string): Promise<void> {
       .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }))
     : undefined;
 
+  // 위키 출처는 싱크에 영구 저장돼 조회 시 푸터에 병기된다 (CC BY 표기)
+  const attribution = currentData?.source === 'vocaro'
+    ? { name: '보카로 가사 위키', url: currentSourceUrl }
+    : undefined;
+
   const panel = ensureOverlay();
   panel.showGenerating(0);
   const res = await sendToBackground<GenerateResponse>({
     type: 'GENERATE_SYNC',
-    payload: { videoId, lyrics: text, lineMeta: lineMeta && lineMeta.length > 0 ? lineMeta : undefined },
+    payload: {
+      videoId,
+      lyrics: text,
+      lineMeta: lineMeta && lineMeta.length > 0 ? lineMeta : undefined,
+      attribution,
+    },
   });
   // 요청 중 내비게이션/재검색이 일어났으면 이 생성 흐름은 폐기
   if (videoId !== currentVideoId || seq !== searchSeq) return;
@@ -572,6 +660,8 @@ async function handlePipToggle(): Promise<void> {
     showPronunciation: settings.showPronunciation,
     pitchEnabled: settings.pitchGuide,
     pitchLaneHeight: settings.pitchLaneHeight,
+    pitchWindowMeasures: settings.pitchWindowMeasures,
+    pitchCountdown: settings.pitchCountdown,
     showConfidence: settings.debugInfo,
     onPitchHeightChange: px => {
       settings = { ...settings, pitchLaneHeight: px };
@@ -618,6 +708,7 @@ async function handlePipToggle(): Promise<void> {
     return;
   }
   pip.setSong(currentSong?.title ?? '', currentSong?.artist ?? '');
+  pip.setTempo(currentData.tempo ?? null);
   pip.setLines(currentData.lines);
   if (settings.pipShowVideo) {
     const video = engine.getVideo() ?? getVideoElement();
