@@ -118,6 +118,7 @@ async function fetchLyricsChain(song: SongInfo, skipLrclib = false): Promise<Lyr
         debugMeta: sync.debug ?? undefined,
         attribution: sync.attribution ?? undefined,
         tempo: sync.tempo ?? undefined,
+        qualityScore: sync.quality_score ?? undefined,
       };
     }
   }

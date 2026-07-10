@@ -62,6 +62,8 @@ export interface LyricsData {
   attribution?: SourceAttribution;
   /** 곡 템포 (everyric 소스만) — 레인 마디 창/비트 격자 */
   tempo?: SongTempo;
+  /** 곡 전체 평균 정렬 신뢰도 (기하평균 확률 평균) — 디버그 표시용 */
+  qualityScore?: number;
 }
 
 export interface LRCLibTrack {
@@ -171,6 +173,10 @@ export interface Settings {
   pitchLaneHeight: number;
   /** 가라오케 레인 표시 구간(마디 수) — 서버 BPM 기준, 템포 없으면 120BPM 가정 폴백 */
   pitchWindowMeasures: number;
+  /** 레인 진행 방식: page = 화면 고정 + 플레이헤드 이동, scroll = 플레이헤드 고정 + 횡스크롤 */
+  pitchScrollMode: 'page' | 'scroll';
+  /** 레인 글자 크기 배율 (계이름·발음·가사·번역 공통) */
+  pitchFontScale: number;
   /** 긴 묵음 뒤 가사 시작 전 4·3·2·1 카운트다운 표시 */
   pitchCountdown: boolean;
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */
@@ -199,6 +205,8 @@ export interface DebugInfo {
   zone: string | null;
   /** 현재 라인 진단 (발성 비율, 클램프 여부) */
   lineDebug: string | null;
+  /** 곡 전체 평균 정렬 신뢰도 */
+  quality: number | null;
 }
 
 export interface TranslatedLine {

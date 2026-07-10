@@ -19,6 +19,10 @@ export interface PipOptions {
   pitchLaneHeight: number;
   /** 레인 표시 구간(마디 수) — 서버 BPM 기준, 템포 없으면 120BPM 가정 폴백 */
   pitchWindowMeasures: number;
+  /** 레인 진행 방식: page = 화면 고정 + 플레이헤드 이동, scroll = 플레이헤드 고정 + 횡스크롤 */
+  pitchScrollMode: 'page' | 'scroll';
+  /** 레인 글자 크기 배율 */
+  pitchFontScale: number;
   /** 긴 묵음 뒤 가사 시작 전 4·3·2·1 카운트다운 */
   pitchCountdown: boolean;
   /** 디버그: 글자별 CTC 신뢰도를 색으로 표시 */
@@ -129,6 +133,8 @@ export class PipController {
   private pitchEnabled = true;
   private pitchLaneHeight = 170;
   private pitchWindowMeasures = 4;
+  private pitchScrollMode: 'page' | 'scroll' = 'page';
+  private pitchFontScale = 1.2;
   private pitchCountdown = true;
   private tempo: SongTempo | null = null;
   private showConfidence = false;
@@ -160,6 +166,8 @@ export class PipController {
     this.pitchEnabled = opts.pitchEnabled;
     this.pitchLaneHeight = opts.pitchLaneHeight;
     this.pitchWindowMeasures = opts.pitchWindowMeasures;
+    this.pitchScrollMode = opts.pitchScrollMode;
+    this.pitchFontScale = opts.pitchFontScale;
     this.pitchCountdown = opts.pitchCountdown;
     this.showConfidence = opts.showConfidence;
 
@@ -319,9 +327,19 @@ export class PipController {
     this.renderLines();
   }
 
-  /** 레인 표시 구간(마디 수) 설정 즉시 반영 */
+  /** 레인 표시 구간(마디 수) 설정 즉시 반영 — 0.5마디까지 허용 */
   setPitchWindow(measures: number): void {
-    this.pitchWindowMeasures = Math.min(16, Math.max(1, measures));
+    this.pitchWindowMeasures = Math.min(16, Math.max(0.25, measures));
+  }
+
+  /** 레인 진행 방식(페이지/스크롤) 즉시 반영 */
+  setPitchScrollMode(mode: 'page' | 'scroll'): void {
+    this.pitchScrollMode = mode;
+  }
+
+  /** 레인 글자 크기 배율 즉시 반영 */
+  setPitchFontScale(scale: number): void {
+    this.pitchFontScale = Math.min(2, Math.max(0.6, scale));
   }
 
   /** 서버가 추정한 곡 템포 — 마디 창 폭·비트 격자에 사용, null이면 초 단위 폴백 */
@@ -437,9 +455,10 @@ export class PipController {
   }
 
   /**
-   * 음정 레인 렌더 — 고정 px/sec 스크롤 오선지.
-   * 창 폭이 N마디(서버 추정 BPM 기준)로 일정해 라인마다 폭이 출렁이지 않고,
-   * 간주는 빈 오선이 그대로 흘러간다. 발음은 계이름처럼 각 노트에 직접 붙는다.
+   * 음정 레인 렌더 — 창 폭이 N마디(서버 추정 BPM 기준)로 일정한 오선지.
+   * page 모드(기본)는 마디 창이 고정된 채 플레이헤드가 왼→오로 쓸고 지나가고,
+   * scroll 모드는 플레이헤드가 좌측 28%에 고정된 채 오선이 횡스크롤된다.
+   * 간주는 빈 오선으로 지나가고, 발음은 계이름처럼 각 노트 앞머리에 붙는다.
    */
   private renderPitch(now: number): void {
     const canvas = this.pitchCanvas;
@@ -468,19 +487,32 @@ export class PipController {
     const hasSegs = pages.some(p => p.line.pronSegments && p.line.pronSegments.length > 0);
     const hasPronRow = !hasSegs && pages.some(p => p.line.pronunciation);
     const hasTr = pages.some(p => p.line.translation);
-    const lyricH = Math.max(16, Math.min(26, Math.round(ch * 0.15)));
-    const lyricPx = Math.max(13, Math.round(lyricH * 0.7));
-    const pronPx = Math.max(10, Math.round(lyricPx * 0.72));
+    const fs = this.pitchFontScale;
+    const lyricH = Math.max(16, Math.min(34, Math.round(ch * 0.15 * fs)));
+    const lyricPx = Math.max(13, Math.round(lyricH * 0.72));
+    const pronPx = Math.max(10, Math.round(lyricPx * 0.8));
     const pronRowH = hasPronRow ? pronPx + 6 : 0;
-    const trPx = Math.max(12, Math.min(16, Math.round(ch * 0.085)));
+    const trPx = Math.max(12, Math.min(22, Math.round(ch * 0.085 * fs)));
     const trH = hasTr ? trPx + 7 : 0;
+    const namePx = Math.max(10, Math.round(11 * fs));
     const padTop = 2;
     const staffH = Math.max(30, ch - padTop - lyricH - pronRowH - trH - 2);
 
     // ── 고정 시간 스케일: 창 폭 = N마디(4/4 가정) — 템포 없으면 120BPM 가정 폴백
     const secPerBeat = this.tempo ? 60 / this.tempo.bpm : 0.5;
     const W = this.pitchWindowMeasures * 4 * secPerBeat;
-    const t0 = now - W * 0.28;
+    let t0: number;
+    let playheadX: number;
+    if (this.pitchScrollMode === 'page') {
+      // 페이지 모드: 창을 마디 경계(beat_offset 기준)에 고정하고 플레이헤드가 이동
+      const offset = this.tempo?.beat_offset ?? 0;
+      t0 = offset + Math.floor((now - offset) / W) * W;
+      playheadX = ((now - t0) / W) * cw;
+    } else {
+      // 스크롤 모드: 플레이헤드 좌측 28% 고정, 오선이 흐른다
+      t0 = now - W * 0.28;
+      playheadX = cw * 0.28;
+    }
     const x = (t: number) => ((t - t0) / W) * cw;
 
     // ── 곡 전체 고정 세로 스케일 (위아래 덧줄 여백 포함)
@@ -514,7 +546,9 @@ export class PipController {
     ctx.globalAlpha = 1;
 
     // ── 노트 막대 + 계이름(위) + 발음(아래) — 시간 창 안의 노트만
-    const vis = notes.filter(n => n.end > t0 - 0.5 && n.start < t0 + W + 0.5);
+    // 페이지 모드는 창 밖 요소를 그리면 가장자리에 다음 페이지 글자가 뭉치므로 여유 0
+    const edgePad = this.pitchScrollMode === 'page' ? 0 : 0.5;
+    const vis = notes.filter(n => n.end > t0 - edgePad && n.start < t0 + W + edgePad);
     const noteH = Math.max(5, Math.min(13, semiPx * 1.6));
     const noteR = Math.min(noteH / 2, 4);
     ctx.textAlign = 'center';
@@ -550,19 +584,22 @@ export class PipController {
         ctx.restore();
       }
 
-      const cx = (x1 + x2) / 2;
+      // 글자는 노트 중앙이 아니라 노트 앞머리(시작 지점)에 붙인다
+      const lx = x1 + 1;
+      ctx.textAlign = 'left';
       // 계이름 — 항상 노트 위
-      if (w >= 16) {
-        ctx.font = 'bold 10px system-ui, sans-serif';
+      if (w >= 14) {
+        ctx.font = `bold ${namePx}px system-ui, sans-serif`;
         ctx.fillStyle = isCurrent ? colors.text : colors.dim;
-        ctx.fillText(PITCH_NAMES_KO[((n.midi % 12) + 12) % 12], cx, Math.max(7, top - 7));
+        ctx.fillText(PITCH_NAMES_KO[((n.midi % 12) + 12) % 12], lx, Math.max(namePx * 0.7, top - namePx * 0.7));
       }
       // 발음 — 계이름처럼 노트 바로 아래에 부착 (사용자 요구: 노트마다 붙일 것)
       if (n.pron) {
         ctx.font = `${pronPx}px system-ui, sans-serif`;
         ctx.fillStyle = n.start <= now ? colors.accent : colors.dim;
-        ctx.fillText(n.pron, cx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
+        ctx.fillText(n.pron, lx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
       }
+      ctx.textAlign = 'center';
     }
 
     // ── 카운트다운: 긴 묵음(5s+) 뒤 라인 시작 4초 전부터 4·3·2·1
@@ -574,8 +611,8 @@ export class PipController {
         const remain = next.start - now;
         if (remain <= 4 && next.start - prevEnd >= 5 && now >= prevEnd) {
           const num = Math.max(1, Math.ceil(remain));
-          // 숫자를 라인 시작 시각 위치에 그려 스크롤과 함께 플레이헤드로 다가오게 한다
-          const nx = Math.max(cw * 0.28 + 30, Math.min(cw - 30, x(next.start)));
+          // 숫자를 라인 시작 시각 위치에 그린다 (창 밖이면 가장자리에 고정)
+          const nx = Math.max(Math.min(playheadX + 30, cw - 30), Math.min(cw - 30, x(next.start)));
           ctx.font = `bold ${Math.round(staffH * 0.5)}px system-ui, sans-serif`;
           ctx.fillStyle = colors.accent;
           ctx.globalAlpha = 0.9;
@@ -607,19 +644,19 @@ export class PipController {
     // ── 노트 아래 가사: 창 안의 글자 토큰을 시간 위치 + 충돌 회피로
     let ty = padTop + staffH;
     ctx.font = `bold ${lyricPx}px system-ui, sans-serif`;
-    const visWords = words.filter(w => w.end > t0 - 0.5 && w.start < t0 + W + 0.5);
+    const visWords = words.filter(w => w.end > t0 - edgePad && w.start < t0 + W + edgePad);
     if (visWords.length > 0) {
-      const items = visWords.map(w => ({
-        w,
-        cx: (x(w.start) + x(w.end)) / 2,
-        width: ctx.measureText(w.word).width,
-      }));
+      // 글자를 노트 시작 지점에서 시작하도록 배치 (충돌 회피는 중심 좌표 기준)
+      const items = visWords.map(w => {
+        const width = ctx.measureText(w.word).width;
+        return { w, cx: x(w.start) + width / 2, width };
+      });
       const xs = placeRow(items.map(it => ({ cx: it.cx, w: it.width })));
       items.forEach((it, i) => {
         let color = it.w.start <= now ? colors.accent : colors.text;
-        // 디버그: 정렬 신뢰도(기하평균 확률, 로그 스케일 버킷) — 빨강<1e-4, 노랑<2e-2
-        if (this.showConfidence && it.w.confidence != null && it.w.confidence < 2e-2) {
-          color = it.w.confidence < 1e-4 ? '#ff6b6b' : '#ffd166';
+        // 디버그: 정렬 신뢰도(기하평균 확률, 로그 버킷) — 빨강<1e-4, 노랑<2e-2, 초록=양호
+        if (this.showConfidence && it.w.confidence != null) {
+          color = it.w.confidence < 1e-4 ? '#ff6b6b' : it.w.confidence < 2e-2 ? '#ffd166' : '#51cf66';
         }
         ctx.fillStyle = color;
         ctx.fillText(it.w.word, xs[i], ty + lyricH * 0.55);
@@ -643,15 +680,14 @@ export class PipController {
       ctx.fillText(page.line.translation, cw / 2, ty + trH * 0.5, cw - 16);
     }
 
-    // ── 고정 플레이헤드 (좌측 28%)
-    const px = cw * 0.28;
+    // ── 플레이헤드 (page 모드: 왼→오 이동, scroll 모드: 좌측 28% 고정)
     ctx.fillStyle = colors.dim;
-    ctx.fillRect(px - 0.75, padTop, 1.5, staffH);
+    ctx.fillRect(playheadX - 0.75, padTop, 1.5, staffH);
     ctx.fillStyle = colors.accent;
     ctx.beginPath();
-    ctx.moveTo(px - 4, padTop);
-    ctx.lineTo(px + 4, padTop);
-    ctx.lineTo(px, padTop + 6);
+    ctx.moveTo(playheadX - 4, padTop);
+    ctx.lineTo(playheadX + 4, padTop);
+    ctx.lineTo(playheadX, padTop + 6);
     ctx.closePath();
     ctx.fill();
   }

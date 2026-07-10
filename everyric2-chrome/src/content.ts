@@ -183,9 +183,15 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
     pip.setShowConfidence(patch.debugInfo);
   }
 
-  // 레인 표시 구간/카운트다운 즉시 반영
+  // 레인 표시 구간/진행 방식/글자 크기/카운트다운 즉시 반영
   if (patch.pitchWindowMeasures !== undefined) {
     pip.setPitchWindow(patch.pitchWindowMeasures);
+  }
+  if (patch.pitchScrollMode !== undefined) {
+    pip.setPitchScrollMode(patch.pitchScrollMode);
+  }
+  if (patch.pitchFontScale !== undefined) {
+    pip.setPitchFontScale(patch.pitchFontScale);
   }
   if (patch.pitchCountdown !== undefined) {
     pip.setPitchCountdown(patch.pitchCountdown);
@@ -234,6 +240,7 @@ function pushDebug(time: number | null): void {
     engineRunning: engine.isRunning(),
     pipOpen: pip.isOpen(),
     jobStatus: generatingJob ? `job=${generatingJob.jobId.slice(0, 8)}(${generatingJob.progress}%)` : null,
+    quality: currentData?.qualityScore ?? null,
   });
 }
 
@@ -661,6 +668,8 @@ async function handlePipToggle(): Promise<void> {
     pitchEnabled: settings.pitchGuide,
     pitchLaneHeight: settings.pitchLaneHeight,
     pitchWindowMeasures: settings.pitchWindowMeasures,
+    pitchScrollMode: settings.pitchScrollMode,
+    pitchFontScale: settings.pitchFontScale,
     pitchCountdown: settings.pitchCountdown,
     showConfidence: settings.debugInfo,
     onPitchHeightChange: px => {

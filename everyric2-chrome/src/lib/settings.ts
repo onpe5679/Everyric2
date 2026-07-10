@@ -17,6 +17,8 @@ export const DEFAULT_SETTINGS: Settings = {
   pitchGuide: true,
   pitchLaneHeight: 170,
   pitchWindowMeasures: 4,
+  pitchScrollMode: 'page',
+  pitchFontScale: 1.2,
   pitchCountdown: true,
   debugInfo: false,
 };

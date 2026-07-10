@@ -148,6 +148,11 @@ export class LyricsOverlay {
     this.panel = h('div', { className: 'ey-panel' },
       this.header, this.banner, this.body, this.resumeChip, this.footer, this.debugEl,
     );
+    // 패널 안 타이핑(검색창·가사 붙여넣기)이 유튜브 전역 단축키(스페이스=재생/정지,
+    // 방향키=시킹 등)로 새지 않도록 키 이벤트를 패널에서 끊는다
+    for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+      this.panel.addEventListener(type, e => e.stopPropagation());
+    }
     shadow.append(this.panel);
 
     this.geometry = geometry ?? this.defaultGeometry();
@@ -552,7 +557,11 @@ export class LyricsOverlay {
     const off = `${info.offsetSec > 0 ? '+' : ''}${info.offsetSec.toFixed(1)}`;
     const line = info.lineCount > 0 ? `${info.lineIndex + 1}/${info.lineCount}` : '-';
     const video = info.videoInfo === 'none' ? 'none' : `${info.videoBound ? 'OK' : 'MISMATCH'}(${info.videoInfo})`;
-    const diag = [info.zone ? `zone=${info.zone}` : null, info.lineDebug].filter(Boolean).join(' ');
+    const diag = [
+      info.quality != null ? `conf=${info.quality.toExponential(1)}` : null,
+      info.zone ? `zone=${info.zone}` : null,
+      info.lineDebug,
+    ].filter(Boolean).join(' ');
     this.debugEl.textContent =
       `vid=${info.videoId ?? '-'} src=${info.source}${info.synced ? '/sync' : '/plain'} line=${line} pip=${info.pipOpen ? 'Y' : 'N'}\n`
       + `t=${t} off=${off} video=${video} eng=${info.engineRunning ? 'Y' : 'N'}${info.jobStatus ? ` ${info.jobStatus}` : ''}`
@@ -752,9 +761,21 @@ export class LyricsOverlay {
       this.callbacks.onSettingsChange({ pitchGuide: pitchGuide.checked }));
 
     const pitchWindow = this.buildSelect(
-      [['2', '2마디'], ['4', '4마디'], ['8', '8마디']],
+      [['0.5', '½마디'], ['1', '1마디'], ['2', '2마디'], ['4', '4마디'], ['8', '8마디']],
       String(this.settings.pitchWindowMeasures),
       v => this.callbacks.onSettingsChange({ pitchWindowMeasures: Number(v) }),
+    );
+
+    const pitchMode = this.buildSelect(
+      [['page', '고정 화면·헤드 이동'], ['scroll', '스크롤·헤드 고정']],
+      this.settings.pitchScrollMode,
+      v => this.callbacks.onSettingsChange({ pitchScrollMode: v as Settings['pitchScrollMode'] }),
+    );
+
+    const pitchFont = this.buildSelect(
+      [['1', '보통'], ['1.2', '크게'], ['1.45', '아주 크게'], ['0.85', '작게']],
+      String(this.settings.pitchFontScale),
+      v => this.callbacks.onSettingsChange({ pitchFontScale: Number(v) }),
     );
 
     const pitchCountdown = h('input', { attrs: { type: 'checkbox' } });
@@ -794,6 +815,8 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' }, h('label', { text: 'PiP에 영상 함께 표시' }), pipShowVideo),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '가라오케 음정 바 (PiP)' }), pitchGuide),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 표시 구간' }), pitchWindow),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 진행 방식' }), pitchMode),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 글자 크기' }), pitchFont),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '가사 시작 카운트다운' }), pitchCountdown),
       h('div', { className: 'ey-settings-row ey-settings-col' },
         h('label', {}, '싱크 서버 URL ', dot),

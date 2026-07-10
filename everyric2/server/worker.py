@@ -115,6 +115,7 @@ async def process_job(job_id: str) -> None:
         )
         audio_hash = download_result["audio_hash"]
         audio_path = download_result["audio_path"]
+        await _set_progress(job_id, 35)  # 다운로드 완료
 
         forced = job_id in _PENDING_FORCE
         _PENDING_FORCE.discard(job_id)
@@ -146,9 +147,17 @@ async def process_job(job_id: str) -> None:
                 Path(audio_path).unlink(missing_ok=True)
                 return
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, _run_alignment, audio_path, job.lyrics, job.language
-        )
+        # 정렬(분리+CTC+멜로디)은 수십 초 걸리는 단일 블록 — 진행률이 멈춰 보이지 않게
+        # 45%에서 시작해 85%까지 천천히 차오르는 티커를 함께 돌린다
+        await _set_progress(job_id, 45)
+        ticker = asyncio.create_task(_tick_progress(job_id, start=45, cap=85))
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, _run_alignment, audio_path, job.lyrics, job.language
+            )
+        finally:
+            ticker.cancel()
+        await _set_progress(job_id, 90)  # 정렬 완료, 저장 중
 
         meta = _PENDING_LINE_META.pop(job_id, None)
         if meta:
@@ -183,6 +192,26 @@ async def process_job(job_id: str) -> None:
         async with get_session() as session:
             job_repo = JobRepository(session)
             await job_repo.update_status(job_id, "failed", error=str(e))
+
+
+async def _set_progress(job_id: str, progress: int) -> None:
+    from everyric2.server.db.connection import get_session
+    from everyric2.server.db.repository import JobRepository
+
+    async with get_session() as session:
+        await JobRepository(session).update_status(job_id, "processing", progress=progress)
+
+
+async def _tick_progress(job_id: str, start: int, cap: int, interval: float = 4.0) -> None:
+    """긴 단계 동안 진행률을 cap까지 천천히 올린다 — 취소되면 그대로 멈춘다."""
+    progress = start
+    try:
+        while progress < cap:
+            await asyncio.sleep(interval)
+            progress = min(cap, progress + 4)
+            await _set_progress(job_id, progress)
+    except asyncio.CancelledError:
+        pass
 
 
 def _download_and_hash(video_id: str) -> dict:
