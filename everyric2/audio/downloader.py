@@ -100,6 +100,15 @@ class YouTubeDownloader:
             os.environ["PATH"] = f"{deno_path}:{os.environ.get('PATH', '')}"
         ydl_opts["allowed_remote_components"] = ["ejs:github"]
 
+    def _add_network_options(self, ydl_opts: dict[str, Any]) -> None:
+        """멀티 NIC 머신에서 다운로드를 특정 로컬 IP(=다른 공인 IP 회선)로 바인딩.
+
+        같은 공인 IP의 반복 다운로드가 403으로 스로틀될 때 다른 회선으로 우회한다
+        (EVERYRIC_AUDIO_SOURCE_ADDRESS).
+        """
+        if self.config.source_address:
+            ydl_opts["source_address"] = self.config.source_address
+
     def validate_url(self, url: str) -> bool:
         """Check if URL is a valid YouTube URL.
 
@@ -153,6 +162,7 @@ class YouTubeDownloader:
 
             self._add_cookie_options(ydl_opts)
             self._add_ejs_options(ydl_opts)
+            self._add_network_options(ydl_opts)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -225,6 +235,7 @@ class YouTubeDownloader:
 
             self._add_cookie_options(ydl_opts)
             self._add_ejs_options(ydl_opts)
+            self._add_network_options(ydl_opts)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)

@@ -72,6 +72,14 @@ class AudioSettings(BaseSettings):
         default=None, description="Path to Netscape format cookie file"
     )
 
+    # Multi-NIC download routing
+    source_address: str | None = Field(
+        default=None,
+        description="Local IP to bind yt-dlp connections to. On multi-NIC machines this "
+        "routes downloads through a different public IP when YouTube throttles the "
+        "default one with HTTP 403",
+    )
+
     @field_validator("temp_dir", mode="after")
     @classmethod
     def ensure_temp_dir_exists(cls, v: Path) -> Path:
