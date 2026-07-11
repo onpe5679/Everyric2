@@ -1,4 +1,5 @@
 import type { LyricLine, SongTempo, SyncDebugMeta } from '../types';
+import type { MicSample } from '../lib/mic-pitch';
 import { h, icon } from './dom';
 import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
 
@@ -39,6 +40,14 @@ export interface PipOptions {
   onMuteToggle: () => void;
   /** 디바이더 드래그로 영상 비율 변경 완료 시 */
   onVideoRatioChange: (ratio: number) => void;
+  /** 멜로디 재생 초기 상태 + 토글 (footer 버튼) */
+  melodyOn: boolean;
+  onMelodyToggle: () => void;
+  /** 메트로놈 초기 상태 + 토글 (footer 버튼) */
+  metronomeOn: boolean;
+  onMetronomeToggle: () => void;
+  /** 마이크 음정 표시가 켜져 있으면 최근 피치 샘플을 돌려준다 (없으면 null) */
+  getMicSamples: (() => MicSample[]) | null;
   onClosed: () => void;
 }
 
@@ -46,6 +55,8 @@ const PLAY_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentC
 const PAUSE_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
 const VOLUME_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/></svg>';
 const MUTED_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.6 3 2.7-2.7-1.4-1.4-2.7 2.7-2.7-2.7-1.4 1.4 2.7 2.7-2.7 2.7 1.4 1.4 2.7-2.7 2.7 2.7 1.4-1.4-2.7-2.7z"/></svg>';
+const NOTE_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
+const METRO_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 2h6l4 19H5L9 2zm1.6 2L7.4 19h9.2l-1.2-6.1-2.7 2.7-1.4-1.4L15 10.4 13.9 4h-3.3z"/></svg>';
 
 const MIN_VIDEO_RATIO = 0.15;
 const MAX_VIDEO_RATIO = 0.75;
@@ -134,9 +145,13 @@ export class PipController {
   private trEl: HTMLDivElement | null = null;
   private nextEl: HTMLDivElement | null = null;
   private titleEl: HTMLDivElement | null = null;
+  private footerEl: HTMLDivElement | null = null;
   private progressEl: HTMLDivElement | null = null;
   private playBtn: HTMLButtonElement | null = null;
   private muteBtn: HTMLButtonElement | null = null;
+  private melodyBtn: HTMLButtonElement | null = null;
+  private metroBtn: HTMLButtonElement | null = null;
+  private getMicSamples: (() => MicSample[]) | null = null;
   private volumeSlider: HTMLInputElement | null = null;
   private volumeDragging = false;
   private timeEl: HTMLSpanElement | null = null;
@@ -225,6 +240,19 @@ export class PipController {
       on: { click: () => opts.onMuteToggle() },
     }, icon(VOLUME_SVG));
 
+    this.melodyBtn = h('button', {
+      className: 'ey-pip-play ey-pip-mute',
+      title: '멜로디 재생 (노트 신디사이즈)',
+      on: { click: () => opts.onMelodyToggle() },
+    }, icon(NOTE_SVG));
+    this.metroBtn = h('button', {
+      className: 'ey-pip-play ey-pip-mute',
+      title: '메트로놈',
+      on: { click: () => opts.onMetronomeToggle() },
+    }, icon(METRO_SVG));
+    this.setAudioState(opts.melodyOn, opts.metronomeOn);
+    this.getMicSamples = opts.getMicSamples;
+
     this.volumeSlider = h('input', {
       className: 'ey-pip-volume',
       title: '볼륨',
@@ -260,18 +288,22 @@ export class PipController {
     this.pitchDividerEl = this.buildPitchDivider(opts.onPitchHeightChange);
     this.applyPitchVisibility();
 
+    this.footerEl = h('div', { className: 'ey-pip-footer' },
+      this.titleEl,
+      h('div', { className: 'ey-pip-controls' },
+        this.playBtn, this.muteBtn, this.melodyBtn, this.metroBtn, this.volumeSlider, progressWrap, this.timeEl),
+    );
     doc.body.append(
       this.videoWrapEl,
       this.dividerEl,
       h('div', { className: 'ey-pip-stage' }, this.prevEl, this.currentEl, this.pronEl, this.trEl, this.nextEl),
       this.pitchDividerEl,
       this.pitchCanvas,
-      h('div', { className: 'ey-pip-footer' },
-        this.titleEl,
-        h('div', { className: 'ey-pip-controls' },
-          this.playBtn, this.muteBtn, this.volumeSlider, progressWrap, this.timeEl),
-      ),
+      this.footerEl,
     );
+
+    // 창 크기가 줄면 레인이 푸터를 밀어내지 않도록 즉시 재클램프
+    win.addEventListener('resize', () => this.clampLaneHeight());
 
     win.addEventListener('pagehide', () => {
       this.stopMirror();
@@ -284,6 +316,12 @@ export class PipController {
       this.pitchCanvas = null;
       this.pitchDividerEl = null;
       this.pitchColors = null;
+      this.videoWrapEl = null;
+      this.dividerEl = null;
+      this.footerEl = null;
+      this.melodyBtn = null;
+      this.metroBtn = null;
+      this.getMicSamples = null;
       opts.onClosed();
     });
     this.renderLines();
@@ -316,8 +354,7 @@ export class PipController {
       mirror.srcObject = stream;
       this.videoWrapEl.replaceChildren(mirror);
       this.videoWrapEl.style.display = '';
-      if (this.dividerEl) this.dividerEl.style.display = '';
-      if (this.videoRatio > 0) this.applyVideoRatio(this.videoRatio);
+      this.syncVideoLayout();
       void mirror.play().catch(() => { /* autoplay 실패 시 프레임은 srcObject로도 갱신됨 */ });
     } catch {
       this.hideVideoArea();
@@ -416,11 +453,61 @@ export class PipController {
     if (this.pitchCanvas) this.pitchCanvas.style.display = show ? '' : 'none';
     if (this.pitchDividerEl) this.pitchDividerEl.style.display = show ? '' : 'none';
     this.win?.document.body.classList.toggle('ey-lane-active', show);
+    this.syncVideoLayout();
+    this.clampLaneHeight();
+  }
+
+  /**
+   * 레인 모드에 따라 영상 flex·비율 디바이더 노출을 한곳에서 일관 유지.
+   * 레인 모드에선 스테이지가 숨어 영상이 유일한 성장 요소여야 하는데, 비율 드래그가 남긴
+   * 인라인 `flex: 0 1 X%`(grow=0)가 CSS(flex:1)를 덮어쓰면 성장 요소가 사라져
+   * 창 크기 조절 시 빈 공간·찌그러짐이 생긴다 — 레인 모드에선 인라인을 걷어낸다.
+   */
+  private syncVideoLayout(): void {
+    if (!this.videoWrapEl) return;
+    const laneShown = this.win?.document.body.classList.contains('ey-lane-active') ?? false;
+    const videoShown = this.videoWrapEl.style.display !== 'none';
+    if (this.dividerEl && videoShown) this.dividerEl.style.display = laneShown ? 'none' : '';
+    if (laneShown) {
+      this.videoWrapEl.style.flex = '';
+      this.videoWrapEl.style.aspectRatio = '';
+      this.videoWrapEl.style.maxHeight = '';
+    } else if (this.videoRatio > 0) {
+      this.videoWrapEl.style.aspectRatio = 'auto';
+      this.videoWrapEl.style.maxHeight = 'none';
+      this.videoWrapEl.style.flex = `0 1 ${(this.videoRatio * 100).toFixed(1)}%`;
+    }
+  }
+
+  /** 레인 높이 상한 — 푸터·영상 최소 영역을 침범해 창 밖으로 밀어내지 않는 한도 */
+  private maxLaneHeight(): number {
+    const win = this.win;
+    if (!win || win.innerHeight === 0) return 320;
+    const footerH = this.footerEl?.offsetHeight || 60;
+    const videoShown = this.videoWrapEl ? this.videoWrapEl.style.display !== 'none' : false;
+    const reserved = footerH + 8 + (videoShown ? 48 : 0);
+    return Math.max(90, Math.min(320, win.innerHeight - reserved));
+  }
+
+  /** 창이 줄어 현재 레인 높이가 상한을 넘으면 맞춰서 줄인다 (창 resize·레인 토글 시) */
+  private clampLaneHeight(): void {
+    if (!this.pitchCanvas || this.pitchCanvas.style.display === 'none') return;
+    const max = this.maxLaneHeight();
+    if (this.pitchCanvas.clientHeight > max) {
+      this.pitchLaneHeight = max;
+      this.pitchCanvas.style.height = `${max}px`;
+    }
   }
 
   /** 디버그 신뢰도 색상 토글 즉시 반영 */
   setShowConfidence(enabled: boolean): void {
     this.showConfidence = enabled;
+  }
+
+  /** 멜로디/메트로놈 토글 버튼 활성 상태 반영 */
+  setAudioState(melody: boolean, metronome: boolean): void {
+    this.melodyBtn?.classList.toggle('on', melody);
+    this.metroBtn?.classList.toggle('on', metronome);
   }
 
   /** 레인 위 디바이더 — 위로 끌면 레인이 커진다. 놓으면 설정에 저장. */
@@ -442,7 +529,7 @@ export class PipController {
     });
     divider.addEventListener('pointermove', (e: PointerEvent) => {
       if (!dragging || !this.pitchCanvas) return;
-      const px = Math.min(320, Math.max(90, Math.round(startH + (startY - e.clientY))));
+      const px = Math.min(this.maxLaneHeight(), Math.max(90, Math.round(startH + (startY - e.clientY))));
       this.pitchLaneHeight = px;
       this.pitchCanvas.style.height = `${px}px`;
     });
@@ -640,6 +727,29 @@ export class PipController {
         ctx.fillText(n.pron, lx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
       }
       ctx.textAlign = 'center';
+    }
+
+    // ── 마이크 음정 궤적 — 사용자가 부른 피치를 청록 점 트레일로 (노트 accent와 구분되는 색)
+    const mic = this.getMicSamples?.();
+    if (mic && mic.length > 0) {
+      const wallNow = performance.now() / 1000;
+      for (const s of mic) {
+        const age = wallNow - s.at;
+        if (age > 2.5) continue;
+        const t = now - age; // 표시용 근사 — 배속 중에는 궤적 간격만 살짝 달라진다
+        if (t < t0 || t > t0 + W) continue;
+        // 검출 옥타브 오차·성별 음역 차이를 흡수: 레인 음역으로 옥타브 폴딩
+        let m = s.midi;
+        while (m < lo && m + 12 <= hi + 6) m += 12;
+        while (m > hi && m - 12 >= lo - 6) m -= 12;
+        if (m < lo - 1 || m > hi + 1) continue;
+        ctx.globalAlpha = Math.max(0.08, 1 - age / 2.5) * 0.9;
+        ctx.fillStyle = '#4dd0e1';
+        ctx.beginPath();
+        ctx.arc(x(t), y(m), age < 0.12 ? 3.4 : 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
     }
 
     // ── 카운트다운: 긴 묵음(5s+) 뒤 라인 시작 4초 전부터 4·3·2·1
@@ -921,12 +1031,10 @@ export class PipController {
   }
 
   private applyVideoRatio(ratio: number): void {
-    if (!this.videoWrapEl) return;
+    // shrink 1: 사용자가 지정한 비율이라도 가사 스테이지 min-height는 침범하지 못한다.
+    // 레인 모드 여부에 따른 실제 스타일 적용은 syncVideoLayout이 담당.
     this.videoRatio = ratio;
-    this.videoWrapEl.style.aspectRatio = 'auto';
-    this.videoWrapEl.style.maxHeight = 'none';
-    // shrink 1: 사용자가 지정한 비율이라도 가사 스테이지 min-height는 침범하지 못한다
-    this.videoWrapEl.style.flex = `0 1 ${(ratio * 100).toFixed(1)}%`;
+    this.syncVideoLayout();
   }
 
   private hideVideoArea(): void {

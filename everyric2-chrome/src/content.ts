@@ -1,5 +1,7 @@
 import { detectSong, getCurrentVideoId, getVideoElement } from './lib/song-detector';
 import { SyncEngine, type SyncHandlers } from './lib/sync-engine';
+import { KaraokeAudio, collectMelodyNotes } from './lib/karaoke-audio';
+import { MicPitch } from './lib/mic-pitch';
 import { getGeometry, getSettings, saveGeometry, saveSettings } from './lib/settings';
 import { LyricsOverlay } from './ui/overlay';
 import { PipController } from './ui/pip';
@@ -26,6 +28,8 @@ let initialGeometry: PanelGeometry | null = null;
 let overlay: LyricsOverlay | null = null;
 const pip = new PipController();
 const engine = new SyncEngine();
+const karaokeAudio = new KaraokeAudio(() => engine.getVideo() ?? getVideoElement());
+const micPitch = new MicPitch();
 
 let currentVideoId: string | null = null;
 let currentSong: SongInfo | null = null;
@@ -133,6 +137,8 @@ function cleanupForPage(): void {
   // 전사 잡은 서버에서 계속 돌므로 추적을 유지한다 (완료 시 해당 영상으로 돌아오면 반영)
   engine.stop();
   pip.close();
+  karaokeAudio.setNotes([]);
+  karaokeAudio.setTempo(null);
   overlay?.setVisible(false);
 }
 
@@ -267,7 +273,35 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
     pip.setPitchEnabled(patch.pitchGuide);
   }
 
+  // 멜로디/메트로놈/마이크 — 토글·볼륨·기기 변경 즉시 반영
+  if (
+    patch.melodyPlayback !== undefined || patch.melodyVolume !== undefined ||
+    patch.metronome !== undefined || patch.metronomeVolume !== undefined ||
+    patch.audioOutputId !== undefined || patch.micPitch !== undefined ||
+    patch.micDeviceId !== undefined
+  ) {
+    applyAudioSettings();
+  }
+
   if (patch.debugInfo === true) pushDebug(null);
+}
+
+/** 멜로디/메트로놈/마이크 상태를 설정에 맞춰 동기화 — 가라오케 창(PiP)이 열려 있을 때만 소리·검출 */
+function applyAudioSettings(): void {
+  karaokeAudio.configure({
+    melody: settings.melodyPlayback,
+    melodyVolume: settings.melodyVolume,
+    metronome: settings.metronome,
+    metronomeVolume: settings.metronomeVolume,
+    sinkId: settings.audioOutputId,
+  });
+  pip.setAudioState(settings.melodyPlayback, settings.metronome);
+  if (pip.isOpen() && settings.micPitch) {
+    if (micPitch.isRunning() && micPitch.currentDeviceId() !== settings.micDeviceId) micPitch.stop();
+    if (!micPitch.isRunning()) void micPitch.start(settings.micDeviceId || undefined);
+  } else if (micPitch.isRunning()) {
+    micPitch.stop();
+  }
 }
 
 /** 현재 시각이 어떤 구간으로 판정됐는지 (star 흡수/가창/간주) — everyric 소스만 */
@@ -588,6 +622,8 @@ function applyLyricsData(data: LyricsData | null): void {
       pip.setTempo(data.tempo ?? null);
       pip.setDebugMeta(data.debugMeta ?? null);
       pip.setLines(data.lines);
+      karaokeAudio.setNotes(collectMelodyNotes(data.lines));
+      karaokeAudio.setTempo(data.tempo ?? null);
       if (settings.pipKeepPanel) {
         panel.showSyncedLyrics(data.lines, data.source);
         panel.setPipEnabled(PipController.isSupported());
@@ -846,7 +882,14 @@ async function handlePipToggle(): Promise<void> {
       settings = { ...settings, pipVideoRatio: ratio };
       void saveSettings({ pipVideoRatio: ratio });
     },
+    melodyOn: settings.melodyPlayback,
+    onMelodyToggle: () => void handleSettingsChange({ melodyPlayback: !settings.melodyPlayback }),
+    metronomeOn: settings.metronome,
+    onMetronomeToggle: () => void handleSettingsChange({ metronome: !settings.metronome }),
+    getMicSamples: () => micPitch.samples(),
     onClosed: () => {
+      karaokeAudio.setActive(false);
+      micPitch.stop();
       overlay?.setPipActive(false);
       // 패널이 placeholder 상태일 때만 복원 (동시 표시 모드면 이미 가사가 떠 있음)
       if (overlay?.isShowingPipPlaceholder()) restoreOverlayState();
@@ -862,6 +905,10 @@ async function handlePipToggle(): Promise<void> {
   pip.setTempo(currentData.tempo ?? null);
   pip.setDebugMeta(currentData.debugMeta ?? null);
   pip.setLines(currentData.lines);
+  karaokeAudio.setNotes(collectMelodyNotes(currentData.lines));
+  karaokeAudio.setTempo(currentData.tempo ?? null);
+  karaokeAudio.setActive(true);
+  applyAudioSettings();
   if (settings.pipShowVideo) {
     const video = engine.getVideo() ?? getVideoElement();
     if (video) pip.attachVideo(video);

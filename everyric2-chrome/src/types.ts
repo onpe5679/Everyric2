@@ -220,6 +220,20 @@ export interface Settings {
   pitchCountdown: boolean;
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */
   pitchGuide: boolean;
+  /** 가라오케 창에서 노트를 신디사이즈로 재생 */
+  melodyPlayback: boolean;
+  /** 멜로디 볼륨 (0..1) */
+  melodyVolume: number;
+  /** 가라오케 창 메트로놈 — 서버 추정 BPM 기준, 4/4 가정 */
+  metronome: boolean;
+  /** 메트로놈 볼륨 (0..1) */
+  metronomeVolume: number;
+  /** 멜로디·메트로놈 출력 기기 id (AudioContext.setSinkId) — '' = 기본 출력 */
+  audioOutputId: string;
+  /** 마이크로 부른 음정을 가라오케 레인에 표시 */
+  micPitch: boolean;
+  /** 마이크 입력 기기 id — '' = 기본 마이크 */
+  micDeviceId: string;
   /** 패널 하단에 내부 상태(비디오 바인딩, 싱크 소스 등) 표시 */
   debugInfo: boolean;
 }

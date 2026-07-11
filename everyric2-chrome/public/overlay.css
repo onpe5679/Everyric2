@@ -818,6 +818,23 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
 .ey-pip-mute { width: 26px; height: 26px; color: var(--ey-text-dim); }
 .ey-pip-mute:hover { color: var(--ey-text); }
 
+/* 멜로디/메트로놈 토글 — 켜져 있으면 accent 색 */
+.ey-pip-play.on { color: var(--ey-accent); }
+.ey-pip-play.on:hover { color: var(--ey-accent); }
+
+/* 설정 시트의 볼륨 슬라이더 */
+.ey-settings-range {
+  width: 88px;
+  accent-color: var(--ey-accent);
+  cursor: pointer;
+}
+
+.ey-settings-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ey-pip-volume {
   width: 64px;
   flex-shrink: 0;

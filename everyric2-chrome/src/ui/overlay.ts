@@ -924,6 +924,33 @@ export class LyricsOverlay {
     pitchCountdown.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ pitchCountdown: pitchCountdown.checked }));
 
+    const melodyPlayback = h('input', { attrs: { type: 'checkbox' } });
+    melodyPlayback.checked = this.settings.melodyPlayback;
+    melodyPlayback.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ melodyPlayback: melodyPlayback.checked }));
+    const melodyVolume = this.buildRange(this.settings.melodyVolume, v =>
+      this.callbacks.onSettingsChange({ melodyVolume: v }));
+
+    const metronome = h('input', { attrs: { type: 'checkbox' } });
+    metronome.checked = this.settings.metronome;
+    metronome.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ metronome: metronome.checked }));
+    const metronomeVolume = this.buildRange(this.settings.metronomeVolume, v =>
+      this.callbacks.onSettingsChange({ metronomeVolume: v }));
+
+    const micPitch = h('input', { attrs: { type: 'checkbox' } });
+    micPitch.checked = this.settings.micPitch;
+    micPitch.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ micPitch: micPitch.checked }));
+
+    const audioOut = h('select', { className: 'ey-select' });
+    audioOut.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ audioOutputId: audioOut.value }));
+    const micDevice = h('select', { className: 'ey-select' });
+    micDevice.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ micDeviceId: micDevice.value }));
+    void this.populateAudioDevices(audioOut, micDevice);
+
     const debugInfo = h('input', { attrs: { type: 'checkbox' } });
     debugInfo.checked = this.settings.debugInfo;
     debugInfo.addEventListener('change', () =>
@@ -959,6 +986,18 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 진행 방식' }), pitchMode),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 글자 크기' }), pitchFont),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '가사 시작 카운트다운' }), pitchCountdown),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '멜로디 재생 (가라오케 창)', attrs: { title: '전사된 노트를 신디사이즈로 재생합니다. 가라오케 창이 열려 있을 때만 소리가 나요.' } }),
+        h('span', { className: 'ey-settings-inline' }, melodyVolume, melodyPlayback)),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '메트로놈', attrs: { title: '서버가 추정한 BPM에 맞춰 박자를 칩니다 (4/4 가정, 4박마다 강세).' } }),
+        h('span', { className: 'ey-settings-inline' }, metronomeVolume, metronome)),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '가라오케 오디오 출력 기기', attrs: { title: '멜로디·메트로놈만 이 기기로 나갑니다. 영상 소리는 기존 출력 그대로.' } }), audioOut),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '마이크 음정 표시 (레인)', attrs: { title: '마이크로 부른 음정을 가라오케 레인에 청록 궤적으로 표시합니다. 켜면 마이크 권한을 요청해요.' } }), micPitch),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: '마이크 기기' }), micDevice),
+      h('div', { className: 'ey-settings-note', text: '기기 이름은 마이크 권한을 한 번 허용해야 표시돼요' }),
       h('div', { className: 'ey-settings-row ey-settings-col' },
         h('label', {}, '싱크 서버 URL ', dot),
         serverInput,
@@ -971,6 +1010,35 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-note', text: '싱크 생성·번역은 Everyric 서버가 필요해요' }),
       h('button', { className: 'ey-secondary-btn', text: '닫기', on: { click: () => this.closeSettings() } }),
     );
+  }
+
+  private buildRange(value: number, onChange: (v: number) => void): HTMLInputElement {
+    const range = h('input', {
+      className: 'ey-settings-range',
+      attrs: { type: 'range', min: '0', max: '100', step: '1', value: String(Math.round(value * 100)) },
+    });
+    range.addEventListener('change', () => onChange(Number(range.value) / 100));
+    return range;
+  }
+
+  /** 오디오 입출력 기기 목록 채우기 — 라벨은 마이크 권한을 허용해야 브라우저가 내려준다 */
+  private async populateAudioDevices(outSel: HTMLSelectElement, inSel: HTMLSelectElement): Promise<void> {
+    const fill = (sel: HTMLSelectElement, devices: MediaDeviceInfo[], defLabel: string, cur: string) => {
+      sel.replaceChildren(h('option', { text: defLabel, attrs: { value: '' } }));
+      devices.forEach((d, i) => {
+        if (!d.deviceId || d.deviceId === 'default' || d.deviceId === 'communications') return;
+        sel.append(h('option', { text: d.label || `기기 ${i + 1}`, attrs: { value: d.deviceId } }));
+      });
+      sel.value = Array.from(sel.options).some(o => o.value === cur) ? cur : '';
+    };
+    let devices: MediaDeviceInfo[] = [];
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch {
+      /* 권한 API 불가 환경 — 기본 항목만 표시 */
+    }
+    fill(outSel, devices.filter(d => d.kind === 'audiooutput'), '기본 출력', this.settings.audioOutputId);
+    fill(inSel, devices.filter(d => d.kind === 'audioinput'), '기본 마이크', this.settings.micDeviceId);
   }
 
   private buildSelect(options: [string, string][], value: string, onChange: (v: string) => void): HTMLSelectElement {

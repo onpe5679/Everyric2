@@ -92,3 +92,7 @@ everyric2-chrome/pip-wide-video.png
 everyric2-chrome/countdown.png
 everyric2-chrome/search-ui.png
 everyric2-chrome/debug-lane-*.png
+
+# Secrets
+nvapi.txt
+*.apikey
