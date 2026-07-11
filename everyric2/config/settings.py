@@ -125,6 +125,39 @@ class AlignmentSettings(BaseSettings):
         "Falls back to original-text alignment when coverage is insufficient or it fails.",
     )
 
+    star_vocal_fallback_sec: float = Field(
+        default=8.0,
+        description="Cost gate for the pronunciation (ko) alignment guard. When a single wildcard "
+        "<star> span absorbs at least this many seconds of real VAD vocal activity, the ko "
+        "alignment may have compressed genuine lyric lines out of that region (kor adapter "
+        "failing on a heavy-effect section). Swallow magnitude alone cannot tell 'compressed real "
+        "lyrics' from 'a genuine lyric-free bridge' (熱異常 swallows ~21s benignly), so exceeding "
+        "this only triggers the definitive cross-check (post_interlude_fill_margin_sec) rather "
+        "than a fallback. Its purpose is to avoid running a second alignment on songs that "
+        "clearly do not need it. Set to 0 to disable the guard entirely.",
+    )
+
+    interlude_min_gap_sec: float = Field(
+        default=5.0,
+        description="Minimum silence gap (seconds) between consecutive VAD vocal regions to count "
+        "as a structural interlude. The largest such gap anchors the post-interlude window used by "
+        "the ko-alignment fallback cross-check. Songs without a gap this long skip the check.",
+    )
+
+    post_interlude_fill_margin_sec: float = Field(
+        default=15.0,
+        description="Decision threshold for the ko-alignment star-swallow guard. Once the swallow "
+        "gate trips and an interlude exists, the original-text (ja) alignment is run and both "
+        "alignments are measured by how many seconds of lyric lines they place in the "
+        "post-interlude vocal window. If ja fills at least this many seconds MORE than ko, the ko "
+        "path compressed the post-interlude block forward (out of the window) → fall back to "
+        "original-text alignment for the whole song. Anchoring on the interlude (fixed by the "
+        "audio) rather than the star span (which moves between alignments) makes this robust: "
+        "初音ミクの消失 shows ja−ko = +46.7 to +79.4s across runs (falls back), 熱異常 shows "
+        "−1.3 to +5.5s (keeps ko) — VAD boundaries drift between runs but the separation stays "
+        "enormous.",
+    )
+
 
 class TranslationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_TRANSLATE_")

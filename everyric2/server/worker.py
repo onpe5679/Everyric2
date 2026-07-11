@@ -535,6 +535,48 @@ def _geomean(values: list[float]) -> float | None:
     return math.exp(sum(math.log(v) for v in xs) / len(xs))
 
 
+def _star_swallowed_vocal(star_spans, vad_regions) -> float:
+    """단일 star span이 실제 VAD 발성 구간을 삼킨 최대 겹침 길이(초).
+
+    독음(ko) 정렬이 초고속/간주 구간에서 실패하면, 와일드카드 star(log 1.0)가 실제
+    후반 가창을 통째로 흡수하고 그 라인들을 앞으로 압축한다 (VWVtIg5cdDU 실측: star
+    한 개가 후반 가창 21s를 삼킴). 다만 이 값만으로는 '실가사 압축(VWV)'과 '가사 없는
+    브릿지 정상 흡수(熱異常도 20.7s 삼키지만 배치 정상)'를 못 가른다. 그래서 이건
+    비용 게이트(값이 크면 ja와 대조)로만 쓰고, 최종 판정은 간주 이후 발성 구간의
+    라인 점유를 ko/ja 비교하는 호출부(_post_interlude_window)가 한다.
+    """
+    def ov(s, r):
+        return max(0.0, min(s[1], r[1]) - max(s[0], r[0]))
+
+    regions = [(reg.start, reg.end) for reg in vad_regions]
+    return max((sum(ov(s, r) for r in regions) for s in star_spans), default=0.0)
+
+
+def _post_interlude_window(vad_regions, min_gap_sec: float) -> tuple[float, float] | None:
+    """최대 간주(무음 갭) 이후의 발성 창 [gap_end, last_vocal_end].
+
+    간주는 오디오가 고정하는 구조라 star(정렬마다 위치 변동)보다 안정적인 앵커다.
+    연속 VAD 리전 사이 최대 갭이 min_gap_sec 이상이면 그 갭 끝~마지막 발성 끝을
+    '간주 이후 창'으로 돌려준다. 큰 간주가 없으면 None(폴백 판단 안 함).
+    """
+    regions = sorted((reg.start, reg.end) for reg in vad_regions)
+    if len(regions) < 2:
+        return None
+    best_gap, gap_end = 0.0, None
+    for (_, e0), (s1, _) in zip(regions, regions[1:]):
+        if s1 - e0 > best_gap:
+            best_gap, gap_end = s1 - e0, s1
+    if gap_end is None or best_gap < min_gap_sec:
+        return None
+    return (gap_end, regions[-1][1])
+
+
+def _lines_span_overlap(results, span: tuple[float, float]) -> float:
+    """results 라인들이 [span] 구간과 겹친 총 길이(초) — 그 구간의 '라인 점유량'."""
+    lo, hi = span
+    return sum(max(0.0, min(r.end_time, hi) - max(r.start_time, lo)) for r in results)
+
+
 def _pron_by_text(line_meta: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
     """line_meta를 정규화 텍스트 → 메타 dict로 색인 (merge_line_meta와 동일 규칙)."""
     by_text: dict[str, dict[str, Any]] = {}
@@ -660,6 +702,13 @@ def _run_alignment(
                 logger.info(f"Pronunciation coverage {coverage:.2f} < 0.9; using original text")
             results = engine.align(audio, lyric_lines, language=language or "auto")
 
+        # 독음 정렬의 star span (아래 VAD 확보 후 '발성 삼킴' 게이트에 쓴다) — 재정렬 전에 포착
+        pron_star_spans = (
+            list(getattr(engine, "_last_star_spans", []))
+            if alignment_text == "pronunciation"
+            else []
+        )
+
         # 보컬 스템 1회 분리 → VAD로 라인 경계 보정(가사에 없는 추임새/간주로 늘어진
         # 라인을 실제 발성 구간으로 되돌림) + 아래 멜로디 f0 추출에 재사용
         vocals = _separate_vocals(audio) if settings.melody.separate_vocals else None
@@ -674,6 +723,43 @@ def _run_alignment(
                 from everyric2.audio.vad import VocalActivityDetector
 
                 vad_result = VocalActivityDetector().detect(vocals)
+                # 독음 정렬이 실제 발성을 star 와일드카드로 삼켰는지 검사한다. star 하나가
+                # 후반 가창을 통째로 흡수하면 그 라인들이 앞으로 압축·오배치된다
+                # (VWVtIg5cdDU(初音ミクの消失) 실측: star 한 개가 후반 가창 21s를 삼켜
+                # 후반 라인이 ~40s 앞으로 압축, 불가능한 음절 속도). 단 삼킴 크기만으론
+                # 熱異常(브릿지에서 20.7s 삼키지만 배치 정상)과 못 가른다 — 그래서 이건
+                # 비용 게이트로만 쓰고, 판정은 '간주 이후 발성 창을 어느 정렬이 채우는가'로
+                # 한다. ko가 그 창을 비우고(라인을 앞으로 압축) ja가 크게 채우면 ja 폴백,
+                # 둘이 비슷하면(熱異常: ja도 채움, 배치 차이는 국소) ko 유지.
+                if alignment_text == "pronunciation" and settings.alignment.star_vocal_fallback_sec > 0:
+                    swallowed = _star_swallowed_vocal(pron_star_spans, vad_result.regions)
+                    post_win = _post_interlude_window(
+                        vad_result.regions, settings.alignment.interlude_min_gap_sec
+                    )
+                    if swallowed >= settings.alignment.star_vocal_fallback_sec and post_win:
+                        ja_candidate = engine.align(audio, lyric_lines, language=language or "auto")
+                        ko_fill = _lines_span_overlap(results, post_win)
+                        ja_fill = _lines_span_overlap(ja_candidate, post_win)
+                        if ja_fill - ko_fill >= settings.alignment.post_interlude_fill_margin_sec:
+                            logger.warning(
+                                f"Pronunciation alignment vacated the post-interlude window "
+                                f"[{post_win[0]:.1f}-{post_win[1]:.1f}]s (ko fills {ko_fill:.1f}s vs "
+                                f"ja {ja_fill:.1f}s, +{ja_fill - ko_fill:.1f}s; star swallowed "
+                                f"{swallowed:.1f}s); falling back to original-text alignment"
+                            )
+                            results = ja_candidate
+                            alignment_text = "original"
+                            pron_data = None
+                            raw_spans = [(r.start_time, r.end_time) for r in results]
+                            fixes = {}
+                        else:
+                            logger.info(
+                                f"Star swallowed {swallowed:.1f}s but both alignments fill the "
+                                f"post-interlude window similarly (ko {ko_fill:.1f}s, ja {ja_fill:.1f}s, "
+                                f"+{ja_fill - ko_fill:.1f}s < "
+                                f"{settings.alignment.post_interlude_fill_margin_sec}s); keeping "
+                                f"pronunciation alignment"
+                            )
                 # extend_to_vocal은 끄는다: 가사에 없는 반복 가창/애드립도 "보컬 활동"이라
                 # 라인을 그쪽으로 늘려버린다 (star 토큰이 흡수해 둔 구간을 도로 끌어안는 역효과)
                 pp = TimingPostProcessor(settings.segmentation, extend_to_vocal=False).process(
@@ -766,8 +852,14 @@ def _run_alignment(
             detected_lang = engine._current_lang
 
         # 곡 단위 디버그 메타 — star가 흡수한 구간(가사 밖 가창)과 VAD 발성 구간,
-        # 그리고 어떤 텍스트로 정렬했는지(원문 vs 독음) 클라 디버그 표시용
-        star_spans = [list(s) for s in getattr(engine, "_last_star_spans", [])]
+        # 그리고 어떤 텍스트로 정렬했는지(원문 vs 독음) 클라 디버그 표시용.
+        # 독음을 유지한 경우 debug star는 ko 정렬의 것이어야 한다 — star 가드가 교차검증용
+        # ja 정렬을 돌리면 engine._last_star_spans가 ja star로 덮이므로 미리 포착해 둔
+        # pron_star_spans(ko star)를 쓴다. 원문 정렬(폴백 포함)은 _last_star_spans가 맞다.
+        final_star_source = pron_star_spans if alignment_text == "pronunciation" else getattr(
+            engine, "_last_star_spans", []
+        )
+        star_spans = [list(s) for s in final_star_source]
         debug_meta = {
             "star_spans": star_spans,
             "vad_regions": [list(v) for v in vad_regions] if vad_regions is not None else None,
