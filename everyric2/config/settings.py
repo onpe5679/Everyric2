@@ -106,6 +106,17 @@ class AlignmentSettings(BaseSettings):
         "stretching neighboring lines",
     )
 
+    use_pronunciation: bool = Field(
+        default=True,
+        description="When line-level Korean pronunciation (독음, e.g. from the Vocaloid lyrics "
+        "wiki) covers enough of the lyrics, run CTC forced alignment on the pronunciation "
+        "text with the MMS 'kor' adapter and map the resulting syllable timings back onto the "
+        "original lines. On synthesized/Vocaloid vocals this lifts alignment confidence and "
+        "fixes gross post-interlude misplacement that local clamps cannot repair, and yields "
+        "syllable-level spans that split multi-mora kanji into separate karaoke notes. "
+        "Falls back to original-text alignment when coverage is insufficient or it fails.",
+    )
+
 
 class TranslationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_TRANSLATE_")

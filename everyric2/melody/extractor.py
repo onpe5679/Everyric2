@@ -500,10 +500,14 @@ class MelodyExtractor:
             if start is None or end is None or end <= start:
                 continue
             notes: list[dict] = []
+            # 독음 정렬 곡은 발음 음절 스팬(pron_segments)을 앵커로 우선한다 — 다음절 한자
+            # (熱=ネツ)가 원문 글자 span으로는 노트 1개로 뭉치지만, 음절 스팬이면 음절마다
+            # 별도 노트로 쪼개진다 (사용자 요구: 다음절 한자 노트 분할).
             words = seg.get("words")
-            if self.config.anchor_to_words and words:
-                # 노트를 정렬된 글자(음절) 경계에서 자른다 — 가사 하이라이트와 타이밍 일치
-                anchors = anchor_spans_from_words(words, float(end))
+            anchor_source = seg.get("pron_segments") or words
+            if self.config.anchor_to_words and anchor_source:
+                # 노트를 정렬된 음절 경계에서 자른다 — 가사 하이라이트와 타이밍 일치
+                anchors = anchor_spans_from_words(anchor_source, float(end))
                 notes = notes_from_anchor_spans(
                     track,
                     anchors,

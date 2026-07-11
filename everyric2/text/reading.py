@@ -552,3 +552,127 @@ def pron_segments_for_line(
             segments[idx]["end"] = segments[idx]["start"]
 
     return segments if segments else None
+
+
+# ---------------------------------------------------------------------------
+# 독음(ko) 정렬 결과의 역매핑 (map_pron_alignment_to_line)
+# ---------------------------------------------------------------------------
+
+
+def _clamp_monotonic(spans: list[dict]) -> None:
+    """인접 span 시간을 단조 증가하도록 제자리 클램프."""
+    for idx in range(1, len(spans)):
+        if spans[idx]["start"] < spans[idx - 1]["end"]:
+            spans[idx]["start"] = spans[idx - 1]["end"]
+        if spans[idx]["end"] < spans[idx]["start"]:
+            spans[idx]["end"] = spans[idx]["start"]
+
+
+def map_pron_alignment_to_line(
+    text: str,
+    pron: str,
+    pron_char_spans: list[tuple[str, float, float]],
+) -> tuple[list[dict] | None, list[dict] | None]:
+    """독음(한국어 발음)으로 정렬한 CTC 결과를 원문 라인에 역매핑한다.
+
+    ``pron_segments_for_line``의 역방향이다. 저기서는 원문 글자 타이밍 → 모라 →
+    발음 음절 순으로 시간을 만들었다면, 여기서는 발음 음절이 이미 오디오에 정렬돼
+    있고(ko CTC), 그 음절 시간을 모라를 거쳐 원문 글자에 되돌린다.
+
+    체인: 발음 음절 k ─(DP 정렬)→ 모라 구간 ─(pykakasi char_start/end)→ 원문 글자.
+
+    Args:
+        text: 원문 라인 (표시용, 한자 포함).
+        pron: 위키 발음 표기(공백 포함 한글).
+        pron_char_spans: ko CTC 정렬의 한글 음절별 (음절, start, end). 공백은 없고
+            일부 음절(OOV)이 누락될 수 있다 — 누락 음절은 이웃으로 보간한다.
+
+    Returns:
+        (word_segments, pron_segments)
+        - pron_segments: [{text, start, end, resolved}] 발음 음절별 스팬 — 노트 앵커·
+          발음 표시용. 음절 정렬이 하나라도 있으면 항상 만든다.
+        - word_segments: [{word, start, end}] 원문 글자별 스팬 — 모라 역매핑이
+          성공하고 품질이 임계값 이상일 때만. 매핑 불가 라인은 None(라인 타이밍만).
+        음절 정렬 자체가 비었으면 (None, None).
+    """
+    syllables = [c for c in pron if not c.isspace()]
+    if not syllables or not pron_char_spans:
+        return None, None
+
+    # 누락 음절을 이웃으로 보간해 음절별 (start, end)를 만든다 (원문 글자 보간과 동일 로직)
+    syl_time = _build_char_time("".join(syllables), pron_char_spans)
+    if all(t is None for t in syl_time):
+        return None, None
+
+    pron_segments: list[dict] = []
+    for k, syl in enumerate(syllables):
+        t = syl_time[k]
+        if t is None:
+            continue
+        pron_segments.append({"text": syl, "start": t[0], "end": t[1], "resolved": True})
+    _clamp_monotonic(pron_segments)
+
+    words = _map_syllable_times_to_chars(text, pron, syllables, syl_time)
+    return words, (pron_segments or None)
+
+
+def _map_syllable_times_to_chars(
+    text: str,
+    pron: str,
+    syllables: list[str],
+    syl_time: list[tuple[float, float] | None],
+) -> list[dict] | None:
+    """발음 음절 시간을 모라 역매핑으로 원문 글자에 분배. 실패 시 None."""
+    try:
+        moras = text_to_moras(text)
+        if not moras:
+            return None
+        result_syls, quality = align_pron_to_moras(moras, pron)
+        # DP 결과는 음절 1개당 1 엔트리 → syl_time과 인덱스가 1:1이어야 한다
+        if quality < _QUALITY_THRESHOLD or len(result_syls) != len(syllables):
+            return None
+
+        char_s: list[float | None] = [None] * len(text)
+        char_e: list[float | None] = [None] * len(text)
+        for k, ps in enumerate(result_syls):
+            if not ps.resolved or ps.mora_start < 0:
+                continue
+            t = syl_time[k]
+            if t is None:
+                continue
+            for mi in range(ps.mora_start, ps.mora_end):
+                if not 0 <= mi < len(moras):
+                    continue
+                for c in range(moras[mi].char_start, moras[mi].char_end):
+                    if not 0 <= c < len(text):
+                        continue
+                    if char_s[c] is None or t[0] < char_s[c]:
+                        char_s[c] = t[0]
+                    if char_e[c] is None or t[1] > char_e[c]:
+                        char_e[c] = t[1]
+
+        known = [i for i in range(len(text)) if char_s[i] is not None]
+        if not known:
+            return None
+        for i in range(known[0]):
+            char_s[i], char_e[i] = char_s[known[0]], char_e[known[0]]
+        for i in range(known[-1] + 1, len(text)):
+            char_s[i], char_e[i] = char_s[known[-1]], char_e[known[-1]]
+        for a, b in zip(known, known[1:]):
+            if b - a <= 1:
+                continue
+            gs, ge = char_e[a], char_s[b]
+            step = (ge - gs) / (b - a)
+            for kk in range(1, b - a):
+                char_s[a + kk] = gs + step * (kk - 1)
+                char_e[a + kk] = gs + step * kk
+
+        words: list[dict] = []
+        for c, ch in enumerate(text):
+            if ch.isspace() or char_s[c] is None:
+                continue
+            words.append({"word": ch, "start": char_s[c], "end": char_e[c]})
+        _clamp_monotonic(words)
+        return words or None
+    except Exception:
+        return None

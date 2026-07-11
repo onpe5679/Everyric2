@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import math
 import re
 import statistics
 from pathlib import Path
@@ -62,7 +63,11 @@ def _attach_pron_segments(seg: dict[str, Any]) -> None:
 
     전사 모델을 다시 돌리지 않는다 (기존 CTC 글자 타이밍을 모라 수로 내부 분할).
     품질 미달/실패 시 필드를 남기지 않아 클라이언트가 그라데이션으로 폴백한다.
+    이미 pron_segments가 있으면(독음 정렬 경로 산출값 등) DP 근사로 덮어쓰지 않는다 —
+    캐시 재사용 시 라인 메타 재병합이 정확한 정렬 스팬을 훼손하는 것을 막는다.
     """
+    if seg.get("pron_segments"):
+        return
     pron = seg.get("pronunciation")
     words = seg.get("words")
     if not pron or not words:
@@ -150,17 +155,20 @@ async def process_job(job_id: str) -> None:
         # 정렬(분리+CTC+멜로디)은 수십 초 걸리는 단일 블록 — 진행률이 멈춰 보이지 않게
         # 45%에서 시작해 85%까지 천천히 차오르는 티커를 함께 돌린다
         await _set_progress(job_id, 45)
+        # 라인 메타(발음)를 정렬 단계로 넘겨 독음(ko) 정렬 경로 판단에 쓴다 (아직 pop 안 함)
+        pending_meta = _PENDING_LINE_META.get(job_id)
         ticker = asyncio.create_task(_tick_progress(job_id, start=45, cap=85))
         try:
             result = await asyncio.get_event_loop().run_in_executor(
-                None, _run_alignment, audio_path, job.lyrics, job.language
+                None, _run_alignment, audio_path, job.lyrics, job.language, pending_meta
             )
         finally:
             ticker.cancel()
         await _set_progress(job_id, 90)  # 정렬 완료, 저장 중
 
         meta = _PENDING_LINE_META.pop(job_id, None)
-        if meta:
+        # 독음 정렬 경로는 발음/번역/pron_segments를 이미 세그먼트에 붙였으므로 재병합 생략
+        if meta and result.get("alignment_text") != "pronunciation":
             merged = merge_line_meta(result["timestamps"], meta)
             logger.info(f"Line meta merged on {merged} segments")
 
@@ -427,7 +435,166 @@ def _clamp_stretched_lines(results, vad_result):
     return results, clamped
 
 
-def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
+def _snap_silence_undershoot(results, vad_result, clamped: set[int]) -> None:
+    """무음(간주)에 좌초한 라인을 다음 발성 온셋으로 스냅한다 (독음 정렬 전용).
+
+    독음(ko) 정렬의 유일한 실패 모드: 간주 전후 전이 라인이 실제 가창(간주 이후)보다
+    앞선 무음 구간에 배치된다 (熱異常 L94: 실제 165.5s인데 간주 무음 146s로 언더슛).
+    라인 창의 발성 커버리지가 매우 낮고(<0.25 — 순수 무음 또는 간주 초입 잔향 blip만
+    스침) 다음 발성 리전까지 >=1.5s 벌어져 있으면 그 온셋 직전(-0.15s)으로 당긴다.
+    라인 전체가 무음에 갇혔으면(끝이 다음 온셋 이전) 길이를 보존해 통째로 이동한다.
+
+    ``_pull_post_interlude_starts``(늦게 잡힌 시작을 앞으로 당김)와 방향이 겹칠 수 있어
+    **_clamp_stretched_lines 이전에** 돌려, 좌초 라인이 먼저 제자리(다음 온셋)를 잡게 한다
+    — 그래야 뒤따르는 정상 라인이 간주 후 첫 라인으로 오인돼 도로 당겨지지 않는다.
+    커버리지가 조금이라도 있으면(온셋 리드·늘임음 꼬리 포함) 보수적으로 건드리지 않는다.
+    """
+    regions = sorted(vad_result.regions, key=lambda reg: reg.start)
+    if not regions:
+        return
+    for i, r in enumerate(results):
+        if i in clamped:
+            continue
+        s, e = r.start_time, r.end_time
+        dur = max(1e-6, e - s)
+        cover = sum(max(0.0, min(reg.end, e) - max(reg.start, s)) for reg in regions) / dur
+        if cover >= 0.25:
+            continue  # 라인이 발성과 유의미하게 겹침 → 정상 배치, 건드리지 않음
+        nxt = next((reg for reg in regions if reg.start >= s), None)
+        if nxt is None:
+            continue  # 뒤에 발성 없음 (곡 끝 무음) → 스냅할 온셋 없음
+        if nxt.start - s < 1.5:
+            continue  # 온셋 직전의 짧은 리드타임은 정상
+        new_start = nxt.start - 0.15
+        next_line_start = results[i + 1].start_time if i + 1 < len(results) else float("inf")
+        if new_start >= next_line_start:
+            continue  # 다음 라인을 침범 → 오탐, 적용하지 않음
+        if e <= nxt.start:
+            # 라인 전체가 무음에 갇힘 → 길이 보존하고 통째로 온셋으로 이동(다음 라인 앞까지)
+            r.start_time = new_start
+            r.end_time = min(new_start + dur, next_line_start)
+            if r.word_segments:
+                _shift_word_segments(r.word_segments, r.start_time, r.end_time)
+        else:
+            r.start_time = new_start  # 시작만 무음, 라인이 이미 리전에 걸침 → start만 스냅
+        clamped.add(i)
+
+
+def _shift_word_segments(word_segments, new_start: float, new_end: float) -> None:
+    """word_segments를 [new_start, new_end] 구간으로 선형 리스케일(제자리)."""
+    if not word_segments:
+        return
+    old_start = word_segments[0].start
+    old_end = word_segments[-1].end
+    span = old_end - old_start
+    target = new_end - new_start
+    if span <= 0:
+        n = len(word_segments)
+        step = target / n if n else 0.0
+        for k, w in enumerate(word_segments):
+            w.start = new_start + step * k
+            w.end = new_start + step * (k + 1)
+        return
+    for w in word_segments:
+        w.start = new_start + (w.start - old_start) / span * target
+        w.end = new_start + (w.end - old_start) / span * target
+
+
+def _geomean(values: list[float]) -> float | None:
+    xs = [v for v in values if v is not None and v > 0]
+    if not xs:
+        return None
+    return math.exp(sum(math.log(v) for v in xs) / len(xs))
+
+
+def _pron_by_text(line_meta: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """line_meta를 정규화 텍스트 → 메타 dict로 색인 (merge_line_meta와 동일 규칙)."""
+    by_text: dict[str, dict[str, Any]] = {}
+    for m in line_meta or []:
+        t = _normalize_line(m.get("text", "") or "")
+        if t and t not in by_text:
+            by_text[t] = m
+    return by_text
+
+
+def _pron_coverage(lyric_lines, by_text: dict[str, dict[str, Any]]) -> float:
+    """발음 표기가 붙은 라인 비율 (0~1)."""
+    if not lyric_lines:
+        return 0.0
+    have = 0
+    for ln in lyric_lines:
+        m = by_text.get(_normalize_line(ln.text))
+        if m and (m.get("pronunciation") or "").strip():
+            have += 1
+    return have / len(lyric_lines)
+
+
+def _align_with_pronunciation(engine, audio, lyric_lines, by_text: dict[str, dict[str, Any]]):
+    """독음(ko) 텍스트로 CTC 정렬 후 원문 라인에 역매핑.
+
+    반환: (results, pron_data)
+      results: 원문 텍스트 SyncResult 목록 (타이밍/word_segments는 독음 정렬 역매핑값).
+      pron_data: line_idx → {"pronunciation", "translation", "pron_segments"}.
+    """
+    from everyric2.inference.prompt import LyricLine, SyncResult, WordSegment
+    from everyric2.text.reading import map_pron_alignment_to_line
+
+    pron_for_line = [
+        (by_text.get(_normalize_line(ln.text)) or {}).get("pronunciation") or ""
+        for ln in lyric_lines
+    ]
+    pron_lines = [
+        LyricLine(text=pron, line_number=ln.line_number)
+        for pron, ln in zip(pron_for_line, lyric_lines)
+    ]
+    ko_results = engine.align(audio, pron_lines, language="ko")
+
+    results = []
+    pron_data: dict[int, dict[str, Any]] = {}
+    for i, (ln, kr) in enumerate(zip(lyric_lines, ko_results)):
+        pron = pron_for_line[i]
+        ko_words = kr.word_segments or []
+        spans = [(w.word, w.start, w.end) for w in ko_words]
+
+        words = pron_segments = None
+        if pron and spans:
+            words, pron_segments = map_pron_alignment_to_line(ln.text, pron, spans)
+
+        word_segments = (
+            [WordSegment(word=w["word"], start=w["start"], end=w["end"]) for w in words]
+            if words
+            else None
+        )
+        line_conf = _geomean([w.confidence for w in ko_words])
+        if word_segments and line_conf is not None:
+            for ws in word_segments:
+                ws.confidence = round(line_conf, 6)
+
+        results.append(
+            SyncResult(
+                line_number=ln.line_number,
+                text=ln.text,
+                start_time=kr.start_time,
+                end_time=kr.end_time,
+                confidence=round(line_conf, 6) if line_conf is not None else None,
+                word_segments=word_segments,
+            )
+        )
+        meta = by_text.get(_normalize_line(ln.text)) or {}
+        pron_data[i] = {
+            "pronunciation": pron or None,
+            "translation": meta.get("translation"),
+            "pron_segments": pron_segments,
+        }
+    return results, pron_data
+
+
+def _run_alignment(
+    audio_path: str,
+    lyrics: str,
+    language: str | None,
+    line_meta: list[dict[str, Any]] | None = None,
+) -> dict:
     from everyric2.alignment.factory import EngineFactory
     from everyric2.audio.loader import AudioLoader
     from everyric2.config.settings import get_settings
@@ -445,7 +612,25 @@ def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
         if not engine.is_available():
             raise RuntimeError("CTC engine not available")
 
-        results = engine.align(audio, lyric_lines, language=language or "auto")
+        # 독음(ko) 정렬 경로: 커버리지가 충분하면 한국어 발음 텍스트+kor adapter로 정렬하고
+        # 원문 라인에 역매핑한다. 미달/실패 시 원문 정렬로 폴백 (회귀 0).
+        by_text = _pron_by_text(line_meta)
+        coverage = _pron_coverage(lyric_lines, by_text)
+        pron_data: dict[int, dict[str, Any]] | None = None
+        alignment_text = "original"
+        if settings.alignment.use_pronunciation and coverage >= 0.9:
+            try:
+                results, pron_data = _align_with_pronunciation(engine, audio, lyric_lines, by_text)
+                alignment_text = "pronunciation"
+                logger.info(f"Pronunciation alignment used (coverage={coverage:.2f})")
+            except Exception:
+                logger.exception("Pronunciation alignment failed; falling back to original text")
+                results = engine.align(audio, lyric_lines, language=language or "auto")
+                pron_data = None
+        else:
+            if settings.alignment.use_pronunciation:
+                logger.info(f"Pronunciation coverage {coverage:.2f} < 0.9; using original text")
+            results = engine.align(audio, lyric_lines, language=language or "auto")
 
         # 보컬 스템 1회 분리 → VAD로 라인 경계 보정(가사에 없는 추임새/간주로 늘어진
         # 라인을 실제 발성 구간으로 되돌림) + 아래 멜로디 f0 추출에 재사용
@@ -463,7 +648,14 @@ def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
                 pp = TimingPostProcessor(settings.segmentation, extend_to_vocal=False).process(
                     results, vad_result, "line"
                 )
+                # 독음 정렬의 무음 언더슛(전이 라인이 간주에 좌초) 교정 — ko 경로에만 적용.
+                # _clamp_stretched_lines(내부 _pull이 간주 후 첫 라인을 당김) **이전에** 돌려
+                # 좌초 라인이 먼저 다음 온셋을 잡게 한다 (뒤 라인 오인 당김 방지).
+                snapped: set[int] = set()
+                if alignment_text == "pronunciation":
+                    _snap_silence_undershoot(pp.results, vad_result, snapped)
                 results, clamped_lines = _clamp_stretched_lines(pp.results, vad_result)
+                clamped_lines |= snapped
                 vad_regions = [(round(reg.start, 2), round(reg.end, 2)) for reg in vad_result.regions]
                 logger.info(f"Timing post-process: {pp.stats}")
             except Exception:
@@ -483,6 +675,16 @@ def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
                     {"word": w.word, "start": w.start, "end": w.end, "confidence": w.confidence}
                     for w in r.word_segments
                 ]
+            # 독음 정렬 경로: 발음 음절 스팬을 멜로디 앵커·발음 표시용으로 직접 부착한다
+            # (기존 DP 근사 pron_segments 대신 — 실제 정렬 타이밍이라 더 정확).
+            if pron_data is not None:
+                pd = pron_data.get(i) or {}
+                if pd.get("pronunciation"):
+                    seg["pronunciation"] = pd["pronunciation"]
+                if pd.get("translation"):
+                    seg["translation"] = pd["translation"]
+                if pd.get("pron_segments"):
+                    seg["pron_segments"] = pd["pron_segments"]
             if vad_regions is not None:
                 # 라인 구간 중 실제 발성 비율 + 클램프 여부 — 확장 디버그 스트립용
                 dur = max(0.001, r.end_time - r.start_time)
@@ -520,11 +722,13 @@ def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
         if hasattr(engine, "_current_lang"):
             detected_lang = engine._current_lang
 
-        # 곡 단위 디버그 메타 — star가 흡수한 구간(가사 밖 가창)과 VAD 발성 구간
+        # 곡 단위 디버그 메타 — star가 흡수한 구간(가사 밖 가창)과 VAD 발성 구간,
+        # 그리고 어떤 텍스트로 정렬했는지(원문 vs 독음) 클라 디버그 표시용
         star_spans = [list(s) for s in getattr(engine, "_last_star_spans", [])]
         debug_meta = {
             "star_spans": star_spans,
             "vad_regions": [list(v) for v in vad_regions] if vad_regions is not None else None,
+            "alignment_text": alignment_text,
         }
 
         return {
@@ -532,6 +736,7 @@ def _run_alignment(audio_path: str, lyrics: str, language: str | None) -> dict:
             "language": detected_lang,
             "quality_score": avg_confidence,
             "debug": debug_meta,
+            "alignment_text": alignment_text,
             # 가라오케 레인의 마디 단위 고정 창·비트 격자용 — 실패해도 None으로 계속
             "tempo": _estimate_tempo(audio),
         }
