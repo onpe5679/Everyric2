@@ -41,3 +41,18 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class SyncLink(Base):
+    """다른 영상의 싱크를 오프셋과 함께 재사용하는 링크 (inst/커버 영상용).
+
+    video_id는 링크의 소유자(PK=고유). source_video_id의 실제 싱크를 offset_sec만큼
+    시프트해 조회 시 대신 내려준다. 자기 싱크가 있으면 링크보다 우선한다.
+    """
+
+    __tablename__ = "sync_links"
+
+    video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    source_video_id: Mapped[str] = mapped_column(String(32), index=True)
+    offset_sec: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

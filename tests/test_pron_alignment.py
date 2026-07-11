@@ -87,6 +87,51 @@ def test_map_pron_segments_are_monotonic():
     assert pron_segments[1]["start"] >= pron_segments[0]["end"]
 
 
+# --- 글자별 confidence 역매핑 (회귀 수정) -----------------------------------
+
+
+def test_map_confidence_distributed_per_char():
+    # 음절별 conf가 다르면 글자 conf도 균일하지 않게 분배된다 (라인 균일 부여 회귀 방지).
+    # 猫が: 猫=ねこ(네·코 두 음절, 한 글자), が=가 → 글자별로 conf가 갈린다.
+    words, _pron = map_pron_alignment_to_line(
+        "猫が", "네코가", [("네", 1.0, 1.2, 0.9), ("코", 1.4, 1.6, 0.9), ("가", 1.8, 2.0, 0.1)]
+    )
+    assert words is not None
+    assert [w["word"] for w in words] == ["猫", "が"]
+    assert words[0]["confidence"] == pytest.approx(0.9)  # 猫 = geomean(0.9, 0.9)
+    assert words[1]["confidence"] == pytest.approx(0.1)  # が
+    assert words[0]["confidence"] != words[1]["confidence"]  # 글자별로 다름
+
+
+def test_map_pron_segments_carry_confidence():
+    # pron_segments 각 음절에도 confidence가 실린다 (클라 미래 사용)
+    _words, pron_segments = map_pron_alignment_to_line(
+        "ねこ", "네코", [("네", 1.0, 1.2, 0.9), ("코", 1.4, 1.6, 0.2)]
+    )
+    assert [round(p["confidence"], 6) for p in pron_segments] == [0.9, 0.2]
+
+
+def test_map_multisyllable_kanji_conf_is_geomean():
+    # 熱=네츠: 두 음절 conf(0.9, 0.1)가 한 글자로 병합 → 글자 conf는 기하평균 sqrt(0.09)=0.3
+    import math
+
+    words, _pron = map_pron_alignment_to_line(
+        "熱", "네츠", [("네", 5.0, 5.1, 0.9), ("츠", 5.3, 5.4, 0.1)]
+    )
+    assert words is not None and len(words) == 1
+    assert words[0]["confidence"] == pytest.approx(math.exp((math.log(0.9) + math.log(0.1)) / 2))
+
+
+def test_map_backward_compat_three_tuple_no_confidence():
+    # conf 없는 3-튜플 입력은 기존대로 동작 — words에 confidence 키가 붙지 않는다
+    words, pron_segments = map_pron_alignment_to_line(
+        "ねこ", "네코", [("네", 1.0, 1.2), ("코", 1.4, 1.6)]
+    )
+    assert words is not None
+    assert all("confidence" not in w for w in words)
+    assert all("confidence" not in p for p in pron_segments)
+
+
 # --- 커버리지 게이트 --------------------------------------------------------
 
 

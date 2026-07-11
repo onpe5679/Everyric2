@@ -624,7 +624,8 @@ def _align_with_pronunciation(engine, audio, lyric_lines, by_text: dict[str, dic
     for i, (ln, kr) in enumerate(zip(lyric_lines, ko_results)):
         pron = pron_for_line[i]
         ko_words = kr.word_segments or []
-        spans = [(w.word, w.start, w.end) for w in ko_words]
+        # 음절별 confidence까지 함께 넘겨 글자별 conf 역매핑을 살린다 (라인 균일 부여 회귀 수정)
+        spans = [(w.word, w.start, w.end, w.confidence) for w in ko_words]
 
         words = pron_segments = None
         if pron and spans:
@@ -636,9 +637,13 @@ def _align_with_pronunciation(engine, audio, lyric_lines, by_text: dict[str, dic
             else None
         )
         line_conf = _geomean([w.confidence for w in ko_words])
-        if word_segments and line_conf is not None:
-            for ws in word_segments:
-                ws.confidence = round(line_conf, 6)
+        if word_segments:
+            # 글자별 conf(reading이 음절 conf 기하평균으로 산출) 우선, 매핑 불가 글자는 라인 기하평균 폴백
+            for ws, w in zip(word_segments, words):
+                c = w.get("confidence")
+                if c is None:
+                    c = line_conf
+                ws.confidence = round(c, 6) if c is not None else None
 
         results.append(
             SyncResult(

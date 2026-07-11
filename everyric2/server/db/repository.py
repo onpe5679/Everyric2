@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from everyric2.server.db.models import Job, SyncResult
+from everyric2.server.db.models import Job, SyncLink, SyncResult
 
 
 def hash_lyrics(lyrics: str) -> str:
@@ -155,3 +155,38 @@ class JobRepository:
             values["error"] = error
 
         await self.session.execute(update(Job).where(Job.id == job_id).values(**values))
+
+
+class SyncLinkRepository:
+    """싱크 링크 CRUD (video_id 고유 → PK 기반 upsert)."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get(self, video_id: str) -> SyncLink | None:
+        result = await self.session.execute(
+            select(SyncLink).where(SyncLink.video_id == video_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def upsert(self, video_id: str, source_video_id: str, offset_sec: float) -> SyncLink:
+        existing = await self.get(video_id)
+        if existing:
+            existing.source_video_id = source_video_id
+            existing.offset_sec = offset_sec
+            await self.session.flush()
+            return existing
+        link = SyncLink(
+            video_id=video_id, source_video_id=source_video_id, offset_sec=offset_sec
+        )
+        self.session.add(link)
+        await self.session.flush()
+        return link
+
+    async def delete(self, video_id: str) -> bool:
+        existing = await self.get(video_id)
+        if not existing:
+            return False
+        await self.session.delete(existing)
+        await self.session.flush()
+        return True

@@ -417,10 +417,12 @@ def _build_char_time(
     text: str, char_spans: list[tuple[str, float, float]]
 ) -> list[tuple[float, float] | None]:
     """원문 글자별 (start, end) 시간. char_spans는 원문 순서의 부분열이며 일부 글자가
-    누락될 수 있다. 누락된 글자는 이웃 글자 시간으로 선형 보간한다."""
+    누락될 수 있다. 누락된 글자는 이웃 글자 시간으로 선형 보간한다.
+    스팬은 (글자, start, end) 또는 뒤에 confidence가 붙은 (글자, start, end, conf)도 허용한다."""
     times: list[tuple[float, float] | None] = [None] * len(text)
     p = 0
-    for ch, start, end in char_spans:
+    for span in char_spans:
+        ch, start, end = span[0], span[1], span[2]
         q = p
         while q < len(text) and text[q] != ch:
             q += 1
@@ -568,6 +570,39 @@ def _clamp_monotonic(spans: list[dict]) -> None:
             spans[idx]["end"] = spans[idx]["start"]
 
 
+def _geomean(values: list[float]) -> float | None:
+    """양수 값들의 기하평균 (0/None 제외). 없으면 None. CTC conf는 확률/지수라 기하평균이 자연스럽다."""
+    import math
+
+    xs = [v for v in values if v is not None and v > 0]
+    if not xs:
+        return None
+    return math.exp(sum(math.log(v) for v in xs) / len(xs))
+
+
+def _syllable_confidences(
+    syllables: list[str], pron_char_spans: list
+) -> list[float | None]:
+    """ko CTC 정렬 스팬의 음절별 confidence를 ``syllables`` 위치에 매핑.
+
+    ``pron_char_spans``는 (음절, start, end[, confidence])의 부분열이며 일부 음절(OOV)이
+    누락될 수 있다 — ``_build_char_time``의 글자 매칭과 동일 로직으로 순서대로 맞춘다.
+    conf가 없는(3-튜플) 스팬이나 매칭 안 된 음절은 None(호출부가 라인 기하평균으로 폴백)."""
+    confs: list[float | None] = [None] * len(syllables)
+    p = 0
+    for span in pron_char_spans:
+        ch = span[0]
+        conf = span[3] if len(span) > 3 else None
+        q = p
+        while q < len(syllables) and syllables[q] != ch:
+            q += 1
+        if q >= len(syllables):
+            continue
+        confs[q] = conf
+        p = q + 1
+    return confs
+
+
 def map_pron_alignment_to_line(
     text: str,
     pron: str,
@@ -603,16 +638,21 @@ def map_pron_alignment_to_line(
     syl_time = _build_char_time("".join(syllables), pron_char_spans)
     if all(t is None for t in syl_time):
         return None, None
+    # 음절별 confidence(ko CTC) — pron_segments 표시·글자 conf 역매핑용
+    syl_conf = _syllable_confidences(syllables, pron_char_spans)
 
     pron_segments: list[dict] = []
     for k, syl in enumerate(syllables):
         t = syl_time[k]
         if t is None:
             continue
-        pron_segments.append({"text": syl, "start": t[0], "end": t[1], "resolved": True})
+        seg = {"text": syl, "start": t[0], "end": t[1], "resolved": True}
+        if syl_conf[k] is not None:
+            seg["confidence"] = round(syl_conf[k], 6)
+        pron_segments.append(seg)
     _clamp_monotonic(pron_segments)
 
-    words = _map_syllable_times_to_chars(text, pron, syllables, syl_time)
+    words = _map_syllable_times_to_chars(text, pron, syllables, syl_time, syl_conf)
     return words, (pron_segments or None)
 
 
@@ -621,8 +661,13 @@ def _map_syllable_times_to_chars(
     pron: str,
     syllables: list[str],
     syl_time: list[tuple[float, float] | None],
+    syl_conf: list[float | None] | None = None,
 ) -> list[dict] | None:
-    """발음 음절 시간을 모라 역매핑으로 원문 글자에 분배. 실패 시 None."""
+    """발음 음절 시간을 모라 역매핑으로 원문 글자에 분배. 실패 시 None.
+
+    ``syl_conf``를 주면 각 글자에 매핑된 음절(들)의 conf 기하평균을 글자 conf로 실어
+    반환한다 (한 라인 안에서 글자별 conf가 달라지도록). 매핑 불가/보간 글자는 conf 없음
+    → 호출부(worker)가 라인 기하평균으로 폴백한다."""
     try:
         moras = text_to_moras(text)
         if not moras:
@@ -634,12 +679,15 @@ def _map_syllable_times_to_chars(
 
         char_s: list[float | None] = [None] * len(text)
         char_e: list[float | None] = [None] * len(text)
+        # 글자별로 그 글자를 덮은 음절들의 conf를 모아 둔다 (뒤에서 기하평균)
+        char_confs: list[list[float]] = [[] for _ in range(len(text))]
         for k, ps in enumerate(result_syls):
             if not ps.resolved or ps.mora_start < 0:
                 continue
             t = syl_time[k]
             if t is None:
                 continue
+            c_conf = syl_conf[k] if syl_conf is not None and k < len(syl_conf) else None
             for mi in range(ps.mora_start, ps.mora_end):
                 if not 0 <= mi < len(moras):
                     continue
@@ -650,6 +698,8 @@ def _map_syllable_times_to_chars(
                         char_s[c] = t[0]
                     if char_e[c] is None or t[1] > char_e[c]:
                         char_e[c] = t[1]
+                    if c_conf is not None:
+                        char_confs[c].append(c_conf)
 
         known = [i for i in range(len(text)) if char_s[i] is not None]
         if not known:
@@ -671,7 +721,11 @@ def _map_syllable_times_to_chars(
         for c, ch in enumerate(text):
             if ch.isspace() or char_s[c] is None:
                 continue
-            words.append({"word": ch, "start": char_s[c], "end": char_e[c]})
+            w = {"word": ch, "start": char_s[c], "end": char_e[c]}
+            conf = _geomean(char_confs[c])
+            if conf is not None:
+                w["confidence"] = round(conf, 6)
+            words.append(w)
         _clamp_monotonic(words)
         return words or None
     except Exception:
