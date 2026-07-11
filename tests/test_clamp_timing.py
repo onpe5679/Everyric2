@@ -223,7 +223,7 @@ def test_butted_line_is_not_extended():
 
 
 def test_tail_extension_capped_and_bounded_by_next_start():
-    # 리전이 길게 이어져도 +1.5초 캡, 다음 라인 시작 -0.05초를 넘지 않는다
+    # 리전 꼬리가 3초 초과(병합 의심)면 +1.5초 캡, 다음 라인 시작 -0.05초를 넘지 않는다
     results = [
         SyncResult(text="캡 라인", start_time=10.0, end_time=12.0),
         SyncResult(text="다음", start_time=13.0, end_time=15.0),
@@ -237,6 +237,28 @@ def test_tail_extension_capped_and_bounded_by_next_start():
     solo = [SyncResult(text="마지막", start_time=40.0, end_time=41.0)]
     _extend_phrase_final_tails(solo, _vad((39.5, 60.0)), set())
     assert solo[0].end_time == pytest.approx(42.5)
+
+
+def test_tail_cap_widens_for_short_region_tail():
+    # 커버 실측 잔존 케이스 재현: 리전 꼬리 2.0초(≤3.0) → 캡 2.5초로 리전 끝까지 연장
+    results = [
+        SyncResult(text="사비 늘임음", start_time=166.0, end_time=167.9),
+        SyncResult(text="다음 소절", start_time=170.9, end_time=173.0),
+    ]
+    vad = _vad((165.5, 169.9))
+    _extend_phrase_final_tails(results, vad, set())
+    assert results[0].end_time == pytest.approx(169.9)  # 1.5캡(169.4)을 넘어 리전 끝까지
+
+
+def test_tail_cap_stays_conservative_for_merged_region():
+    # 간주를 삼킨 병합 리전(꼬리 21.8초 > 3.0) → +1.5초 캡 유지로 과연장 방지
+    results = [
+        SyncResult(text="간주 앞 라인", start_time=66.0, end_time=67.0),
+        SyncResult(text="간주 뒤", start_time=89.0, end_time=92.0),
+    ]
+    vad = _vad((60.0, 88.8))
+    _extend_phrase_final_tails(results, vad, set())
+    assert results[0].end_time == pytest.approx(68.5)  # 67.0 + 1.5
 
 
 def test_tail_extension_skipped_outside_vad():

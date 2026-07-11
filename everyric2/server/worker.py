@@ -360,7 +360,10 @@ def _extend_phrase_final_tails(results, vad_result, clamped: set[int]) -> None:
     CTC는 마지막 음절을 온셋에서 끊어 늘임음(held note)의 감쇠를 따라가지 않는다 —
     SRT/VAD 이중 실측으로 phrase-final 라인의 86~100%가 median 0.4~0.66초 일찍
     끝남이 확인됨. 라인 끝이 속한 VAD 리전의 끝까지(단 다음 라인 시작 -0.05초,
-    +1.5초 캡 이내) 라인과 마지막 글자의 end를 함께 연장한다.
+    캡 이내) 라인과 마지막 글자의 end를 함께 연장한다.
+    캡은 적응형: 리전 꼬리가 3초 이내면 진짜 늘임음으로 보고 +2.5초까지,
+    그보다 길면 간주를 삼킨 병합 리전일 수 있어 +1.5초로 보수적으로 자른다
+    (커버 실측에서 잔존 3건이 전부 1.5초 캡, 과연장 1건이 22초 병합 리전이었음).
     소절 중간(butted) 라인과 이미 클램프로 잘라낸 라인은 건드리지 않는다.
     """
     for i, r in enumerate(results):
@@ -374,7 +377,8 @@ def _extend_phrase_final_tails(results, vad_result, clamped: set[int]) -> None:
         )
         if region is None:
             continue  # 라인 끝이 발성 리전 밖 — 따라갈 꼬리가 없다
-        new_end = min(region.end, next_start - 0.05, r.end_time + 1.5)
+        cap = 2.5 if region.end - r.end_time <= 3.0 else 1.5
+        new_end = min(region.end, next_start - 0.05, r.end_time + cap)
         if new_end <= r.end_time + 0.05:
             continue
         r.end_time = new_end
