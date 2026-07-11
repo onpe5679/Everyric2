@@ -1,0 +1,53 @@
+{
+  "experiment": "Qwen3-ForcedAligner-0.6B vs current MMS-1B-all CTC pipeline, forced alignment for karaoke line sync",
+  "env": "isolated uv venv (qwen-align-venv), torch 2.11.0+cu128, qwen-asr==0.0.6, RTX 5090, main venv untouched",
+  "model": {
+    "hf_id": "Qwen/Qwen3-ForcedAligner-0.6B",
+    "license": "Apache-2.0 (vs current MMS-1B-all CC-BY-NC-4.0 -- major licensing upgrade if it worked)",
+    "params": "601M (0.9B incl. audio encoder per HF card), ~1.84GB fp16/bf16",
+    "languages": 11,
+    "supports_ja_ko": true,
+    "install": "pip install qwen-asr (pulls torch/transformers deps); from qwen_asr import Qwen3ForcedAligner",
+    "api": "Qwen3ForcedAligner.from_pretrained(repo, dtype, device_map).align(audio=path|List|[ndarray,sr], text=str|List[str], language=name) -> List[ForcedAlignResult(items=[ForcedAlignItem(text,start_time,end_time)])]"
+  },
+  "perf": {
+    "model_load_s": "6-40 (first run downloads ~1.84GB weights; warm load ~6s)",
+    "vram_single_call_MiB": "~1700-3400",
+    "vram_after_several_calls_MiB": "~9200 (no explicit cache eviction observed between .align() calls in this package version)",
+    "full_song_align_wall_s": "1.0-3.8s for a 241s / 989-1337 char song (RTF roughly 0.005-0.016, i.e. 60-250x realtime) -- inference itself is extremely fast when it doesn't fail"
+  },
+  "reliability_findings": {
+    "test_song": "熱異常 (netsujou) -- original vocaloid b2NTglk9tvI + human cover hDhjRh-Gt4g, 134 lyric lines, both ~241s",
+    "ground_truth": "YouTube auto-captions SRT for hDhjRh-Gt4g cover (77 cues after collapsing repeated identical lines), same char-stream+SequenceMatcher methodology as srt_analysis/compare.py for apples-to-apples comparability",
+    "full_song_one_shot_call": {
+      "method": "single model.align() call: full audio file path + full concatenated lyric text (ja or ko-pronunciation)",
+      "result": "plausible timestamps for roughly the first 90-150s, then CATASTROPHIC FREEZE: remaining lines all pinned to one identical timestamp (e.g. 199.92s on the original audio) for the rest of the song -- 85/134 lines (63%) frozen on b2NTglk9tvI",
+      "vs_srt_ja_orig": {"n_matched": 74, "start_err_median_s": 75.96, "start_err_p90_s": 120.22, "start_err_max_s": 139.97, "pct_over_2s_err": "95%"},
+      "vs_srt_ja_cover": {"n_matched": 74, "start_err_median_s": 47.13, "start_err_p90_s": 102.44, "start_err_max_s": 113.10, "pct_over_2s_err": "99%"},
+      "ko_pronunciation": "same freeze pattern observed by direct inspection (could not score vs the ja-text SRT with the char-matching method -- language mismatch, not a model issue)",
+      "reproduced_in_fp32_too": "yes -- identical 199.92s freeze value with dtype=torch.float32, so this is NOT a bf16 precision artifact"
+    },
+    "control_song_stable_lyrics": {
+      "song": "ロキ (roki, Xg-qfsKN2_E.wav) -- non-repetitive lyrics, known near-perfect (median 0.04s) for the current MMS pipeline",
+      "result": "SAME failure class even without repeated lyrics: e.g. one line assigned a 93s span (9.92-102.88), several consecutive lines frozen at 102.88s, and the LAST 5 lines got start=None/end=None (no timestamp produced at all)",
+      "conclusion": "the freeze is not specific to 熱異常's repeated hooks -- it is a general instability of this model+package for ~4-minute full-song inputs"
+    },
+    "manual_chunking_attempt": {
+      "method": "cut a clean, correctly-matched 30s clip (same PCM_16/48kHz format as source) covering lines 0-7, align only that clip+text",
+      "bf16_result": "ALL items returned start=end=0.0 (complete degenerate failure) for every one of 1-8 lines tested",
+      "fp32_result": "FIXED -- non-degenerate, plausible timestamps close to ground truth (e.g. line0 0.0-2.24s vs SRT truth 0.27-3.42s)",
+      "takeaway": "bf16 causes a separate, additional short-clip failure mode not present in fp32; fp32 + manual VAD-style chunking looks like the only potentially viable integration path, but was only spot-checked on one 30s/8-line clip, not validated at full-song scale"
+    },
+    "current_pipeline_baseline_same_song_cover": {
+      "source": "srt_analysis/compare.py against the same hDhjRh-Gt4g SRT (post-processing/safeguards already applied, per team's recent commits)",
+      "start_err_median_s": 0.072, "start_err_abs_median_s": 0.090, "start_err_abs_p90_s": 0.404,
+      "end_err_abs_median_s": 0.122, "end_err_abs_p90_s": 0.737
+    }
+  },
+  "verdict": {
+    "license_and_packaging": "clear win -- Apache-2.0 vs current CC-BY-NC-4.0, official ja+ko support, trivial pip install, tiny VRAM, very fast raw inference",
+    "accuracy_as_tested": "NOT usable as a drop-in replacement today -- one-shot full-song alignment (the natural/documented usage pattern) fails catastrophically after roughly the first 90-150s of any ~4min song regardless of lyric repetition (median line-start error 47-76s vs current pipeline's 0.07-0.09s on the identical benchmark, i.e. 3+ orders of magnitude worse)",
+    "possible_path_forward": "fp32 + external VAD/segment-based chunking (mirroring the Demucs+VAD infrastructure the current MMS pipeline already has) shows promise on a single spot-checked 30s clip, but building and validating that chunking layer is substantial additional engineering, not yet proven at scale, and qwen-asr is a very young package (v0.0.6)",
+    "recommendation": "DO NOT integrate now. Revisit if/when qwen-asr matures (check for official long-audio/song guidance or chunking utilities) or if someone validates the fp32-chunked approach across a full song end-to-end."
+  }
+}
