@@ -3,6 +3,7 @@ import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -28,6 +29,10 @@ class TranslationResult:
     engine: str
     tone: str
 
+
+_HANGUL_RE = re.compile(r"[가-힣]")
+_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
+_OTHER_LETTER_RE = re.compile(r"[^\x00-\x7F가-힣\s\W]")
 
 TONE_PROMPTS = {
     "literal": "Translate literally, preserving the original meaning as closely as possible.",
@@ -146,6 +151,29 @@ TRANSLATION:"""
 
         raise ValueError(f"Failed to parse JSON response: {response[:200]}")
 
+    def _detect_lang_heuristic(self, text: str) -> str:
+        """한글/ASCII 비율 기반 언어 추정. source_lang="auto"일 때 발음 생략 게이트에만 쓰이는
+        거친 휴리스틱이며 실제 번역 언어 감지에는 관여하지 않는다."""
+        hangul = len(_HANGUL_RE.findall(text))
+        ascii_letters = len(_ASCII_LETTER_RE.findall(text))
+        other_letters = len(_OTHER_LETTER_RE.findall(text))
+        total = hangul + ascii_letters + other_letters
+        if total == 0:
+            return "en"
+        if hangul / total >= 0.3:
+            return "ko"
+        if ascii_letters / total >= 0.5:
+            return "en"
+        return "other"
+
+    def _should_skip_pronunciation(self, text: str, source_lang: str) -> bool:
+        """원문이 영어/한국어면 로마자/한글 발음표기가 무의미하므로 생략한다.
+        번역 자체는 그대로 수행되고 pronunciation 필드만 비운다."""
+        lang = source_lang
+        if lang == "auto":
+            lang = self._detect_lang_heuristic(text)
+        return lang in ("en", "ko")
+
     def _parse_text_response(
         self, response: str, original_lines: list[str]
     ) -> list[TranslationLine]:
@@ -195,9 +223,10 @@ class GeminiTranslator(BaseTranslator):
         if not self.api_key:
             return self._fallback_result(original_lines, source_lang, target_lang)
 
-        prompt = self._build_prompt(
-            text, source_lang, target_lang, self.settings.include_pronunciation
+        include_pron = self.settings.include_pronunciation and not self._should_skip_pronunciation(
+            text, source_lang
         )
+        prompt = self._build_prompt(text, source_lang, target_lang, include_pron)
 
         try:
             response = requests.post(
@@ -218,7 +247,7 @@ class GeminiTranslator(BaseTranslator):
             result = response.json()
             content = result["candidates"][0]["content"]["parts"][0]["text"]
 
-            if self.settings.include_pronunciation:
+            if include_pron:
                 lines = self._parse_json_response(content, original_lines)
             else:
                 lines = self._parse_text_response(content, original_lines)
@@ -285,9 +314,10 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 [], source_lang, target_lang, self.settings.engine, self.settings.tone
             )
 
-        prompt = self._build_prompt(
-            text, source_lang, target_lang, self.settings.include_pronunciation
+        include_pron = self.settings.include_pronunciation and not self._should_skip_pronunciation(
+            text, source_lang
         )
+        prompt = self._build_prompt(text, source_lang, target_lang, include_pron)
 
         headers = {
             "Content-Type": "application/json",
@@ -298,8 +328,10 @@ class OpenAICompatibleTranslator(BaseTranslator):
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": self.settings.temperature,
+            "max_tokens": self.settings.max_tokens,
             "stream": False,
         }
+        payload.update(self._payload_extras())
 
         try:
             response = requests.post(
@@ -313,9 +345,15 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 raise RuntimeError(f"API error: {response.status_code} - {response.text[:200]}")
 
             result = response.json()
-            content = result["choices"][0]["message"]["content"]
+            message = result["choices"][0]["message"]
+            content = message.get("content") or ""
+            if not content.strip():
+                # reasoning 모델이 사고에 max_tokens를 소진하면 content가 비어서 온다
+                raise RuntimeError(
+                    "Empty completion content (model may have spent max_tokens on reasoning)"
+                )
 
-            if self.settings.include_pronunciation:
+            if include_pron:
                 lines = self._parse_json_response(content, original_lines)
             else:
                 lines = self._parse_text_response(content, original_lines)
@@ -329,6 +367,44 @@ class OpenAICompatibleTranslator(BaseTranslator):
         except Exception as e:
             raise RuntimeError(f"Translation failed: {e}") from e
 
+    def _payload_extras(self) -> dict:
+        """엔진별 추가 페이로드 훅 — 기본은 없음."""
+        return {}
+
+
+class NvidiaTranslator(OpenAICompatibleTranslator):
+    """NVIDIA NIM (OpenAI 호환 /v1/chat/completions) 백엔드.
+
+    키 해석 순서: settings.api_key -> env NVIDIA_API_KEY -> 루트 nvapi.txt 파일.
+    모델은 gemini 기본값(settings.model)과 섞이지 않도록 settings.nvidia_model을 쓴다.
+    """
+
+    NIM_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+    _KEY_FILE = Path(__file__).resolve().parents[2] / "nvapi.txt"
+
+    def __init__(self, settings: TranslationSettings | None = None):
+        # OpenAICompatibleTranslator.__init__을 건너뛰고 BaseTranslator.__init__만 호출해
+        # OPENAI_API_KEY/로컬 기본 URL 등 다른 엔진 전용 로직이 섞이지 않게 한다.
+        BaseTranslator.__init__(self, settings)
+        self.api_key = (
+            self.settings.api_key or os.getenv("NVIDIA_API_KEY") or self._read_key_file()
+        )
+        self.model = self.settings.nvidia_model
+        self.api_url = self.settings.api_url or self.NIM_API_URL
+
+    def _read_key_file(self) -> str | None:
+        try:
+            return self._KEY_FILE.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+    def _payload_extras(self) -> dict:
+        # qwen3 계열은 reasoning 모델 — 사고 모드를 끄지 않으면 max_tokens를 사고에
+        # 소진해 content가 비거나(빈 응답) 타임아웃이 난다. NIM qwen 챗 템플릿 스위치.
+        if "qwen" in self.model.lower():
+            return {"chat_template_kwargs": {"thinking": False}}
+        return {}
+
 
 class TranslatorFactory:
     @staticmethod
@@ -337,6 +413,8 @@ class TranslatorFactory:
 
         if settings.engine == "gemini":
             return GeminiTranslator(settings)
+        elif settings.engine == "nvidia":
+            return NvidiaTranslator(settings)
         elif settings.engine in ("openai", "local"):
             return OpenAICompatibleTranslator(settings)
         else:

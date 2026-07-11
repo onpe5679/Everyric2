@@ -162,10 +162,15 @@ class AlignmentSettings(BaseSettings):
 class TranslationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_TRANSLATE_")
 
-    engine: Literal["gemini", "openai", "local"] = Field(
+    engine: Literal["gemini", "openai", "local", "nvidia"] = Field(
         default="gemini", description="Translation engine"
     )
     model: str = Field(default="gemini-2.0-flash", description="Model name")
+    nvidia_model: str = Field(
+        default="qwen/qwen3.5-122b-a10b",
+        description="Model name for the NVIDIA NIM engine (separate from `model` so the "
+        "gemini default doesn't leak into NIM requests)",
+    )
     api_url: str | None = Field(default=None, description="Custom API URL for local LLM")
     api_key: str | None = Field(default=None, description="API key (env var takes precedence)")
     tone: Literal["literal", "natural", "poetic", "casual", "formal"] = Field(
@@ -180,6 +185,12 @@ class TranslationSettings(BaseSettings):
     )
     target_language: str = Field(default="ko", description="Target language for translation")
     timeout: int = Field(default=120, description="API timeout in seconds")
+    max_tokens: int = Field(
+        default=4096,
+        description="Max completion tokens for OpenAI-compatible chat endpoints (openai/local/"
+        "nvidia). Without this, some NIM-hosted models default to a small completion budget "
+        "and truncate the pronunciation JSON array mid-response for multi-line lyrics.",
+    )
 
 
 class SegmentationSettings(BaseSettings):
