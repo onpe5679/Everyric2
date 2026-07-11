@@ -78,8 +78,14 @@ export function segmentsToLines(segments: EveryricSegment[]): LyricLine[] {
     pronunciation: s.pronunciation || undefined,
     pronSegments: s.pron_segments && s.pron_segments.length > 0 ? s.pron_segments : undefined,
     translation: s.translation || undefined,
+    confidence: s.confidence,
     debug: s.debug
-      ? { activeRatio: s.debug.active_ratio, clamped: s.debug.clamped }
+      ? {
+          activeRatio: s.debug.active_ratio,
+          clamped: s.debug.clamped,
+          orig: s.debug.orig,
+          fixes: s.debug.fixes,
+        }
       : undefined,
   }));
 }

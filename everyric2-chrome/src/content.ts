@@ -241,7 +241,22 @@ function pushDebug(time: number | null): void {
     pipOpen: pip.isOpen(),
     jobStatus: generatingJob ? `job=${generatingJob.jobId.slice(0, 8)}(${generatingJob.progress}%)` : null,
     quality: currentData?.qualityScore ?? null,
+    ...lineConfSummary(),
+    alignmentText: currentData?.debugMeta?.alignment_text ?? null,
   });
+}
+
+/** 라인 confidence의 median·저신뢰 비율 — 곡 전체 정렬 품질 요약 (디버그 표시용) */
+function lineConfSummary(): { qualityMed: number | null; lowConfRatio: number | null } {
+  const vals = (currentData?.lines ?? [])
+    .map(l => l.confidence)
+    .filter((v): v is number => v != null)
+    .sort((a, b) => a - b);
+  if (vals.length === 0) return { qualityMed: null, lowConfRatio: null };
+  return {
+    qualityMed: vals[Math.floor(vals.length / 2)],
+    lowConfRatio: vals.filter(v => v < 1e-4).length / vals.length,
+  };
 }
 
 /**
@@ -492,6 +507,7 @@ function applyLyricsData(data: LyricsData | null): void {
   if (data.synced) {
     if (pip.isOpen()) {
       pip.setTempo(data.tempo ?? null);
+      pip.setDebugMeta(data.debugMeta ?? null);
       pip.setLines(data.lines);
       if (settings.pipKeepPanel) {
         panel.showSyncedLyrics(data.lines, data.source);
@@ -718,6 +734,7 @@ async function handlePipToggle(): Promise<void> {
   }
   pip.setSong(currentSong?.title ?? '', currentSong?.artist ?? '');
   pip.setTempo(currentData.tempo ?? null);
+  pip.setDebugMeta(currentData.debugMeta ?? null);
   pip.setLines(currentData.lines);
   if (settings.pipShowVideo) {
     const video = engine.getVideo() ?? getVideoElement();

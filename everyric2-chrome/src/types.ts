@@ -34,8 +34,20 @@ export interface LyricLine {
   pronunciation?: string;
   /** 발음 음절별 타이밍 (서버가 모라 분해+DP로 산출) — 없으면 시간 비례 그라데이션 폴백 */
   pronSegments?: PronSegment[];
-  /** 서버 정렬 진단 (디버그 스트립용) */
-  debug?: { activeRatio?: number; clamped?: boolean };
+  /** 라인 단위 CTC 정렬 신뢰도 (0~1) — 곡 전체 통계·디버그 표시용 */
+  confidence?: number;
+  /** 서버 정렬 진단 (디버그 스트립·레인 디버그 오버레이용) */
+  debug?: LineDebug;
+}
+
+/** 라인 정렬 진단 — 세이프가드가 고친 라인은 보정 전 원본 타이밍과 규칙 라벨을 담는다 */
+export interface LineDebug {
+  activeRatio?: number;
+  clamped?: boolean;
+  /** 세이프가드 적용 전 원본 [start, end] (raw CTC) — 유의미하게 바뀐 라인만 */
+  orig?: [number, number];
+  /** 적용된 보정 규칙: stretch(8s+클램프)/repeat(반복행)/pull(간주 후 당김)/tail(끝음 연장)/snap(무음 온셋 스냅) */
+  fixes?: string[];
 }
 
 /** 발음 표기 한 음절의 타임스탬프 */
@@ -81,6 +93,8 @@ export interface EveryricSegment {
   text: string;
   start: number;
   end: number;
+  /** 라인 단위 CTC 정렬 신뢰도 (0~1) */
+  confidence?: number;
   words?: WordSegment[];
   notes?: NoteSegment[];
   /** 서버에 저장된 발음 표기/사람 번역 (생성 시 line_meta로 전달된 것) */
@@ -88,8 +102,8 @@ export interface EveryricSegment {
   translation?: string;
   /** 발음 음절별 타이밍 (서버 계산) */
   pron_segments?: PronSegment[];
-  /** 라인 진단: 발성 비율/클램프 여부 */
-  debug?: { active_ratio?: number; clamped?: boolean };
+  /** 라인 진단: 발성 비율/클램프 여부/보정 전 원본 타이밍/적용 규칙 */
+  debug?: { active_ratio?: number; clamped?: boolean; orig?: [number, number]; fixes?: string[] };
 }
 
 /** 가사 출처 표기 (예: 보카로 가사 위키 CC BY) */
@@ -111,6 +125,17 @@ export interface SyncDebugMeta {
   star_spans?: [number, number][] | null;
   /** VAD가 발성으로 판정한 구간들 */
   vad_regions?: [number, number][] | null;
+  /** 음정 인식 모델(RMVPE/FCPE) RAW f0 곡선 — 균일 샘플, null = 무성 프레임 */
+  f0_curve?: F0Curve | null;
+  /** 정렬에 쓴 텍스트: "pronunciation"(독음) | "original"(원문) */
+  alignment_text?: string | null;
+}
+
+/** RAW f0 곡선 (다운샘플) — midi[i]의 시각 = t0 + i*dt */
+export interface F0Curve {
+  t0: number;
+  dt: number;
+  midi: (number | null)[];
 }
 
 /** 싱크 생성 시 서버에 함께 저장할 라인별 발음/번역 */
@@ -207,6 +232,12 @@ export interface DebugInfo {
   lineDebug: string | null;
   /** 곡 전체 평균 정렬 신뢰도 */
   quality: number | null;
+  /** 곡 전체 median 정렬 신뢰도 (라인 confidence 기준) */
+  qualityMed: number | null;
+  /** 저신뢰(<1e-4) 라인 비율 (0~1) */
+  lowConfRatio: number | null;
+  /** 정렬에 쓴 텍스트 (독음/원문) — 서버 debug 메타 */
+  alignmentText: string | null;
 }
 
 export interface TranslatedLine {

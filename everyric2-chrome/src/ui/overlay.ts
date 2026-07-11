@@ -217,7 +217,8 @@ export class LyricsOverlay {
           // 값은 CTC 프레임 로그확률의 기하평균(0~1) — 절대값이 작아 로그 스케일로 버킷:
           // <1e-4(로그 -9 이하)=낮음, <2e-2(로그 -4 이하)=중간
           const conf = word.confidence;
-          const confClass = conf == null ? '' : conf < 1e-4 ? ' ey-conf-low' : conf < 2e-2 ? ' ey-conf-mid' : '';
+          // 버킷 색은 레인(pip.ts confBucketColor)과 동일: 빨강<1e-4, 노랑<2e-2, 초록=양호
+          const confClass = conf == null ? '' : conf < 1e-4 ? ' ey-conf-low' : conf < 2e-2 ? ' ey-conf-mid' : ' ey-conf-ok';
           return h('span', { className: `ey-word${confClass}`, text: word.word, attrs: { 'data-start': String(word.start) } });
         });
       } else {
@@ -559,6 +560,9 @@ export class LyricsOverlay {
     const video = info.videoInfo === 'none' ? 'none' : `${info.videoBound ? 'OK' : 'MISMATCH'}(${info.videoInfo})`;
     const diag = [
       info.quality != null ? `conf=${info.quality.toExponential(1)}` : null,
+      info.qualityMed != null ? `med=${info.qualityMed.toExponential(1)}` : null,
+      info.lowConfRatio != null ? `low=${Math.round(info.lowConfRatio * 100)}%` : null,
+      info.alignmentText ? `align=${info.alignmentText === 'pronunciation' ? '독음' : '원문'}` : null,
       info.zone ? `zone=${info.zone}` : null,
       info.lineDebug,
     ].filter(Boolean).join(' ');

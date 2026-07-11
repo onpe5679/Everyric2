@@ -233,11 +233,14 @@
 .ey-word.sung { color: var(--ey-accent); }
 .ey-line.active .ey-word.sung { text-shadow: 0 0 10px var(--ey-accent-soft); }
 
-/* 디버그 모드: 글자별 CTC 신뢰도 색상 (낮음=빨강, 중간=노랑) */
+/* 디버그 모드: 글자별 CTC 신뢰도 색상 (낮음=빨강, 중간=노랑, 양호=초록)
+   — 가라오케 레인(pip.ts confBucketColor)과 반드시 같은 값 유지 */
 .ey-show-conf .ey-word.ey-conf-low { color: #ff6b6b; }
 .ey-show-conf .ey-word.ey-conf-mid { color: #ffd166; }
+.ey-show-conf .ey-word.ey-conf-ok { color: #51cf66; }
 .ey-show-conf .ey-word.ey-conf-low.sung,
-.ey-show-conf .ey-word.ey-conf-mid.sung { text-decoration: underline dotted; }
+.ey-show-conf .ey-word.ey-conf-mid.sung,
+.ey-show-conf .ey-word.ey-conf-ok.sung { text-decoration: underline dotted; }
 
 /* 번역 서브 라인 */
 .ey-line-tr {

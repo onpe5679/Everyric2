@@ -1,4 +1,4 @@
-import type { LyricLine, SongTempo } from '../types';
+import type { LyricLine, SongTempo, SyncDebugMeta } from '../types';
 import { h, icon } from './dom';
 import { appendKaraokeSpans } from './karaoke';
 
@@ -52,6 +52,23 @@ const MAX_VIDEO_RATIO = 0.75;
 
 // 계이름 (pitch class 0 = 도)
 const PITCH_NAMES_KO = ['도', '도#', '레', '레#', '미', '파', '파#', '솔', '솔#', '라', '라#', '시'];
+
+/** CTC 신뢰도 로그 버킷 색 — 패널(overlay.css의 .ey-conf-*)과 반드시 같은 값 유지 */
+const CONF_COLOR_LOW = '#ff6b6b';
+const CONF_COLOR_MID = '#ffd166';
+const CONF_COLOR_OK = '#51cf66';
+function confBucketColor(conf: number): string {
+  return conf < 1e-4 ? CONF_COLOR_LOW : conf < 2e-2 ? CONF_COLOR_MID : CONF_COLOR_OK;
+}
+
+/** 디버그 오버레이: 세이프가드 규칙별 마커 색 */
+const FIX_COLORS: Record<string, string> = {
+  stretch: '#ff6b6b', // 8s+ 늘어짐 클램프
+  repeat: '#ff8787',  // 반복행 outlier 클램프
+  pull: '#4dabf7',    // 간주 후 시작 당김
+  tail: '#ffa94d',    // 끝음 연장
+  snap: '#da77f2',    // 무음 온셋 스냅
+};
 
 interface PitchNote {
   midi: number;
@@ -139,6 +156,10 @@ export class PipController {
   private tempo: SongTempo | null = null;
   private showConfidence = false;
   private pitchColors: PitchColors | null = null;
+  /** 곡 단위 정렬 진단 (디버그 모드 레인 오버레이: VAD/간주 스트립·RAW f0·정렬 텍스트) */
+  private debugMeta: SyncDebugMeta | null = null;
+  /** 라인 confidence 통계 — setLines에서 1회 계산 (디버그 헤더 표시용) */
+  private confStats: { med: number; avg: number; low: number } | null = null;
 
   static isSupported(): boolean {
     return 'documentPictureInPicture' in window;
@@ -323,6 +344,12 @@ export class PipController {
     this.lines = lines;
     this.index = -1;
     this.pitch = collectPitchData(lines);
+    const confs = lines.map(l => l.confidence).filter((v): v is number => v != null).sort((a, b) => a - b);
+    this.confStats = confs.length === 0 ? null : {
+      med: confs[Math.floor(confs.length / 2)],
+      avg: confs.reduce((s, v) => s + v, 0) / confs.length,
+      low: confs.filter(v => v < 1e-4).length / confs.length,
+    };
     this.applyPitchVisibility();
     this.renderLines();
   }
@@ -345,6 +372,11 @@ export class PipController {
   /** 서버가 추정한 곡 템포 — 마디 창 폭·비트 격자에 사용, null이면 초 단위 폴백 */
   setTempo(tempo: SongTempo | null): void {
     this.tempo = tempo && tempo.bpm > 0 ? tempo : null;
+  }
+
+  /** 곡 단위 정렬 진단 메타 — 디버그 모드에서 VAD/간주 스트립·RAW f0 곡선을 그린다 */
+  setDebugMeta(meta: SyncDebugMeta | null): void {
+    this.debugMeta = meta;
   }
 
   /** 카운트다운 설정 즉시 반영 */
@@ -545,6 +577,11 @@ export class PipController {
     }
     ctx.globalAlpha = 1;
 
+    // ── 디버그 배경 레이어: VAD 가창/간주 스트립 + star 흡수 밴드 + RAW f0 곡선
+    if (this.showConfidence) {
+      this.renderDebugUnderlay(ctx, t0, W, x, y, lo, hi, cw, padTop, staffH);
+    }
+
     // ── 노트 막대 + 계이름(위) + 발음(아래) — 시간 창 안의 노트만
     // 페이지 모드는 창 밖 요소를 그리면 가장자리에 다음 페이지 글자가 뭉치므로 여유 0
     const edgePad = this.pitchScrollMode === 'page' ? 0 : 0.5;
@@ -654,9 +691,9 @@ export class PipController {
       const xs = placeRow(items.map(it => ({ cx: it.cx, w: it.width })));
       items.forEach((it, i) => {
         let color = it.w.start <= now ? colors.accent : colors.text;
-        // 디버그: 정렬 신뢰도(기하평균 확률, 로그 버킷) — 빨강<1e-4, 노랑<2e-2, 초록=양호
+        // 디버그: 정렬 신뢰도(기하평균 확률, 로그 버킷) — 패널과 동일 색 (confBucketColor)
         if (this.showConfidence && it.w.confidence != null) {
-          color = it.w.confidence < 1e-4 ? '#ff6b6b' : it.w.confidence < 2e-2 ? '#ffd166' : '#51cf66';
+          color = confBucketColor(it.w.confidence);
         }
         ctx.fillStyle = color;
         ctx.fillText(it.w.word, xs[i], ty + lyricH * 0.55);
@@ -680,6 +717,11 @@ export class PipController {
       ctx.fillText(page.line.translation, cw / 2, ty + trH * 0.5, cw - 16);
     }
 
+    // ── 디버그 전경 레이어: 보정된 라인의 원본 타이밍 고스트 + 곡 전체 confidence 헤더
+    if (this.showConfidence) {
+      this.renderDebugOverlay(ctx, pages, t0, W, x, cw, padTop);
+    }
+
     // ── 플레이헤드 (page 모드: 왼→오 이동, scroll 모드: 좌측 28% 고정)
     ctx.fillStyle = colors.dim;
     ctx.fillRect(playheadX - 0.75, padTop, 1.5, staffH);
@@ -690,6 +732,126 @@ export class PipController {
     ctx.lineTo(playheadX, padTop + 6);
     ctx.closePath();
     ctx.fill();
+  }
+
+  /**
+   * 디버그 배경 레이어 — 정렬 파이프라인의 "재료"를 오선 뒤에 깐다:
+   * 하단 스트립 = VAD 가창(초록)/간주·무성(회색), 그 위 보라 밴드 = star 흡수(가사 밖 가창),
+   * 파란 곡선 = 음정 모델(RMVPE/FCPE) RAW f0 (노트 양자화 전 원본, null=무성에서 끊김).
+   */
+  private renderDebugUnderlay(
+    ctx: CanvasRenderingContext2D,
+    t0: number, W: number,
+    x: (t: number) => number, y: (midi: number) => number,
+    lo: number, hi: number, cw: number, padTop: number, staffH: number,
+  ): void {
+    const meta = this.debugMeta;
+    if (!meta) return;
+    const clampX = (v: number) => Math.max(0, Math.min(cw, v));
+    const stripY = padTop + staffH - 4;
+    const regions = meta.vad_regions ?? [];
+    // 간주(리전 사이 갭 2s+)를 회색으로 — interpolation이 간주를 예약하지 않는 문제를 눈으로 본다
+    for (let i = 0; i <= regions.length; i++) {
+      const gapS = i === 0 ? 0 : regions[i - 1][1];
+      const gapE = i === regions.length ? t0 + W : regions[i][0];
+      if (gapE - gapS >= 2.0 && gapE > t0 && gapS < t0 + W) {
+        ctx.fillStyle = 'rgba(134, 142, 150, 0.30)';
+        ctx.fillRect(clampX(x(gapS)), stripY, clampX(x(gapE)) - clampX(x(gapS)), 4);
+      }
+    }
+    for (const [s, e] of regions) {
+      if (e <= t0 || s >= t0 + W) continue;
+      ctx.fillStyle = 'rgba(81, 207, 102, 0.35)';
+      ctx.fillRect(clampX(x(s)), stripY, Math.max(1, clampX(x(e)) - clampX(x(s))), 4);
+    }
+    for (const [s, e] of meta.star_spans ?? []) {
+      if (e <= t0 || s >= t0 + W) continue;
+      ctx.fillStyle = 'rgba(218, 119, 242, 0.5)';
+      ctx.fillRect(clampX(x(s)), stripY - 3, Math.max(1, clampX(x(e)) - clampX(x(s))), 2);
+    }
+    const f0 = meta.f0_curve;
+    if (f0 && f0.dt > 0 && f0.midi.length > 0) {
+      ctx.strokeStyle = 'rgba(77, 171, 247, 0.65)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      let pen = false;
+      const i0 = Math.max(0, Math.floor((t0 - f0.t0) / f0.dt));
+      const i1 = Math.min(f0.midi.length - 1, Math.ceil((t0 + W - f0.t0) / f0.dt));
+      for (let i = i0; i <= i1; i++) {
+        const m = f0.midi[i];
+        if (m == null) { pen = false; continue; }
+        const px = x(f0.t0 + i * f0.dt);
+        const py = y(Math.max(lo, Math.min(hi, m)));
+        if (pen) ctx.lineTo(px, py);
+        else { ctx.moveTo(px, py); pen = true; }
+      }
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * 디버그 전경 레이어 — 세이프가드가 고친 라인의 보정 전 원본 타이밍을 점선 고스트로
+   * (규칙별 색: stretch/repeat=빨강, pull=파랑, tail=주황, snap=보라, 세로 틱 = 원본·보정 후 시작),
+   * 우상단에 곡 전체 confidence(median/avg/저신뢰 비율)와 정렬 텍스트(독음/원문) 헤더.
+   */
+  private renderDebugOverlay(
+    ctx: CanvasRenderingContext2D,
+    pages: PitchLine[],
+    t0: number, W: number,
+    x: (t: number) => number,
+    cw: number, padTop: number,
+  ): void {
+    ctx.save();
+    ctx.textBaseline = 'middle';
+    let row = 0;
+    for (const p of pages) {
+      const dbg = p.line.debug;
+      if (!dbg?.orig) continue;
+      const [os, oe] = dbg.orig;
+      if (Math.max(oe, p.end) < t0 || Math.min(os, p.start) > t0 + W) continue;
+      const color = FIX_COLORS[dbg.fixes?.[0] ?? ''] ?? '#868e96';
+      const gy = padTop + 6 + (row % 3) * 8; // 인접 라인 겹침 방지용 3행 로테이션
+      row++;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x(os), gy);
+      ctx.lineTo(x(oe), gy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // 세로 틱: 보정 전 시작(os)과 보정 후 시작 — 얼마나 옮겨졌는지 한눈에
+      const ns = p.line.time ?? p.start;
+      ctx.beginPath();
+      ctx.moveTo(x(os), gy - 3);
+      ctx.lineTo(x(os), gy + 3);
+      ctx.moveTo(x(ns), gy - 3);
+      ctx.lineTo(x(ns), gy + 3);
+      ctx.stroke();
+      if (dbg.fixes && dbg.fixes.length > 0) {
+        ctx.font = '9px ui-monospace, monospace';
+        ctx.fillStyle = color;
+        ctx.textAlign = 'left';
+        ctx.fillText(dbg.fixes.join('·'), Math.max(2, x(Math.max(os, t0)) + 2), gy - 6);
+      }
+    }
+    if (this.confStats) {
+      const s = this.confStats;
+      const at = this.debugMeta?.alignment_text;
+      const suffix = at ? (at === 'pronunciation' ? ' · 독음정렬' : ' · 원문정렬') : '';
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.textAlign = 'right';
+      ctx.fillStyle = confBucketColor(s.med);
+      ctx.globalAlpha = 0.9;
+      ctx.fillText(
+        `conf med ${s.med.toExponential(1)} avg ${s.avg.toExponential(1)} low ${(s.low * 100).toFixed(0)}%${suffix}`,
+        cw - 4, padTop + 7,
+      );
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
   }
 
   /** 발음 폴백 (음절 타이밍 없는 곡) — 현재 라인 발음을 가운데 정렬 + 진행률 그라데이션 */
