@@ -361,9 +361,13 @@ def _extend_phrase_final_tails(results, vad_result, clamped: set[int]) -> None:
     SRT/VAD 이중 실측으로 phrase-final 라인의 86~100%가 median 0.4~0.66초 일찍
     끝남이 확인됨. 라인 끝이 속한 VAD 리전의 끝까지(단 다음 라인 시작 -0.05초,
     캡 이내) 라인과 마지막 글자의 end를 함께 연장한다.
-    캡은 적응형: 리전 꼬리가 3초 이내면 진짜 늘임음으로 보고 +2.5초까지,
-    그보다 길면 간주를 삼킨 병합 리전일 수 있어 +1.5초로 보수적으로 자른다
-    (커버 실측에서 잔존 3건이 전부 1.5초 캡, 과연장 1건이 22초 병합 리전이었음).
+    캡은 적응형: 리전 꼬리가 3초 이내이고 다음 라인이 8초 안에 이어지면 진짜
+    늘임음으로 보고 +2.5초까지, 그 밖(꼬리>3초 병합 리전 의심, 또는 간주 직전
+    라인)은 +1.5초로 보수적으로 자른다. 간주 직전은 리전 끝이 잔향·악기 유입으로
+    실제 발성보다 늦게 잡히는 데다 재실행 간 ±1초 가까이 흔들려서(커버 실측
+    cue#37: 리전 꼬리 1.5→2.3s 변동으로 과연장 악화) 꼬리 길이만으로는 진짜
+    늘임음과 구분할 수 없다 — 잔존 3건(사비 중간, 다음 줄 갭 ~3초)과 과연장
+    1건(간주 앞, 갭 22초)을 가르는 신호는 다음 라인까지의 갭이었다.
     소절 중간(butted) 라인과 이미 클램프로 잘라낸 라인은 건드리지 않는다.
     """
     for i, r in enumerate(results):
@@ -377,7 +381,8 @@ def _extend_phrase_final_tails(results, vad_result, clamped: set[int]) -> None:
         )
         if region is None:
             continue  # 라인 끝이 발성 리전 밖 — 따라갈 꼬리가 없다
-        cap = 2.5 if region.end - r.end_time <= 3.0 else 1.5
+        real_tail = region.end - r.end_time <= 3.0 and next_start - r.end_time < 8.0
+        cap = 2.5 if real_tail else 1.5
         new_end = min(region.end, next_start - 0.05, r.end_time + cap)
         if new_end <= r.end_time + 0.05:
             continue

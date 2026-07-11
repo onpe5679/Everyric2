@@ -250,6 +250,18 @@ def test_tail_cap_widens_for_short_region_tail():
     assert results[0].end_time == pytest.approx(169.9)  # 1.5캡(169.4)을 넘어 리전 끝까지
 
 
+def test_tail_cap_conservative_before_interlude():
+    # 커버 cue#37 재현: 리전 꼬리 2.3초(≤3)지만 다음 라인까지 22초 간주 → 보수 캡 +1.5초
+    # (간주 직전은 리전 끝이 잔향으로 늦게 잡히고 재실행 간 흔들려 꼬리 길이를 못 믿는다)
+    results = [
+        SyncResult(text="간주 직전 늘임음", start_time=66.0, end_time=67.3),
+        SyncResult(text="간주 뒤", start_time=89.5, end_time=92.0),
+    ]
+    vad = _vad((60.0, 69.6))
+    _extend_phrase_final_tails(results, vad, set())
+    assert results[0].end_time == pytest.approx(68.8)  # 67.3 + 1.5 (2.5캡이면 69.6까지 갔을 것)
+
+
 def test_tail_cap_stays_conservative_for_merged_region():
     # 간주를 삼킨 병합 리전(꼬리 21.8초 > 3.0) → +1.5초 캡 유지로 과연장 방지
     results = [
