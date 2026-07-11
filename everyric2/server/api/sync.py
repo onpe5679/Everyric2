@@ -258,7 +258,8 @@ async def list_available_syncs(limit: int = Query(50, ge=1, le=200)):
                     "alignment_text": debug.get("alignment_text"),
                 }
             )
-        return {"syncs": items}
+        # 확장 클라이언트(listSyncs)가 SyncListItem[] bare 배열을 기대 → 래핑하지 않는다
+        return items
 
 
 @router.get("/{video_id}", response_model=SyncLookupResponse)

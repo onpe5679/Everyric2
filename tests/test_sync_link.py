@@ -199,8 +199,8 @@ def test_relink_is_upsert():
 def test_list_returns_candidates():
     async def body():
         async with _env():
-            out = await list_available_syncs(limit=10)
-            syncs = out["syncs"]
+            syncs = await list_available_syncs(limit=10)  # bare 배열 (확장 클라이언트 계약)
+            assert isinstance(syncs, list)
             assert len(syncs) == 1
             item = syncs[0]
             assert item["video_id"] == "SRC"
