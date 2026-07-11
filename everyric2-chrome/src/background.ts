@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { checkHealth, generateSync, getJobStatus, lookupSync, translateLyrics, vocaroMatch, type ServerConfig } from './lib/everyric-api';
+import { checkHealth, generateSync, getJobStatus, lookupSync, regenerateSync, translateLyrics, vocaroMatch, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
 import { getSettings } from './lib/settings';
@@ -67,6 +67,16 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
         attribution: message.payload.attribution,
       });
       return res ? { data: res } : { error: 'generate_request_failed' };
+    }
+
+    case 'REGENERATE_SYNC': {
+      const res = await regenerateSync(await getServerConfig(), {
+        video_id: message.payload.videoId,
+        lyrics: message.payload.lyrics,
+        line_meta: message.payload.lineMeta,
+        attribution: message.payload.attribution,
+      });
+      return res ? { data: res } : { error: 'regenerate_request_failed' };
     }
 
     case 'JOB_STATUS': {

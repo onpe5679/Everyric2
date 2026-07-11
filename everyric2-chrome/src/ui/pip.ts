@@ -1,6 +1,6 @@
 import type { LyricLine, SongTempo, SyncDebugMeta } from '../types';
 import { h, icon } from './dom';
-import { appendKaraokeSpans } from './karaoke';
+import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
 
 interface DocumentPictureInPictureApi {
   requestWindow(options?: { width?: number; height?: number }): Promise<Window>;
@@ -159,7 +159,7 @@ export class PipController {
   /** 곡 단위 정렬 진단 (디버그 모드 레인 오버레이: VAD/간주 스트립·RAW f0·정렬 텍스트) */
   private debugMeta: SyncDebugMeta | null = null;
   /** 라인 confidence 통계 — setLines에서 1회 계산 (디버그 헤더 표시용) */
-  private confStats: { med: number; avg: number; low: number } | null = null;
+  private confStats: { med: number; ok: number; mid: number; low: number } | null = null;
 
   static isSupported(): boolean {
     return 'documentPictureInPicture' in window;
@@ -345,10 +345,13 @@ export class PipController {
     this.index = -1;
     this.pitch = collectPitchData(lines);
     const confs = lines.map(l => l.confidence).filter((v): v is number => v != null).sort((a, b) => a - b);
+    const low = confs.filter(v => v < 1e-4).length / Math.max(1, confs.length);
+    const mid = confs.filter(v => v >= 1e-4 && v < 2e-2).length / Math.max(1, confs.length);
     this.confStats = confs.length === 0 ? null : {
       med: confs[Math.floor(confs.length / 2)],
-      avg: confs.reduce((s, v) => s + v, 0) / confs.length,
-      low: confs.filter(v => v < 1e-4).length / confs.length,
+      ok: 1 - low - mid,
+      mid,
+      low,
     };
     this.applyPitchVisibility();
     this.renderLines();
@@ -836,17 +839,25 @@ export class PipController {
       }
     }
     if (this.confStats) {
+      // 사람이 읽는 등급 분포 — 글자 색과 같은 3색으로 "정렬 좋음 87% 보통 10% 낮음 3%"
       const s = this.confStats;
       const at = this.debugMeta?.alignment_text;
-      const suffix = at ? (at === 'pronunciation' ? ' · 독음정렬' : ' · 원문정렬') : '';
+      const parts: { text: string; color: string }[] = [
+        { text: '정렬 ', color: '#868e96' },
+        { text: `좋음${Math.round(s.ok * 100)}%`, color: CONF_COLOR_OK },
+        { text: ` 보통${Math.round(s.mid * 100)}%`, color: CONF_COLOR_MID },
+        { text: ` 낮음${Math.round(s.low * 100)}%`, color: CONF_COLOR_LOW },
+      ];
+      if (at) parts.push({ text: at === 'pronunciation' ? ' · 독음' : ' · 원문', color: '#868e96' });
       ctx.font = '10px ui-monospace, monospace';
-      ctx.textAlign = 'right';
-      ctx.fillStyle = confBucketColor(s.med);
+      ctx.textAlign = 'left';
       ctx.globalAlpha = 0.9;
-      ctx.fillText(
-        `conf med ${s.med.toExponential(1)} avg ${s.avg.toExponential(1)} low ${(s.low * 100).toFixed(0)}%${suffix}`,
-        cw - 4, padTop + 7,
-      );
+      let px = cw - 4 - parts.reduce((a, p) => a + ctx.measureText(p.text).width, 0);
+      for (const p of parts) {
+        ctx.fillStyle = p.color;
+        ctx.fillText(p.text, px, padTop + 7);
+        px += ctx.measureText(p.text).width;
+      }
       ctx.globalAlpha = 1;
     }
     ctx.restore();
@@ -944,10 +955,24 @@ export class PipController {
 
     this.prevEl.textContent = prev?.text ?? '';
     this.nextEl.textContent = next?.text ?? '';
-    if (this.pronEl) this.pronEl.textContent = current?.pronunciation ?? '';
     if (this.trEl) this.trEl.textContent = current?.translation ?? '';
 
     this.wordEls = [];
+    // 발음도 음절 타이밍(pronSegments)이 있으면 패널처럼 부른 만큼 색이 차오르게 —
+    // 음절 span을 wordEls에 합류시켜 tick의 sung 토글을 그대로 태운다
+    if (this.pronEl) {
+      this.pronEl.replaceChildren();
+      const pron = current?.pronunciation ?? '';
+      const segs = current?.pronSegments;
+      const mapped = current && pron && segs && segs.length > 0
+        ? appendTimedSpans(this.pronEl, pron, segs, s => s.text, seg => {
+            const el = h('span', { className: 'ey-pron-syl', text: seg.text });
+            this.wordEls.push({ start: seg.start, el });
+            return el;
+          })
+        : 0;
+      if (mapped === 0) this.pronEl.textContent = pron;
+    }
     this.currentEl.replaceChildren();
     if (!current) {
       this.currentEl.textContent = '♪';

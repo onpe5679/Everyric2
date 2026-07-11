@@ -292,6 +292,23 @@
 
 .ey-resume-chip:hover { background: var(--ey-primary-press); }
 
+/* 전사 진행 칩 — 헤더 아래 얇은 줄, 패널 본문을 점유하지 않는다 */
+.ey-gen-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 10px 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--ey-primary-soft, rgba(124, 92, 255, 0.18));
+  color: var(--ey-text);
+  font-family: var(--ey-font);
+  font-size: 11.5px;
+  align-self: flex-start;
+}
+.ey-gen-chip .ey-icon { display: inline-flex; }
+.ey-panel.collapsed .ey-gen-chip { display: none !important; }
+
 /* ── 상태 화면 ─────────────────────────────────────────────────── */
 
 .ey-state {
@@ -718,6 +735,8 @@ body.ey-pip {
 }
 
 .ey-pip-pron:empty { display: none; }
+/* PiP 발음 음절 카라오케 필 — 패널(.ey-line.active .ey-pron-syl.sung)과 동일 색 */
+.ey-pip-pron .ey-pron-syl.sung { color: var(--ey-accent); }
 
 body.ey-hide-pron .ey-pip-pron { display: none; }
 

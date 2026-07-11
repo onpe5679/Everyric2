@@ -31,7 +31,8 @@ let currentSong: SongInfo | null = null;
 let currentData: LyricsData | null = null;
 let currentSourceUrl: string | null = null; // 보카로 위키 출처 페이지 (CC BY 출처 표기용)
 let lastVocaro: { videoId: string; lines: VocaroLine[] } | null = null; // 싱크 생성 후 발음/번역 재병합용
-let generatingJob: { jobId: string; videoId: string; seq: number; progress: number } | null = null;
+/** 진행 중인 전사 잡 — videoId 키. 영상을 이동해도 백그라운드로 계속 추적한다 */
+const generatingJobs = new Map<string, { jobId: string; progress: number; queueLabel?: string }>();
 let pollTimer: number | undefined;
 let searchSeq = 0;
 let lastLineIndex = -1;
@@ -85,9 +86,30 @@ function watchVideoBinding(): void {
   }
 }
 
-/** 자동 검색이 꺼져 있으면 사용자가 패널을 열어둔 경우에만 따라간다 */
+/** 자동 검색이 꺼져 있으면 사용자가 패널을 열어둔 경우에만 따라간다.
+ * 자동 검색이 켜져 있어도 음악 영상으로 판별될 때만 자동으로 뜬다 —
+ * 브이로그/게임 영상에서 노래를 찾겠다고 패널이 뜨는 것을 막는다. */
 function shouldFollow(): boolean {
-  return settings.autoSearch || (overlay?.isVisible() ?? false);
+  if (overlay?.isVisible()) return true; // 사용자가 열어둔 패널은 항상 따라간다
+  return settings.autoSearch && isLikelyMusicVideo();
+}
+
+/** 음악 영상 판별 — 유튜브 자체 신호 우선, 없으면 채널/제목 휴리스틱 */
+function isLikelyMusicVideo(): boolean {
+  // 1) 설명란 '음악' 섹션 (콘텐츠 ID로 곡이 식별된 영상) — 가장 신뢰
+  if (document.querySelector('ytd-video-description-music-section-renderer')) return true;
+  // 2) 워치 페이지 microdata 장르 — 있으면 그대로 믿는다 (Music이 아니면 차단)
+  const genre = document.querySelector<HTMLMetaElement>('meta[itemprop="genre"]');
+  if (genre?.content) {
+    const g = genre.content.trim().toLowerCase();
+    return g === 'music' || g === '음악';
+  }
+  // 3) 자동 생성 음악 채널(" - Topic")
+  const channel = document.querySelector('ytd-watch-metadata ytd-channel-name a')?.textContent?.trim() ?? '';
+  if (/ - Topic$/.test(channel)) return true;
+  // 4) 제목 휴리스틱 — MV/가사/커버/보컬로이드 계열 표기
+  const title = document.title;
+  return /(M\/?V|Official\s*(Music\s*)?Video|뮤직\s*비디오|가사|lyrics?|\bcover(ed)?\b|커버|불러보았다|歌ってみた|feat\.|ft\.|【[^】]*(MV|PV|오리지널|Original)[^】]*】)/i.test(title);
 }
 
 function checkCurrentPage(): void {
@@ -107,8 +129,7 @@ function cleanupForPage(): void {
   currentSong = null;
   currentData = null;
   currentSourceUrl = null;
-  generatingJob = null;
-  stopPolling();
+  // 전사 잡은 서버에서 계속 돌므로 추적을 유지한다 (완료 시 해당 영상으로 돌아오면 반영)
   engine.stop();
   pip.close();
   overlay?.setVisible(false);
@@ -140,6 +161,7 @@ function ensureOverlay(): LyricsOverlay {
       void saveSettings({ offsetSec });
     },
     onSettingsChange: patch => void handleSettingsChange(patch),
+    onRegenerate: () => void handleRegenerate(),
     onPipToggle: () => void handlePipToggle(),
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),
@@ -239,23 +261,36 @@ function pushDebug(time: number | null): void {
     videoInfo: video ? `rs${video.readyState},${video.paused ? 'pause' : 'play'}` : 'none',
     engineRunning: engine.isRunning(),
     pipOpen: pip.isOpen(),
-    jobStatus: generatingJob ? `job=${generatingJob.jobId.slice(0, 8)}(${generatingJob.progress}%)` : null,
+    jobStatus: currentJobStatus(),
     quality: currentData?.qualityScore ?? null,
     ...lineConfSummary(),
     alignmentText: currentData?.debugMeta?.alignment_text ?? null,
   });
 }
 
-/** 라인 confidence의 median·저신뢰 비율 — 곡 전체 정렬 품질 요약 (디버그 표시용) */
-function lineConfSummary(): { qualityMed: number | null; lowConfRatio: number | null } {
+function currentJobStatus(): string | null {
+  const cur = currentVideoId ? generatingJobs.get(currentVideoId) : undefined;
+  if (cur) return `job=${cur.jobId.slice(0, 8)}(${cur.progress}%)`;
+  return generatingJobs.size > 0 ? `bg-jobs=${generatingJobs.size}` : null;
+}
+
+/** 라인 confidence의 median·등급 분포 — 곡 전체 정렬 품질 요약 (디버그 표시용) */
+function lineConfSummary(): {
+  qualityMed: number | null;
+  lowConfRatio: number | null;
+  confGrades: { ok: number; mid: number; low: number } | null;
+} {
   const vals = (currentData?.lines ?? [])
     .map(l => l.confidence)
     .filter((v): v is number => v != null)
     .sort((a, b) => a - b);
-  if (vals.length === 0) return { qualityMed: null, lowConfRatio: null };
+  if (vals.length === 0) return { qualityMed: null, lowConfRatio: null, confGrades: null };
+  const low = vals.filter(v => v < 1e-4).length / vals.length;
+  const mid = vals.filter(v => v >= 1e-4 && v < 2e-2).length / vals.length;
   return {
     qualityMed: vals[Math.floor(vals.length / 2)],
-    lowConfRatio: vals.filter(v => v < 1e-4).length / vals.length,
+    lowConfRatio: low,
+    confGrades: { ok: 1 - low - mid, mid, low },
   };
 }
 
@@ -351,8 +386,7 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
   const panel = ensureOverlay();
   panel.setVisible(true);
   panel.showLoading();
-  stopPolling();
-  generatingJob = null;
+  updateGenChip(); // 이 영상(또는 다른 영상)의 전사 진행 칩은 검색과 무관하게 유지
   engine.stop();
 
   void refreshServerStatus();
@@ -459,8 +493,8 @@ async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
   const videoId = currentVideoId;
   if (!videoId) return;
   const seq = ++searchSeq; // 진행 중이던 자동 검색/생성 흐름은 폐기
-  stopPolling();
-  generatingJob = null;
+  generatingJobs.delete(videoId); // 다른 가사를 고르면 이 영상의 기존 전사 추적은 버린다
+  updateGenChip();
   engine.stop();
   const panel = ensureOverlay();
   panel.showLoading('선택한 가사를 불러오는 중…');
@@ -596,8 +630,9 @@ async function handleGenerate(lyricsText: string): Promise<void> {
     ? { name: '보카로 가사 위키', url: currentSourceUrl }
     : undefined;
 
+  if (generatingJobs.has(videoId)) return; // 이 영상은 이미 전사 중 — 칩이 진행률을 보여준다
+
   const panel = ensureOverlay();
-  panel.showGenerating(0);
   const res = await sendToBackground<GenerateResponse>({
     type: 'GENERATE_SYNC',
     payload: {
@@ -607,56 +642,102 @@ async function handleGenerate(lyricsText: string): Promise<void> {
       attribution,
     },
   });
-  // 요청 중 내비게이션/재검색이 일어났으면 이 생성 흐름은 폐기
-  if (videoId !== currentVideoId || seq !== searchSeq) return;
   if (res.error || !res.data) {
-    panel.showError('싱크 생성 요청에 실패했어요. 서버 상태를 확인해 주세요.');
+    if (videoId === currentVideoId && seq === searchSeq) {
+      panel.showError('싱크 생성 요청에 실패했어요. 서버 상태를 확인해 주세요.');
+    }
     return;
   }
   if (res.data.status === 'completed') {
-    void searchLyrics();
+    if (videoId === currentVideoId) void searchLyrics();
     return;
   }
-  generatingJob = { jobId: res.data.job_id, videoId, seq, progress: 0 };
-  stopPolling();
-  pollTimer = window.setInterval(() => void pollJob(), 2000);
+  // 패널을 점유하지 않는다 — 현재 화면(가사/검색)은 그대로 두고 작은 칩으로 진행률만 표시.
+  // 다른 영상으로 이동해도 잡은 계속 추적되고, 완료 후 돌아오면 조회 시 자동 반영된다.
+  generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
+  updateGenChip();
+  ensurePolling();
 }
 
-async function pollJob(): Promise<void> {
-  const job = generatingJob;
-  if (!job) {
-    stopPolling();
-    return;
-  }
-  if (job.videoId !== currentVideoId || job.seq !== searchSeq) {
-    stopPolling();
-    generatingJob = null;
-    return;
-  }
-  const res = await sendToBackground<JobStatusResponse>({ type: 'JOB_STATUS', payload: { jobId: job.jobId } });
-  if (generatingJob?.jobId !== job.jobId) return;
-  const status = res.data;
-  if (!status) return; // 일시적 실패 — 다음 폴링에서 재시도
+/** 재생성: 현재 everyric 싱크의 가사·발음·출처 그대로 서버 캐시를 무시하고 다시 정렬 */
+async function handleRegenerate(): Promise<void> {
+  const videoId = currentVideoId;
+  const data = currentData;
+  if (!videoId || !data?.synced || data.source !== 'everyric') return;
+  if (generatingJobs.has(videoId)) return;
 
-  if (status.status === 'completed') {
+  const lyrics = data.lines.map(l => l.text).join('\n').trim();
+  if (!lyrics) return;
+  const lineMeta = data.lines
+    .filter(l => l.pronunciation || l.translation)
+    .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }));
+
+  const res = await sendToBackground<GenerateResponse>({
+    type: 'REGENERATE_SYNC',
+    payload: {
+      videoId,
+      lyrics,
+      lineMeta: lineMeta.length > 0 ? lineMeta : undefined,
+      attribution: data.attribution,
+    },
+  });
+  if (res.error || !res.data) {
+    if (videoId === currentVideoId) ensureOverlay().showError('재생성 요청에 실패했어요. 서버 상태를 확인해 주세요.');
+    return;
+  }
+  generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
+  updateGenChip();
+  ensurePolling();
+}
+
+async function pollJobs(): Promise<void> {
+  if (generatingJobs.size === 0) {
     stopPolling();
-    generatingJob = null;
-    void searchLyrics();
-  } else if (status.status === 'failed') {
-    stopPolling();
-    generatingJob = null;
-    ensureOverlay().showError(status.error || '싱크 생성에 실패했어요');
-  } else {
-    job.progress = status.progress ?? job.progress;
-    let label: string | undefined;
-    if (status.queue_position != null && status.queue_position > 0) {
-      label = status.queue_size != null
-        ? `대기열 ${status.queue_position}번째 (총 ${status.queue_size}개) — 곧 시작해요`
-        : `대기열 ${status.queue_position}번째 — 곧 시작해요`;
-    } else if (status.status === 'queued' || status.status === 'pending') {
-      label = '대기열에 등록됐어요 — 곧 시작해요';
+    updateGenChip();
+    return;
+  }
+  for (const [videoId, job] of [...generatingJobs]) {
+    const res = await sendToBackground<JobStatusResponse>({ type: 'JOB_STATUS', payload: { jobId: job.jobId } });
+    if (generatingJobs.get(videoId)?.jobId !== job.jobId) continue; // 그 사이 교체/취소됨
+    const status = res.data;
+    if (!status) continue; // 일시적 실패 — 다음 폴링에서 재시도
+
+    if (status.status === 'completed') {
+      generatingJobs.delete(videoId);
+      if (videoId === currentVideoId) void searchLyrics();
+    } else if (status.status === 'failed') {
+      generatingJobs.delete(videoId);
+      if (videoId === currentVideoId) {
+        ensureOverlay().showError(status.error || '싱크 생성에 실패했어요');
+      }
+    } else {
+      job.progress = status.progress ?? job.progress;
+      job.queueLabel = status.queue_position != null && status.queue_position > 0
+        ? `대기열 ${status.queue_position}번째`
+        : (status.status === 'queued' || status.status === 'pending' ? '대기열' : undefined);
     }
-    ensureOverlay().showGenerating(job.progress, label);
+  }
+  updateGenChip();
+}
+
+/** 진행 칩 갱신 — 현재 영상 잡의 진행률, 그 외 영상 잡은 건수로 요약 */
+function updateGenChip(): void {
+  if (!overlay) return;
+  const cur = currentVideoId ? generatingJobs.get(currentVideoId) : undefined;
+  const others = generatingJobs.size - (cur ? 1 : 0);
+  let text: string | null = null;
+  if (cur) {
+    const state = cur.queueLabel ?? `${cur.progress}%`;
+    text = `전사 중 ${state}${others > 0 ? ` · 외 ${others}건` : ''}`;
+  } else if (others > 0) {
+    text = `다른 영상 전사 중 ${others}건`;
+  }
+  overlay.setGenerationChip(text);
+}
+
+function ensurePolling(): void {
+  if (pollTimer === undefined) {
+    pollTimer = window.setInterval(() => void pollJobs(), 2000);
   }
 }
 
@@ -747,11 +828,8 @@ async function handlePipToggle(): Promise<void> {
 
 function restoreOverlayState(): void {
   if (!overlay || currentVideoId === null) return;
-  if (generatingJob) {
-    overlay.showGenerating(generatingJob.progress);
-    return;
-  }
   applyLyricsData(currentData);
+  updateGenChip(); // 전사 중이면 칩으로 표시 (패널 점유 없음)
 }
 
 // ── 서버 상태/유틸 ─────────────────────────────────────────────

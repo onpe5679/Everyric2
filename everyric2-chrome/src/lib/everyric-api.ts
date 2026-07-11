@@ -46,6 +46,18 @@ export function generateSync(
   }, 15000);
 }
 
+/** 캐시를 무시하고 싱크를 강제 재생성한다 — 큐 등록 후 즉시 job_id 반환 */
+export function regenerateSync(
+  server: ServerConfig,
+  payload: { video_id: string; lyrics: string; line_meta?: LineMeta[]; attribution?: SourceAttribution },
+): Promise<GenerateResponse | null> {
+  return request<GenerateResponse>(server, '/api/sync/regenerate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...payload, force: true }),
+  }, 15000);
+}
+
 export function getJobStatus(server: ServerConfig, jobId: string): Promise<JobStatusResponse | null> {
   return request<JobStatusResponse>(server, `/api/job/${encodeURIComponent(jobId)}`);
 }

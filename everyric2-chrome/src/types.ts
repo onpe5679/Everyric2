@@ -236,6 +236,8 @@ export interface DebugInfo {
   qualityMed: number | null;
   /** 저신뢰(<1e-4) 라인 비율 (0~1) */
   lowConfRatio: number | null;
+  /** 라인 신뢰도 등급 분포 (좋음/보통/낮음, 0~1) — 사람이 읽는 요약 */
+  confGrades: { ok: number; mid: number; low: number } | null;
   /** 정렬에 쓴 텍스트 (독음/원문) — 서버 debug 메타 */
   alignmentText: string | null;
 }
@@ -272,6 +274,7 @@ export type BgRequest =
   | { type: 'SEARCH_CANDIDATES'; payload: { title: string; artist: string; duration: number } }
   | { type: 'PICK_LRCLIB'; payload: { id: number } }
   | { type: 'GENERATE_SYNC'; payload: { videoId: string; lyrics: string; language?: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
+  | { type: 'REGENERATE_SYNC'; payload: { videoId: string; lyrics: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string } }
   | { type: 'SERVER_HEALTH' }
