@@ -789,8 +789,14 @@ def _run_alignment(
                 "start": r.start_time,
                 "end": r.end_time,
             }
-            if r.confidence is not None:
-                seg["confidence"] = r.confidence
+            # 원문 정렬 경로는 엔진이 라인 confidence를 안 채운다(word에만 존재) —
+            # ko 경로와 동일하게 글자 conf의 기하평균으로 보충해 quality_score와
+            # 레인/패널의 곡 단위 conf 통계가 모든 곡에서 동작하게 한다
+            line_conf = r.confidence
+            if line_conf is None and r.word_segments:
+                line_conf = _geomean([w.confidence for w in r.word_segments])
+            if line_conf is not None:
+                seg["confidence"] = round(line_conf, 6)
             if r.word_segments:
                 seg["words"] = [
                     {"word": w.word, "start": w.start, "end": w.end, "confidence": w.confidence}
