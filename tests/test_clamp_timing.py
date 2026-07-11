@@ -295,6 +295,25 @@ def test_clamped_line_is_not_re_extended():
     assert results[2].end_time == pytest.approx(16.0)  # 연장 없이 클램프 값 유지
 
 
+def test_fixes_labels_recorded_per_rule():
+    # fixes를 넘기면 어떤 규칙이 어떤 라인을 고쳤는지 라벨링된다 (디버그 오버레이용)
+    results = [
+        _line("훅", 10.0, 12.0),
+        _line("훅", 12.0, 14.0),
+        _line("훅", 14.0, 21.0),  # 반복 outlier → repeat
+        _line("늘임음", 25.0, 26.0),  # phrase-final, 리전 끝 27.0까지 연장 → tail
+        _line("간주 뒤", 45.0, 49.0),  # 간주 후 당김 → pull (clamped 마킹 → tail 제외)
+    ]
+    vad = _vad((10.0, 21.0), (24.8, 27.0), (39.0, 49.0))
+    fixes: dict[int, list[str]] = {}
+    results, clamped = _clamp_stretched_lines(results, vad, fixes=fixes)
+
+    assert fixes[2] == ["repeat"]
+    assert fixes[3] == ["tail"]
+    assert fixes[4] == ["pull"]
+    assert 0 not in fixes and 1 not in fixes  # 안 고친 라인은 라벨 없음
+
+
 # --- 통합: 기존 규칙 보존 + 새 규칙 공존 -----------------------------------
 
 

@@ -399,16 +399,33 @@ def _extend_phrase_final_tails(results, vad_result, clamped: set[int]) -> None:
             r.word_segments[-1].end = new_end
 
 
-def _clamp_stretched_lines(results, vad_result):
+def _diff_fixes(
+    fixes: dict[int, list[str]],
+    label: str,
+    before: list[tuple[float, float]],
+    results,
+    tol: float = 0.01,
+) -> None:
+    """스테이지 전후 타이밍 diff로 어떤 규칙이 어떤 라인을 고쳤는지 라벨링 (디버그용)."""
+    for i, r in enumerate(results):
+        if abs(r.start_time - before[i][0]) > tol or abs(r.end_time - before[i][1]) > tol:
+            labels = fixes.setdefault(i, [])
+            if label not in labels:
+                labels.append(label)
+
+
+def _clamp_stretched_lines(results, vad_result, fixes: dict[int, list[str]] | None = None):
     """가사에 없는 반복 가창(라인 내부 퍼짐)으로 병적으로 길어진 라인을 잘라낸다.
 
     CTC는 같은 가사가 여러 번 불리면 글자들을 여러 렌디션에 걸쳐 흩뿌릴 수 있다
     (라인 사이 star로는 못 잡는 케이스). 지속 8초 초과 + 발성 커버리지 50% 미만인
     라인만 첫 발성 구간 끝으로 클램프한다 — 정상 라인은 건드리지 않는다.
     여기에 더해 반복행 outlier 클램프·간주 후 시작 앵커 당기기·소절 끝 늘임음
-    연장을 함께 적용한다. 반환: (results, 클램프된 라인 인덱스 집합)
+    연장을 함께 적용한다. fixes를 넘기면 규칙별 적용 라인을 라벨링한다(디버그).
+    반환: (results, 클램프된 라인 인덱스 집합)
     """
     clamped: set[int] = set()
+    before = [(r.start_time, r.end_time) for r in results] if fixes is not None else None
     for i, r in enumerate(results):
         dur = r.end_time - r.start_time
         if dur <= 8.0:
@@ -425,11 +442,22 @@ def _clamp_stretched_lines(results, vad_result):
         if new_end < r.end_time:
             r.end_time = new_end
             clamped.add(i)
+    if fixes is not None and before is not None:
+        _diff_fixes(fixes, "stretch", before, results)
+        before = [(r.start_time, r.end_time) for r in results]
     # 반복행 형제 대비 outlier로 늘어난 라인 + 간주 뒤 늦게 시작한 라인도 보정
     _clamp_repeated_outliers(results, clamped)
+    if fixes is not None and before is not None:
+        _diff_fixes(fixes, "repeat", before, results)
+        before = [(r.start_time, r.end_time) for r in results]
     _pull_post_interlude_starts(results, vad_result, clamped)
+    if fixes is not None and before is not None:
+        _diff_fixes(fixes, "pull", before, results)
+        before = [(r.start_time, r.end_time) for r in results]
     # 소절 끝 늘임음은 실제 발성 끝까지 연장 (클램프된 라인 제외)
     _extend_phrase_final_tails(results, vad_result, clamped)
+    if fixes is not None and before is not None:
+        _diff_fixes(fixes, "tail", before, results)
     if clamped:
         logger.info(f"Clamped {len(clamped)} pathologically stretched lines")
     return results, clamped
@@ -637,6 +665,9 @@ def _run_alignment(
         vocals = _separate_vocals(audio) if settings.melody.separate_vocals else None
         vad_regions: list[tuple[float, float]] | None = None
         clamped_lines: set[int] = set()
+        # 보정 전 원본(raw CTC) 타이밍 + 규칙별 보정 라벨 — 확장 디버그 오버레이용
+        raw_spans = [(r.start_time, r.end_time) for r in results]
+        fixes: dict[int, list[str]] = {}
         if vocals is not None:
             try:
                 from everyric2.alignment.timing_postprocess import TimingPostProcessor
@@ -648,13 +679,17 @@ def _run_alignment(
                 pp = TimingPostProcessor(settings.segmentation, extend_to_vocal=False).process(
                     results, vad_result, "line"
                 )
+                # 0.2s 넘게 움직인 라인만 pp 라벨 — 미세 조정까지 고스트로 그리면 소음
+                _diff_fixes(fixes, "pp", raw_spans, pp.results, tol=0.2)
                 # 독음 정렬의 무음 언더슛(전이 라인이 간주에 좌초) 교정 — ko 경로에만 적용.
                 # _clamp_stretched_lines(내부 _pull이 간주 후 첫 라인을 당김) **이전에** 돌려
                 # 좌초 라인이 먼저 다음 온셋을 잡게 한다 (뒤 라인 오인 당김 방지).
                 snapped: set[int] = set()
                 if alignment_text == "pronunciation":
+                    snap_before = [(r.start_time, r.end_time) for r in pp.results]
                     _snap_silence_undershoot(pp.results, vad_result, snapped)
-                results, clamped_lines = _clamp_stretched_lines(pp.results, vad_result)
+                    _diff_fixes(fixes, "snap", snap_before, pp.results)
+                results, clamped_lines = _clamp_stretched_lines(pp.results, vad_result, fixes=fixes)
                 clamped_lines |= snapped
                 vad_regions = [(round(reg.start, 2), round(reg.end, 2)) for reg in vad_result.regions]
                 logger.info(f"Timing post-process: {pp.stats}")
@@ -695,9 +730,15 @@ def _run_alignment(
                     "active_ratio": round(vocal / dur, 2),
                     "clamped": i in clamped_lines,
                 }
+                # 보정된 라인은 보정 전 원본 타이밍 + 적용 규칙 라벨을 함께 내려준다
+                fx = fixes.get(i)
+                if fx:
+                    seg["debug"]["orig"] = [round(raw_spans[i][0], 2), round(raw_spans[i][1], 2)]
+                    seg["debug"]["fixes"] = fx
             timestamps.append(seg)
 
         # 가라오케용 음정(MIDI 노트) 주석 — 실패해도 싱크 생성 자체는 계속한다
+        f0_curve = None
         if settings.melody.enabled:
             try:
                 from everyric2.melody.extractor import MelodyExtractor
@@ -707,6 +748,8 @@ def _run_alignment(
                     # vocal_regions는 넘기지 않는다 — extractor가 라인 스팬 합집합으로
                     # 자체 마스킹한다 (VAD 마스크는 조용한 벌스 노트를 소실시킴)
                     annotated = extractor.annotate_timestamps(audio, timestamps, vocals=vocals)
+                    # 디버그 오버레이용 RAW f0 곡선 (다운샘플, 옥타브 폴딩 전)
+                    f0_curve = extractor.last_f0_curve
                     logger.info(f"Melody notes annotated on {annotated} spans")
                 else:
                     logger.warning("Melody enabled but torchfcpe is not installed; skipping")
@@ -729,6 +772,8 @@ def _run_alignment(
             "star_spans": star_spans,
             "vad_regions": [list(v) for v in vad_regions] if vad_regions is not None else None,
             "alignment_text": alignment_text,
+            # 음정 모델(RMVPE/FCPE) RAW f0 곡선 — 레인 디버그 오버레이용
+            "f0_curve": f0_curve,
         }
 
         return {

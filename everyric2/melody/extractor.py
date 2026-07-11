@@ -43,6 +43,36 @@ def hz_to_midi(hz: np.ndarray) -> np.ndarray:
     return np.where(np.asarray(hz) > 0, midi, np.nan)
 
 
+def downsample_f0_curve(
+    track: F0Track, target_dt: float = 0.05, max_points: int = 12000
+) -> dict | None:
+    """f0 트랙을 확장 디버그 오버레이용 균일 곡선으로 다운샘플 (~20Hz).
+
+    옥타브 폴딩 이전의 RAW 트랙을 넘겨야 모델의 서브하모닉 락온 같은 원본 거동이
+    보인다. unvoiced 프레임은 None — 클라이언트가 선을 끊는 신호로 쓴다.
+    """
+    n = len(track.times)
+    if n == 0:
+        return None
+    frame_dt = float(track.times[1] - track.times[0]) if n > 1 else target_dt
+    if frame_dt <= 0:
+        return None
+    stride = max(1, round(target_dt / frame_dt))
+    if n / stride > max_points:
+        stride = int(np.ceil(n / max_points))
+    midi = [
+        round(float(track.midi[i]), 1)
+        if bool(track.voiced[i]) and np.isfinite(track.midi[i])
+        else None
+        for i in range(0, n, stride)
+    ]
+    return {
+        "t0": round(float(track.times[0]), 3),
+        "dt": round(frame_dt * stride, 4),
+        "midi": midi,
+    }
+
+
 def snap_octave_jumps(
     track: F0Track,
     *,
@@ -340,6 +370,8 @@ class MelodyExtractor:
         self.config = config or get_settings().melody
         self._model = None
         self._backend: str | None = None  # "fcpe" | "rmvpe", set once _get_model() runs
+        # annotate_timestamps가 채우는 디버그용 RAW f0 곡선 (다운샘플, 폴딩 전)
+        self.last_f0_curve: dict | None = None
 
     def is_available(self) -> bool:
         try:
@@ -485,6 +517,8 @@ class MelodyExtractor:
             ]
         # 체인 스냅 대신 라인별 지배 옥타브 창 폴딩 — 라인 단위라 오염 전파가 없다
         track = self.extract_f0(audio, vocals=vocals, vocal_regions=vocal_regions, apply_snap=False)
+        # 디버그 오버레이용 RAW 곡선 — 폴딩 전에 캡처해야 모델 원본 거동이 보인다
+        self.last_f0_curve = downsample_f0_curve(track)
         if self.config.octave_snap and vocal_regions:
             folded = fold_line_octaves(track, vocal_regions)
             if folded:
