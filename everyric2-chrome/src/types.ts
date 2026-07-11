@@ -76,6 +76,8 @@ export interface LyricsData {
   tempo?: SongTempo;
   /** 곡 전체 평균 정렬 신뢰도 (기하평균 확률 평균) — 디버그 표시용 */
   qualityScore?: number;
+  /** 다른 영상의 싱크에 링크된 상태 (해제 UI 표시용) */
+  linked?: { sourceVideoId: string; offsetSec: number };
 }
 
 export interface LRCLibTrack {
@@ -157,6 +159,18 @@ export interface EveryricSyncResponse {
   debug?: SyncDebugMeta | null;
   attribution?: SourceAttribution | null;
   tempo?: SongTempo | null;
+  /** 다른 영상의 싱크를 빌려온 경우 (inst·커버 링크) — 타이밍은 이미 오프셋 적용됨 */
+  linked?: { source_video_id: string; offset_sec: number } | null;
+}
+
+/** GET /api/sync/list 항목 — 링크 후보 선택용 */
+export interface SyncListItem {
+  video_id: string;
+  first_line: string;
+  line_count: number;
+  attribution_name?: string | null;
+  created_at?: string | null;
+  alignment_text?: string | null;
 }
 
 export interface GenerateResponse {
@@ -275,6 +289,9 @@ export type BgRequest =
   | { type: 'PICK_LRCLIB'; payload: { id: number } }
   | { type: 'GENERATE_SYNC'; payload: { videoId: string; lyrics: string; language?: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
   | { type: 'REGENERATE_SYNC'; payload: { videoId: string; lyrics: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
+  | { type: 'SYNC_LINK'; payload: { videoId: string; sourceVideoId: string; offsetSec: number } }
+  | { type: 'SYNC_UNLINK'; payload: { videoId: string } }
+  | { type: 'SYNC_LIST' }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string } }
   | { type: 'SERVER_HEALTH' }

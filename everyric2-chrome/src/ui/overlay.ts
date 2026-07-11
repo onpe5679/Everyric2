@@ -16,9 +16,22 @@ export interface OverlayCallbacks {
   onCandidateSearch: (query: { title: string; artist: string }) => void;
   /** 후보 리스트에서 사용자가 직접 선택 */
   onPickCandidate: (candidate: SearchCandidate) => void;
+  /** 다른 영상의 싱크에 연결 (inst·커버) — 성공 시 content가 재조회한다 */
+  onLinkSync: (sourceVideoId: string, offsetSec: number) => void;
+  /** 현재 영상의 싱크 링크 해제 */
+  onUnlinkSync: () => void;
+  /** 서버 저장 싱크 목록 요청 — 결과는 showSyncList로 되돌아온다 */
+  onRequestSyncList: () => void;
 }
 
 type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search';
+
+/** 유튜브 URL 또는 순수 11자리 ID에서 videoId 추출 */
+function parseVideoId(input: string): string | null {
+  if (/^[\w-]{11}$/.test(input)) return input;
+  const m = input.match(/(?:v=|youtu\.be\/|\/shorts\/|\/embed\/)([\w-]{11})/);
+  return m ? m[1] : null;
+}
 
 const DEFAULT_WIDTH = 340;
 const DEFAULT_HEIGHT = 480;
@@ -68,6 +81,10 @@ export class LyricsOverlay {
   private attributionName: string | null = null;
   private lastSong: SongInfo | null = null;
   private searchResultsEl: HTMLDivElement | null = null;
+  private linkListEl: HTMLDivElement | null = null;
+  private linkSrcInput: HTMLInputElement | null = null;
+  /** 현재 표시 중인 싱크의 링크 상태 (없으면 null) — content가 setLinked로 밀어넣는다 */
+  private linkedInfo: { sourceVideoId: string; offsetSec: number } | null = null;
 
   private geometry: PanelGeometry;
   private applyingGeometry = false;
@@ -382,6 +399,8 @@ export class LyricsOverlay {
         ),
         this.searchResultsEl,
         h('div', { className: 'ey-divider' }),
+        this.buildLinkSection(),
+        h('div', { className: 'ey-divider' }),
         h('button', {
           className: 'ey-secondary-btn',
           text: '자동 검색으로 되돌리기',
@@ -390,6 +409,99 @@ export class LyricsOverlay {
       ),
     );
     if (titleInput.value) doSearch();
+  }
+
+  /** 다른 영상 싱크 연결 섹션 (inst·커버 영상용) — 검색 시트 하단 */
+  private buildLinkSection(): HTMLDivElement {
+    const srcInput = h('input', {
+      className: 'ey-input',
+      attrs: { placeholder: '원본 영상 URL 또는 ID (전사가 이미 있는 영상)' },
+    });
+    this.linkSrcInput = srcInput;
+    const offsetInput = h('input', {
+      className: 'ey-input ey-input-narrow',
+      attrs: { type: 'number', step: '0.1', placeholder: '오프셋(초)', title: '이 영상이 원본보다 늦게 시작하면 +, 빠르면 -' },
+    });
+    offsetInput.value = this.linkedInfo ? String(this.linkedInfo.offsetSec) : '0';
+    this.linkListEl = h('div', { className: 'ey-result-list' });
+
+    const doLink = () => {
+      const src = parseVideoId(srcInput.value.trim());
+      if (!src) {
+        this.setLinkStatus('영상 URL 또는 11자리 ID를 입력해 주세요');
+        return;
+      }
+      const offset = Number(offsetInput.value) || 0;
+      this.setLinkStatus('연결 중…');
+      this.callbacks.onLinkSync(src, offset);
+    };
+
+    const section = h('div', { className: 'ey-link-section' },
+      h('div', { className: 'ey-state-text', text: '다른 영상의 싱크 연결 (inst·커버용)' }),
+    );
+    if (this.linkedInfo) {
+      section.append(h('div', { className: 'ey-link-current' },
+        h('span', {
+          text: `현재 ${this.linkedInfo.sourceVideoId}에 연결됨 (${this.linkedInfo.offsetSec >= 0 ? '+' : ''}${this.linkedInfo.offsetSec}s)`,
+        }),
+        h('button', {
+          className: 'ey-secondary-btn',
+          text: '링크 해제',
+          on: { click: () => this.callbacks.onUnlinkSync() },
+        }),
+      ));
+    }
+    section.append(
+      h('div', { className: 'ey-search-form' },
+        srcInput,
+        offsetInput,
+        h('button', { className: 'ey-primary-btn', text: '연결', on: { click: doLink } }),
+      ),
+      h('button', {
+        className: 'ey-secondary-btn',
+        text: '서버에 저장된 싱크 목록에서 고르기',
+        on: {
+          click: () => {
+            this.setLinkStatus('목록 불러오는 중…');
+            this.callbacks.onRequestSyncList();
+          },
+        },
+      }),
+      this.linkListEl,
+    );
+    return section;
+  }
+
+  /** SYNC_LIST 응답 반영 — 항목 클릭 시 원본 입력칸에 채워 넣는다 */
+  showSyncList(items: { video_id: string; first_line: string; line_count: number; attribution_name?: string | null; alignment_text?: string | null }[]): void {
+    if (this.stateKind !== 'search' || !this.linkListEl) return;
+    if (items.length === 0) {
+      this.setLinkStatus('서버에 저장된 싱크가 없어요');
+      return;
+    }
+    this.linkListEl.replaceChildren(...items.map(it =>
+      h('button', {
+        className: 'ey-result-item',
+        on: {
+          click: () => {
+            if (this.linkSrcInput) this.linkSrcInput.value = it.video_id;
+          },
+        },
+      },
+        h('span', { className: 'ey-result-src', text: it.video_id }),
+        h('span', { className: 'ey-result-title', text: it.first_line || '(첫 줄 없음)' }),
+        h('span', { className: 'ey-result-meta', text: `${it.line_count}줄${it.attribution_name ? ' · ' + it.attribution_name : ''}` }),
+      )));
+  }
+
+  /** 링크 섹션 상태 메시지 (검색 상태가 아니면 무시) */
+  setLinkStatus(message: string): void {
+    this.linkListEl?.replaceChildren(h('div', { className: 'ey-state-sub', text: message }));
+  }
+
+  /** 현재 싱크의 링크 상태 — 검색 시트의 해제 UI와 출처 배지에 반영 */
+  setLinked(info: { sourceVideoId: string; offsetSec: number } | null): void {
+    this.linkedInfo = info;
   }
 
   /** SEARCH_CANDIDATES 응답 반영 — 검색 상태가 아니면 무시 (stale 응답 방지) */
@@ -661,7 +773,11 @@ export class LyricsOverlay {
     const base = source === 'everyric' ? 'Everyric' : source === 'vocaro' ? '보카로 가사 위키' : 'LRCLIB';
     // 가사 원출처(위키 등)를 병기 — 전사는 서버가 했어도 가사의 출처는 따로 표기
     const extra = this.attributionName && this.attributionName !== base ? ` · ${this.attributionName}` : '';
-    this.sourceBadge.textContent = base + extra;
+    // 다른 영상의 싱크를 빌려온 경우 링크 표시 (해제는 검색 시트에서)
+    const link = this.linkedInfo
+      ? ` · 🔗${this.linkedInfo.offsetSec !== 0 ? `${this.linkedInfo.offsetSec > 0 ? '+' : ''}${this.linkedInfo.offsetSec}s` : ''}`
+      : '';
+    this.sourceBadge.textContent = base + extra + link;
     // 출처 상세: 무엇을 어디서 가져왔는지 — 클릭 전에 툴팁으로도 확인 가능
     const kind = synced ? '싱크 가사' : '일반 가사';
     this.sourceBadge.title = this.sourceUrl ? `${kind} · 출처 페이지 열기\n${this.sourceUrl}` : kind;

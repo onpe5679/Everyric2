@@ -1,4 +1,4 @@
-import type { EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, SourceAttribution, TranslateResult } from '../types';
+import type { EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, SourceAttribution, SyncListItem, TranslateResult } from '../types';
 
 export interface ServerConfig {
   serverUrl: string;
@@ -69,6 +69,29 @@ export function translateLyrics(server: ServerConfig, text: string, targetLang: 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, source_lang: 'auto', target_lang: targetLang }),
   }, 120000);
+}
+
+/** inst·커버 영상을 다른 영상의 싱크에 오프셋과 함께 연결 (재등록은 upsert) */
+export function linkSync(
+  server: ServerConfig,
+  payload: { video_id: string; source_video_id: string; offset_sec: number },
+): Promise<Record<string, unknown> | null> {
+  return request<Record<string, unknown>>(server, '/api/sync/link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function unlinkSync(server: ServerConfig, videoId: string): Promise<{ removed: boolean } | null> {
+  return request<{ removed: boolean }>(server, `/api/sync/link/${encodeURIComponent(videoId)}`, {
+    method: 'DELETE',
+  });
+}
+
+/** 서버에 저장된 싱크 목록 — 링크 후보 선택용 (최신순) */
+export function listSyncs(server: ServerConfig, limit = 50): Promise<SyncListItem[] | null> {
+  return request<SyncListItem[]>(server, `/api/sync/list?limit=${limit}`);
 }
 
 export async function checkHealth(server: ServerConfig): Promise<boolean> {

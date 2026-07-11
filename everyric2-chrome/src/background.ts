@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { checkHealth, generateSync, getJobStatus, lookupSync, regenerateSync, translateLyrics, vocaroMatch, type ServerConfig } from './lib/everyric-api';
+import { checkHealth, generateSync, getJobStatus, linkSync, listSyncs, lookupSync, regenerateSync, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
 import { getSettings } from './lib/settings';
@@ -101,6 +101,25 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       return { data: matched?.found && matched.slug ? await fetchSongPage(matched.slug) : null };
     }
 
+    case 'SYNC_LINK': {
+      const res = await linkSync(await getServerConfig(), {
+        video_id: message.payload.videoId,
+        source_video_id: message.payload.sourceVideoId,
+        offset_sec: message.payload.offsetSec,
+      });
+      return res ? { data: res } : { error: 'link_failed' };
+    }
+
+    case 'SYNC_UNLINK': {
+      const res = await unlinkSync(await getServerConfig(), message.payload.videoId);
+      return res ? { data: res } : { error: 'unlink_failed' };
+    }
+
+    case 'SYNC_LIST': {
+      const res = await listSyncs(await getServerConfig());
+      return { data: res ?? [] };
+    }
+
     case 'VOCARO_PAGE':
       return { data: await fetchSongPage(message.payload.slug) };
 
@@ -129,6 +148,9 @@ async function fetchLyricsChain(song: SongInfo, skipLrclib = false): Promise<Lyr
         attribution: sync.attribution ?? undefined,
         tempo: sync.tempo ?? undefined,
         qualityScore: sync.quality_score ?? undefined,
+        linked: sync.linked
+          ? { sourceVideoId: sync.linked.source_video_id, offsetSec: sync.linked.offset_sec }
+          : undefined,
       };
     }
   }

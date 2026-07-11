@@ -15,6 +15,7 @@ import type {
   SearchCandidate,
   Settings,
   SongInfo,
+  SyncListItem,
   TranslateResult,
 } from './types';
 import type { VocaroLine, VocaroResult } from './lib/vocaro';
@@ -166,8 +167,50 @@ function ensureOverlay(): LyricsOverlay {
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),
     onPickCandidate: candidate => void handlePickCandidate(candidate),
+    onLinkSync: (sourceVideoId, offsetSec) => void handleLinkSync(sourceVideoId, offsetSec),
+    onUnlinkSync: () => void handleUnlinkSync(),
+    onRequestSyncList: () => void handleRequestSyncList(),
   }, initialGeometry);
   return overlay;
+}
+
+// ── 싱크 링크 (inst·커버 영상이 다른 영상의 전사를 재사용) ──────────
+
+async function handleLinkSync(sourceVideoId: string, offsetSec: number): Promise<void> {
+  const videoId = currentVideoId;
+  if (!videoId) return;
+  if (sourceVideoId === videoId) {
+    ensureOverlay().setLinkStatus('자기 자신에게는 연결할 수 없어요');
+    return;
+  }
+  const res = await sendToBackground<Record<string, unknown>>({
+    type: 'SYNC_LINK',
+    payload: { videoId, sourceVideoId, offsetSec },
+  });
+  if (videoId !== currentVideoId) return;
+  if (res.error || !res.data) {
+    ensureOverlay().setLinkStatus('연결 실패 — 원본 영상에 전사(싱크)가 있는지 확인해 주세요');
+    return;
+  }
+  void searchLyrics(); // 링크된 싱크를 즉시 불러온다
+}
+
+async function handleUnlinkSync(): Promise<void> {
+  const videoId = currentVideoId;
+  if (!videoId) return;
+  const res = await sendToBackground<{ removed: boolean }>({ type: 'SYNC_UNLINK', payload: { videoId } });
+  if (videoId !== currentVideoId) return;
+  if (res.error) {
+    ensureOverlay().setLinkStatus('해제 실패 — 서버 상태를 확인해 주세요');
+    return;
+  }
+  ensureOverlay().setLinked(null);
+  void searchLyrics();
+}
+
+async function handleRequestSyncList(): Promise<void> {
+  const res = await sendToBackground<SyncListItem[]>({ type: 'SYNC_LIST' });
+  overlay?.showSyncList(res.data ?? []);
 }
 
 async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
@@ -532,6 +575,8 @@ function applyLyricsData(data: LyricsData | null): void {
   const attribution = data?.attribution
     ?? (data?.source === 'vocaro' ? { name: '보카로 가사 위키', url: currentSourceUrl } : null);
   panel.setAttribution(attribution ?? null);
+  // 다른 영상 싱크를 빌려온 상태면 출처 배지·검색 시트 해제 UI에 반영
+  panel.setLinked(data?.source === 'everyric' ? data.linked ?? null : null);
 
   if (!data) {
     if (pip.isOpen()) pip.close();
