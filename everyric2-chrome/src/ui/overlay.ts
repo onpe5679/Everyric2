@@ -220,6 +220,12 @@ export class LyricsOverlay {
       h('div', { className: 'ey-state' },
         skeleton,
         h('div', { className: 'ey-state-text', text: message }),
+        // 자동 검색을 기다릴 필요 없이 바로 수동 검색으로 전환
+        h('button', {
+          className: 'ey-secondary-btn',
+          text: '기다리지 않고 수동 검색',
+          on: { click: () => this.openSearch() },
+        }),
       ),
     );
   }
@@ -319,31 +325,6 @@ export class LyricsOverlay {
     const artistInput = h('input', { className: 'ey-input', attrs: { placeholder: '아티스트 (선택)' } });
     artistInput.value = song?.artist ?? '';
 
-    const lyricsArea = h('textarea', {
-      className: 'ey-textarea',
-      attrs: { placeholder: '여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요', rows: '6' },
-    });
-    const pasteSection = h('div', { className: 'ey-paste-section' },
-      lyricsArea,
-      this.makeGenerateButton('붙여넣은 가사로 싱크 생성', () => {
-        const text = lyricsArea.value.trim();
-        if (text) this.callbacks.onGenerate(text);
-      }),
-    );
-    pasteSection.style.display = 'none';
-
-    const pasteToggle = h('button', {
-      className: 'ey-secondary-btn',
-      text: '가사 직접 붙여넣기',
-      on: {
-        click: () => {
-          const hidden = pasteSection.style.display === 'none';
-          pasteSection.style.display = hidden ? '' : 'none';
-          pasteToggle.textContent = hidden ? '붙여넣기 닫기' : '가사 직접 붙여넣기';
-        },
-      },
-    });
-
     this.body.append(
       h('div', { className: 'ey-state' },
         h('div', { className: 'ey-state-emoji', text: '🎵' }),
@@ -362,11 +343,44 @@ export class LyricsOverlay {
             },
           }),
         ),
+        h('button', {
+          className: 'ey-secondary-btn',
+          text: '상세 검색 (후보 선택·싱크 연결)',
+          on: { click: () => this.openSearch() },
+        }),
         h('div', { className: 'ey-divider' }),
-        pasteToggle,
-        pasteSection,
+        this.buildPasteSection(true),
       ),
     );
+  }
+
+  /** 가사 직접 붙여넣기 섹션 (토글 접힘) — 빈 상태·검색 시트 공용 */
+  private buildPasteSection(startOpen = false): HTMLDivElement {
+    const lyricsArea = h('textarea', {
+      className: 'ey-textarea',
+      attrs: { placeholder: '여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요', rows: '6' },
+    });
+    const pasteSection = h('div', { className: 'ey-paste-section' },
+      lyricsArea,
+      this.makeGenerateButton('붙여넣은 가사로 싱크 생성', () => {
+        const text = lyricsArea.value.trim();
+        if (text) this.callbacks.onGenerate(text);
+      }),
+    );
+    pasteSection.style.display = startOpen ? '' : 'none';
+
+    const pasteToggle = h('button', {
+      className: 'ey-secondary-btn',
+      text: startOpen ? '붙여넣기 닫기' : '가사 직접 붙여넣기',
+      on: {
+        click: () => {
+          const hidden = pasteSection.style.display === 'none';
+          pasteSection.style.display = hidden ? '' : 'none';
+          pasteToggle.textContent = hidden ? '붙여넣기 닫기' : '가사 직접 붙여넣기';
+        },
+      },
+    });
+    return h('div', { className: 'ey-paste-wrap' }, pasteToggle, pasteSection);
   }
 
   /** 상시 재검색: 현재 곡 정보를 초기값으로 검색 폼 + 소스별 후보 리스트를 연다 */
@@ -392,12 +406,15 @@ export class LyricsOverlay {
     this.body.append(
       h('div', { className: 'ey-state ey-search-state' },
         h('div', { className: 'ey-state-text', text: '가사 검색 — 결과에서 직접 선택할 수 있어요' }),
+        h('div', { className: 'ey-state-sub', text: '보카로 위키(발음·번역 포함) + LRCLIB(싱크 가사)를 함께 검색합니다' }),
         h('div', { className: 'ey-search-form' },
           titleInput,
           artistInput,
           h('button', { className: 'ey-primary-btn', text: '검색', on: { click: doSearch } }),
         ),
         this.searchResultsEl,
+        h('div', { className: 'ey-divider' }),
+        this.buildPasteSection(),
         h('div', { className: 'ey-divider' }),
         this.buildLinkSection(),
         h('div', { className: 'ey-divider' }),
@@ -694,7 +711,7 @@ export class LyricsOverlay {
       g ? `정렬 좋음${Math.round(g.ok * 100)}%·보통${Math.round(g.mid * 100)}%·낮음${Math.round(g.low * 100)}%` : null,
       info.quality != null ? `conf=${info.quality.toExponential(1)}` : null,
       info.qualityMed != null ? `med=${info.qualityMed.toExponential(1)}` : null,
-      info.alignmentText ? `align=${info.alignmentText === 'pronunciation' ? '독음' : '원문'}` : null,
+      info.alignmentText ? `전사텍스트=${info.alignmentText === 'pronunciation' ? '독음(한국어 발음)' : '원문(원어)'}` : null,
       info.zone ? `zone=${info.zone}` : null,
       info.lineDebug,
     ].filter(Boolean).join(' ');

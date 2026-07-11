@@ -835,6 +835,13 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   gap: 8px;
 }
 
+.ey-paste-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
 .ey-pip-volume {
   width: 64px;
   flex-shrink: 0;

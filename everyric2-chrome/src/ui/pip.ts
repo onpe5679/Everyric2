@@ -958,7 +958,13 @@ export class PipController {
         { text: ` 보통${Math.round(s.mid * 100)}%`, color: CONF_COLOR_MID },
         { text: ` 낮음${Math.round(s.low * 100)}%`, color: CONF_COLOR_LOW },
       ];
-      if (at) parts.push({ text: at === 'pronunciation' ? ' · 독음' : ' · 원문', color: '#868e96' });
+      if (at) {
+        // 어떤 텍스트로 CTC 전사했는지: 독음 = 한국어 발음표기, 원문 = 일/영 등 원어 그대로
+        parts.push({
+          text: at === 'pronunciation' ? ' · 전사:독음(한국어 발음)' : ' · 전사:원문(원어)',
+          color: '#868e96',
+        });
+      }
       ctx.font = '10px ui-monospace, monospace';
       ctx.textAlign = 'left';
       ctx.globalAlpha = 0.9;
