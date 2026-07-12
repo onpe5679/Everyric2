@@ -103,3 +103,5 @@ nvapi.txt
 .mantic/
 **/.mantic/
 everyric2-ae/node_modules/
+*.db-shm
+*.db-wal
