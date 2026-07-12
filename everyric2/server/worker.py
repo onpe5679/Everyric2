@@ -371,6 +371,10 @@ async def _set_progress(job_id: str, progress: int, stage: str | None = None) ->
     from everyric2.server.db.connection import get_session
     from everyric2.server.db.repository import JobRepository
 
+    # 취소 대기 중이면 진행률 갱신을 멈춘다 — 취소 API가 이미 failed로 마감했는데
+    # 모니터가 processing으로 되돌려 쓰면 클라이언트가 failed↔processing 왕복을 본다
+    if job_id in _CANCEL_REQUESTED:
+        return
     async with get_session() as session:
         await JobRepository(session).update_status(
             job_id, "processing", progress=progress, stage=stage
