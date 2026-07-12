@@ -302,10 +302,24 @@ class ServerSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_SERVER_")
 
-    host: str = Field(default="0.0.0.0", description="Server host")
+    host: str = Field(
+        default="127.0.0.1",
+        description="Server bind host. Default loopback-only; set 0.0.0.0 explicitly "
+        "to expose on the LAN (combine with api_key).",
+    )
     port: int = Field(default=8000, description="Server port")
     reload: bool = Field(default=False, description="Enable auto-reload for development")
     workers: int = Field(default=1, description="Number of worker processes")
+    api_key: str = Field(
+        default="",
+        description="When set, every /api request must present this value (or the admin "
+        "key) in X-API-Key. Empty = no auth (local single-user default).",
+    )
+    max_concurrent_jobs: int = Field(
+        default=1,
+        description="Max sync-generation jobs processed at once. Alignment+separation+"
+        "melody hold significant GPU/RAM; excess jobs wait in a queue (status=queued).",
+    )
     admin_api_key: str = Field(
         default="",
         description="Admin API key (X-API-Key). When set, destructive actions "

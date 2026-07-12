@@ -18,6 +18,8 @@ class JobStatusResponse(BaseModel):
     # 현재 진행 단계명 + 단계 내 진행률(%) — 확장 진행 칩 표시용
     stage: str | None = None
     stage_progress: int | None = None
+    # 대기열 순번 (1 = 다음 차례) — 처리 슬롯이 다 차서 status=queued일 때만
+    queue_position: int | None = None
 
 
 @router.get("/{job_id}", response_model=JobStatusResponse)
@@ -39,6 +41,10 @@ async def get_job_status(job_id: str):
             if hi > lo:
                 stage_progress = max(0, min(100, round((job.progress - lo) * 100 / (hi - lo))))
 
+        queue_position = None
+        if job.status == "queued":
+            queue_position = await job_repo.count_queued_before(job.created_at) + 1
+
         response = JobStatusResponse(
             job_id=job.id,
             status=job.status,
@@ -46,6 +52,7 @@ async def get_job_status(job_id: str):
             error=job.error,
             stage=stage,
             stage_progress=stage_progress,
+            queue_position=queue_position,
         )
 
         if job.status == "completed" and job.result_id:

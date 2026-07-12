@@ -637,7 +637,15 @@ function requestTranslation(
       },
     });
     const lines = res.data?.lines;
-    if (lines && lines.length > 0) translationCache.set(key, lines);
+    if (lines && lines.length > 0) {
+      translationCache.set(key, lines);
+      // 장시간 세션 메모리 상한 — 가장 오래된 항목부터 축출 (Map은 삽입 순서 유지)
+      while (translationCache.size > 24) {
+        const oldest = translationCache.keys().next().value;
+        if (oldest === undefined) break;
+        translationCache.delete(oldest);
+      }
+    }
     return lines && lines.length > 0 ? lines : undefined;
   })().finally(() => pendingTranslate.delete(key));
   pendingTranslate.set(key, p);

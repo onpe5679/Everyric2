@@ -78,10 +78,13 @@ class TestServerSettings:
         """Test default server settings."""
         settings = ServerSettings()
 
-        assert settings.host == "0.0.0.0"
+        # 기본 바인드는 루프백 — LAN 노출은 명시적으로만 (공개 배포 안전 기본값)
+        assert settings.host == "127.0.0.1"
         assert settings.port == 8000
         assert settings.reload is False
         assert settings.workers == 1
+        assert settings.api_key == ""
+        assert settings.max_concurrent_jobs == 1
 
 
 class TestSettings:

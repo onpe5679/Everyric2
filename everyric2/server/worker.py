@@ -47,6 +47,19 @@ STAGE_WINDOWS: dict[str, tuple[int, int]] = {
 # 잡별 현재 단계 — 정렬 스레드(_run_alignment의 on_stage 콜백)가 쓰고 모니터가 읽는다
 _JOB_STAGE: dict[str, str] = {}
 
+# 동시 처리 슬롯 — 정렬(demucs+CTC+멜로디)은 GPU/RAM을 크게 쓰므로 상한 없이 병렬로
+# 돌리면 OOM이 난다. 초과분은 status=queued로 대기하고 확장이 "대기열"로 표시한다.
+_JOB_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _job_slot() -> asyncio.Semaphore:
+    global _JOB_SEMAPHORE
+    if _JOB_SEMAPHORE is None:
+        from everyric2.config.settings import get_settings
+
+        _JOB_SEMAPHORE = asyncio.Semaphore(max(1, get_settings().server.max_concurrent_jobs))
+    return _JOB_SEMAPHORE
+
 
 def _normalize_line(s: str) -> str:
     return " ".join(s.split())
@@ -116,7 +129,7 @@ def compute_audio_hash(file_path: Path) -> str:
 
 async def process_job(job_id: str) -> None:
     from everyric2.server.db.connection import get_session
-    from everyric2.server.db.repository import JobRepository, SyncRepository, hash_lyrics
+    from everyric2.server.db.repository import JobRepository
 
     async with get_session() as session:
         job_repo = JobRepository(session)
@@ -126,7 +139,24 @@ async def process_job(job_id: str) -> None:
             logger.error(f"Job not found: {job_id}")
             return
 
-        await job_repo.update_status(job_id, "processing", progress=10, stage="다운로드")
+        # 슬롯이 다 차 있으면 대기열 — job API가 queue_position을 계산해 내려준다
+        await job_repo.update_status(job_id, "queued", progress=0)
+
+    slot = _job_slot()
+    if slot.locked():
+        logger.info(f"Job {job_id} waiting for a processing slot")
+    async with slot:
+        await _process_job_inner(job_id, job)
+
+
+async def _process_job_inner(job_id: str, job) -> None:
+    from everyric2.server.db.connection import get_session
+    from everyric2.server.db.repository import JobRepository, SyncRepository, hash_lyrics
+
+    async with get_session() as session:
+        await JobRepository(session).update_status(
+            job_id, "processing", progress=10, stage="다운로드"
+        )
 
     try:
         lyrics_hash_value = hash_lyrics(job.lyrics)

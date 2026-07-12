@@ -319,7 +319,9 @@ class GeminiTranslator(BaseTranslator):
 
         try:
             response = requests.post(
-                f"{self.api_url}?key={self.api_key}",
+                self.api_url,
+                # 키는 URL 쿼리가 아니라 헤더로 — URL은 예외 메시지·로그에 그대로 찍힌다
+                headers={"x-goog-api-key": self.api_key},
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {

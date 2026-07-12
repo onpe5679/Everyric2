@@ -141,12 +141,21 @@ class JobRepository:
             .where(
                 Job.video_id == video_id,
                 Job.lyrics_hash == lyrics_hash,
-                Job.status.in_(["pending", "processing"]),
+                Job.status.in_(["pending", "queued", "processing"]),
             )
             .order_by(Job.created_at.desc())
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def count_queued_before(self, created_at) -> int:
+        """대기열 순번 계산 — 나보다 먼저 등록된 대기(queued) 잡 수."""
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(Job)
+            .where(Job.status == "queued", Job.created_at < created_at)
+        )
+        return int(result.scalar_one())
 
     async def create(
         self,

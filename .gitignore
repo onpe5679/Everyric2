@@ -96,3 +96,10 @@ everyric2-chrome/debug-lane-*.png
 # Secrets
 nvapi.txt
 *.apikey
+
+# 런타임 데이터/로그/AI 세션 아티팩트 — 공개 리포에 포함 금지
+*.db
+*.log
+.mantic/
+**/.mantic/
+everyric2-ae/node_modules/

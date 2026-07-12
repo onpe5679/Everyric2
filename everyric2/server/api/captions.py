@@ -7,6 +7,7 @@
 
 import json
 import logging
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -17,6 +18,17 @@ from fastapi import APIRouter, HTTPException
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/captions", tags=["captions"])
+
+# 경로 파라미터를 URL·파일 glob에 그대로 쓰므로 형식을 강제한다 (쿼리 인젝션 차단)
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_LANG_RE = re.compile(r"^[A-Za-z0-9-]{1,16}$")
+
+
+def _validate(video_id: str, lang: str | None = None) -> None:
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video_id")
+    if lang is not None and not _LANG_RE.match(lang):
+        raise HTTPException(status_code=422, detail="invalid lang")
 
 # 자동 생성 자막은 번역 대상 언어 ~150개가 전부 나열된다 — 원어 트랙('-orig')과
 # 사용자가 실제로 쓸 번역만 노출한다
@@ -67,12 +79,14 @@ def list_caption_tracks(video_id: str):
     """이 영상의 자막 트랙 목록 (업로더 자막 전체 + 자동 생성은 원어/ja·ko·en만)."""
     import yt_dlp
 
+    _validate(video_id)
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         with yt_dlp.YoutubeDL(_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"caption listing failed: {e}") from e
+        logger.exception(f"caption listing failed for {video_id}")
+        raise HTTPException(status_code=502, detail="caption listing failed") from e
     if not info:
         raise HTTPException(status_code=502, detail="caption listing failed: no info")
 
@@ -95,6 +109,7 @@ def get_caption_lines(video_id: str, lang: str, auto: bool = False):
     """선택한 트랙의 자막을 타이밍 포함 라인으로 반환 — yt-dlp가 json3로 받아 파싱."""
     import yt_dlp
 
+    _validate(video_id, lang)
     url = f"https://www.youtube.com/watch?v={video_id}"
     tmp = Path(tempfile.mkdtemp(prefix="eycap-"))
     try:
@@ -111,7 +126,8 @@ def get_caption_lines(video_id: str, lang: str, auto: bool = False):
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.extract_info(url, download=True)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"caption download failed: {e}") from e
+            logger.exception(f"caption download failed for {video_id}/{lang}")
+            raise HTTPException(status_code=502, detail="caption download failed") from e
 
         files = sorted(tmp.glob("*.json3"))
         if not files:

@@ -81,7 +81,9 @@ def translate_lyrics(request: TranslateRequest):
     # 이벤트 루프를 세우면 /health까지 밀려 확장이 서버가 죽은 줄 알게 된다.
     # FastAPI는 plain def 엔드포인트를 스레드풀에서 돌린다.
     try:
-        settings = get_settings().translation
+        # 전역 싱글턴을 직접 변조하면 스레드풀 동시 요청끼리 tone/발음 플래그가 새어
+        # 나간다 — 요청마다 깊은 복사본을 만들어 격리한다
+        settings = get_settings().translation.model_copy(deep=True)
         valid_tones = ("literal", "natural", "poetic", "casual", "formal")
         if request.tone in valid_tones:
             object.__setattr__(settings, "tone", request.tone)
@@ -141,5 +143,8 @@ def translate_lyrics(request: TranslateRequest):
             target_lang=result.target_lang,
             engine=result.engine,
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 내부 예외 문자열엔 API URL(키 포함 가능)·경로가 실릴 수 있다 — 클라엔 일반
+        # 메시지만, 상세는 서버 로그로
+        logger.exception("Translation request failed")
+        raise HTTPException(status_code=500, detail="translation failed (see server log)")
