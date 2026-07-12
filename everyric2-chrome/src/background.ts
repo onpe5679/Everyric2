@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { checkHealth, fetchCaptionLines, generateSync, getJobStatus, linkSync, listCaptionTracks, listSyncs, lookupSync, regenerateSync, resetSync, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
+import { checkHealth, fetchCaptionLines, generateSync, getJobStatus, linkSync, listCaptionTracks, listSyncs, lookupSync, regenerateSync, resetSync, saveUserOffset, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
 import { getSettings } from './lib/settings';
@@ -123,6 +123,13 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       return res ? { data: res } : { error: 'sync_reset_failed' };
     }
 
+    case 'SYNC_OFFSET': {
+      const res = await saveUserOffset(
+        await getServerConfig(), message.payload.videoId, message.payload.offsetSec,
+      );
+      return res ? { data: res } : { error: 'sync_offset_failed' };
+    }
+
     case 'SYNC_LIST': {
       const res = await listSyncs(await getServerConfig());
       return { data: res ?? [] };
@@ -157,6 +164,8 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
 /** 우선순위: Everyric 서버(단어 타이밍 보존) → (skipLrclib가 아니면) LRCLIB 싱크 → LRCLIB 일반 */
 async function fetchLyricsChain(song: SongInfo, skipLrclib = false): Promise<LyricsData | null> {
   const sync = await lookupSync(await getServerConfig(), song.videoId);
+  // 서버에 저장된 영상별 사용자 오프셋 — 싱크가 없어도(found=false) 내려온다
+  const userOffset = sync?.user_offset ?? undefined;
   if (sync?.found && sync.timestamps && sync.timestamps.length > 0) {
     const lines = segmentsToLines(sync.timestamps);
     if (lines.length > 0) {
@@ -175,6 +184,7 @@ async function fetchLyricsChain(song: SongInfo, skipLrclib = false): Promise<Lyr
         linked: sync.linked
           ? { sourceVideoId: sync.linked.source_video_id, offsetSec: sync.linked.offset_sec }
           : undefined,
+        userOffset,
       };
     }
   }
@@ -182,7 +192,9 @@ async function fetchLyricsChain(song: SongInfo, skipLrclib = false): Promise<Lyr
   // 보카로 위키 우선 설정이면 LRCLIB은 content 쪽에서 위키 미스 이후에 별도로 시도한다
   if (skipLrclib) return null;
   const track = await fetchFromLrclib(song);
-  return track ? lrclibToLyricsData(track) : null;
+  const data = track ? lrclibToLyricsData(track) : null;
+  if (data) data.userOffset = userOffset;
+  return data;
 }
 
 function lrclibToLyricsData(track: LRCLibTrack): LyricsData | null {

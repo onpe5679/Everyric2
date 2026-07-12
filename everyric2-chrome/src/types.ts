@@ -80,6 +80,8 @@ export interface LyricsData {
   qualityScore?: number;
   /** 다른 영상의 싱크에 링크된 상태 (해제 UI 표시용) */
   linked?: { sourceVideoId: string; offsetSec: number };
+  /** 이 영상에 서버 저장된 사용자 싱크 오프셋(초) — 로드 시 적용 */
+  userOffset?: number;
 }
 
 export interface LRCLibTrack {
@@ -175,6 +177,8 @@ export interface EveryricSyncResponse {
   key?: SongKey | null;
   /** 다른 영상의 싱크를 빌려온 경우 (inst·커버 링크) — 타이밍은 이미 오프셋 적용됨 */
   linked?: { source_video_id: string; offset_sec: number } | null;
+  /** 이 영상에 저장된 사용자 싱크 오프셋(초) */
+  user_offset?: number | null;
 }
 
 /** GET /api/sync/list 항목 — 링크 후보 선택용 */
@@ -257,6 +261,8 @@ export interface Settings {
   micDeviceId: string;
   /** 마이크 음정 옥타브 보정 (옥타브 단위, -2~+2) — 자동 폴딩 전에 적용 */
   micOctave: number;
+  /** 전사 신뢰도가 매우 낮은 곡(<0.001)에서 가사창 상단 경고 바 표시 */
+  lowConfWarning: boolean;
   /** 패널 하단에 내부 상태(비디오 바인딩, 싱크 소스 등) 표시 */
   debugInfo: boolean;
 }
@@ -346,6 +352,7 @@ export type BgRequest =
   | { type: 'SYNC_LINK'; payload: { videoId: string; sourceVideoId: string; offsetSec: number } }
   | { type: 'SYNC_UNLINK'; payload: { videoId: string } }
   | { type: 'SYNC_RESET'; payload: { videoId: string } }
+  | { type: 'SYNC_OFFSET'; payload: { videoId: string; offsetSec: number } }
   | { type: 'SYNC_LIST' }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string; title?: string; artist?: string } }

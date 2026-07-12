@@ -311,3 +311,45 @@ def test_regenerate_joins_active_job():
             assert r2.job_id == r1.job_id  # 진행 중이면 재생성도 합류
 
     asyncio.run(body())
+
+
+def test_user_offset_roundtrip():
+    from everyric2.server.api.sync import UserOffsetRequest, save_user_offset
+
+    async def body():
+        async with _env():
+            await save_user_offset("SRC", UserOffsetRequest(offset_sec=1.5))
+            resp = await get_sync("SRC")
+            assert resp.found is True
+            assert resp.user_offset == 1.5
+            # 싱크 없는 영상도 오프셋은 저장·조회된다 (found=false여도 내려감)
+            await save_user_offset("NOSYNC", UserOffsetRequest(offset_sec=-0.3))
+            resp2 = await get_sync("NOSYNC")
+            assert resp2.found is False
+            assert resp2.user_offset == -0.3
+
+    asyncio.run(body())
+
+
+def test_destructive_daily_limit_with_admin_bypass():
+    from everyric2.config.settings import get_settings
+
+    async def body():
+        async with _env():
+            server = get_settings().server
+            orig_key, orig_limit = server.admin_api_key, server.daily_destructive_limit
+            object.__setattr__(server, "admin_api_key", "admin-secret")
+            object.__setattr__(server, "daily_destructive_limit", 1)
+            try:
+                # 비어드민: 1회 허용, 2회째 429
+                await reset_video_syncs("SRC", x_api_key=None)
+                with pytest.raises(HTTPException) as exc:
+                    await reset_video_syncs("SRC", x_api_key="wrong")
+                assert exc.value.status_code == 429
+                # 어드민 키는 한도 없이 통과
+                await reset_video_syncs("SRC", x_api_key="admin-secret")
+            finally:
+                object.__setattr__(server, "admin_api_key", orig_key)
+                object.__setattr__(server, "daily_destructive_limit", orig_limit)
+
+    asyncio.run(body())

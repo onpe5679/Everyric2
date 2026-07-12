@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pitchScrollMode: 'page',
   pitchFontScale: 1.2,
   pitchCountdown: true,
+  lowConfWarning: true,
   debugInfo: false,
 };
 

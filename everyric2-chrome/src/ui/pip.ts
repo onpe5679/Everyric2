@@ -54,6 +54,10 @@ export interface PipOptions {
   onMetronomeBeatChange: (beat: number) => void;
   /** 마이크 음정 옥타브 보정 (옥타브 단위, -2~+2) */
   micOctave: number;
+  /** 레인 표시 구간(마디) 변경 — 창 안 ± 버튼 */
+  onPitchWindowChange: (measures: number) => void;
+  /** 레인 진행 방식 변경 — 창 안 토글 버튼 */
+  onPitchScrollModeChange: (mode: 'page' | 'scroll') => void;
   /** 마이크 음정 표시가 켜져 있으면 최근 피치 샘플을 돌려준다 (없으면 null) */
   getMicSamples: (() => MicSample[]) | null;
   onClosed: () => void;
@@ -183,6 +187,13 @@ export class PipController {
   private micOctave = 0;
   private metroRateBtn: HTMLButtonElement | null = null;
   private metroBeatBtn: HTMLButtonElement | null = null;
+  private windowLabelBtn: HTMLButtonElement | null = null;
+  private windowMinusBtn: HTMLButtonElement | null = null;
+  private windowPlusBtn: HTMLButtonElement | null = null;
+  private modeBtn: HTMLButtonElement | null = null;
+  /** 레인(가라오케 모드)이 실제로 표시 중인지 — 가라오케 관련 버튼 노출 게이트 */
+  private laneShown = false;
+  private metroOn = false;
   private showConfidence = false;
   private pitchColors: PitchColors | null = null;
   /** 곡 단위 정렬 진단 (디버그 모드 레인 오버레이: VAD/간주 스트립·RAW f0·정렬 텍스트) */
@@ -292,6 +303,46 @@ export class PipController {
         },
       },
     });
+    // 레인 표시 구간(마디) ±와 진행 방식 토글 — 설정 시트까지 안 가도 창 안에서 조절
+    this.windowMinusBtn = h('button', {
+      className: 'ey-pip-play ey-pip-metro-opt',
+      title: '표시 구간 절반으로 (마디 수 −)',
+      on: {
+        click: () => {
+          const next = Math.max(0.5, this.pitchWindowMeasures / 2);
+          this.setPitchWindow(next);
+          opts.onPitchWindowChange(next);
+        },
+      },
+    }, '−');
+    this.windowLabelBtn = h('button', {
+      className: 'ey-pip-play ey-pip-metro-opt ey-pip-window-label',
+      title: '레인 표시 구간 (한 화면에 보이는 마디 수)',
+    });
+    this.windowLabelBtn.disabled = true;
+    this.windowPlusBtn = h('button', {
+      className: 'ey-pip-play ey-pip-metro-opt',
+      title: '표시 구간 두 배로 (마디 수 +)',
+      on: {
+        click: () => {
+          const next = Math.min(16, this.pitchWindowMeasures * 2);
+          this.setPitchWindow(next);
+          opts.onPitchWindowChange(next);
+        },
+      },
+    }, '+');
+    this.modeBtn = h('button', {
+      className: 'ey-pip-play ey-pip-metro-opt',
+      title: '진행 방식 전환 — 고정 화면(플레이헤드 이동) ↔ 스크롤(플레이헤드 고정)',
+      on: {
+        click: () => {
+          const next = this.pitchScrollMode === 'page' ? 'scroll' : 'page';
+          this.setPitchScrollMode(next);
+          opts.onPitchScrollModeChange(next);
+        },
+      },
+    });
+    this.updateWindowControls();
     this.setMetronomeConfig(this.metronomeRate, this.metronomeBeat);
     this.setAudioState(opts.melodyOn, opts.metronomeOn);
     this.getMicSamples = opts.getMicSamples;
@@ -336,6 +387,7 @@ export class PipController {
       h('div', { className: 'ey-pip-controls' },
         this.playBtn, this.muteBtn, this.melodyBtn, this.metroBtn,
         this.metroRateBtn, this.metroBeatBtn,
+        this.windowMinusBtn, this.windowLabelBtn, this.windowPlusBtn, this.modeBtn,
         this.volumeSlider, progressWrap, this.timeEl),
     );
     doc.body.append(
@@ -368,6 +420,11 @@ export class PipController {
       this.metroBtn = null;
       this.metroRateBtn = null;
       this.metroBeatBtn = null;
+      this.windowLabelBtn = null;
+      this.windowMinusBtn = null;
+      this.windowPlusBtn = null;
+      this.modeBtn = null;
+      this.laneShown = false;
       this.getMicSamples = null;
       opts.onClosed();
     });
@@ -444,11 +501,26 @@ export class PipController {
   /** 레인 표시 구간(마디 수) 설정 즉시 반영 — 0.5마디까지 허용 */
   setPitchWindow(measures: number): void {
     this.pitchWindowMeasures = Math.min(16, Math.max(0.25, measures));
+    this.updateWindowControls();
   }
 
   /** 레인 진행 방식(페이지/스크롤) 즉시 반영 */
   setPitchScrollMode(mode: 'page' | 'scroll'): void {
     this.pitchScrollMode = mode;
+    this.updateWindowControls();
+  }
+
+  /** 창 안 레인 조절 버튼(마디 ±·진행 방식)의 라벨을 현재 값에 맞춘다 */
+  private updateWindowControls(): void {
+    if (this.windowLabelBtn) {
+      const m = this.pitchWindowMeasures;
+      this.windowLabelBtn.textContent = m === 0.5 ? '½마디' : `${m}마디`;
+    }
+    if (this.modeBtn) {
+      this.modeBtn.textContent = this.pitchScrollMode === 'page' ? '고정' : '스크롤';
+    }
+    if (this.windowMinusBtn) this.windowMinusBtn.disabled = this.pitchWindowMeasures <= 0.5;
+    if (this.windowPlusBtn) this.windowPlusBtn.disabled = this.pitchWindowMeasures >= 16;
   }
 
   /** 가라오케 글자 크기 배율 즉시 반영 — 레인(캔버스) + 스테이지(CSS 변수) 공통 */
@@ -518,11 +590,29 @@ export class PipController {
   /** 레인 표시 조건 = 설정 on + 노트 데이터 있음. 레인이 켜지면 스테이지는 숨긴다(중복 표시). */
   private applyPitchVisibility(): void {
     const show = this.pitchEnabled && this.pitch.notes.length > 0;
+    this.laneShown = show;
     if (this.pitchCanvas) this.pitchCanvas.style.display = show ? '' : 'none';
     if (this.pitchDividerEl) this.pitchDividerEl.style.display = show ? '' : 'none';
     this.win?.document.body.classList.toggle('ey-lane-active', show);
+    this.syncKaraokeControls();
     this.syncVideoLayout();
     this.clampLaneHeight();
+  }
+
+  /** 가라오케 관련 버튼(멜로디·메트로놈·마디·진행 방식)은 레인이 실제로 보일 때만 노출 */
+  private syncKaraokeControls(): void {
+    const lane = this.laneShown;
+    const display = (el: HTMLElement | null, show: boolean) => {
+      if (el) el.style.display = show ? '' : 'none';
+    };
+    display(this.melodyBtn, lane);
+    display(this.metroBtn, lane);
+    display(this.metroRateBtn, lane && this.metroOn);
+    display(this.metroBeatBtn, lane && this.metroOn);
+    display(this.windowMinusBtn, lane);
+    display(this.windowLabelBtn, lane);
+    display(this.windowPlusBtn, lane);
+    display(this.modeBtn, lane);
   }
 
   /**
@@ -572,12 +662,12 @@ export class PipController {
     this.showConfidence = enabled;
   }
 
-  /** 멜로디/메트로놈 토글 버튼 활성 상태 반영 — 세부 버튼은 메트로놈이 켜졌을 때만 노출 */
+  /** 멜로디/메트로놈 토글 버튼 활성 상태 반영 — 세부 버튼은 메트로놈+레인이 켜졌을 때만 */
   setAudioState(melody: boolean, metronome: boolean): void {
+    this.metroOn = metronome;
     this.melodyBtn?.classList.toggle('on', melody);
     this.metroBtn?.classList.toggle('on', metronome);
-    if (this.metroRateBtn) this.metroRateBtn.style.display = metronome ? '' : 'none';
-    if (this.metroBeatBtn) this.metroBeatBtn.style.display = metronome ? '' : 'none';
+    this.syncKaraokeControls();
   }
 
   /** 레인 위 디바이더 — 위로 끌면 레인이 커진다. 놓으면 설정에 저장. */

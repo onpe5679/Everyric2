@@ -36,6 +36,37 @@ class TranslationResult:
 _HANGUL_RE = re.compile(r"[가-힣]")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 _OTHER_LETTER_RE = re.compile(r"[^\x00-\x7F가-힣\s\W]")
+_JA_CHAR_RE = re.compile(r"[぀-ヿ㐀-鿿]")
+
+_kakasi_reader = None
+
+
+def _kana_readings(text: str) -> list[str] | None:
+    """일본어 원문 각 라인의 히라가나 읽기 (pykakasi) — 발음 프롬프트의 정답 참조.
+
+    일본어 문자가 없거나 pykakasi 사용 불가 시 None (힌트 없이 진행).
+    라인 수·순서는 입력 텍스트의 줄과 1:1.
+    """
+    if not _JA_CHAR_RE.search(text):
+        return None
+    global _kakasi_reader
+    try:
+        if _kakasi_reader is None:
+            import pykakasi
+
+            _kakasi_reader = pykakasi.kakasi()
+        readings = []
+        for ln in text.split("\n"):
+            ln = ln.strip()
+            readings.append(
+                "".join(item.get("hira", "") for item in _kakasi_reader.convert(ln))
+                if ln
+                else ""
+            )
+        return readings if any(readings) else None
+    except Exception:
+        logger.exception("kana reading hints failed; prompting without them")
+        return None
 
 TONE_PROMPTS = {
     "literal": "Translate literally, preserving the original meaning as closely as possible.",
@@ -90,6 +121,19 @@ class BaseTranslator(ABC):
         )
 
         if include_pronunciation:
+            # 일본어 원문이면 pykakasi 가나 읽기를 정답 참조로 프롬프트에 심는다 —
+            # LLM이 한자를 직접 읽다 틀리는 오독(消えないで→케나이데, ずっと→즈토)을
+            # 가나→한글 전사(쉬운 작업)로 바꿔 원천 차단한다. 실패 시 힌트 없이 진행.
+            reading_block = ""
+            readings = _kana_readings(text)
+            if readings:
+                reading_block = (
+                    "\nKANA READINGS (authoritative reading of each original line, in order."
+                    " Base the pronunciation on these exact kana — do NOT re-read kanji"
+                    " yourself; small particle corrections like は=わ, へ=え are allowed):\n"
+                    + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(readings))
+                    + "\n"
+                )
             if target_lang == "ko":
                 # 한국어 UI에서는 로마자가 아니라 한글 독음이 발음표기다 (보카로 위키와 동일 규약)
                 pron_rule = (
@@ -125,7 +169,7 @@ IMPORTANT:
 - Keep the same number of lines, in the same order
 - Output ONLY the JSON array, no explanations
 {pron_note}
-
+{reading_block}
 LYRICS:
 {text}"""
         else:

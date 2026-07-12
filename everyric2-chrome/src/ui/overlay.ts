@@ -28,6 +28,8 @@ export interface OverlayCallbacks {
   onCaptionTracks: () => void;
   /** 자막 트랙 선택 — 텍스트를 받아 setPasteText로 붙여넣기 칸에 채운다 */
   onCaptionPick: (track: CaptionTrack) => void;
+  /** 검색 시트에서 원래 보던 가사 화면으로 복귀 (실수로 검색을 연 경우 탈출구) */
+  onCloseSearch: () => void;
 }
 
 type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search';
@@ -64,6 +66,7 @@ export class LyricsOverlay {
   private banner: HTMLDivElement;
   private resumeChip: HTMLButtonElement;
   private genChip: HTMLDivElement;
+  private warnBar: HTMLDivElement;
   private pipBtn: HTMLButtonElement;
   private regenBtn: HTMLButtonElement;
   private collapseBtn: HTMLButtonElement;
@@ -150,6 +153,10 @@ export class LyricsOverlay {
     this.genChip = h('div', { className: 'ey-gen-chip' }, icon(ICONS.sparkle), '');
     this.genChip.style.display = 'none';
 
+    // 낮은 정렬 신뢰도 경고 바 — X로 닫을 수 있고 설정에서 아예 끌 수 있다
+    this.warnBar = h('div', { className: 'ey-warn-bar' });
+    this.warnBar.style.display = 'none';
+
     this.body = h('div', {
       className: 'ey-body',
       on: {
@@ -192,7 +199,7 @@ export class LyricsOverlay {
     this.debugEl.style.display = 'none';
 
     this.panel = h('div', { className: 'ey-panel' },
-      this.header, this.banner, this.genChip, this.body, this.resumeChip, this.footer, this.debugEl,
+      this.header, this.banner, this.genChip, this.warnBar, this.body, this.resumeChip, this.footer, this.debugEl,
     );
     // 패널 안 타이핑(검색창·가사 붙여넣기)이 유튜브 전역 단축키(스페이스=재생/정지,
     // 방향키=시킹 등)로 새지 않도록 키 이벤트를 패널에서 끊는다
@@ -380,7 +387,11 @@ export class LyricsOverlay {
   private buildPasteSection(startOpen = false): HTMLDivElement {
     const lyricsArea = h('textarea', {
       className: 'ey-textarea',
-      attrs: { placeholder: '여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요', rows: '6' },
+      attrs: {
+        placeholder: '여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요\n'
+          + '유의: 제목·섹션 표기 등 없이 줄바꿈만 있는 원문 언어 가사여야 합니다.',
+        rows: '6',
+      },
     });
     this.captionListEl = h('div', { className: 'ey-result-list' });
     // 영상에 올라간 자막(일본어 가사 자막 등)을 가사로 가져오는 버튼 — 트랙을 고르면
@@ -398,6 +409,10 @@ export class LyricsOverlay {
     });
     const pasteSection = h('div', { className: 'ey-paste-section' },
       lyricsArea,
+      h('div', {
+        className: 'ey-state-sub',
+        text: '유의: 제목·섹션 표기([Verse] 등)가 섞이면 타이밍이 어긋나요 — 원문 가사 줄만 넣어 주세요',
+      }),
       captionBtn,
       this.captionListEl,
       this.makeGenerateButton('붙여넣은 가사로 싱크 생성', () => {
@@ -471,6 +486,11 @@ export class LyricsOverlay {
 
     this.body.append(
       h('div', { className: 'ey-state ey-search-state' },
+        h('button', {
+          className: 'ey-secondary-btn ey-search-back',
+          text: '← 보던 가사로 돌아가기',
+          on: { click: () => this.callbacks.onCloseSearch() },
+        }),
         h('div', { className: 'ey-state-text', text: '가사 검색 — 결과에서 직접 선택할 수 있어요' }),
         h('div', { className: 'ey-state-sub', text: '보카로 위키(발음·번역 포함) + LRCLIB(싱크 가사)를 함께 검색합니다' }),
         h('div', { className: 'ey-search-form' },
@@ -771,6 +791,34 @@ export class LyricsOverlay {
     this.trStatusEl.textContent = text ?? '';
   }
 
+  /** 낮은 정렬 신뢰도 경고 바 — score가 null이면 숨김. X로 닫을 수 있다. */
+  setQualityWarning(score: number | null): void {
+    if (score === null) {
+      this.warnBar.style.display = 'none';
+      return;
+    }
+    this.warnBar.replaceChildren(
+      h('span', {
+        className: 'ey-warn-text',
+        text: `⚠️ 전사가 부정확할 수 있어요 (정렬 신뢰도 ${fmtConf(score)})`,
+        attrs: { title: '전사·발음 정렬의 평균 신뢰도가 낮아요. 가사 원문이 정확한지 확인하거나 재생성을 시도해 보세요.' },
+      }),
+      h('button', {
+        className: 'ey-warn-close',
+        text: '×',
+        title: '이 경고 닫기 (설정에서 끌 수도 있어요)',
+        on: { click: () => { this.warnBar.style.display = 'none'; } },
+      }),
+    );
+    this.warnBar.style.display = '';
+  }
+
+  /** 영상별 저장 오프셋을 UI에 반영 (설정 전역값과 분리된 per-video 상태) */
+  setOffsetValue(offsetSec: number): void {
+    this.offsetSec = offsetSec;
+    this.updateOffsetLabel();
+  }
+
   /** 전사 진행 칩 — null이면 숨김. 패널 본문을 점유하지 않는 작은 표시. */
   setGenerationChip(text: string | null): void {
     if (!text) {
@@ -809,10 +857,7 @@ export class LyricsOverlay {
     this.panel.classList.add(`ey-fs-${settings.fontSize}`);
     const light = this.resolveTheme(settings) === 'light';
     this.panel.classList.toggle('ey-light', light);
-    if (this.offsetSec !== settings.offsetSec) {
-      this.offsetSec = settings.offsetSec;
-      this.updateOffsetLabel();
-    }
+    // 오프셋은 영상별 상태(setOffsetValue로 주입) — 전역 설정으로 되돌리지 않는다
     this.debugEl.style.display = settings.debugInfo ? '' : 'none';
     this.panel.classList.toggle('ey-hide-pron', !settings.showPronunciation);
     // 디버그 모드에서 글자별 CTC 신뢰도를 색으로 표시
@@ -1069,6 +1114,11 @@ export class LyricsOverlay {
       this.callbacks.onSettingsChange({ micDeviceId: micDevice.value }));
     void this.populateAudioDevices(audioOut, micDevice);
 
+    const lowConfWarning = h('input', { attrs: { type: 'checkbox' } });
+    lowConfWarning.checked = this.settings.lowConfWarning;
+    lowConfWarning.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ lowConfWarning: lowConfWarning.checked }));
+
     const debugInfo = h('input', { attrs: { type: 'checkbox' } });
     debugInfo.checked = this.settings.debugInfo;
     debugInfo.addEventListener('change', () =>
@@ -1099,7 +1149,7 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' }, h('label', { text: '가사 소스 우선순위' }), sourcePriority),
       h('div', { className: 'ey-settings-row' }, h('label', { text: 'PiP 중에도 패널 가사 유지' }), pipKeepPanel),
       h('div', { className: 'ey-settings-row' }, h('label', { text: 'PiP에 영상 함께 표시' }), pipShowVideo),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: '가라오케 음정 바 (PiP)' }), pitchGuide),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: '가라오케 음정 바 (BETA · PiP)' }), pitchGuide),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 표시 구간' }), pitchWindow),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 진행 방식' }), pitchMode),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '음정 바 글자 크기' }), pitchFont),
@@ -1130,6 +1180,8 @@ export class LyricsOverlay {
         h('label', { text: 'API 키' }),
         apiKeyInput,
       ),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '낮은 정렬 신뢰도 경고', attrs: { title: '전사 신뢰도가 매우 낮은 곡에서 가사창 상단에 경고 바를 띄웁니다.' } }), lowConfWarning),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '디버그 정보 표시' }), debugInfo),
       h('div', { className: 'ey-settings-note', text: '싱크 생성·번역은 Everyric 서버가 필요해요' }),
       h('button', { className: 'ey-secondary-btn', text: '닫기', on: { click: () => this.closeSettings() } }),

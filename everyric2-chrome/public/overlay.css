@@ -73,12 +73,44 @@
 
 .ey-panel.collapsed .ey-body,
 .ey-panel.collapsed .ey-banner,
+.ey-panel.collapsed .ey-warn-bar,
 .ey-panel.collapsed .ey-footer,
 .ey-panel.collapsed .ey-resume-chip,
 .ey-panel.collapsed .ey-settings,
 .ey-panel.collapsed .ey-debug {
   display: none !important;
 }
+
+/* 낮은 정렬 신뢰도 경고 바 — 헤더/진행 칩 아래, X로 닫기 */
+.ey-warn-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 10px 6px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(255, 176, 46, 0.12);
+  border: 1px solid rgba(255, 176, 46, 0.35);
+  font-size: 12px;
+  color: var(--ey-text);
+  flex-shrink: 0;
+}
+.ey-warn-text { min-width: 0; }
+.ey-warn-close {
+  border: none;
+  background: transparent;
+  color: var(--ey-text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.ey-warn-close:hover { color: var(--ey-text); }
+
+/* 검색 시트 복귀 버튼 — 시트 최상단에서 눈에 띄게 */
+.ey-search-back { align-self: center; }
 
 .ey-panel.ey-fs-small { --ey-line-size: 13px; }
 .ey-panel.ey-fs-medium { --ey-line-size: 15px; }
@@ -317,9 +349,11 @@
 .ey-link-section {
   display: flex;
   flex-direction: column;
+  align-items: center; /* 다른 검색 시트 요소들과 같은 가운데 정렬 유지 */
   gap: 8px;
   width: 100%;
 }
+.ey-link-section .ey-state-text { text-align: center; }
 .ey-link-current {
   display: flex;
   align-items: center;

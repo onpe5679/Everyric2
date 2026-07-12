@@ -47,6 +47,11 @@ const generatingJobs = new Map<string, {
 // 생성 요청 준비 단계(LLM 번역·독음 대기, 수십 초) 중인 영상 — 잡 등록 전이라
 // generatingJobs가 비어 있어, 이 가드가 없으면 버튼 연타가 전부 서버로 나간다
 const preparingGenerate = new Set<string>();
+// 진행 중 잡을 탭 간 공유하는 storage 키 — 다른 탭/새 탭에서도 진행 칩이 이어진다
+const JOBS_STORAGE_KEY = 'activeJobs';
+// 현재 영상의 사용자 싱크 오프셋(초) — 영상마다 서버에 저장·복원된다 (전역 설정 아님)
+let videoOffset = 0;
+let offsetSaveTimer: number | undefined;
 let pollTimer: number | undefined;
 let searchSeq = 0;
 let lastLineIndex = -1;
@@ -60,8 +65,35 @@ async function init(): Promise<void> {
   settings = await getSettings();
   [cssText, initialGeometry] = await Promise.all([loadCss(), getGeometry()]);
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+  await restoreActiveJobs();
   observeNavigation();
   checkCurrentPage();
+}
+
+/** 다른 탭(또는 이전 세션)이 시작한 전사 잡을 이어받아 진행 칩·폴링을 계속한다 */
+async function restoreActiveJobs(): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(JOBS_STORAGE_KEY);
+    const jobs = stored[JOBS_STORAGE_KEY] as Record<string, { jobId: string }> | undefined;
+    if (!jobs) return;
+    for (const [videoId, job] of Object.entries(jobs)) {
+      if (job?.jobId && !generatingJobs.has(videoId)) {
+        generatingJobs.set(videoId, { jobId: job.jobId, progress: 0 });
+      }
+    }
+    if (generatingJobs.size > 0) ensurePolling();
+  } catch { /* storage 실패 — 이 탭에서 시작한 잡만 추적 */ }
+}
+
+/** 진행 중 잡 목록을 storage에 반영 — 다른 탭이 이어받을 수 있게 */
+function persistActiveJobs(): void {
+  try {
+    void chrome.storage.local.set({
+      [JOBS_STORAGE_KEY]: Object.fromEntries(
+        [...generatingJobs].map(([v, j]) => [v, { jobId: j.jobId }]),
+      ),
+    });
+  } catch { /* storage 실패는 치명적이지 않다 */ }
 }
 
 async function loadCss(): Promise<string> {
@@ -97,7 +129,7 @@ function watchVideoBinding(): void {
   const video = getVideoElement();
   if (video && video !== engine.getVideo()) {
     engine.start(video, currentData.lines, makeEngineHandlers());
-    engine.setOffset(settings.offsetSec);
+    engine.setOffset(videoOffset);
     // 미러 스트림도 새 video 기준으로 갱신
     if (pip.isOpen() && settings.pipShowVideo) pip.attachVideo(video);
   }
@@ -146,6 +178,8 @@ function cleanupForPage(): void {
   currentSong = null;
   currentData = null;
   currentSourceUrl = null;
+  videoOffset = 0;
+  clearTimeout(offsetSaveTimer);
   // 전사 잡은 서버에서 계속 돌므로 추적을 유지한다 (완료 시 해당 영상으로 돌아오면 반영)
   engine.stop();
   pip.close();
@@ -175,9 +209,15 @@ function ensureOverlay(): LyricsOverlay {
     onGenerate: text => void handleGenerate(text),
     onRetrySearch: query => void searchLyrics(query),
     onOffsetChange: offsetSec => {
+      // 오프셋은 영상별 상태 — 서버에 저장해 다음 시청·다른 기기에서도 복원된다.
+      // 링크로 빌려온 싱크(inst/커버)도 보는 영상 기준이라 영상마다 따로 저장된다.
       engine.setOffset(offsetSec);
-      settings = { ...settings, offsetSec };
-      void saveSettings({ offsetSec });
+      videoOffset = offsetSec;
+      scheduleOffsetSave();
+    },
+    onCloseSearch: () => {
+      applyLyricsData(currentData);
+      updateGenChip();
     },
     onSettingsChange: patch => void handleSettingsChange(patch),
     onRegenerate: () => void handleRegenerate(),
@@ -193,6 +233,16 @@ function ensureOverlay(): LyricsOverlay {
     onCaptionPick: track => void handleCaptionPick(track),
   }, initialGeometry);
   return overlay;
+}
+
+/** 오프셋 변경을 디바운스해 서버에 저장 (연타 중 매 클릭 요청 방지) */
+function scheduleOffsetSave(): void {
+  const videoId = currentVideoId;
+  if (!videoId) return;
+  clearTimeout(offsetSaveTimer);
+  offsetSaveTimer = window.setTimeout(() => {
+    void sendToBackground({ type: 'SYNC_OFFSET', payload: { videoId, offsetSec: videoOffset } });
+  }, 800);
 }
 
 // ── 유튜브 자막 → 가사 붙여넣기 칸 ─────────────────────────────
@@ -242,6 +292,27 @@ async function handleLinkSync(sourceVideoId: string, offsetSec: number): Promise
   if (sourceVideoId === videoId) {
     ensureOverlay().setLinkStatus('자기 자신에게는 연결할 수 없어요');
     return;
+  }
+  // 자체 전사가 있으면 조회가 링크보다 자체 전사를 우선해 연결이 무시된다 —
+  // 사용자가 명시적으로 연결을 원했으니 확인 후 자체 전사를 지우고 연결한다
+  if (currentData?.synced && currentData.source === 'everyric' && !currentData.linked) {
+    const ok = window.confirm(
+      '이 영상에는 자체 전사가 이미 있어요.\n연결하면 자체 전사를 삭제하고 원본 영상의 싱크를 대신 사용합니다. 계속할까요?',
+    );
+    if (!ok) {
+      ensureOverlay().setLinkStatus('연결 취소됨 — 자체 전사를 유지합니다');
+      return;
+    }
+    const reset = await sendToBackground<{ removed_syncs: number }>({
+      type: 'SYNC_RESET', payload: { videoId },
+    });
+    if (reset.error) {
+      ensureOverlay().setLinkStatus('자체 전사 삭제에 실패했어요 — 서버 상태를 확인해 주세요');
+      return;
+    }
+    for (const key of [...translationCache.keys()]) {
+      if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+    }
   }
   const res = await sendToBackground<Record<string, unknown>>({
     type: 'SYNC_LINK',
@@ -344,6 +415,16 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
     pip.setMicOctave(settings.micOctave);
   }
 
+  // 저신뢰 경고 토글 즉시 반영
+  if (patch.lowConfWarning !== undefined) {
+    overlay?.setQualityWarning(
+      settings.lowConfWarning && currentData?.synced && currentData.source === 'everyric'
+        && currentData.qualityScore != null && currentData.qualityScore < 0.001
+        ? currentData.qualityScore
+        : null,
+    );
+  }
+
   if (patch.debugInfo === true) pushDebug(null);
 }
 
@@ -371,7 +452,7 @@ function applyAudioSettings(): void {
 function debugZoneAt(time: number | null): string | null {
   const meta = currentData?.debugMeta;
   if (!meta || time === null) return null;
-  const t = time - settings.offsetSec;
+  const t = time - videoOffset;
   if (meta.star_spans?.some(([s, e]) => t >= s && t < e)) return '추임새★';
   if (meta.vad_regions == null) return null;
   return meta.vad_regions.some(([s, e]) => t >= s && t < e) ? '가창' : '간주·무성';
@@ -394,7 +475,7 @@ function pushDebug(time: number | null): void {
     source: currentData?.source ?? '-',
     synced: currentData?.synced ?? false,
     time: time ?? (video ? video.currentTime : null),
-    offsetSec: settings.offsetSec,
+    offsetSec: videoOffset,
     lineIndex: lastLineIndex,
     lineCount: currentData?.lines.length ?? 0,
     videoBound: bound !== null && (dom === null || bound === dom),
@@ -710,6 +791,7 @@ async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
   if (!videoId) return;
   const seq = ++searchSeq; // 진행 중이던 자동 검색/생성 흐름은 폐기
   generatingJobs.delete(videoId); // 다른 가사를 고르면 이 영상의 기존 전사 추적은 버린다
+  persistActiveJobs();
   updateGenChip();
   engine.stop();
   const panel = ensureOverlay();
@@ -745,6 +827,16 @@ function applyLyricsData(data: LyricsData | null): void {
   currentData = data;
   lastLineIndex = -1;
   engine.stop();
+  // 영상별 저장 오프셋 복원 (서버에 저장된 값, 없으면 0) — UI 라벨도 함께
+  videoOffset = data?.userOffset ?? 0;
+  panel.setOffsetValue(videoOffset);
+  // 곡 전체 정렬 신뢰도가 매우 낮으면 경고 바 (설정으로 끌 수 있음)
+  panel.setQualityWarning(
+    settings.lowConfWarning && data?.synced && data.source === 'everyric'
+      && data.qualityScore != null && data.qualityScore < 0.001
+      ? data.qualityScore
+      : null,
+  );
   const attribution = data?.attribution
     ?? (data?.source === 'vocaro' ? { name: '보카로 가사 위키', url: currentSourceUrl } : null);
   panel.setAttribution(attribution ?? null);
@@ -808,7 +900,7 @@ async function startEngine(lines: LyricLine[]): Promise<void> {
   const video = await waitForVideo();
   if (!video || !currentData?.synced) return;
   engine.start(video, lines, makeEngineHandlers());
-  engine.setOffset(settings.offsetSec);
+  engine.setOffset(videoOffset);
 }
 
 async function waitForVideo(maxRetries = 10, delayMs = 500): Promise<HTMLVideoElement | null> {
@@ -890,6 +982,7 @@ async function handleGenerate(lyricsText: string): Promise<void> {
     // 패널을 점유하지 않는다 — 현재 화면(가사/검색)은 그대로 두고 작은 칩으로 진행률만 표시.
     // 다른 영상으로 이동해도 잡은 계속 추적되고, 완료 후 돌아오면 조회 시 자동 반영된다.
     generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
+    persistActiveJobs();
     ensurePolling();
   } finally {
     preparingGenerate.delete(videoId);
@@ -935,6 +1028,7 @@ async function handleRegenerate(): Promise<void> {
       return;
     }
     generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
+    persistActiveJobs();
     ensurePolling();
   } finally {
     preparingGenerate.delete(videoId);
@@ -958,6 +1052,7 @@ async function handleResetSync(): Promise<void> {
     if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
   }
   generatingJobs.delete(videoId);
+  persistActiveJobs();
   updateGenChip();
   void searchLyrics();
 }
@@ -976,9 +1071,11 @@ async function pollJobs(): Promise<void> {
 
     if (status.status === 'completed') {
       generatingJobs.delete(videoId);
+      persistActiveJobs();
       if (videoId === currentVideoId) void searchLyrics();
     } else if (status.status === 'failed') {
       generatingJobs.delete(videoId);
+      persistActiveJobs();
       if (videoId === currentVideoId) {
         ensureOverlay().showError(status.error || '싱크 생성에 실패했어요');
       }
@@ -1091,6 +1188,8 @@ async function handlePipToggle(): Promise<void> {
     metronomeBeat: settings.metronomeBeat,
     onMetronomeBeatChange: beat => void handleSettingsChange({ metronomeBeat: beat }),
     micOctave: settings.micOctave,
+    onPitchWindowChange: measures => void handleSettingsChange({ pitchWindowMeasures: measures }),
+    onPitchScrollModeChange: mode => void handleSettingsChange({ pitchScrollMode: mode }),
     getMicSamples: () => micPitch.samples(),
     onClosed: () => {
       karaokeAudio.setActive(false);

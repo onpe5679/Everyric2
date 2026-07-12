@@ -45,6 +45,34 @@ class Job(Base):
     )
 
 
+class VideoOffset(Base):
+    """영상별 사용자 싱크 오프셋(초) — 확장의 ±0.1s 조정을 서버에 영구 저장.
+
+    보는 영상(video_id) 기준이라, 링크로 빌려온 싱크(inst/커버)도 영상마다
+    서로 다른 오프셋을 따로 저장할 수 있다. 타임스탬프 자체는 건드리지 않고
+    클라이언트가 재생 시점에 적용한다.
+    """
+
+    __tablename__ = "video_offsets"
+
+    video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    offset_sec: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ActionLog(Base):
+    """파괴적 행위(강제 재생성·초기화) 기록 — 일일 한도 검사용 (공개 배포 대비)."""
+
+    __tablename__ = "action_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    action: Mapped[str] = mapped_column(String(16), index=True)
+    video_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class SyncLink(Base):
     """다른 영상의 싱크를 오프셋과 함께 재사용하는 링크 (inst/커버 영상용).
 

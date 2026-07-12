@@ -110,6 +110,17 @@ export function resetSync(
   );
 }
 
+/** 영상별 사용자 싱크 오프셋 저장 — 다음 조회부터 user_offset으로 내려온다 */
+export function saveUserOffset(
+  server: ServerConfig, videoId: string, offsetSec: number,
+): Promise<{ offset_sec: number } | null> {
+  return request<{ offset_sec: number }>(server, `/api/sync/offset/${encodeURIComponent(videoId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offset_sec: offsetSec }),
+  });
+}
+
 export function unlinkSync(server: ServerConfig, videoId: string): Promise<{ removed: boolean } | null> {
   return request<{ removed: boolean }>(server, `/api/sync/link/${encodeURIComponent(videoId)}`, {
     method: 'DELETE',

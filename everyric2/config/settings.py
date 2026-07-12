@@ -306,6 +306,17 @@ class ServerSettings(BaseSettings):
     port: int = Field(default=8000, description="Server port")
     reload: bool = Field(default=False, description="Enable auto-reload for development")
     workers: int = Field(default=1, description="Number of worker processes")
+    admin_api_key: str = Field(
+        default="",
+        description="Admin API key (X-API-Key). When set, destructive actions "
+        "(force regenerate, sync reset) from other callers are rate-limited; "
+        "requests presenting this key bypass the limit. Empty = no limits (local use).",
+    )
+    daily_destructive_limit: int = Field(
+        default=2,
+        description="Max force-regenerations/resets per video per 24h for non-admin "
+        "callers (only enforced when admin_api_key is set). 0 disables the limit.",
+    )
 
 
 class Settings(BaseSettings):

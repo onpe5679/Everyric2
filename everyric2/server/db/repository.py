@@ -1,10 +1,11 @@
 import hashlib
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from everyric2.server.db.models import Job, SyncLink, SyncResult
+from everyric2.server.db.models import ActionLog, Job, SyncLink, SyncResult, VideoOffset
 
 
 def hash_lyrics(lyrics: str) -> str:
@@ -184,6 +185,55 @@ class JobRepository:
             values["stage"] = stage
 
         await self.session.execute(update(Job).where(Job.id == job_id).values(**values))
+
+
+class VideoOffsetRepository:
+    """영상별 사용자 싱크 오프셋 upsert/조회."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get(self, video_id: str) -> float | None:
+        result = await self.session.execute(
+            select(VideoOffset).where(VideoOffset.video_id == video_id)
+        )
+        row = result.scalar_one_or_none()
+        return row.offset_sec if row else None
+
+    async def upsert(self, video_id: str, offset_sec: float) -> None:
+        result = await self.session.execute(
+            select(VideoOffset).where(VideoOffset.video_id == video_id)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            row.offset_sec = offset_sec
+        else:
+            self.session.add(VideoOffset(video_id=video_id, offset_sec=offset_sec))
+        await self.session.flush()
+
+
+class ActionLogRepository:
+    """파괴적 행위 로그 — 영상·행위별 최근 24시간 횟수로 일일 한도를 검사한다."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def log(self, action: str, video_id: str) -> None:
+        self.session.add(ActionLog(action=action, video_id=video_id))
+        await self.session.flush()
+
+    async def count_recent(self, action: str, video_id: str, hours: int = 24) -> int:
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(ActionLog)
+            .where(
+                ActionLog.action == action,
+                ActionLog.video_id == video_id,
+                ActionLog.created_at >= since,
+            )
+        )
+        return int(result.scalar_one())
 
 
 class SyncLinkRepository:

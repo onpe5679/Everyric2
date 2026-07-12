@@ -1,16 +1,38 @@
 import copy
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from pydantic import BaseModel
 
+from everyric2.config.settings import get_settings
 from everyric2.server.db.connection import get_session
 from everyric2.server.db.repository import (
+    ActionLogRepository,
     JobRepository,
     SyncLinkRepository,
     SyncRepository,
+    VideoOffsetRepository,
     hash_lyrics,
 )
+
+
+async def _check_destructive_limit(session, action: str, video_id: str, api_key: str | None):
+    """파괴적 행위(강제 재생성·초기화) 일일 한도 — admin_api_key가 설정된 배포에서만.
+
+    키가 미설정이면(로컬 사용) 제한 없음. 키 보유 요청은 어드민으로 보고 통과.
+    통과 시 로그를 남겨 다음 검사에 반영한다.
+    """
+    server = get_settings().server
+    limit = server.daily_destructive_limit
+    if not server.admin_api_key or limit <= 0 or api_key == server.admin_api_key:
+        return
+    log_repo = ActionLogRepository(session)
+    if await log_repo.count_recent(action, video_id) >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"이 영상의 {action} 일일 한도({limit}회/24시간)에 도달했어요. 내일 다시 시도해 주세요.",
+        )
+    await log_repo.log(action, video_id)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
@@ -35,6 +57,9 @@ class SyncLookupResponse(BaseModel):
     # 다른 영상의 싱크를 오프셋과 함께 빌려 왔을 때만 채워진다 (자기 싱크가 있으면 None).
     # 클라이언트가 링크 상태 표시·해제 버튼을 띄우는 데 쓴다.
     linked: dict[str, Any] | None = None
+    # 이 영상에 저장된 사용자 싱크 오프셋(초) — 클라이언트가 재생 시점에 적용.
+    # 링크로 빌려온 싱크도 보는 영상 기준이라 영상마다 따로 저장된다.
+    user_offset: float | None = None
 
 
 class LineMeta(BaseModel):
@@ -265,20 +290,38 @@ async def list_available_syncs(limit: int = Query(50, ge=1, le=200)):
         return items
 
 
+class UserOffsetRequest(BaseModel):
+    offset_sec: float
+
+
+@router.put("/offset/{video_id}")
+async def save_user_offset(video_id: str, request: UserOffsetRequest):
+    """이 영상에서 사용자가 조정한 싱크 오프셋(초)을 저장 — 다음 조회부터 함께 내려간다."""
+    offset = max(-60.0, min(60.0, request.offset_sec))
+    async with get_session() as session:
+        await VideoOffsetRepository(session).upsert(video_id, offset)
+    return {"video_id": video_id, "offset_sec": offset}
+
+
 @router.get("/{video_id}", response_model=SyncLookupResponse)
 async def get_sync(video_id: str, lyrics_hash: str | None = None):
     async with get_session() as session:
         repo = SyncRepository(session)
+        user_offset = await VideoOffsetRepository(session).get(video_id)
 
         # 자기 싱크가 있으면 링크보다 우선한다
         if lyrics_hash:
             result = await repo.get_by_video_and_hash(video_id, lyrics_hash)
             if result:
-                return _build_sync_response(result, result.timestamps)
+                resp = _build_sync_response(result, result.timestamps)
+                resp.user_offset = user_offset
+                return resp
         else:
             results = await repo.get_by_video(video_id)
             if results:
-                return _build_sync_response(results[0], results[0].timestamps)
+                resp = _build_sync_response(results[0], results[0].timestamps)
+                resp.user_offset = user_offset
+                return resp
 
         # 자기 싱크가 없고 링크가 있으면 source 싱크를 offset 적용해 빌려 온다
         link = await SyncLinkRepository(session).get(video_id)
@@ -287,7 +330,7 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
             if source_syncs:
                 src = source_syncs[0]
                 shifted = _shift_sync_timestamps(src.timestamps, link.offset_sec)
-                return _build_sync_response(
+                resp = _build_sync_response(
                     src,
                     shifted,
                     linked={
@@ -295,17 +338,20 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
                         "offset_sec": link.offset_sec,
                     },
                 )
+                resp.user_offset = user_offset
+                return resp
 
-        return SyncLookupResponse(found=False)
+        return SyncLookupResponse(found=False, user_offset=user_offset)
 
 
 @router.delete("/{video_id}")
-async def reset_video_syncs(video_id: str):
+async def reset_video_syncs(video_id: str, x_api_key: str | None = Header(default=None)):
     """이 영상의 서버 싱크를 전부 삭제(초기화) — 잘못 붙여넣은 가사 등에서 새로 시작.
 
     이 영상이 소유자이거나 소스인 링크도 함께 제거한다 ("/link/{video_id}"가 먼저
-    선언돼 있어 링크 삭제 경로와 충돌하지 않는다)."""
+    선언돼 있어 링크 삭제 경로와 충돌하지 않는다). 공개 배포에선 일일 한도 적용."""
     async with get_session() as session:
+        await _check_destructive_limit(session, "reset", video_id, x_api_key)
         removed_syncs = await SyncRepository(session).delete_by_video(video_id)
         removed_links = await SyncLinkRepository(session).delete_involving(video_id)
         return {
@@ -443,10 +489,17 @@ def _get_lyrics_preview(timestamps: dict) -> str:
 
 
 @router.post("/regenerate", response_model=GenerateResponse)
-async def regenerate_sync(request: RegenerateRequest, background_tasks: BackgroundTasks):
+async def regenerate_sync(
+    request: RegenerateRequest,
+    background_tasks: BackgroundTasks,
+    x_api_key: str | None = Header(default=None),
+):
     lyrics_hash_value = hash_lyrics(request.lyrics)
 
     async with get_session() as session:
+        if request.force:
+            # 강제 재생성은 GPU 수십 초를 태우는 파괴적 행위 — 공개 배포에선 일일 한도 적용
+            await _check_destructive_limit(session, "regenerate", request.video_id, x_api_key)
         if not request.force:
             sync_repo = SyncRepository(session)
             existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
