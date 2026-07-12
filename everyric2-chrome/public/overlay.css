@@ -882,6 +882,34 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
 }
 .ey-pip-metro-opt:hover { color: var(--ey-text); }
 
+/* PiP 좌상단 미니 설정 — 가라오케 기능·영상 표시 토글. 반투명으로 떠 있다가 호버 시 선명 */
+.ey-pip-corner {
+  position: fixed;
+  top: 6px;
+  left: 6px;
+  display: flex;
+  gap: 4px;
+  z-index: 60;
+  opacity: 0.38;
+  transition: opacity 0.15s;
+}
+.ey-pip-corner:hover { opacity: 1; }
+.ey-pip-mini {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #b6b6b6;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ey-pip-mini:hover { color: #fff; }
+.ey-pip-mini.on { color: #fff; background: rgba(88, 140, 255, 0.55); }
+
 /* 설정 시트의 볼륨 슬라이더 */
 .ey-settings-range {
   width: 88px;

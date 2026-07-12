@@ -60,6 +60,10 @@ export interface PipOptions {
   onPitchScrollModeChange: (mode: 'page' | 'scroll') => void;
   /** 마이크 음정 표시가 켜져 있으면 최근 피치 샘플을 돌려준다 (없으면 null) */
   getMicSamples: (() => MicSample[]) | null;
+  /** 좌상단 미니 버튼 — 가라오케 음정 바 기능 자체 토글 (설정 pitchGuide) */
+  onKaraokeToggle: (on: boolean) => void;
+  /** 좌상단 미니 버튼 — PiP 영상 표시 토글 (설정 pipShowVideo) */
+  onVideoToggle: (on: boolean) => void;
   onClosed: () => void;
 }
 
@@ -68,6 +72,8 @@ const PAUSE_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="current
 const VOLUME_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/></svg>';
 const MUTED_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.6 3 2.7-2.7-1.4-1.4-2.7 2.7-2.7-2.7-1.4 1.4 2.7 2.7-2.7 2.7 1.4 1.4 2.7-2.7 2.7 2.7 1.4-1.4-2.7-2.7z"/></svg>';
 const NOTE_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
+const LANE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M3 5h18v2H3zm0 4h12v2H3zm0 4h18v2H3zm0 4h9v2H3z"/></svg>';
+const SCREEN_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M3 4h18v13H3V4zm2 2v9h14V6H5zm3 13h8v2H8v-2z"/></svg>';
 const METRO_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 2h6l4 19H5L9 2zm1.6 2L7.4 19h9.2l-1.2-6.1-2.7 2.7-1.4-1.4L15 10.4 13.9 4h-3.3z"/></svg>';
 
 const MIN_VIDEO_RATIO = 0.15;
@@ -200,6 +206,11 @@ export class PipController {
   private debugMeta: SyncDebugMeta | null = null;
   /** 라인 confidence 통계 — setLines에서 1회 계산 (디버그 헤더 표시용) */
   private confStats: { med: number; ok: number; mid: number; low: number } | null = null;
+  /** 좌상단 미니 버튼 — 가라오케 기능·PiP 영상 표시 토글 */
+  private cornerKaraokeBtn: HTMLButtonElement | null = null;
+  private cornerVideoBtn: HTMLButtonElement | null = null;
+  /** PiP 영상 표시 '설정' 상태 — 미러 성공 여부(DRM 실패 등)와 무관한 사용자 의도 */
+  private videoOn = false;
 
   static isSupported(): boolean {
     return 'documentPictureInPicture' in window;
@@ -382,6 +393,21 @@ export class PipController {
     this.pitchDividerEl = this.buildPitchDivider(opts.onPitchHeightChange);
     this.applyPitchVisibility();
 
+    // 좌상단 미니 설정 — 가라오케 기능 자체·영상 표시를 창 안에서 바로 토글.
+    // 레인이 창 상단에 붙을 때 캔버스 키 라벨은 x를 밀어 겹치지 않는다(renderPitch).
+    this.videoOn = opts.showVideo;
+    this.cornerKaraokeBtn = h('button', {
+      className: 'ey-pip-mini',
+      title: '가라오케 음정 바 켜기/끄기',
+      on: { click: () => opts.onKaraokeToggle(!this.pitchEnabled) },
+    }, icon(LANE_SVG));
+    this.cornerVideoBtn = h('button', {
+      className: 'ey-pip-mini',
+      title: '영상 함께 표시 켜기/끄기',
+      on: { click: () => opts.onVideoToggle(!this.videoOn) },
+    }, icon(SCREEN_SVG));
+    this.syncCornerButtons();
+
     this.footerEl = h('div', { className: 'ey-pip-footer' },
       this.titleEl,
       h('div', { className: 'ey-pip-controls' },
@@ -397,6 +423,7 @@ export class PipController {
       this.pitchDividerEl,
       this.pitchCanvas,
       this.footerEl,
+      h('div', { className: 'ey-pip-corner' }, this.cornerKaraokeBtn, this.cornerVideoBtn),
     );
 
     // 창 크기가 줄면 레인이 푸터를 밀어내지 않도록 즉시 재클램프
@@ -424,6 +451,9 @@ export class PipController {
       this.windowMinusBtn = null;
       this.windowPlusBtn = null;
       this.modeBtn = null;
+      this.cornerKaraokeBtn = null;
+      this.cornerVideoBtn = null;
+      this.videoOn = false;
       this.laneShown = false;
       this.getMicSamples = null;
       opts.onClosed();
@@ -467,6 +497,8 @@ export class PipController {
 
   setVideoEnabled(enabled: boolean, source: HTMLVideoElement | null): void {
     if (!this.win) return;
+    this.videoOn = enabled;
+    this.syncCornerButtons();
     if (enabled && source) {
       this.attachVideo(source);
     } else {
@@ -585,6 +617,13 @@ export class PipController {
   setPitchEnabled(enabled: boolean): void {
     this.pitchEnabled = enabled;
     this.applyPitchVisibility();
+    this.syncCornerButtons();
+  }
+
+  /** 좌상단 미니 버튼의 on/off 시각 상태를 현재 설정에 맞춘다 */
+  private syncCornerButtons(): void {
+    this.cornerKaraokeBtn?.classList.toggle('on', this.pitchEnabled);
+    this.cornerVideoBtn?.classList.toggle('on', this.videoOn);
   }
 
   /** 레인 표시 조건 = 설정 on + 노트 데이터 있음. 레인이 켜지면 스테이지는 숨긴다(중복 표시). */
@@ -635,6 +674,28 @@ export class PipController {
       this.videoWrapEl.style.maxHeight = 'none';
       this.videoWrapEl.style.flex = `0 1 ${(this.videoRatio * 100).toFixed(1)}%`;
     }
+    this.syncLaneSizing();
+  }
+
+  /**
+   * 레인 높이 배분 — 영상이 함께 표시될 때만 드래그 높이(px)가 의미 있다.
+   * 영상이 없으면 레인이 유일한 성장 요소라 창을 꽉 채우고(높이 조절로 아래가 비는
+   * 버그 방지), 높이 디바이더도 숨긴다 (조절할 대상이 없음).
+   */
+  private syncLaneSizing(): void {
+    if (!this.pitchCanvas || !this.laneShown) return;
+    const videoShown = this.videoWrapEl ? this.videoWrapEl.style.display !== 'none' : false;
+    if (videoShown) {
+      this.pitchCanvas.style.flex = '';
+      this.pitchCanvas.style.height = `${this.pitchLaneHeight}px`;
+      this.pitchCanvas.style.minHeight = '';
+      if (this.pitchDividerEl) this.pitchDividerEl.style.display = '';
+    } else {
+      this.pitchCanvas.style.flex = '1 1 0';
+      this.pitchCanvas.style.height = 'auto';
+      this.pitchCanvas.style.minHeight = '90px';
+      if (this.pitchDividerEl) this.pitchDividerEl.style.display = 'none';
+    }
   }
 
   /** 레인 높이 상한 — 푸터·영상 최소 영역만 남기고 창 전체까지 키울 수 있다 (고정 캡 없음) */
@@ -650,6 +711,8 @@ export class PipController {
   /** 창이 줄어 현재 레인 높이가 상한을 넘으면 맞춰서 줄인다 (창 resize·레인 토글 시) */
   private clampLaneHeight(): void {
     if (!this.pitchCanvas || this.pitchCanvas.style.display === 'none') return;
+    // 영상 미표시 = flex 채움 모드 — 고정 높이가 없으니 클램프 대상이 아니다
+    if (!this.videoWrapEl || this.videoWrapEl.style.display === 'none') return;
     const max = this.maxLaneHeight();
     if (this.pitchCanvas.clientHeight > max) {
       this.pitchLaneHeight = max;
@@ -1000,7 +1063,10 @@ export class PipController {
       ctx.textAlign = 'left';
       ctx.fillStyle = colors.dim;
       ctx.globalAlpha = 0.85;
-      ctx.fillText(parts.join(' · '), 4, padTop + 7);
+      // 레인이 창 상단에 붙어 있으면(영상·스테이지 없음) 좌상단 미니 버튼과 겹치지
+      // 않게 라벨을 오른쪽으로 민다
+      const labelX = canvas.getBoundingClientRect().top < 34 ? 62 : 4;
+      ctx.fillText(parts.join(' · '), labelX, padTop + 7);
       ctx.globalAlpha = 1;
       ctx.textAlign = 'center';
     }
@@ -1224,6 +1290,7 @@ export class PipController {
       this.videoWrapEl.replaceChildren();
     }
     if (this.dividerEl) this.dividerEl.style.display = 'none';
+    this.syncLaneSizing(); // 영상이 사라지면 레인이 창을 채운다
   }
 
   private stopMirror(): void {

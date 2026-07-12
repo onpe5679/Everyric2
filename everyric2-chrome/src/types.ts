@@ -263,6 +263,8 @@ export interface Settings {
   micOctave: number;
   /** 전사 신뢰도가 매우 낮은 곡(<0.001)에서 가사창 상단 경고 바 표시 */
   lowConfWarning: boolean;
+  /** 전사 잡 완료/실패 시 브라우저 알림 — 다른 탭에 있어도 확인 가능 */
+  notifyOnComplete: boolean;
   /** 패널 하단에 내부 상태(비디오 바인딩, 싱크 소스 등) 표시 */
   debugInfo: boolean;
 }
@@ -355,6 +357,7 @@ export type BgRequest =
   | { type: 'SYNC_OFFSET'; payload: { videoId: string; offsetSec: number } }
   | { type: 'SYNC_LIST' }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
+  | { type: 'NOTIFY'; payload: { id?: string; title: string; message: string } }
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string; title?: string; artist?: string } }
   | { type: 'SERVER_HEALTH' }
   | { type: 'VOCARO_LOOKUP'; payload: { title: string } }

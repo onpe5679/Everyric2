@@ -84,6 +84,20 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       return res ? { data: res } : { error: 'job_status_failed' };
     }
 
+    case 'NOTIFY': {
+      // 전사 잡 종료를 다른 탭/창에 있어도 알 수 있게 OS 알림으로. 같은 id로 만들면
+      // 여러 탭이 같은 잡을 폴링해도 알림이 중복되지 않고 갱신된다.
+      try {
+        chrome.notifications.create(message.payload.id ?? `ey-${Date.now()}`, {
+          type: 'basic',
+          iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+          title: message.payload.title,
+          message: message.payload.message,
+        });
+      } catch { /* 알림 실패는 치명적이지 않다 */ }
+      return { data: true };
+    }
+
     case 'TRANSLATE': {
       const res = await translateLyrics(
         await getServerConfig(), message.payload.text, message.payload.targetLang,

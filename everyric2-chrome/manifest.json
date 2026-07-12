@@ -5,7 +5,7 @@
   "minimum_chrome_version": "103",
   "description": "Display time-synced lyrics for any song on YouTube. Karaoke-style lyric highlighting with community-powered lyrics timing.",
 
-  "permissions": ["storage"],
+  "permissions": ["storage", "notifications"],
 
   "host_permissions": [
     "https://lrclib.net/*",

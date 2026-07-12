@@ -1119,6 +1119,11 @@ export class LyricsOverlay {
     lowConfWarning.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ lowConfWarning: lowConfWarning.checked }));
 
+    const notifyOnComplete = h('input', { attrs: { type: 'checkbox' } });
+    notifyOnComplete.checked = this.settings.notifyOnComplete;
+    notifyOnComplete.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ notifyOnComplete: notifyOnComplete.checked }));
+
     const debugInfo = h('input', { attrs: { type: 'checkbox' } });
     debugInfo.checked = this.settings.debugInfo;
     debugInfo.addEventListener('change', () =>
@@ -1182,6 +1187,8 @@ export class LyricsOverlay {
       ),
       h('div', { className: 'ey-settings-row' },
         h('label', { text: '낮은 정렬 신뢰도 경고', attrs: { title: '전사 신뢰도가 매우 낮은 곡에서 가사창 상단에 경고 바를 띄웁니다.' } }), lowConfWarning),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '전사 완료 알림', attrs: { title: '대기열에 넣은 전사가 끝나면 브라우저 알림으로 알려줍니다. 다른 탭에 있어도 확인할 수 있어요.' } }), notifyOnComplete),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '디버그 정보 표시' }), debugInfo),
       h('div', { className: 'ey-settings-note', text: '싱크 생성·번역은 Everyric 서버가 필요해요' }),
       h('button', { className: 'ey-secondary-btn', text: '닫기', on: { click: () => this.closeSettings() } }),

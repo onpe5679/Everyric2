@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pitchFontScale: 1.2,
   pitchCountdown: true,
   lowConfWarning: true,
+  notifyOnComplete: true,
   debugInfo: false,
 };
 
