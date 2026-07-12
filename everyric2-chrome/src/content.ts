@@ -66,8 +66,34 @@ async function init(): Promise<void> {
   [cssText, initialGeometry] = await Promise.all([loadCss(), getGeometry()]);
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
   await restoreActiveJobs();
+  watchJobsFromOtherTabs();
   observeNavigation();
   checkCurrentPage();
+}
+
+/** 다른 탭이 새로 시작한 전사 잡을 실시간으로 이어받는다 (storage 이벤트).
+ *  삭제 동기화는 하지 않는다 — 다른 탭이 마감한 잡은 이 탭 폴링도 곧
+ *  completed/404를 보고 스스로 정리하므로, 이벤트 순서 경합으로 산 잡을
+ *  잘못 지우는 위험만 남기 때문. */
+function watchJobsFromOtherTabs(): void {
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes[JOBS_STORAGE_KEY]) return;
+      const jobs = (changes[JOBS_STORAGE_KEY].newValue ?? {}) as
+        Record<string, { jobId: string; title?: string }>;
+      let added = false;
+      for (const [videoId, job] of Object.entries(jobs)) {
+        if (job?.jobId && !generatingJobs.has(videoId)) {
+          generatingJobs.set(videoId, { jobId: job.jobId, progress: 0, title: job.title });
+          added = true;
+        }
+      }
+      if (added) {
+        ensurePolling();
+        updateGenChip();
+      }
+    });
+  } catch { /* 이벤트 미지원 환경 — 이 탭에서 시작한 잡만 추적 */ }
 }
 
 /** 다른 탭(또는 이전 세션)이 시작한 전사 잡을 이어받아 진행 칩·폴링을 계속한다 */
@@ -86,14 +112,28 @@ async function restoreActiveJobs(): Promise<void> {
   } catch { /* storage 실패 — 이 탭에서 시작한 잡만 추적 */ }
 }
 
-/** 진행 중 잡 목록을 storage에 반영 — 다른 탭이 이어받을 수 있게 */
-function persistActiveJobs(): void {
+// 이 탭이 마감(완료·실패·취소·교체)한 잡의 videoId — 병합 저장 때 이 항목만 걷어낸다
+const finishedJobs = new Set<string>();
+
+/** 잡 추적 종료 + storage 반영 — 삭제는 반드시 이 경로로 (병합 저장이 마감을 알아야 한다) */
+function removeJob(videoId: string): void {
+  if (generatingJobs.delete(videoId)) finishedJobs.add(videoId);
+  void persistActiveJobs();
+}
+
+/** 진행 중 잡 목록을 storage에 반영 — 다른 탭이 이어받을 수 있게.
+ *  통째로 덮어쓰면 탭끼리 서로의 잡을 지우므로 read-merge-write:
+ *  이 탭의 잡은 얹고, 이 탭이 마감한 잡만 걷어낸다. */
+async function persistActiveJobs(): Promise<void> {
   try {
-    void chrome.storage.local.set({
-      [JOBS_STORAGE_KEY]: Object.fromEntries(
-        [...generatingJobs].map(([v, j]) => [v, { jobId: j.jobId, title: j.title }]),
-      ),
-    });
+    const stored = await chrome.storage.local.get(JOBS_STORAGE_KEY);
+    const merged: Record<string, { jobId: string; title?: string }> = {
+      ...(stored[JOBS_STORAGE_KEY] as Record<string, { jobId: string; title?: string }> | undefined),
+    };
+    for (const v of finishedJobs) delete merged[v];
+    finishedJobs.clear();
+    for (const [v, j] of generatingJobs) merged[v] = { jobId: j.jobId, title: j.title };
+    await chrome.storage.local.set({ [JOBS_STORAGE_KEY]: merged });
   } catch { /* storage 실패는 치명적이지 않다 */ }
 }
 
@@ -118,6 +158,12 @@ function observeNavigation(): void {
   document.addEventListener('yt-navigate-finish', () => window.setTimeout(checkCurrentPage, 300));
   window.setInterval(checkCurrentPage, 1500);
   window.setInterval(watchVideoBinding, 3000);
+  // 유튜브 다크모드 토글(html[dark])을 실시간 반영 — theme=auto일 때 패널·레인 색 갱신
+  new MutationObserver(() => {
+    if (settings.theme !== 'auto') return;
+    overlay?.applySettings(settings);
+    pip.refreshColors();
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['dark'] });
 }
 
 /**
@@ -127,6 +173,9 @@ function observeNavigation(): void {
  */
 function watchVideoBinding(): void {
   if (!currentData?.synced || !engine.isRunning()) return;
+  // 내비게이션 직후엔 DOM은 새 영상, currentData는 이전 곡인 창이 있다 — 이전 곡을
+  // 새 영상에 붙이지 않도록 페이지 videoId가 아직 같을 때만 재바인딩한다
+  if (getCurrentVideoId() !== currentVideoId) return;
   const video = getVideoElement();
   if (video && video !== engine.getVideo()) {
     engine.start(video, currentData.lines, makeEngineHandlers());
@@ -226,7 +275,8 @@ function ensureOverlay(): LyricsOverlay {
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),
     onPickCandidate: candidate => void handlePickCandidate(candidate),
-    onLinkSync: (sourceVideoId, offsetSec) => void handleLinkSync(sourceVideoId, offsetSec),
+    onLinkSync: (sourceVideoId, offsetSec, rate) => void handleLinkSync(sourceVideoId, offsetSec, rate),
+    onCancelGenerate: () => void handleCancelGenerate(),
     onUnlinkSync: () => void handleUnlinkSync(),
     onRequestSyncList: () => void handleRequestSyncList(),
     onResetSync: () => void handleResetSync(),
@@ -287,7 +337,7 @@ async function handleCaptionPick(track: CaptionTrack): Promise<void> {
 
 // ── 싱크 링크 (inst·커버 영상이 다른 영상의 전사를 재사용) ──────────
 
-async function handleLinkSync(sourceVideoId: string, offsetSec: number): Promise<void> {
+async function handleLinkSync(sourceVideoId: string, offsetSec: number, rate: number): Promise<void> {
   const videoId = currentVideoId;
   if (!videoId) return;
   if (sourceVideoId === videoId) {
@@ -317,7 +367,7 @@ async function handleLinkSync(sourceVideoId: string, offsetSec: number): Promise
   }
   const res = await sendToBackground<Record<string, unknown>>({
     type: 'SYNC_LINK',
-    payload: { videoId, sourceVideoId, offsetSec },
+    payload: { videoId, sourceVideoId, offsetSec, rate },
   });
   if (videoId !== currentVideoId) return;
   if (res.error || !res.data) {
@@ -526,7 +576,9 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
     let slug: string | null = null;
     try {
       const stored = await chrome.storage.local.get(`vocaroRef:${videoId}`);
-      slug = (stored[`vocaroRef:${videoId}`] as string | undefined) ?? null;
+      // 구버전은 슬러그 문자열만 저장했다 — 새 형식({slug, t})과 둘 다 읽는다
+      const raw = stored[`vocaroRef:${videoId}`] as string | { slug?: string } | undefined;
+      slug = typeof raw === 'string' ? raw : raw?.slug ?? null;
     } catch { /* storage 실패 → 병합 생략 */ }
     if (!slug) return;
     const res = await sendToBackground<VocaroResult | null>({ type: 'VOCARO_PAGE', payload: { slug } });
@@ -575,7 +627,7 @@ async function loadTranslations(): Promise<void> {
   ) return;
 
   const lang = settings.translationLanguage;
-  const cached = translationCache.get(`${videoId}:${lang}`);
+  const cached = translationCacheGet(`${videoId}:${lang}`);
   // 캐시도 같은 기준으로 검증 — 발음 빠진 캐시(구버전 응답)는 다시 받아온다
   if (cached && (!expectsPron || cached.some(l => l.pronunciation))) {
     applyTranslations(data, cached);
@@ -620,6 +672,16 @@ function expectsPronunciation(texts: string[]): boolean {
   return (cjk?.length ?? 0) >= 5;
 }
 
+/** LRU 판독 — 조회한 항목을 최신으로 되돌려 넣어, 축출이 '가장 오래 안 쓴 것'부터 되게 */
+function translationCacheGet(key: string): TranslatedLine[] | undefined {
+  const v = translationCache.get(key);
+  if (v !== undefined) {
+    translationCache.delete(key);
+    translationCache.set(key, v);
+  }
+  return v;
+}
+
 /** 서버 번역(발음 포함) 요청 — video+언어 기준으로 동시 요청을 하나로 합치고 캐시에 저장 */
 function requestTranslation(
   videoId: string, srcLines: string[],
@@ -662,7 +724,7 @@ async function fetchLlmLineMeta(
   const lang = settings.translationLanguage;
   try {
     overlay?.setTranslationStatus('AI 번역·독음 생성 중…');
-    let translated = translationCache.get(`${videoId}:${lang}`);
+    let translated = translationCacheGet(`${videoId}:${lang}`);
     // 발음이 빠진 캐시(구버전 응답 등)는 다시 받아온다
     if (
       !translated || translated.length !== srcLines.length
@@ -774,12 +836,33 @@ function adoptVocaroResult(videoId: string, vocaro: VocaroResult): LyricsData {
     pronunciation: l.pronunciation,
   }));
   currentSourceUrl = vocaro.pageUrl;
-  // 이 곡의 위키 페이지를 기억 — 싱크 생성 뒤에도 발음/번역을 다시 입힐 수 있게
+  // 이 곡의 위키 페이지를 기억 — 싱크 생성 뒤에도 발음/번역을 다시 입힐 수 있게.
+  // 타임스탬프를 함께 저장해 오래 안 본 영상부터 정리할 수 있게 한다
   lastVocaro = { videoId, lines: vocaro.lines };
   try {
-    void chrome.storage.local.set({ [`vocaroRef:${videoId}`]: vocaro.slug });
+    void chrome.storage.local
+      .set({ [`vocaroRef:${videoId}`]: { slug: vocaro.slug, t: Date.now() } })
+      .then(() => pruneVocaroRefs());
   } catch { /* 저장 실패는 무시 — 세션 내 캐시로도 동작 */ }
   return { source: 'vocaro', synced: false, lines, plainText: lines.map(l => l.text).join('\n') };
+}
+
+/** vocaroRef가 시청 이력만큼 무한히 쌓이지 않게 오래된 것부터 정리.
+ *  타임스탬프 없는 구형(문자열) 항목은 가장 오래된 것으로 취급한다. */
+const VOCARO_REF_MAX = 120;
+async function pruneVocaroRefs(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const refs = Object.entries(all)
+      .filter(([k]) => k.startsWith('vocaroRef:'))
+      .map(([k, v]) => ({
+        key: k,
+        t: typeof v === 'object' && v !== null ? ((v as { t?: number }).t ?? 0) : 0,
+      }));
+    if (refs.length <= VOCARO_REF_MAX) return;
+    refs.sort((a, b) => a.t - b.t);
+    await chrome.storage.local.remove(refs.slice(0, refs.length - VOCARO_REF_MAX).map(r => r.key));
+  } catch { /* 정리 실패는 무시 */ }
 }
 
 /** 수동 검색: 소스별 후보 리스트를 모아 패널에 전달 */
@@ -799,8 +882,7 @@ async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
   const videoId = currentVideoId;
   if (!videoId) return;
   const seq = ++searchSeq; // 진행 중이던 자동 검색/생성 흐름은 폐기
-  generatingJobs.delete(videoId); // 다른 가사를 고르면 이 영상의 기존 전사 추적은 버린다
-  persistActiveJobs();
+  removeJob(videoId); // 다른 가사를 고르면 이 영상의 기존 전사 추적은 버린다
   updateGenChip();
   engine.stop();
   const panel = ensureOverlay();
@@ -896,7 +978,11 @@ function makeEngineHandlers(): SyncHandlers {
       overlay?.updateTime(time);
       pip.tick(time, engine.getDuration(), engine.isPaused());
       const video = engine.getVideo();
-      if (video) pip.updateVolume(video.volume, video.muted);
+      if (video) {
+        pip.updateVolume(video.volume, video.muted);
+        // 마이크 궤적의 벽시계→곡 시간 환산에 배속이 필요하다
+        pip.setPlaybackRate(video.playbackRate);
+      }
       if (settings.debugInfo && Date.now() - lastDebugPush >= 500) {
         lastDebugPush = Date.now();
         pushDebug(time);
@@ -936,8 +1022,15 @@ async function waitForSongInfo(seq: number, maxRetries = 6, delayMs = 700): Prom
 async function handleGenerate(lyricsText: string): Promise<void> {
   const videoId = currentVideoId;
   const seq = searchSeq;
-  const text = lyricsText.trim();
-  if (!videoId || !text) return;
+  // 빈 줄·앞뒤 공백을 걷어낸 실제 라인만 서버로 — LLM line_meta도 같은 배열로
+  // 만들어 인덱스가 어긋나지 않게 한다 (서버 병합은 텍스트 매칭)
+  const srcLines = lyricsText.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!videoId || srcLines.length === 0) return;
+  if (srcLines.length > 500) {
+    ensureOverlay().showError(`가사가 너무 길어요 (${srcLines.length}줄) — 500줄 이하로 줄여 주세요`);
+    return;
+  }
+  const text = srcLines.join('\n');
 
   // 이미 전사 중이거나 요청 준비 중(LLM 번역·독음 대기) — 연타를 서버로 내보내지 않는다.
   // 같은 영상의 중복 잡은 임시 오디오 파일을 두고 경합해 다운로드 실패(WinError 32)까지 냈다.
@@ -964,7 +1057,6 @@ async function handleGenerate(lyricsText: string): Promise<void> {
     // line_meta로 넘긴다 — 서버가 독음(ko) 정렬 경로를 타고 발음/번역도 싱크에 저장된다.
     // 실패해도 싱크 생성 자체는 계속한다 (원문 정렬 폴백).
     if (!lineMeta || lineMeta.length === 0) {
-      const srcLines = text.split('\n').map(s => s.trim()).filter(Boolean);
       lineMeta = await fetchLlmLineMeta(videoId, srcLines);
     }
 
@@ -991,7 +1083,7 @@ async function handleGenerate(lyricsText: string): Promise<void> {
     // 패널을 점유하지 않는다 — 현재 화면(가사/검색)은 그대로 두고 작은 칩으로 진행률만 표시.
     // 다른 영상으로 이동해도 잡은 계속 추적되고, 완료 후 돌아오면 조회 시 자동 반영된다.
     generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0, title: currentSong?.title });
-    persistActiveJobs();
+    void persistActiveJobs();
     ensurePolling();
   } finally {
     preparingGenerate.delete(videoId);
@@ -1037,7 +1129,7 @@ async function handleRegenerate(): Promise<void> {
       return;
     }
     generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0, title: currentSong?.title });
-    persistActiveJobs();
+    void persistActiveJobs();
     ensurePolling();
   } finally {
     preparingGenerate.delete(videoId);
@@ -1060,10 +1152,33 @@ async function handleResetSync(): Promise<void> {
   for (const key of [...translationCache.keys()]) {
     if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
   }
-  generatingJobs.delete(videoId);
-  persistActiveJobs();
+  removeJob(videoId);
   updateGenChip();
   void searchLyrics();
+}
+
+/** 진행 칩 ✕ — 현재 영상의 전사 잡 취소. 서버는 즉시 또는 다음 단계 경계에서 멈춘다 */
+async function handleCancelGenerate(): Promise<void> {
+  const videoId = currentVideoId;
+  const job = videoId ? generatingJobs.get(videoId) : undefined;
+  if (!videoId || !job) return;
+  const res = await sendToBackground<{ cancelled: boolean; status?: string }>({
+    type: 'JOB_CANCEL', payload: { jobId: job.jobId },
+  });
+  if (res.error) {
+    ensureOverlay().showError('취소 요청에 실패했어요 — 서버 상태를 확인해 주세요');
+    return;
+  }
+  // 그 사이 이미 완료된 잡이면 취소 대신 결과를 반영한다
+  if (res.data && !res.data.cancelled && res.data.status === 'completed') {
+    removeJob(videoId);
+    updateGenChip();
+    if (videoId === currentVideoId) void searchLyrics();
+    return;
+  }
+  // 사용자가 직접 취소했으니 실패 알림 없이 추적만 정리
+  removeJob(videoId);
+  updateGenChip();
 }
 
 async function pollJobs(): Promise<void> {
@@ -1072,26 +1187,27 @@ async function pollJobs(): Promise<void> {
     updateGenChip();
     return;
   }
+  let anyResponse = false;
   for (const [videoId, job] of [...generatingJobs]) {
     const res = await sendToBackground<JobStatusResponse>({ type: 'JOB_STATUS', payload: { jobId: job.jobId } });
     if (generatingJobs.get(videoId)?.jobId !== job.jobId) continue; // 그 사이 교체/취소됨
     const status = res.data;
     if (!status) continue; // 일시적 실패 — 다음 폴링에서 재시도
+    anyResponse = true;
 
     if (status.status === 'completed') {
-      generatingJobs.delete(videoId);
-      persistActiveJobs();
+      removeJob(videoId);
       notifyJobDone(job.jobId, '전사 완료', `${job.title ?? videoId} — 가사 싱크가 준비됐어요`);
       if (videoId === currentVideoId) void searchLyrics();
     } else if (status.status === 'failed') {
-      generatingJobs.delete(videoId);
-      persistActiveJobs();
-      notifyJobDone(
-        job.jobId, '전사 실패',
-        `${job.title ?? videoId} — ${status.error || '싱크 생성에 실패했어요'}`,
-      );
+      removeJob(videoId);
+      // gone = 서버에 잡 기록이 없음(재시작 등) — 무한 폴링 대신 명시적으로 마감
+      const errMsg = status.gone
+        ? '서버에서 작업 기록을 찾을 수 없어요 (서버 재시작 등) — 다시 생성해 주세요'
+        : (status.error || '싱크 생성에 실패했어요');
+      notifyJobDone(job.jobId, '전사 실패', `${job.title ?? videoId} — ${errMsg}`);
       if (videoId === currentVideoId) {
-        ensureOverlay().showError(status.error || '싱크 생성에 실패했어요');
+        ensureOverlay().showError(errMsg);
       }
     } else {
       job.progress = status.progress ?? job.progress;
@@ -1101,6 +1217,13 @@ async function pollJobs(): Promise<void> {
         ? `대기열 ${status.queue_position}번째`
         : (status.status === 'queued' || status.status === 'pending' ? '대기열' : undefined);
     }
+  }
+  // 서버가 계속 무응답이면 폴링 간격을 늘려 무의미한 요청을 줄인다 (응답 오면 즉시 복귀)
+  if (anyResponse) {
+    pollFailStreak = 0;
+    setPollInterval(POLL_MS_NORMAL);
+  } else if (++pollFailStreak >= 5) {
+    setPollInterval(POLL_MS_SLOW);
   }
   updateGenChip();
 }
@@ -1131,12 +1254,28 @@ function updateGenChip(): void {
   } else if (others > 0) {
     text = `다른 영상 전사 중 ${others}건`;
   }
-  overlay.setGenerationChip(text);
+  // 잡이 등록된 뒤에만 취소 가능 (준비 단계는 잡 id가 아직 없다)
+  overlay.setGenerationChip(text, Boolean(cur));
 }
+
+const POLL_MS_NORMAL = 2000;
+const POLL_MS_SLOW = 10000;
+let pollMs = POLL_MS_NORMAL;
+let pollFailStreak = 0;
 
 function ensurePolling(): void {
   if (pollTimer === undefined) {
-    pollTimer = window.setInterval(() => void pollJobs(), 2000);
+    pollTimer = window.setInterval(() => void pollJobs(), pollMs);
+  }
+}
+
+/** 폴링 주기 변경 — 진행 중이면 타이머를 새 주기로 갈아 끼운다 */
+function setPollInterval(ms: number): void {
+  if (pollMs === ms) return;
+  pollMs = ms;
+  if (pollTimer !== undefined) {
+    clearInterval(pollTimer);
+    pollTimer = window.setInterval(() => void pollJobs(), ms);
   }
 }
 

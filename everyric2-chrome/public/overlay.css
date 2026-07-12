@@ -344,6 +344,17 @@
 }
 .ey-gen-chip .ey-icon { display: inline-flex; }
 .ey-panel.collapsed .ey-gen-chip { display: none !important; }
+.ey-gen-chip-cancel {
+  border: none;
+  background: transparent;
+  color: var(--ey-text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  margin-left: 2px;
+  cursor: pointer;
+}
+.ey-gen-chip-cancel:hover { color: var(--ey-text); }
 
 /* 싱크 링크 섹션 (검색 시트 하단) */
 .ey-link-section {
@@ -881,6 +892,12 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   color: var(--ey-text-dim);
 }
 .ey-pip-metro-opt:hover { color: var(--ey-text); }
+
+/* PiP 창을 아주 작게 줄여도 컨트롤이 한 줄에 짓눌리지 않게 줄바꿈 허용 */
+.ey-pip-controls {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
 
 /* PiP 좌상단 미니 설정 — 가라오케 기능·영상 표시 토글. 반투명으로 떠 있다가 호버 시 선명 */
 .ey-pip-corner {

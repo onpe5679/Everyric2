@@ -16,6 +16,9 @@ export function getCurrentVideoId(): string | null {
   try {
     const url = new URL(location.href);
     if (url.pathname === '/watch') return url.searchParams.get('v');
+    // Shorts·임베드·라이브 경로는 videoId가 경로에 실려 온다
+    const m = url.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})(?:[/?]|$)/);
+    if (m) return m[1];
   } catch {
     /* URL 파싱 실패는 videoId 없음으로 처리 */
   }
@@ -25,9 +28,17 @@ export function getCurrentVideoId(): string | null {
 export function getVideoElement(): HTMLVideoElement | null {
   const videos = Array.from(document.querySelectorAll<HTMLVideoElement>('video'));
   if (videos.length === 0) return null;
-  // 페이지에 프리뷰/광고 등 여러 video가 있을 수 있으므로 실제 재생 중인 것을 우선한다
-  const playing = videos.find(v => !v.paused && v.readyState >= 2 && v.currentTime > 0);
-  if (playing) return playing;
+  // 페이지에 프리뷰/광고 등 여러 video가 있을 수 있으므로 실제 재생 중인 것을 우선하되,
+  // 그중에서도 본편 플레이어(html5-main-video)를 먼저, 인라인 프리뷰·광고 슬롯 안의
+  // video는 후순위로 — 홈 피드 프리뷰가 재생 중이면 가사가 엉뚱한 영상에 붙는다
+  const playing = videos.filter(v => !v.paused && v.readyState >= 2 && v.currentTime > 0);
+  const mainPlaying = playing.find(v => v.classList.contains('html5-main-video'));
+  if (mainPlaying) return mainPlaying;
+  const nonPreview = playing.find(
+    v => !v.closest('ytd-video-preview, ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer'),
+  );
+  if (nonPreview) return nonPreview;
+  if (playing.length > 0) return playing[0];
   return videos.find(v => v.classList.contains('html5-main-video')) ?? videos[0];
 }
 

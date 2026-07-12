@@ -62,8 +62,31 @@ export function regenerateSync(
   }, 15000);
 }
 
-export function getJobStatus(server: ServerConfig, jobId: string): Promise<JobStatusResponse | null> {
-  return request<JobStatusResponse>(server, `/api/job/${encodeURIComponent(jobId)}`);
+/** 404(잡 기록 소실 — 서버 재시작 등)는 null(일시 실패)과 구분해 gone 마커로 돌려준다.
+ *  null이면 폴링이 무한 재시도하므로 사라진 잡은 명시적으로 마감시켜야 한다. */
+export async function getJobStatus(server: ServerConfig, jobId: string): Promise<JobStatusResponse | null> {
+  try {
+    const res = await fetch(`${baseUrl(server)}/api/job/${encodeURIComponent(jobId)}`, {
+      headers: buildHeaders(server),
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.status === 404) {
+      return { job_id: jobId, status: 'failed', progress: 0, gone: true };
+    }
+    if (!res.ok) return null;
+    return await res.json() as JobStatusResponse;
+  } catch {
+    return null;
+  }
+}
+
+/** 진행 중인 전사 잡 취소 요청 — 이미 끝난 잡이면 cancelled=false와 현재 상태가 온다 */
+export function cancelJob(
+  server: ServerConfig, jobId: string,
+): Promise<{ job_id: string; cancelled: boolean; status?: string } | null> {
+  return request<{ job_id: string; cancelled: boolean; status?: string }>(
+    server, `/api/job/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' },
+  );
 }
 
 /** LLM 번역은 곡 전체 기준 수십 초가 걸릴 수 있어 타임아웃을 길게 잡는다.
@@ -89,10 +112,11 @@ export function translateLyrics(
   }, 120000);
 }
 
-/** inst·커버 영상을 다른 영상의 싱크에 오프셋과 함께 연결 (재등록은 upsert) */
+/** inst·커버 영상을 다른 영상의 싱크에 오프셋·배속과 함께 연결 (재등록은 upsert).
+ *  rate는 원곡 대비 재생 배속(nightcore≈1.25) — 서버가 t/rate+offset으로 시간축을 사상한다. */
 export function linkSync(
   server: ServerConfig,
-  payload: { video_id: string; source_video_id: string; offset_sec: number },
+  payload: { video_id: string; source_video_id: string; offset_sec: number; rate: number },
 ): Promise<Record<string, unknown> | null> {
   return request<Record<string, unknown>>(server, '/api/sync/link', {
     method: 'POST',

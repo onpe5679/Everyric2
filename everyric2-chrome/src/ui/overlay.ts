@@ -16,8 +16,10 @@ export interface OverlayCallbacks {
   onCandidateSearch: (query: { title: string; artist: string }) => void;
   /** 후보 리스트에서 사용자가 직접 선택 */
   onPickCandidate: (candidate: SearchCandidate) => void;
-  /** 다른 영상의 싱크에 연결 (inst·커버) — 성공 시 content가 재조회한다 */
-  onLinkSync: (sourceVideoId: string, offsetSec: number) => void;
+  /** 다른 영상의 싱크에 연결 (inst·커버) — rate는 원곡 대비 배속(nightcore≈1.25) */
+  onLinkSync: (sourceVideoId: string, offsetSec: number, rate: number) => void;
+  /** 진행 중인 전사 잡 취소 (진행 칩 클릭) */
+  onCancelGenerate: () => void;
   /** 현재 영상의 싱크 링크 해제 */
   onUnlinkSync: () => void;
   /** 서버 저장 싱크 목록 요청 — 결과는 showSyncList로 되돌아온다 */
@@ -102,7 +104,7 @@ export class LyricsOverlay {
   private linkListEl: HTMLDivElement | null = null;
   private linkSrcInput: HTMLInputElement | null = null;
   /** 현재 표시 중인 싱크의 링크 상태 (없으면 null) — content가 setLinked로 밀어넣는다 */
-  private linkedInfo: { sourceVideoId: string; offsetSec: number } | null = null;
+  private linkedInfo: { sourceVideoId: string; offsetSec: number; rate?: number } | null = null;
 
   private geometry: PanelGeometry;
   private applyingGeometry = false;
@@ -271,6 +273,8 @@ export class LyricsOverlay {
       const el = h('div', {
         className: 'ey-line',
         title: '클릭해서 이 부분으로 이동',
+        // dir=auto — RTL(아랍어·히브리어) 가사가 문장 방향대로 정렬되게
+        attrs: { dir: 'auto' },
         on: {
           click: () => {
             if (line.time !== null) this.callbacks.onSeek(line.time);
@@ -294,7 +298,7 @@ export class LyricsOverlay {
         // 음절 타이밍(pronSegments)이 있으면 단어처럼 부른 만큼 색이 차오르게 스팬으로
         // (사이 텍스트는 appendTimedSpans가 인접 span에 끼워 넣어 흰 글자 없이 칠해진다)
         const segs = line.pronSegments;
-        const pronEl = h('div', { className: 'ey-line-pron' });
+        const pronEl = h('div', { className: 'ey-line-pron', attrs: { dir: 'auto' } });
         const mapped = segs && segs.length > 0
           ? appendTimedSpans(pronEl, line.pronunciation, segs, s => s.text, seg =>
               h('span', {
@@ -306,7 +310,7 @@ export class LyricsOverlay {
         if (mapped === 0) pronEl.replaceChildren(line.pronunciation);
         el.append(pronEl);
       }
-      if (line.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation }));
+      if (line.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation, attrs: { dir: 'auto' } }));
       el.dataset.index = String(index);
       this.lineEls.push(el);
       list.append(el);
@@ -332,9 +336,9 @@ export class LyricsOverlay {
     this.lines = lines;
     const list = h('div', { className: 'ey-lines ey-lines-plain' });
     for (const line of lines) {
-      const el = h('div', { className: 'ey-line ey-line-plain', text: line.text });
-      if (line.pronunciation) el.append(h('div', { className: 'ey-line-pron', text: line.pronunciation }));
-      if (line.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation }));
+      const el = h('div', { className: 'ey-line ey-line-plain', text: line.text, attrs: { dir: 'auto' } });
+      if (line.pronunciation) el.append(h('div', { className: 'ey-line-pron', text: line.pronunciation, attrs: { dir: 'auto' } }));
+      if (line.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation, attrs: { dir: 'auto' } }));
       this.lineEls.push(el);
       list.append(el);
     }
@@ -417,7 +421,13 @@ export class LyricsOverlay {
       this.captionListEl,
       this.makeGenerateButton('붙여넣은 가사로 싱크 생성', () => {
         const text = lyricsArea.value.trim();
-        if (text) this.callbacks.onGenerate(text);
+        if (!text) {
+          // 빈 채로 눌렀을 때 무반응이면 버튼이 죽은 줄 안다 — 안내 후 입력칸으로 포커스
+          this.setCaptionStatus('가사를 먼저 붙여넣어 주세요');
+          lyricsArea.focus();
+          return;
+        }
+        this.callbacks.onGenerate(text);
       }),
     );
     pasteSection.style.display = startOpen ? '' : 'none';
@@ -538,6 +548,16 @@ export class LyricsOverlay {
       attrs: { type: 'number', step: '0.1', placeholder: '오프셋(초)', title: '이 영상이 원본보다 늦게 시작하면 +, 빠르면 -' },
     });
     offsetInput.value = this.linkedInfo ? String(this.linkedInfo.offsetSec) : '0';
+    // 배속이 다른 커버(nightcore 등)는 고정 오프셋만으론 뒤로 갈수록 밀린다 — 서버가
+    // t/배속+오프셋으로 시간축을 사상한다
+    const rateInput = h('input', {
+      className: 'ey-input ey-input-narrow',
+      attrs: {
+        type: 'number', step: '0.01', min: '0.5', max: '2', placeholder: '배속',
+        title: '원곡 대비 재생 배속 — nightcore≈1.25, 같은 속도면 1',
+      },
+    });
+    rateInput.value = this.linkedInfo?.rate ? String(this.linkedInfo.rate) : '1';
     this.linkListEl = h('div', { className: 'ey-result-list' });
 
     const doLink = () => {
@@ -547,17 +567,20 @@ export class LyricsOverlay {
         return;
       }
       const offset = Number(offsetInput.value) || 0;
+      const rate = Math.min(2, Math.max(0.5, Number(rateInput.value) || 1));
       this.setLinkStatus('연결 중…');
-      this.callbacks.onLinkSync(src, offset);
+      this.callbacks.onLinkSync(src, offset, rate);
     };
 
     const section = h('div', { className: 'ey-link-section' },
       h('div', { className: 'ey-state-text', text: '다른 영상의 싱크 연결 (inst·커버용)' }),
     );
     if (this.linkedInfo) {
+      const rateBadge = this.linkedInfo.rate && this.linkedInfo.rate !== 1
+        ? ` ×${this.linkedInfo.rate}` : '';
       section.append(h('div', { className: 'ey-link-current' },
         h('span', {
-          text: `현재 ${this.linkedInfo.sourceVideoId}에 연결됨 (${this.linkedInfo.offsetSec >= 0 ? '+' : ''}${this.linkedInfo.offsetSec}s)`,
+          text: `현재 ${this.linkedInfo.sourceVideoId}에 연결됨 (${this.linkedInfo.offsetSec >= 0 ? '+' : ''}${this.linkedInfo.offsetSec}s${rateBadge})`,
         }),
         h('button', {
           className: 'ey-secondary-btn',
@@ -570,6 +593,7 @@ export class LyricsOverlay {
       h('div', { className: 'ey-search-form' },
         srcInput,
         offsetInput,
+        rateInput,
         h('button', { className: 'ey-primary-btn', text: '연결', on: { click: doLink } }),
       ),
       h('button', {
@@ -615,7 +639,7 @@ export class LyricsOverlay {
   }
 
   /** 현재 싱크의 링크 상태 — 검색 시트의 해제 UI와 출처 배지에 반영 */
-  setLinked(info: { sourceVideoId: string; offsetSec: number } | null): void {
+  setLinked(info: { sourceVideoId: string; offsetSec: number; rate?: number } | null): void {
     this.linkedInfo = info;
   }
 
@@ -781,9 +805,9 @@ export class LyricsOverlay {
       const line = this.lines[i];
       // 번역 API가 발음(한글 독음)을 늦게 채워주는 경우 — 렌더 후 붙은 발음도 표시
       if (line?.pronunciation && !el.querySelector('.ey-line-pron')) {
-        el.append(h('div', { className: 'ey-line-pron', text: line.pronunciation }));
+        el.append(h('div', { className: 'ey-line-pron', text: line.pronunciation, attrs: { dir: 'auto' } }));
       }
-      if (line?.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation }));
+      if (line?.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation, attrs: { dir: 'auto' } }));
     });
   }
 
@@ -819,13 +843,26 @@ export class LyricsOverlay {
     this.updateOffsetLabel();
   }
 
-  /** 전사 진행 칩 — null이면 숨김. 패널 본문을 점유하지 않는 작은 표시. */
-  setGenerationChip(text: string | null): void {
+  /** 전사 진행 칩 — null이면 숨김. 패널 본문을 점유하지 않는 작은 표시.
+   *  cancellable이면 ✕ 버튼으로 진행 중인 전사를 취소할 수 있다 (현재 영상 잡만). */
+  setGenerationChip(text: string | null, cancellable = false): void {
     if (!text) {
       this.genChip.style.display = 'none';
       return;
     }
     this.genChip.replaceChildren(icon(ICONS.sparkle), text);
+    if (cancellable) {
+      this.genChip.append(h('button', {
+        className: 'ey-gen-chip-cancel',
+        text: '×',
+        title: '전사 취소',
+        on: {
+          click: () => {
+            if (window.confirm('진행 중인 전사를 취소할까요?')) this.callbacks.onCancelGenerate();
+          },
+        },
+      }));
+    }
     this.genChip.style.display = '';
   }
 

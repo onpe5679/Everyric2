@@ -37,7 +37,12 @@ async function searchLrclib(song: SongInfo): Promise<LRCLibTrack | null> {
   if (song.artist) {
     attempts.push([new URLSearchParams({ track_name: song.title, artist_name: song.artist }), false]);
   }
-  attempts.push([new URLSearchParams({ q: song.artist ? `${song.artist} ${song.title}` : song.title }), true]);
+  // duration도 아티스트도 없으면 자유검색을 걸러낼 신호가 제목뿐 — 흔한 제목(“花” 등)은
+  // 전혀 다른 곡이 통과하므로 자유검색 자체를 생략한다 (수동 검색으로 유도)
+  if (song.artist || song.duration > 0) {
+    attempts.push([new URLSearchParams({ q: song.artist ? `${song.artist} ${song.title}` : song.title }), true]);
+  }
+  if (attempts.length === 0) return null;
 
   // 두 시도를 병렬 발사하되 우선순위(정확 검색 먼저)대로 채택 — 대기 시간 절반
   const settled = await Promise.all(

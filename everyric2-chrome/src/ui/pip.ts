@@ -202,6 +202,8 @@ export class PipController {
   private metroOn = false;
   private showConfidence = false;
   private pitchColors: PitchColors | null = null;
+  /** 원본 video의 재생 배속 — 마이크 궤적의 벽시계 나이를 곡 시간축으로 환산할 때 쓴다 */
+  private playbackRate = 1;
   /** 곡 단위 정렬 진단 (디버그 모드 레인 오버레이: VAD/간주 스트립·RAW f0·정렬 텍스트) */
   private debugMeta: SyncDebugMeta | null = null;
   /** 라인 confidence 통계 — setLines에서 1회 계산 (디버그 헤더 표시용) */
@@ -262,11 +264,12 @@ export class PipController {
     this.dividerEl = this.buildDivider(win, opts.onVideoRatioChange);
     this.dividerEl.style.display = 'none';
 
-    this.prevEl = h('div', { className: 'ey-pip-line prev', on: { click: () => this.seekRelative(-1) } });
-    this.currentEl = h('div', { className: 'ey-pip-line current', on: { click: () => this.seekRelative(0) } });
-    this.pronEl = h('div', { className: 'ey-pip-pron' });
-    this.trEl = h('div', { className: 'ey-pip-tr' });
-    this.nextEl = h('div', { className: 'ey-pip-line next', on: { click: () => this.seekRelative(1) } });
+    // dir=auto — 아랍어·히브리어 등 RTL 가사가 좌측 정렬로 어색하게 붙는 것 방지
+    this.prevEl = h('div', { className: 'ey-pip-line prev', attrs: { dir: 'auto' }, on: { click: () => this.seekRelative(-1) } });
+    this.currentEl = h('div', { className: 'ey-pip-line current', attrs: { dir: 'auto' }, on: { click: () => this.seekRelative(0) } });
+    this.pronEl = h('div', { className: 'ey-pip-pron', attrs: { dir: 'auto' } });
+    this.trEl = h('div', { className: 'ey-pip-tr', attrs: { dir: 'auto' } });
+    this.nextEl = h('div', { className: 'ey-pip-line next', attrs: { dir: 'auto' }, on: { click: () => this.seekRelative(1) } });
     this.titleEl = h('div', { className: 'ey-pip-title' });
 
     this.playBtn = h('button', {
@@ -429,6 +432,12 @@ export class PipController {
     // 창 크기가 줄면 레인이 푸터를 밀어내지 않도록 즉시 재클램프
     win.addEventListener('resize', () => this.clampLaneHeight());
 
+    // OS 테마가 바뀌면 캐시된 레인 색이 낡는다 — 다음 렌더에서 CSS 변수 재판독
+    try {
+      win.matchMedia('(prefers-color-scheme: dark)')
+        .addEventListener('change', () => this.refreshColors());
+    } catch { /* matchMedia 미지원 환경은 무시 */ }
+
     win.addEventListener('pagehide', () => {
       this.stopMirror();
       this.win = null;
@@ -456,6 +465,7 @@ export class PipController {
       this.videoOn = false;
       this.laneShown = false;
       this.getMicSamples = null;
+      this.playbackRate = 1;
       opts.onClosed();
     });
     this.renderLines();
@@ -606,6 +616,16 @@ export class PipController {
   /** 번역 등 라인 데이터가 바뀐 뒤 강제 재렌더 */
   refresh(): void {
     if (this.win) this.renderLines();
+  }
+
+  /** 테마 변경 등으로 CSS 변수가 바뀌었을 때 — 캐시된 레인 색을 버리고 재판독 */
+  refreshColors(): void {
+    this.pitchColors = null;
+  }
+
+  /** 원본 video 배속 — 마이크 궤적 시간축 보정용 (content가 tick마다 밀어넣는다) */
+  setPlaybackRate(rate: number): void {
+    if (Number.isFinite(rate) && rate > 0) this.playbackRate = rate;
   }
 
   /** 발음 표기 설정 토글 즉시 반영 */
@@ -965,7 +985,9 @@ export class PipController {
       for (const s of mic) {
         const age = wallNow - s.at;
         if (age > 2.5) continue;
-        const t = now - age; // 표시용 근사 — 배속 중에는 궤적 간격만 살짝 달라진다
+        // 곡 시간은 벽시계보다 배속만큼 빨리/느리게 흐른다 — 배속 재생 중 궤적이
+        // 뒤로 밀리지 않게 나이를 배속으로 환산해 사상한다
+        const t = now - age * this.playbackRate;
         if (t < t0 || t > t0 + W) continue;
         // 사용자 지정 옥타브 보정(설정) 먼저 적용한 뒤, 남는 오차는 레인 음역으로 폴딩
         let m = s.midi + this.micOctave * 12;

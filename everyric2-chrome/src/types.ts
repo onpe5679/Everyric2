@@ -78,8 +78,8 @@ export interface LyricsData {
   key?: SongKey;
   /** 곡 전체 평균 정렬 신뢰도 (기하평균 확률 평균) — 디버그 표시용 */
   qualityScore?: number;
-  /** 다른 영상의 싱크에 링크된 상태 (해제 UI 표시용) */
-  linked?: { sourceVideoId: string; offsetSec: number };
+  /** 다른 영상의 싱크에 링크된 상태 (해제 UI 표시용) — rate는 원곡 대비 배속 */
+  linked?: { sourceVideoId: string; offsetSec: number; rate?: number };
   /** 이 영상에 서버 저장된 사용자 싱크 오프셋(초) — 로드 시 적용 */
   userOffset?: number;
 }
@@ -175,8 +175,8 @@ export interface EveryricSyncResponse {
   attribution?: SourceAttribution | null;
   tempo?: SongTempo | null;
   key?: SongKey | null;
-  /** 다른 영상의 싱크를 빌려온 경우 (inst·커버 링크) — 타이밍은 이미 오프셋 적용됨 */
-  linked?: { source_video_id: string; offset_sec: number } | null;
+  /** 다른 영상의 싱크를 빌려온 경우 (inst·커버 링크) — 타이밍은 이미 오프셋·배속 적용됨 */
+  linked?: { source_video_id: string; offset_sec: number; rate?: number | null } | null;
   /** 이 영상에 저장된 사용자 싱크 오프셋(초) */
   user_offset?: number | null;
 }
@@ -209,6 +209,8 @@ export interface JobStatusResponse {
   /** 현재 진행 단계명 (다운로드/전사 정렬/보컬 분리/…) + 단계 내 진행률(%) */
   stage?: string | null;
   stage_progress?: number | null;
+  /** 서버가 404를 반환 — 잡 기록이 사라짐(서버 재시작 등). 폴링은 실패로 마감한다 */
+  gone?: boolean;
 }
 
 export interface Settings {
@@ -351,12 +353,13 @@ export type BgRequest =
   | { type: 'PICK_LRCLIB'; payload: { id: number } }
   | { type: 'GENERATE_SYNC'; payload: { videoId: string; lyrics: string; language?: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
   | { type: 'REGENERATE_SYNC'; payload: { videoId: string; lyrics: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
-  | { type: 'SYNC_LINK'; payload: { videoId: string; sourceVideoId: string; offsetSec: number } }
+  | { type: 'SYNC_LINK'; payload: { videoId: string; sourceVideoId: string; offsetSec: number; rate: number } }
   | { type: 'SYNC_UNLINK'; payload: { videoId: string } }
   | { type: 'SYNC_RESET'; payload: { videoId: string } }
   | { type: 'SYNC_OFFSET'; payload: { videoId: string; offsetSec: number } }
   | { type: 'SYNC_LIST' }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
+  | { type: 'JOB_CANCEL'; payload: { jobId: string } }
   | { type: 'NOTIFY'; payload: { id?: string; title: string; message: string } }
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string; title?: string; artist?: string } }
   | { type: 'SERVER_HEALTH' }

@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { checkHealth, fetchCaptionLines, generateSync, getJobStatus, linkSync, listCaptionTracks, listSyncs, lookupSync, regenerateSync, resetSync, saveUserOffset, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
+import { cancelJob, checkHealth, fetchCaptionLines, generateSync, getJobStatus, linkSync, listCaptionTracks, listSyncs, lookupSync, regenerateSync, resetSync, saveUserOffset, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
 import { getSettings } from './lib/settings';
@@ -84,6 +84,11 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       return res ? { data: res } : { error: 'job_status_failed' };
     }
 
+    case 'JOB_CANCEL': {
+      const res = await cancelJob(await getServerConfig(), message.payload.jobId);
+      return res ? { data: res } : { error: 'job_cancel_failed' };
+    }
+
     case 'NOTIFY': {
       // 전사 잡 종료를 다른 탭/창에 있어도 알 수 있게 OS 알림으로. 같은 id로 만들면
       // 여러 탭이 같은 잡을 폴링해도 알림이 중복되지 않고 갱신된다.
@@ -123,6 +128,7 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
         video_id: message.payload.videoId,
         source_video_id: message.payload.sourceVideoId,
         offset_sec: message.payload.offsetSec,
+        rate: message.payload.rate,
       });
       return res ? { data: res } : { error: 'link_failed' };
     }
@@ -196,7 +202,11 @@ async function fetchLyricsChain(song: SongInfo, skipLrclib = false): Promise<Lyr
         key: sync.key ?? undefined,
         qualityScore: sync.quality_score ?? undefined,
         linked: sync.linked
-          ? { sourceVideoId: sync.linked.source_video_id, offsetSec: sync.linked.offset_sec }
+          ? {
+              sourceVideoId: sync.linked.source_video_id,
+              offsetSec: sync.linked.offset_sec,
+              rate: sync.linked.rate ?? undefined,
+            }
           : undefined,
         userOffset,
       };
