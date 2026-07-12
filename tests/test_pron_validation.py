@@ -51,6 +51,8 @@ class TestKanaReadingHints:
     def test_prompt_includes_hints_only_with_pronunciation(self):
         t = GeminiTranslator(TranslationSettings())
         p = t._build_prompt("消えないで", "ja", "ko", True)
-        assert "KANA READINGS" in p and "きえないで" in p
+        # 힌트는 '참조'로 제공(사전 오독은 문맥 교정 지시) + 발음 필드는 가나로만 요구
+        assert "REFERENCE READINGS" in p and "きえないで" in p
+        assert "kana reading" in p and "きみ" in p
         p2 = t._build_prompt("消えないで", "ja", "ko", False)
-        assert "KANA" not in p2 and "pronunciation" not in p2
+        assert "READINGS" not in p2 and "pronunciation" not in p2

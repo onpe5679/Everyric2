@@ -121,34 +121,42 @@ class BaseTranslator(ABC):
         )
 
         if include_pronunciation:
-            # 일본어 원문이면 pykakasi 가나 읽기를 정답 참조로 프롬프트에 심는다 —
-            # LLM이 한자를 직접 읽다 틀리는 오독(消えないで→케나이데, ずっと→즈토)을
-            # 가나→한글 전사(쉬운 작업)로 바꿔 원천 차단한다. 실패 시 힌트 없이 진행.
+            # 일본어 원문이면 pykakasi 가나 읽기를 참조로 프롬프트에 심는다. 단 pykakasi는
+            # 사전 읽기라 문맥 의존 한자를 오독한다 (실측: 君にだけ→くんにだけ — 노래에선
+            # きみ). 그래서 '정답'이 아니라 '참조 + 오독은 문맥으로 교정'으로 지시한다.
             reading_block = ""
             readings = _kana_readings(text)
             if readings:
                 reading_block = (
-                    "\nKANA READINGS (authoritative reading of each original line, in order."
-                    " Base the pronunciation on these exact kana — do NOT re-read kanji"
-                    " yourself; small particle corrections like は=わ, へ=え are allowed):\n"
+                    "\nREFERENCE READINGS (machine dictionary reading of each line, in order."
+                    " The dictionary can misread context-dependent kanji — e.g. it may say"
+                    " くん for 君 where the song sings きみ. Use these as a base and correct"
+                    " such misreadings from the song's context):\n"
                     + "\n".join(f"{i + 1}. {r}" for i, r in enumerate(readings))
                     + "\n"
                 )
             if target_lang == "ko":
-                # 한국어 UI에서는 로마자가 아니라 한글 독음이 발음표기다 (보카로 위키와 동일 규약)
+                # 한글 독음은 서버가 가나에서 결정적으로 변환한다(kana_hangul) — LLM에겐
+                # 문맥 판단이 필요한 '한자→가나'만 맡긴다. LLM의 가나→한글 기계 전사는
+                # 촉음/ん 소실 실수가 잦았다 (ずっと→즈토, じぶんが→지부가 실측).
                 pron_rule = (
-                    "2. The Korean Hangul reading (한글 독음) of the ORIGINAL line — transcribe"
-                    " how the original line SOUNDS using Hangul only"
-                    " (e.g. 時計の針が → 도케이노 하리가). This is NOT the translation and NOT"
-                    " romanization."
+                    "2. The full kana reading (ひらがな) of the ORIGINAL line — how the line"
+                    " is actually sung. Convert every kanji to kana. FOLLOW the REFERENCE"
+                    " READINGS below; deviate only where the dictionary clearly misread a"
+                    " context-dependent kanji (e.g. 君 sung きみ, not くん) — okurigana words"
+                    " like 消え=きえ are reliable as given. Write particles as pronounced"
+                    " (は→わ, へ→え). Insert a space between sung phrases — a typical line"
+                    " has 2-4 phrases (きみにだけ みえている) — but keep particles attached"
+                    " to their word (きみにだけ, never きみ に だけ). Kana ONLY in this field."
                 )
                 pron_example = (
                     '[{"original": "時計の針が", "translation": "시곗바늘이",'
-                    ' "pronunciation": "도케이노 하리가"}]'
+                    ' "pronunciation": "とけいの はりが"}]'
                 )
                 pron_note = (
-                    "- pronunciation must be the Hangul reading of how the ORIGINAL line"
-                    " sounds, never romanization and never a translation"
+                    "- pronunciation must be the kana reading of the ORIGINAL line"
+                    " (hiragana, spaced by phrase) — never romanization, never a"
+                    " translation, never Hangul"
                 )
             else:
                 pron_rule = "2. Romanized pronunciation of the ORIGINAL text (not the translation)"
@@ -556,6 +564,14 @@ class LyricsTranslator:
         old_setting = self.settings.include_pronunciation
         self.settings.include_pronunciation = True
         try:
-            return self._translator.translate(lyrics, source_lang, target_lang, context)
+            result = self._translator.translate(lyrics, source_lang, target_lang, context)
         finally:
             self.settings.include_pronunciation = old_setting
+        if target_lang == "ko":
+            # LLM은 가나 독음까지만 책임진다 — 가나→한글은 결정적 변환으로 마감
+            # (촉음=ㅅ받침, ん=ㄴ받침, 장음=모음 반복). 한글로 온 구형 응답은 그대로 둔다.
+            from everyric2.text.kana_hangul import finalize_pronunciation
+
+            for line in result.lines:
+                line.pronunciation = finalize_pronunciation(line.pronunciation)
+        return result

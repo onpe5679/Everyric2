@@ -245,17 +245,20 @@ class TestPromptBuilding:
 
         self.probe = _Probe(TranslationSettings())
 
-    def test_ko_target_pron_asks_hangul_reading_not_romanization(self):
+    def test_ko_target_pron_asks_kana_reading_not_romanization(self):
+        # 새 계약: LLM은 가나 독음만 쓰고(문맥 한자 읽기), 한글 변환은 서버가 한다
+        # (kana_hangul — 촉음/ん/장음의 기계 전사 실수 원천 차단)
         prompt = self.probe._build_prompt("時計の針が", "ja", "ko", include_pronunciation=True)
-        assert "한글 독음" in prompt
-        # 한글 예시가 있어야 LLM이 로마자로 새지 않는다
-        assert "도케이노 하리가" in prompt
+        assert "kana reading" in prompt
+        # 가나 예시가 있어야 LLM이 로마자/한글로 새지 않는다
+        assert "とけいの はりが" in prompt
+        assert "never Hangul" in prompt
         assert "Romanized pronunciation" not in prompt
 
     def test_non_ko_target_pron_stays_romanized(self):
         prompt = self.probe._build_prompt("時計の針が", "ja", "en", include_pronunciation=True)
         assert "Romanized pronunciation" in prompt
-        assert "한글 독음" not in prompt
+        assert "kana reading" not in prompt
 
     def test_song_context_is_injected(self):
         prompt = self.probe._build_prompt(
