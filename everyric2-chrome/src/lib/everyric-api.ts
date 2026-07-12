@@ -62,12 +62,26 @@ export function getJobStatus(server: ServerConfig, jobId: string): Promise<JobSt
   return request<JobStatusResponse>(server, `/api/job/${encodeURIComponent(jobId)}`);
 }
 
-/** LLM 번역은 곡 전체 기준 수십 초가 걸릴 수 있어 타임아웃을 길게 잡는다 */
-export function translateLyrics(server: ServerConfig, text: string, targetLang: string): Promise<TranslateResult | null> {
+/** LLM 번역은 곡 전체 기준 수십 초가 걸릴 수 있어 타임아웃을 길게 잡는다.
+ *  발음표기(target=ko면 한글 독음)도 항상 함께 요청한다 — 원문이 en/ko면 서버 게이트가
+ *  발음만 생략하고 번역은 정상 반환. 곡 제목/아티스트는 LLM 번역 맥락으로 쓰인다. */
+export function translateLyrics(
+  server: ServerConfig,
+  text: string,
+  targetLang: string,
+  song?: { title?: string | null; artist?: string | null },
+): Promise<TranslateResult | null> {
   return request<TranslateResult>(server, '/api/translate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, source_lang: 'auto', target_lang: targetLang }),
+    body: JSON.stringify({
+      text,
+      source_lang: 'auto',
+      target_lang: targetLang,
+      include_pronunciation: true,
+      title: song?.title || undefined,
+      artist: song?.artist || undefined,
+    }),
   }, 120000);
 }
 

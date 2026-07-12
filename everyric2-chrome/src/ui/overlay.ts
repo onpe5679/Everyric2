@@ -26,6 +26,14 @@ export interface OverlayCallbacks {
 
 type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search';
 
+/** confidence(CTC 확률 기하평균, 0~1)를 e표기 없이 10진수로 — 아주 작은 값도 첫 유효숫자까지 */
+function fmtConf(v: number): string {
+  if (!(v > 0)) return '0';
+  if (v >= 0.001) return v.toFixed(3);
+  const digits = Math.min(10, 1 - Math.floor(Math.log10(v)));
+  return v.toFixed(digits);
+}
+
 /** 유튜브 URL 또는 순수 11자리 ID에서 videoId 추출 */
 function parseVideoId(input: string): string | null {
   if (/^[\w-]{11}$/.test(input)) return input;
@@ -680,8 +688,12 @@ export class LyricsOverlay {
   refreshTranslations(): void {
     this.lineEls.forEach((el, i) => {
       el.querySelector('.ey-line-tr')?.remove();
-      const translation = this.lines[i]?.translation;
-      if (translation) el.append(h('div', { className: 'ey-line-tr', text: translation }));
+      const line = this.lines[i];
+      // 번역 API가 발음(한글 독음)을 늦게 채워주는 경우 — 렌더 후 붙은 발음도 표시
+      if (line?.pronunciation && !el.querySelector('.ey-line-pron')) {
+        el.append(h('div', { className: 'ey-line-pron', text: line.pronunciation }));
+      }
+      if (line?.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation }));
     });
   }
 
@@ -709,8 +721,8 @@ export class LyricsOverlay {
     const diag = [
       // 사람이 읽는 등급 분포 (글자 색과 동일 기준: 좋음=초록, 보통=노랑, 낮음=빨강)
       g ? `정렬 좋음${Math.round(g.ok * 100)}%·보통${Math.round(g.mid * 100)}%·낮음${Math.round(g.low * 100)}%` : null,
-      info.quality != null ? `conf=${info.quality.toExponential(1)}` : null,
-      info.qualityMed != null ? `med=${info.qualityMed.toExponential(1)}` : null,
+      info.quality != null ? `conf=${fmtConf(info.quality)}` : null,
+      info.qualityMed != null ? `med=${fmtConf(info.qualityMed)}` : null,
       info.alignmentText ? `전사텍스트=${info.alignmentText === 'pronunciation' ? '독음(한국어 발음)' : '원문(원어)'}` : null,
       info.zone ? `zone=${info.zone}` : null,
       info.lineDebug,

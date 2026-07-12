@@ -32,6 +32,22 @@ def stash_force(job_id: str) -> None:
     _PENDING_FORCE.add(job_id)
 
 
+# 진행 단계 → 전역 진행률 창 (lo, hi). 단계 내부의 실제 진행 콜백은 없으므로
+# 창 안에서 시간 기반으로 차오르고, job API가 창 기준 단계별 퍼센트를 계산한다.
+STAGE_WINDOWS: dict[str, tuple[int, int]] = {
+    "다운로드": (10, 34),
+    "캐시 확인": (34, 36),
+    "전사 정렬": (36, 62),
+    "보컬 분리": (62, 74),
+    "타이밍 보정": (74, 80),
+    "멜로디 분석": (80, 88),
+    "저장": (90, 100),
+}
+
+# 잡별 현재 단계 — 정렬 스레드(_run_alignment의 on_stage 콜백)가 쓰고 모니터가 읽는다
+_JOB_STAGE: dict[str, str] = {}
+
+
 def _normalize_line(s: str) -> str:
     return " ".join(s.split())
 
@@ -110,17 +126,23 @@ async def process_job(job_id: str) -> None:
             logger.error(f"Job not found: {job_id}")
             return
 
-        await job_repo.update_status(job_id, "processing", progress=10)
+        await job_repo.update_status(job_id, "processing", progress=10, stage="다운로드")
 
     try:
         lyrics_hash_value = hash_lyrics(job.lyrics)
 
-        download_result = await asyncio.get_event_loop().run_in_executor(
-            None, _download_and_hash, job.video_id
+        dl_ticker = asyncio.create_task(
+            _tick_progress(job_id, start=10, cap=33, interval=2.0, stage="다운로드")
         )
+        try:
+            download_result = await asyncio.get_event_loop().run_in_executor(
+                None, _download_and_hash, job.video_id
+            )
+        finally:
+            dl_ticker.cancel()
         audio_hash = download_result["audio_hash"]
         audio_path = download_result["audio_path"]
-        await _set_progress(job_id, 35)  # 다운로드 완료
+        await _set_progress(job_id, 35, stage="캐시 확인")  # 다운로드 완료
 
         forced = job_id in _PENDING_FORCE
         _PENDING_FORCE.discard(job_id)
@@ -152,19 +174,27 @@ async def process_job(job_id: str) -> None:
                 Path(audio_path).unlink(missing_ok=True)
                 return
 
-        # 정렬(분리+CTC+멜로디)은 수십 초 걸리는 단일 블록 — 진행률이 멈춰 보이지 않게
-        # 45%에서 시작해 85%까지 천천히 차오르는 티커를 함께 돌린다
-        await _set_progress(job_id, 45)
+        # 정렬(CTC+분리+보정+멜로디)은 수십 초 걸리는 단일 블록 — 정렬 스레드가 단계명을
+        # _JOB_STAGE에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 DB에 반영한다
+        _JOB_STAGE[job_id] = "전사 정렬"
+        await _set_progress(job_id, 36, stage="전사 정렬")
         # 라인 메타(발음)를 정렬 단계로 넘겨 독음(ko) 정렬 경로 판단에 쓴다 (아직 pop 안 함)
         pending_meta = _PENDING_LINE_META.get(job_id)
-        ticker = asyncio.create_task(_tick_progress(job_id, start=45, cap=85))
+        monitor = asyncio.create_task(_stage_monitor(job_id, start=36))
         try:
             result = await asyncio.get_event_loop().run_in_executor(
-                None, _run_alignment, audio_path, job.lyrics, job.language, pending_meta
+                None,
+                _run_alignment,
+                audio_path,
+                job.lyrics,
+                job.language,
+                pending_meta,
+                lambda name: _JOB_STAGE.__setitem__(job_id, name),
             )
         finally:
-            ticker.cancel()
-        await _set_progress(job_id, 90)  # 정렬 완료, 저장 중
+            monitor.cancel()
+            _JOB_STAGE.pop(job_id, None)
+        await _set_progress(job_id, 90, stage="저장")  # 정렬 완료, 저장 중
 
         meta = _PENDING_LINE_META.pop(job_id, None)
         # 독음 정렬 경로는 발음/번역/pron_segments를 이미 세그먼트에 붙였으므로 재병합 생략
@@ -197,27 +227,56 @@ async def process_job(job_id: str) -> None:
         _PENDING_LINE_META.pop(job_id, None)
         _PENDING_ATTRIBUTION.pop(job_id, None)
         _PENDING_FORCE.discard(job_id)
+        _JOB_STAGE.pop(job_id, None)
         async with get_session() as session:
             job_repo = JobRepository(session)
             await job_repo.update_status(job_id, "failed", error=str(e))
 
 
-async def _set_progress(job_id: str, progress: int) -> None:
+async def _set_progress(job_id: str, progress: int, stage: str | None = None) -> None:
     from everyric2.server.db.connection import get_session
     from everyric2.server.db.repository import JobRepository
 
     async with get_session() as session:
-        await JobRepository(session).update_status(job_id, "processing", progress=progress)
+        await JobRepository(session).update_status(
+            job_id, "processing", progress=progress, stage=stage
+        )
 
 
-async def _tick_progress(job_id: str, start: int, cap: int, interval: float = 4.0) -> None:
+async def _tick_progress(
+    job_id: str, start: int, cap: int, interval: float = 4.0, stage: str | None = None
+) -> None:
     """긴 단계 동안 진행률을 cap까지 천천히 올린다 — 취소되면 그대로 멈춘다."""
     progress = start
     try:
         while progress < cap:
             await asyncio.sleep(interval)
             progress = min(cap, progress + 4)
-            await _set_progress(job_id, progress)
+            await _set_progress(job_id, progress, stage=stage)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _stage_monitor(job_id: str, start: int, interval: float = 2.0) -> None:
+    """정렬 블록 동안 _JOB_STAGE의 현재 단계를 읽어 단계명+진행률을 DB에 쓴다.
+
+    단계가 바뀌면 그 단계 창의 시작으로 점프하고, 같은 단계가 유지되는 동안은
+    틱마다 창 폭의 1/6씩 상한까지 차오른다 (내부 진행 콜백이 없는 근사치)."""
+    progress = float(start)
+    last_stage: str | None = None
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            stage = _JOB_STAGE.get(job_id)
+            if not stage:
+                continue
+            lo, hi = STAGE_WINDOWS.get(stage, (36, 88))
+            if stage != last_stage:
+                last_stage = stage
+                progress = max(progress, float(lo))
+            else:
+                progress = min(float(hi), progress + (hi - lo) / 6.0)
+            await _set_progress(job_id, int(progress), stage=stage)
     except asyncio.CancelledError:
         pass
 
@@ -669,11 +728,20 @@ def _run_alignment(
     lyrics: str,
     language: str | None,
     line_meta: list[dict[str, Any]] | None = None,
+    on_stage: Any | None = None,
 ) -> dict:
     from everyric2.alignment.factory import EngineFactory
     from everyric2.audio.loader import AudioLoader
     from everyric2.config.settings import get_settings
     from everyric2.inference.prompt import LyricLine
+
+    def report(stage: str) -> None:
+        # 진행 단계 보고 — 실패해도 정렬 자체는 계속한다
+        if on_stage is not None:
+            try:
+                on_stage(stage)
+            except Exception:
+                pass
 
     settings = get_settings()
     loader = AudioLoader()
@@ -716,7 +784,9 @@ def _run_alignment(
 
         # 보컬 스템 1회 분리 → VAD로 라인 경계 보정(가사에 없는 추임새/간주로 늘어진
         # 라인을 실제 발성 구간으로 되돌림) + 아래 멜로디 f0 추출에 재사용
+        report("보컬 분리")
         vocals = _separate_vocals(audio) if settings.melody.separate_vocals else None
+        report("타이밍 보정")
         vad_regions: list[tuple[float, float]] | None = None
         clamped_lines: set[int] = set()
         # 보정 전 원본(raw CTC) 타이밍 + 규칙별 보정 라벨 — 확장 디버그 오버레이용
@@ -835,6 +905,7 @@ def _run_alignment(
             timestamps.append(seg)
 
         # 가라오케용 음정(MIDI 노트) 주석 — 실패해도 싱크 생성 자체는 계속한다
+        report("멜로디 분석")
         f0_curve = None
         if settings.melody.enabled:
             try:

@@ -196,3 +196,37 @@ class TestTranslateAppliesGate:
         assert result.lines[0].pronunciation == "Ohayou"
         assert result.lines[0].translation == "안녕"
         assert result.engine == "nvidia"
+
+
+class TestPromptBuilding:
+    """_build_prompt — ko 타깃은 한글 독음, 곡 컨텍스트 주입, 가사 맥락 지시."""
+
+    def setup_method(self):
+        class _Probe(BaseTranslator):
+            def translate(self, *a, **k):  # pragma: no cover - not exercised
+                raise NotImplementedError
+
+        self.probe = _Probe(TranslationSettings())
+
+    def test_ko_target_pron_asks_hangul_reading_not_romanization(self):
+        prompt = self.probe._build_prompt("時計の針が", "ja", "ko", include_pronunciation=True)
+        assert "한글 독음" in prompt
+        # 한글 예시가 있어야 LLM이 로마자로 새지 않는다
+        assert "도케이노 하리가" in prompt
+        assert "Romanized pronunciation" not in prompt
+
+    def test_non_ko_target_pron_stays_romanized(self):
+        prompt = self.probe._build_prompt("時計の針が", "ja", "en", include_pronunciation=True)
+        assert "Romanized pronunciation" in prompt
+        assert "한글 독음" not in prompt
+
+    def test_song_context_is_injected(self):
+        prompt = self.probe._build_prompt(
+            "きみの声", "ja", "ko", include_pronunciation=False, context='"熱異常" by かいりきベア'
+        )
+        assert 'Song: "熱異常" by かいりきベア' in prompt
+
+    def test_lyrics_guidance_present_in_both_paths(self):
+        for pron in (True, False):
+            prompt = self.probe._build_prompt("きみの声", "ja", "ko", include_pronunciation=pron)
+            assert "ONE song" in prompt

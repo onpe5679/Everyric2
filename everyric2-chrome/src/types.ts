@@ -188,6 +188,9 @@ export interface JobStatusResponse {
   /** 서버가 큐잉을 지원하면 대기 순번(1 = 다음 차례)을 내려줄 수 있다 */
   queue_position?: number | null;
   queue_size?: number | null;
+  /** 현재 진행 단계명 (다운로드/전사 정렬/보컬 분리/…) + 단계 내 진행률(%) */
+  stage?: string | null;
+  stage_progress?: number | null;
 }
 
 export interface Settings {
@@ -307,7 +310,7 @@ export type BgRequest =
   | { type: 'SYNC_UNLINK'; payload: { videoId: string } }
   | { type: 'SYNC_LIST' }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
-  | { type: 'TRANSLATE'; payload: { text: string; targetLang: string } }
+  | { type: 'TRANSLATE'; payload: { text: string; targetLang: string; title?: string; artist?: string } }
   | { type: 'SERVER_HEALTH' }
   | { type: 'VOCARO_LOOKUP'; payload: { title: string } }
   | { type: 'VOCARO_PAGE'; payload: { slug: string } };

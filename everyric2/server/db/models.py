@@ -37,6 +37,8 @@ class Job(Base):
     result_id: Mapped[str | None] = mapped_column(String(36))
     error: Mapped[str | None] = mapped_column(Text)
     progress: Mapped[int] = mapped_column(default=0)
+    # 현재 진행 단계명 (다운로드/전사 정렬/보컬 분리/…) — 확장 진행 칩 표시용
+    stage: Mapped[str | None] = mapped_column(String(24))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

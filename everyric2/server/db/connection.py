@@ -20,6 +20,13 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all은 기존 테이블에 새 컬럼을 추가하지 않는다 — 가벼운 수동 보강 (SQLite 전용)
+        if DATABASE_URL.startswith("sqlite"):
+            from sqlalchemy import text
+
+            cols = {row[1] for row in await conn.execute(text("PRAGMA table_info(jobs)"))}
+            if "stage" not in cols:
+                await conn.execute(text("ALTER TABLE jobs ADD COLUMN stage VARCHAR(24)"))
 
 
 async def close_db():

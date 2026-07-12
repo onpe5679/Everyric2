@@ -85,7 +85,10 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     }
 
     case 'TRANSLATE': {
-      const res = await translateLyrics(await getServerConfig(), message.payload.text, message.payload.targetLang);
+      const res = await translateLyrics(
+        await getServerConfig(), message.payload.text, message.payload.targetLang,
+        { title: message.payload.title, artist: message.payload.artist },
+      );
       return res ? { data: res } : { error: 'translate_failed' };
     }
 

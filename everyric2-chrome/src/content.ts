@@ -19,6 +19,7 @@ import type {
   SongInfo,
   SyncListItem,
   TranslateResult,
+  TranslatedLine,
 } from './types';
 import type { VocaroLine, VocaroResult } from './lib/vocaro';
 
@@ -37,12 +38,15 @@ let currentData: LyricsData | null = null;
 let currentSourceUrl: string | null = null; // 보카로 위키 출처 페이지 (CC BY 출처 표기용)
 let lastVocaro: { videoId: string; lines: VocaroLine[] } | null = null; // 싱크 생성 후 발음/번역 재병합용
 /** 진행 중인 전사 잡 — videoId 키. 영상을 이동해도 백그라운드로 계속 추적한다 */
-const generatingJobs = new Map<string, { jobId: string; progress: number; queueLabel?: string }>();
+const generatingJobs = new Map<string, {
+  jobId: string; progress: number; queueLabel?: string;
+  stage?: string; stageProgress?: number;
+}>();
 let pollTimer: number | undefined;
 let searchSeq = 0;
 let lastLineIndex = -1;
 let lastDebugPush = 0;
-const translationCache = new Map<string, string[]>(); // `${videoId}:${lang}` → 라인별 번역
+const translationCache = new Map<string, TranslatedLine[]>(); // `${videoId}:${lang}` → 라인별 번역+발음
 
 async function init(): Promise<void> {
   settings = await getSettings();
@@ -420,6 +424,8 @@ async function loadTranslations(): Promise<void> {
   const videoId = currentVideoId;
   if (!data || !videoId || !settings.showTranslation) return;
   if (data.source === 'vocaro' || data.humanTranslated) return; // 위키가 이미 사람 번역을 제공
+  // 서버 싱크에 번역·발음이 이미 저장돼 있으면(생성 시 LLM 메타 병합) LLM 재호출 생략
+  if (data.lines.every(l => l.translation)) return;
 
   const lang = settings.translationLanguage;
   const cached = translationCache.get(`${videoId}:${lang}`);
@@ -428,31 +434,45 @@ async function loadTranslations(): Promise<void> {
     return;
   }
 
-  overlay?.setTranslationStatus('번역 중…');
+  overlay?.setTranslationStatus('번역·발음 생성 중…');
   const res = await sendToBackground<TranslateResult>({
     type: 'TRANSLATE',
-    payload: { text: data.lines.map(l => l.text).join('\n'), targetLang: lang },
+    payload: {
+      text: data.lines.map(l => l.text).join('\n'),
+      targetLang: lang,
+      title: currentSong?.title,
+      artist: currentSong?.artist ?? undefined,
+    },
   });
   if (currentData !== data || currentVideoId !== videoId) return; // 곡이 바뀜
   if (!settings.showTranslation || settings.translationLanguage !== lang) return;
 
-  const translations = res.data?.lines?.map(l => l.translation);
-  if (!translations || translations.length === 0) {
+  const lines = res.data?.lines;
+  if (!lines || lines.length === 0) {
     overlay?.setTranslationStatus('번역 실패 — 서버 확인');
     return;
   }
-  translationCache.set(`${videoId}:${lang}`, translations);
-  applyTranslations(data, translations);
+  translationCache.set(`${videoId}:${lang}`, lines);
+  applyTranslations(data, lines);
 }
 
-function applyTranslations(data: LyricsData, translations: string[]): void {
+function applyTranslations(data: LyricsData, translated: TranslatedLine[]): void {
+  let pronApplied = false;
   data.lines.forEach((line, i) => {
-    const t = translations[i]?.trim();
+    const t = translated[i]?.translation?.trim();
     // '[NO API KEY]'는 구버전 서버의 키 미설정 플레이스홀더 — 번역으로 표시하지 않는다
     if (t && t !== line.text && !t.startsWith('[NO API KEY]')) line.translation = t;
+    // 발음표기(target=ko면 한글 독음) — 사람이 단 발음(보카로 위키)이 있으면 건드리지 않는다
+    const p = translated[i]?.pronunciation?.trim();
+    if (p && !line.pronunciation) {
+      line.pronunciation = p;
+      pronApplied = true;
+    }
   });
   overlay?.setTranslationStatus(null);
   overlay?.refreshTranslations();
+  // 발음이 새로 붙었으면 PiP 내부 변환 캐시(setLines 시점 복사)도 다시 채운다
+  if (pronApplied && currentData === data) pip.setLines(data.lines);
   pip.refresh();
 }
 
@@ -700,7 +720,7 @@ async function handleGenerate(lyricsText: string): Promise<void> {
 
   // 보카로 위키 가사로 생성할 때는 발음/사람 번역도 서버에 함께 저장한다
   // (서버 싱크에 병합돼 다른 프로필·사용자에게도 그대로 표시됨)
-  const lineMeta = currentData?.source === 'vocaro'
+  let lineMeta = currentData?.source === 'vocaro'
     ? currentData.lines
       .filter(l => l.pronunciation || l.translation)
       .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }))
@@ -712,6 +732,43 @@ async function handleGenerate(lyricsText: string): Promise<void> {
     : undefined;
 
   if (generatingJobs.has(videoId)) return; // 이 영상은 이미 전사 중 — 칩이 진행률을 보여준다
+
+  // 위키 발음이 없으면(수동 붙여넣기·LRCLIB 등) LLM 번역·한글 독음을 먼저 받아
+  // line_meta로 넘긴다 — 서버가 독음(ko) 정렬 경로를 타고 발음/번역도 싱크에 저장된다.
+  // 실패해도 싱크 생성 자체는 계속한다 (원문 정렬 폴백).
+  if (!lineMeta || lineMeta.length === 0) {
+    const lang = settings.translationLanguage;
+    const srcLines = text.split('\n').map(s => s.trim()).filter(Boolean);
+    try {
+      overlay?.setTranslationStatus('AI 번역·독음 생성 중…');
+      let translated = translationCache.get(`${videoId}:${lang}`);
+      if (!translated || translated.length !== srcLines.length) {
+        const res = await sendToBackground<TranslateResult>({
+          type: 'TRANSLATE',
+          payload: {
+            text: srcLines.join('\n'),
+            targetLang: lang,
+            title: currentSong?.title,
+            artist: currentSong?.artist ?? undefined,
+          },
+        });
+        translated = res.data?.lines;
+        if (translated && translated.length > 0) translationCache.set(`${videoId}:${lang}`, translated);
+      }
+      if (translated && translated.length > 0) {
+        // LLM이 echo한 original 대신 붙여넣은 원문으로 인덱스 매핑 — 서버 병합은 텍스트 매칭이라
+        // 원문이 정확해야 한다 (서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치)
+        lineMeta = srcLines
+          .map((t, i) => ({
+            text: t,
+            pronunciation: translated![i]?.pronunciation?.trim() || undefined,
+            translation: translated![i]?.translation?.trim() || undefined,
+          }))
+          .filter(m => m.pronunciation || m.translation);
+      }
+    } catch { /* 번역 실패 — 메타 없이 진행 */ }
+    if (videoId === currentVideoId) overlay?.setTranslationStatus(null);
+  }
 
   const panel = ensureOverlay();
   const res = await sendToBackground<GenerateResponse>({
@@ -793,6 +850,8 @@ async function pollJobs(): Promise<void> {
       }
     } else {
       job.progress = status.progress ?? job.progress;
+      job.stage = status.stage ?? undefined;
+      job.stageProgress = status.stage_progress ?? undefined;
       job.queueLabel = status.queue_position != null && status.queue_position > 0
         ? `대기열 ${status.queue_position}번째`
         : (status.status === 'queued' || status.status === 'pending' ? '대기열' : undefined);
@@ -808,7 +867,11 @@ function updateGenChip(): void {
   const others = generatingJobs.size - (cur ? 1 : 0);
   let text: string | null = null;
   if (cur) {
-    const state = cur.queueLabel ?? `${cur.progress}%`;
+    // 단계명이 오면 "보컬 분리 60% · 전체 68%"처럼 무슨 과정인지 함께 보여준다
+    const state = cur.queueLabel
+      ?? (cur.stage
+        ? `${cur.stage} ${cur.stageProgress ?? 0}% · 전체 ${cur.progress}%`
+        : `${cur.progress}%`);
     text = `전사 중 ${state}${others > 0 ? ` · 외 ${others}건` : ''}`;
   } else if (others > 0) {
     text = `다른 영상 전사 중 ${others}건`;

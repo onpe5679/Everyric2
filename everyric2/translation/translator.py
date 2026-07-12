@@ -53,6 +53,7 @@ class BaseTranslator(ABC):
         lyrics: list[LyricLine] | str,
         source_lang: str = "auto",
         target_lang: str | None = None,
+        context: str | None = None,
     ) -> TranslationResult:
         pass
 
@@ -62,32 +63,72 @@ class BaseTranslator(ABC):
         source_lang: str,
         target_lang: str,
         include_pronunciation: bool,
+        context: str | None = None,
     ) -> str:
         lang_names = {"ko": "Korean", "en": "English", "ja": "Japanese", "zh": "Chinese"}
         target = lang_names.get(target_lang, target_lang)
         tone_instruction = TONE_PROMPTS.get(self.settings.tone, TONE_PROMPTS["natural"])
+        context_block = f"\nSong: {context}" if context else ""
+
+        # 가사 맥락 지시 — 줄별 고립 직역(기계번역 톤)을 막고 곡 전체를 하나의 화자로 잇는다
+        register_hint = (
+            " Korean song lyrics use the plain intimate register (반말/해라체, e.g. ~해, ~야,"
+            " ~잖아) — never formal endings like ~습니다/~어요 unless the original is"
+            " explicitly formal."
+            if target_lang == "ko"
+            else ""
+        )
+        lyrics_guidance = (
+            "These lines are the lyrics of ONE song, in order. Read the whole song first,"
+            " then translate so the lines flow as a coherent song: keep one consistent"
+            " speaker, emotional register and formality throughout, resolve omitted"
+            " subjects/pronouns from surrounding lines, and prefer natural lyrical phrasing"
+            f" over word-for-word rendering. Never translate a line in isolation.{register_hint}"
+        )
 
         if include_pronunciation:
+            if target_lang == "ko":
+                # 한국어 UI에서는 로마자가 아니라 한글 독음이 발음표기다 (보카로 위키와 동일 규약)
+                pron_rule = (
+                    "2. The Korean Hangul reading (한글 독음) of the ORIGINAL line — transcribe"
+                    " how the original line SOUNDS using Hangul only"
+                    " (e.g. 時計の針が → 도케이노 하리가). This is NOT the translation and NOT"
+                    " romanization."
+                )
+                pron_example = (
+                    '[{"original": "時計の針が", "translation": "시곗바늘이",'
+                    ' "pronunciation": "도케이노 하리가"}]'
+                )
+                pron_note = (
+                    "- pronunciation must be the Hangul reading of how the ORIGINAL line"
+                    " sounds, never romanization and never a translation"
+                )
+            else:
+                pron_rule = "2. Romanized pronunciation of the ORIGINAL text (not the translation)"
+                pron_example = '[{"original": "原文", "translation": "translation", "pronunciation": "genbun"}]'
+                pron_note = "- pronunciation should be romanization of the ORIGINAL lyrics"
             return f"""Translate these song lyrics to {target}.
 {tone_instruction}
+{lyrics_guidance}{context_block}
 
 For each line, provide:
 1. The translation
-2. Romanized pronunciation of the ORIGINAL text (not the translation)
+{pron_rule}
 
 Output as JSON array:
-[{{"original": "原文", "translation": "번역", "pronunciation": "genbun"}}]
+{pron_example}
 
 IMPORTANT:
-- Keep the same number of lines
+- Keep the same number of lines, in the same order
 - Output ONLY the JSON array, no explanations
-- pronunciation should be romanization of the ORIGINAL lyrics
+{pron_note}
 
 LYRICS:
 {text}"""
         else:
             return f"""Translate these song lyrics to {target}.
 {tone_instruction}
+{lyrics_guidance}{context_block}
 
 Keep the same line structure (same number of lines).
 Only output the translation, no explanations or notes.
@@ -207,6 +248,7 @@ class GeminiTranslator(BaseTranslator):
         lyrics: list[LyricLine] | str,
         source_lang: str = "auto",
         target_lang: str | None = None,
+        context: str | None = None,
     ) -> TranslationResult:
         target_lang = target_lang or self.settings.target_language
 
@@ -226,7 +268,7 @@ class GeminiTranslator(BaseTranslator):
         include_pron = self.settings.include_pronunciation and not self._should_skip_pronunciation(
             text, source_lang
         )
-        prompt = self._build_prompt(text, source_lang, target_lang, include_pron)
+        prompt = self._build_prompt(text, source_lang, target_lang, include_pron, context)
 
         try:
             response = requests.post(
@@ -299,6 +341,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         lyrics: list[LyricLine] | str,
         source_lang: str = "auto",
         target_lang: str | None = None,
+        context: str | None = None,
     ) -> TranslationResult:
         target_lang = target_lang or self.settings.target_language
 
@@ -317,7 +360,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         include_pron = self.settings.include_pronunciation and not self._should_skip_pronunciation(
             text, source_lang
         )
-        prompt = self._build_prompt(text, source_lang, target_lang, include_pron)
+        prompt = self._build_prompt(text, source_lang, target_lang, include_pron, context)
 
         headers = {
             "Content-Type": "application/json",
@@ -435,8 +478,9 @@ class LyricsTranslator:
         lyrics: list[LyricLine] | str,
         source_lang: str = "auto",
         target_lang: str = "ko",
+        context: str | None = None,
     ) -> str:
-        result = self._translator.translate(lyrics, source_lang, target_lang)
+        result = self._translator.translate(lyrics, source_lang, target_lang, context)
         return "\n".join(line.translation for line in result.lines)
 
     def translate_with_pronunciation(
@@ -444,10 +488,11 @@ class LyricsTranslator:
         lyrics: list[LyricLine] | str,
         source_lang: str = "auto",
         target_lang: str = "ko",
+        context: str | None = None,
     ) -> TranslationResult:
         old_setting = self.settings.include_pronunciation
         self.settings.include_pronunciation = True
         try:
-            return self._translator.translate(lyrics, source_lang, target_lang)
+            return self._translator.translate(lyrics, source_lang, target_lang, context)
         finally:
             self.settings.include_pronunciation = old_setting

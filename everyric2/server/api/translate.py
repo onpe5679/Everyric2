@@ -14,8 +14,11 @@ class TranslateRequest(BaseModel):
     target_lang: str = Field(default="ko", description="Target language code")
     tone: str = Field(default="natural", description="Translation tone")
     include_pronunciation: bool = Field(
-        default=False, description="Include romanized pronunciation"
+        default=False, description="Include pronunciation of the original text"
     )
+    # 곡 컨텍스트 (선택) — LLM이 가사 맥락(제목/아티스트)을 알고 번역하게 한다
+    title: str | None = Field(default=None, description="Song title for context")
+    artist: str | None = Field(default=None, description="Artist name for context")
 
 
 class TranslationLineResponse(BaseModel):
@@ -42,17 +45,25 @@ async def translate_lyrics(request: TranslateRequest):
 
         translator = LyricsTranslator(settings=settings)
 
+        context = None
+        if request.title:
+            context = f'"{request.title.strip()}"'
+            if request.artist:
+                context += f" by {request.artist.strip()}"
+
         if request.include_pronunciation:
             result = translator.translate_with_pronunciation(
                 request.text,
                 source_lang=request.source_lang,
                 target_lang=request.target_lang,
+                context=context,
             )
         else:
             result = translator._translator.translate(
                 request.text,
                 source_lang=request.source_lang,
                 target_lang=request.target_lang,
+                context=context,
             )
 
         return TranslateResponse(

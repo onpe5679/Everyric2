@@ -145,6 +145,7 @@ class JobRepository:
         progress: int | None = None,
         result_id: str | None = None,
         error: str | None = None,
+        stage: str | None = None,
     ) -> None:
         values: dict[str, Any] = {"status": status}
         if progress is not None:
@@ -153,6 +154,8 @@ class JobRepository:
             values["result_id"] = result_id
         if error is not None:
             values["error"] = error
+        if stage is not None:
+            values["stage"] = stage
 
         await self.session.execute(update(Job).where(Job.id == job_id).values(**values))
 
