@@ -107,6 +107,24 @@ class AlignmentSettings(BaseSettings):
         default=16000, description="Sample rate for alignment engines"
     )
 
+    align_on_vocals: bool = Field(
+        default=True,
+        description="Run CTC alignment on the demucs-separated vocal stem instead of the full "
+        "mix — the original CLI design (--separate swapped the audio before alignment). CTC "
+        "emissions are far cleaner without instrumentals, which matters most on dense mixes. "
+        "Separation output is reused for VAD clamping and melody f0 either way, so enabling "
+        "this adds no extra compute. Falls back to the mix when demucs is unavailable.",
+    )
+
+    star_guard_splice: bool = Field(
+        default=True,
+        description="When the star-swallow guard confirms the ko alignment compressed the "
+        "post-interlude block forward, splice instead of discarding the whole ko alignment: "
+        "keep ko (syllable-accurate) timings for lines before the interlude and take the "
+        "original-text alignment's timings for lines it places after the interlude. Falls back "
+        "to the full original-text alignment when the splice boundary is degenerate.",
+    )
+
     star_tokens: bool = Field(
         default=True,
         description="Insert wildcard <star> tokens between lyric lines during CTC alignment "

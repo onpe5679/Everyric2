@@ -37,9 +37,9 @@ def stash_force(job_id: str) -> None:
 STAGE_WINDOWS: dict[str, tuple[int, int]] = {
     "다운로드": (10, 34),
     "캐시 확인": (34, 36),
-    "전사 정렬": (36, 62),
-    "보컬 분리": (62, 74),
-    "타이밍 보정": (74, 80),
+    "보컬 분리": (36, 50),
+    "전사 정렬": (50, 72),
+    "타이밍 보정": (72, 80),
     "멜로디 분석": (80, 88),
     "저장": (90, 100),
 }
@@ -206,8 +206,8 @@ async def _process_job_inner(job_id: str, job) -> None:
 
         # 정렬(CTC+분리+보정+멜로디)은 수십 초 걸리는 단일 블록 — 정렬 스레드가 단계명을
         # _JOB_STAGE에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 DB에 반영한다
-        _JOB_STAGE[job_id] = "전사 정렬"
-        await _set_progress(job_id, 36, stage="전사 정렬")
+        _JOB_STAGE[job_id] = "보컬 분리"
+        await _set_progress(job_id, 36, stage="보컬 분리")
         # 라인 메타(발음)를 정렬 단계로 넘겨 독음(ko) 정렬 경로 판단에 쓴다 (아직 pop 안 함)
         pending_meta = _PENDING_LINE_META.get(job_id)
         monitor = asyncio.create_task(_stage_monitor(job_id, start=36))
@@ -670,6 +670,39 @@ def _lines_span_overlap(results, span: tuple[float, float]) -> float:
     return sum(max(0.0, min(r.end_time, hi) - max(r.start_time, lo)) for r in results)
 
 
+def _splice_alignments(ko_results, ja_results, post_win: tuple[float, float]) -> int | None:
+    """ko 정렬이 간주 이후 블록을 앞으로 압축했을 때 전곡 ja 폴백 대신 스플라이스한다.
+
+    간주 전 라인은 ko(독음 음절 타이밍) 유지, ja가 간주 이후에 배치한 첫 라인(k)부터는
+    ja 타이밍으로 교체한다 (ko_results를 제자리 수정). 가사 순서는 고정이고 CTC 정렬은
+    라인 순서 단조라, ja 기준 '간주 이후 첫 라인' 인덱스가 곧 텍스트상 후반 블록의 시작이다.
+    경계에서 ko 마지막 유지 라인이 ja 첫 교체 라인을 침범하면 끝을 클램프한다.
+
+    반환: 교체 시작 인덱스 k. 스플라이스가 성립하지 않으면 None (ko_results 무변경):
+      - ja가 간주 이후에 아무 라인도 안 둠 (가드 오발 — 호출부가 전곡 폴백)
+      - k == 0 (전곡 교체 = 전곡 폴백과 동일하므로 기존 경로에 맡김)
+      - ko 유지 구간(k 이전)에 경계를 넘는 라인이 있음 (압축이 간주를 걸침 — 부분 보존 불가)
+    """
+    gap_end = post_win[0]
+    k = next(
+        (i for i, r in enumerate(ja_results) if r.start_time >= gap_end - 0.5),
+        None,
+    )
+    if not k:  # None 또는 0
+        return None
+    bound = ja_results[k].start_time
+    if any(r.start_time >= bound for r in ko_results[:k]):
+        return None
+    for i in range(k):
+        r = ko_results[i]
+        if r.end_time > bound:
+            r.end_time = max(r.start_time + 0.01, bound)
+            if r.word_segments:
+                _shift_word_segments(r.word_segments, r.start_time, r.end_time)
+    ko_results[k:] = ja_results[k:]
+    return k
+
+
 def _pron_by_text(line_meta: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
     """line_meta를 정규화 텍스트 → 메타 dict로 색인 (merge_line_meta와 동일 규칙)."""
     by_text: dict[str, dict[str, Any]] = {}
@@ -789,6 +822,17 @@ def _run_alignment(
         if not engine.is_available():
             raise RuntimeError("CTC engine not available")
 
+        # 보컬 스템 1회 분리 — 원 설계(CLI --separate)대로 정렬 입력으로 쓰고, 아래 VAD
+        # 라인 경계 보정과 멜로디 f0 추출에 재사용한다. 반주가 빠진 스템은 CTC emission이
+        # 훨씬 깨끗해 고밀도 믹스/이펙트 구간에서 정렬 품질이 오른다. 미설치/실패 시 믹스 폴백.
+        report("보컬 분리")
+        need_vocals = settings.melody.separate_vocals or settings.alignment.align_on_vocals
+        vocals = _separate_vocals(audio) if need_vocals else None
+        align_audio = (
+            vocals if (vocals is not None and settings.alignment.align_on_vocals) else audio
+        )
+
+        report("전사 정렬")
         # 독음(ko) 정렬 경로: 커버리지가 충분하면 한국어 발음 텍스트+kor adapter로 정렬하고
         # 원문 라인에 역매핑한다. 미달/실패 시 원문 정렬로 폴백 (회귀 0).
         by_text = _pron_by_text(line_meta)
@@ -797,17 +841,19 @@ def _run_alignment(
         alignment_text = "original"
         if settings.alignment.use_pronunciation and coverage >= 0.9:
             try:
-                results, pron_data = _align_with_pronunciation(engine, audio, lyric_lines, by_text)
+                results, pron_data = _align_with_pronunciation(
+                    engine, align_audio, lyric_lines, by_text
+                )
                 alignment_text = "pronunciation"
                 logger.info(f"Pronunciation alignment used (coverage={coverage:.2f})")
             except Exception:
                 logger.exception("Pronunciation alignment failed; falling back to original text")
-                results = engine.align(audio, lyric_lines, language=language or "auto")
+                results = engine.align(align_audio, lyric_lines, language=language or "auto")
                 pron_data = None
         else:
             if settings.alignment.use_pronunciation:
                 logger.info(f"Pronunciation coverage {coverage:.2f} < 0.9; using original text")
-            results = engine.align(audio, lyric_lines, language=language or "auto")
+            results = engine.align(align_audio, lyric_lines, language=language or "auto")
 
         # 독음 정렬의 star span (아래 VAD 확보 후 '발성 삼킴' 게이트에 쓴다) — 재정렬 전에 포착
         pron_star_spans = (
@@ -816,10 +862,7 @@ def _run_alignment(
             else []
         )
 
-        # 보컬 스템 1회 분리 → VAD로 라인 경계 보정(가사에 없는 추임새/간주로 늘어진
-        # 라인을 실제 발성 구간으로 되돌림) + 아래 멜로디 f0 추출에 재사용
-        report("보컬 분리")
-        vocals = _separate_vocals(audio) if settings.melody.separate_vocals else None
+        # VAD로 라인 경계 보정 — 가사에 없는 추임새/간주로 늘어진 라인을 실제 발성 구간으로
         report("타이밍 보정")
         vad_regions: list[tuple[float, float]] | None = None
         clamped_lines: set[int] = set()
@@ -846,19 +889,44 @@ def _run_alignment(
                         vad_result.regions, settings.alignment.interlude_min_gap_sec
                     )
                     if swallowed >= settings.alignment.star_vocal_fallback_sec and post_win:
-                        ja_candidate = engine.align(audio, lyric_lines, language=language or "auto")
+                        ja_candidate = engine.align(
+                            align_audio, lyric_lines, language=language or "auto"
+                        )
                         ko_fill = _lines_span_overlap(results, post_win)
                         ja_fill = _lines_span_overlap(ja_candidate, post_win)
                         if ja_fill - ko_fill >= settings.alignment.post_interlude_fill_margin_sec:
-                            logger.warning(
-                                f"Pronunciation alignment vacated the post-interlude window "
-                                f"[{post_win[0]:.1f}-{post_win[1]:.1f}]s (ko fills {ko_fill:.1f}s vs "
-                                f"ja {ja_fill:.1f}s, +{ja_fill - ko_fill:.1f}s; star swallowed "
-                                f"{swallowed:.1f}s); falling back to original-text alignment"
+                            splice_k = (
+                                _splice_alignments(results, ja_candidate, post_win)
+                                if settings.alignment.star_guard_splice
+                                else None
                             )
-                            results = ja_candidate
-                            alignment_text = "original"
-                            pron_data = None
+                            if splice_k is not None:
+                                # 간주 전 라인은 ko(음절 타이밍) 보존 + 간주 후는 ja로 교체.
+                                # 교체된 라인의 ko pron_segments는 압축된 타이밍이라 무효 —
+                                # 스팬만 버리면 발음·번역 텍스트는 남고, 캐시 재병합이 ja
+                                # 타이밍 기반 DP 근사로 노트 스팬을 복원한다.
+                                logger.warning(
+                                    f"Pronunciation alignment vacated the post-interlude window "
+                                    f"[{post_win[0]:.1f}-{post_win[1]:.1f}]s (ko fills {ko_fill:.1f}s "
+                                    f"vs ja {ja_fill:.1f}s; star swallowed {swallowed:.1f}s); "
+                                    f"splicing ko[:{splice_k}] + ja[{splice_k}:]"
+                                )
+                                alignment_text = "spliced"
+                                if pron_data:
+                                    for idx in range(splice_k, len(results)):
+                                        pd = pron_data.get(idx)
+                                        if pd:
+                                            pd["pron_segments"] = None
+                            else:
+                                logger.warning(
+                                    f"Pronunciation alignment vacated the post-interlude window "
+                                    f"[{post_win[0]:.1f}-{post_win[1]:.1f}]s (ko fills {ko_fill:.1f}s "
+                                    f"vs ja {ja_fill:.1f}s, +{ja_fill - ko_fill:.1f}s; star swallowed "
+                                    f"{swallowed:.1f}s); falling back to original-text alignment"
+                                )
+                                results = ja_candidate
+                                alignment_text = "original"
+                                pron_data = None
                             raw_spans = [(r.start_time, r.end_time) for r in results]
                             fixes = {}
                         else:
@@ -974,7 +1042,8 @@ def _run_alignment(
         # 그리고 어떤 텍스트로 정렬했는지(원문 vs 독음) 클라 디버그 표시용.
         # 독음을 유지한 경우 debug star는 ko 정렬의 것이어야 한다 — star 가드가 교차검증용
         # ja 정렬을 돌리면 engine._last_star_spans가 ja star로 덮이므로 미리 포착해 둔
-        # pron_star_spans(ko star)를 쓴다. 원문 정렬(폴백 포함)은 _last_star_spans가 맞다.
+        # pron_star_spans(ko star)를 쓴다. 원문 정렬(폴백 포함)은 _last_star_spans가 맞고,
+        # 스플라이스는 후반(교체 구간)을 지배하는 ja star(_last_star_spans)를 그대로 쓴다.
         final_star_source = pron_star_spans if alignment_text == "pronunciation" else getattr(
             engine, "_last_star_spans", []
         )
