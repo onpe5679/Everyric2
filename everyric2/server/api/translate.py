@@ -80,13 +80,27 @@ def translate_lyrics(request: TranslateRequest):
     # async def가 아닌 plain def — 내부의 동기 LLM 호출(requests.post, 수십 초)이
     # 이벤트 루프를 세우면 /health까지 밀려 확장이 서버가 죽은 줄 알게 된다.
     # FastAPI는 plain def 엔드포인트를 스레드풀에서 돌린다.
+
+    # 입력 상한 — 대형(122B) 모델 특성상 초장문은 분 단위로 걸려(5000자 실측 90초+)
+    # 확장 UI가 죽은 것처럼 보인다. 가사 규모를 한참 넘는 입력은 422로 즉시 거절한다.
+    # 주의: 아래 try 안에서 올리면 except Exception이 500으로 삼킨다 — 반드시 밖에서.
+    lines_in = request.text.split("\n")
+    if len(request.text) > 15000 or len(lines_in) > 400 or any(len(ln) > 1000 for ln in lines_in):
+        raise HTTPException(
+            status_code=422,
+            detail="가사가 너무 길어요 — 최대 400줄, 줄당 1000자, 전체 15000자까지 지원해요.",
+        )
+    valid_tones = ("literal", "natural", "poetic", "casual", "formal")
+    if request.tone not in valid_tones:
+        raise HTTPException(
+            status_code=422, detail=f"unknown tone '{request.tone}' — one of {valid_tones}"
+        )
+
     try:
         # 전역 싱글턴을 직접 변조하면 스레드풀 동시 요청끼리 tone/발음 플래그가 새어
         # 나간다 — 요청마다 깊은 복사본을 만들어 격리한다
         settings = get_settings().translation.model_copy(deep=True)
-        valid_tones = ("literal", "natural", "poetic", "casual", "formal")
-        if request.tone in valid_tones:
-            object.__setattr__(settings, "tone", request.tone)
+        object.__setattr__(settings, "tone", request.tone)
         settings.include_pronunciation = request.include_pronunciation
 
         translator = LyricsTranslator(settings=settings)

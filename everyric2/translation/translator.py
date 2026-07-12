@@ -436,21 +436,32 @@ class OpenAICompatibleTranslator(BaseTranslator):
         payload.update(self._payload_extras())
 
         try:
-            response = requests.post(
-                self.api_url,
-                json=payload,
-                headers=headers,
-                timeout=self.settings.timeout,
-            )
+            content = ""
+            # 빈 응답(콘텐츠 필터/reasoning이 max_tokens 소진)은 1회 재시도 —
+            # HTML 태그·코드 조각이 섞인 가사에서 실측된 간헐 실패라 한 번이면 대부분 회복
+            for attempt in range(2):
+                response = requests.post(
+                    self.api_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.settings.timeout,
+                )
 
-            if not response.ok:
-                raise RuntimeError(f"API error: {response.status_code} - {response.text[:200]}")
+                if not response.ok:
+                    raise RuntimeError(
+                        f"API error: {response.status_code} - {response.text[:200]}"
+                    )
 
-            result = response.json()
-            message = result["choices"][0]["message"]
-            content = message.get("content") or ""
+                result = response.json()
+                message = result["choices"][0]["message"]
+                content = message.get("content") or ""
+                if content.strip():
+                    break
+                logger.warning(
+                    f"Empty completion content (attempt {attempt + 1}/2); "
+                    f"{'retrying' if attempt == 0 else 'giving up'}"
+                )
             if not content.strip():
-                # reasoning 모델이 사고에 max_tokens를 소진하면 content가 비어서 온다
                 raise RuntimeError(
                     "Empty completion content (model may have spent max_tokens on reasoning)"
                 )

@@ -333,6 +333,14 @@ class ServerSettings(BaseSettings):
         description="When set, every /api request must present this value (or the admin "
         "key) in X-API-Key. Empty = no auth (local single-user default).",
     )
+    max_job_audio_sec: int = Field(
+        default=1800,
+        description="Maximum audio duration (seconds) accepted for sync generation. Longer "
+        "videos (podcasts, live archives, hours-long loops) would monopolize the single GPU "
+        "slot for hours with no way to cancel mid-alignment; the job now fails fast with a "
+        "friendly message right after download instead. 0 disables the cap.",
+    )
+
     max_concurrent_jobs: int = Field(
         default=1,
         description="Max sync-generation jobs processed at once. Alignment+separation+"

@@ -267,11 +267,14 @@ class SyncLinkRepository:
         )
         return result.rowcount or 0
 
-    async def upsert(self, video_id: str, source_video_id: str, offset_sec: float) -> SyncLink:
+    async def upsert(
+        self, video_id: str, source_video_id: str, offset_sec: float, rate: float = 1.0
+    ) -> SyncLink:
         existing = await self.get(video_id)
         if existing:
             existing.source_video_id = source_video_id
             existing.offset_sec = offset_sec
+            existing.rate = rate
             await self.session.flush()
             return existing
         link = SyncLink(

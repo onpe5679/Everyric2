@@ -31,6 +31,13 @@ async def init_db():
             cols = {row[1] for row in await conn.execute(text("PRAGMA table_info(jobs)"))}
             if "stage" not in cols:
                 await conn.execute(text("ALTER TABLE jobs ADD COLUMN stage VARCHAR(24)"))
+            link_cols = {
+                row[1] for row in await conn.execute(text("PRAGMA table_info(sync_links)"))
+            }
+            if link_cols and "rate" not in link_cols:
+                await conn.execute(
+                    text("ALTER TABLE sync_links ADD COLUMN rate FLOAT DEFAULT 1.0")
+                )
         # 서버가 죽으며 남긴 좀비 잡(pending/processing) 정리 — 방치하면 같은 영상의
         # 생성 요청이 죽은 잡에 합류해 영구 "전사 중"에 갇힌다
         from sqlalchemy import text as _text

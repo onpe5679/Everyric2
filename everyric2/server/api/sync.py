@@ -1,8 +1,10 @@
+import asyncio
 import copy
+import re
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from everyric2.config.settings import get_settings
 from everyric2.server.db.connection import get_session
@@ -35,6 +37,21 @@ async def _check_destructive_limit(session, action: str, video_id: str, api_key:
     await log_repo.log(action, video_id)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
+
+# 유튜브 video_id 형식 (captions.py와 동일 규칙) — 무제한 길이 문자열이 그대로 쿼리
+# 파라미터/저장 키로 흘러드는 것을 차단한다
+_VIDEO_ID_PATTERN = r"^[A-Za-z0-9_-]{11}$"
+_VIDEO_ID_RE = re.compile(_VIDEO_ID_PATTERN)
+
+# 생성 API의 check-then-act(기존 싱크/활성 잡 확인 → 잡 생성)를 직렬화한다 —
+# 동시 다중 탭 요청이 근소하게 겹치면 같은 (video_id, lyrics_hash) 잡이 중복 생성됐다.
+# 단일 프로세스 서버라 프로세스 내 락으로 충분하다.
+_CREATE_LOCK = asyncio.Lock()
+
+
+def _validate_video_id(video_id: str) -> None:
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video_id")
 
 
 class SyncLookupResponse(BaseModel):
@@ -78,7 +95,7 @@ class Attribution(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    video_id: str
+    video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
     lyrics: str
     lyrics_source: str = "user_input"
     language: str | None = None
@@ -97,13 +114,13 @@ class SearchByAudioRequest(BaseModel):
 
 
 class CopySyncRequest(BaseModel):
-    source_video_id: str
-    target_video_id: str
+    source_video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
+    target_video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
     lyrics: str | None = None
 
 
 class RegenerateRequest(BaseModel):
-    video_id: str
+    video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
     lyrics: str
     language: str | None = None
     force: bool = False
@@ -136,56 +153,70 @@ def _merge_meta_into_sync(
 
 
 class SyncLinkRequest(BaseModel):
-    video_id: str
-    source_video_id: str
+    video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
+    source_video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
     offset_sec: float = 0.0
+    # 원곡 대비 재생 배속 (nightcore 1.25 등) — 고정 오프셋만으로는 배속이 다른 커버에서
+    # 곡이 진행될수록 가사가 밀린다. 소스 시간 t → t/rate + offset으로 사상.
+    rate: float = Field(default=1.0, ge=0.25, le=4.0)
 
 
 class SyncLinkResponse(BaseModel):
     video_id: str
     source_video_id: str
     offset_sec: float
+    rate: float = 1.0
     created_at: str | None = None
 
 
-def _shift_time(value: Any, offset: float) -> Any:
-    """숫자면 offset 시프트(과한 부동소수 잡음 방지로 반올림), 아니면 그대로."""
+def _shift_time(value: Any, offset: float, rate: float = 1.0) -> Any:
+    """숫자면 t/rate + offset 사상(과한 부동소수 잡음 방지로 반올림), 아니면 그대로.
+
+    rate는 원곡 대비 재생 배속 — nightcore(1.25)처럼 시간축이 압축된 커버는 고정
+    오프셋만으로는 뒤로 갈수록 밀린다. rate=1.0이면 기존과 동일한 순수 시프트."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return round(value + offset, 4)
+        return round(value / rate + offset, 4)
     return value
 
 
-def _shift_sync_timestamps(timestamps: dict[str, Any], offset: float) -> dict[str, Any]:
-    """소스 싱크의 모든 시간 필드를 offset만큼 시프트한 깊은 복사본을 만든다.
+def _shift_sync_timestamps(
+    timestamps: dict[str, Any], offset: float, rate: float = 1.0
+) -> dict[str, Any]:
+    """소스 싱크의 모든 시간 필드를 t/rate + offset으로 사상한 깊은 복사본을 만든다.
 
     세그먼트 start/end·words·notes·pron_segments, extra.debug의 vad_regions/star_spans/
     f0_curve.t0, tempo.beat_offset, 세그먼트 debug.orig까지 함께 옮긴다. attribution 등
-    시간이 아닌 필드는 그대로 둔다. offset은 음수(소스가 링크 영상보다 늦게 시작)도 된다."""
+    시간이 아닌 필드는 그대로 둔다. offset은 음수(소스가 링크 영상보다 늦게 시작)도 된다.
+    rate≠1이면 BPM(rate배)과 f0_curve 샘플 간격(dt/rate)도 함께 보정한다."""
     data = copy.deepcopy(timestamps)
+    rate = rate if rate and rate > 0 else 1.0
+
+    def sh(value: Any) -> Any:
+        return _shift_time(value, offset, rate)
 
     for seg in data.get("segments", []) or []:
         if seg.get("start") is not None:
-            seg["start"] = _shift_time(seg["start"], offset)
+            seg["start"] = sh(seg["start"])
         if seg.get("end") is not None:
-            seg["end"] = _shift_time(seg["end"], offset)
+            seg["end"] = sh(seg["end"])
         for w in seg.get("words") or []:
             if w.get("start") is not None:
-                w["start"] = _shift_time(w["start"], offset)
+                w["start"] = sh(w["start"])
             if w.get("end") is not None:
-                w["end"] = _shift_time(w["end"], offset)
+                w["end"] = sh(w["end"])
         for n in seg.get("notes") or []:
             if n.get("start") is not None:
-                n["start"] = _shift_time(n["start"], offset)
+                n["start"] = sh(n["start"])
             if n.get("end") is not None:
-                n["end"] = _shift_time(n["end"], offset)
+                n["end"] = sh(n["end"])
         for p in seg.get("pron_segments") or []:
             if p.get("start") is not None:
-                p["start"] = _shift_time(p["start"], offset)
+                p["start"] = sh(p["start"])
             if p.get("end") is not None:
-                p["end"] = _shift_time(p["end"], offset)
+                p["end"] = sh(p["end"])
         dbg = seg.get("debug")
         if isinstance(dbg, dict) and isinstance(dbg.get("orig"), list) and len(dbg["orig"]) == 2:
-            dbg["orig"] = [_shift_time(dbg["orig"][0], offset), _shift_time(dbg["orig"][1], offset)]
+            dbg["orig"] = [sh(dbg["orig"][0]), sh(dbg["orig"][1])]
 
     debug = data.get("debug")
     if isinstance(debug, dict):
@@ -193,17 +224,22 @@ def _shift_sync_timestamps(timestamps: dict[str, Any], offset: float) -> dict[st
             arr = debug.get(key)
             if isinstance(arr, list):
                 debug[key] = [
-                    [_shift_time(span[0], offset), _shift_time(span[1], offset), *span[2:]]
+                    [sh(span[0]), sh(span[1]), *span[2:]]
                     for span in arr
                     if isinstance(span, (list, tuple)) and len(span) >= 2
                 ]
         f0 = debug.get("f0_curve")
         if isinstance(f0, dict) and f0.get("t0") is not None:
-            f0["t0"] = _shift_time(f0["t0"], offset)
+            f0["t0"] = sh(f0["t0"])
+            if rate != 1.0 and isinstance(f0.get("dt"), (int, float)):
+                f0["dt"] = round(f0["dt"] / rate, 6)
 
     tempo = data.get("tempo")
-    if isinstance(tempo, dict) and tempo.get("beat_offset") is not None:
-        tempo["beat_offset"] = _shift_time(tempo["beat_offset"], offset)
+    if isinstance(tempo, dict):
+        if tempo.get("beat_offset") is not None:
+            tempo["beat_offset"] = sh(tempo["beat_offset"])
+        if rate != 1.0 and isinstance(tempo.get("bpm"), (int, float)):
+            tempo["bpm"] = round(tempo["bpm"] * rate, 2)
 
     return data
 
@@ -248,18 +284,20 @@ async def create_sync_link(request: SyncLinkRequest):
             )
         link_repo = SyncLinkRepository(session)
         link = await link_repo.upsert(
-            request.video_id, request.source_video_id, request.offset_sec
+            request.video_id, request.source_video_id, request.offset_sec, request.rate
         )
         return SyncLinkResponse(
             video_id=link.video_id,
             source_video_id=link.source_video_id,
             offset_sec=link.offset_sec,
+            rate=link.rate,
             created_at=link.created_at.isoformat() if link.created_at else None,
         )
 
 
 @router.delete("/link/{video_id}")
 async def delete_sync_link(video_id: str):
+    _validate_video_id(video_id)
     async with get_session() as session:
         removed = await SyncLinkRepository(session).delete(video_id)
         return {"video_id": video_id, "removed": removed}
@@ -297,6 +335,7 @@ class UserOffsetRequest(BaseModel):
 @router.put("/offset/{video_id}")
 async def save_user_offset(video_id: str, request: UserOffsetRequest):
     """이 영상에서 사용자가 조정한 싱크 오프셋(초)을 저장 — 다음 조회부터 함께 내려간다."""
+    _validate_video_id(video_id)
     offset = max(-60.0, min(60.0, request.offset_sec))
     async with get_session() as session:
         await VideoOffsetRepository(session).upsert(video_id, offset)
@@ -305,6 +344,7 @@ async def save_user_offset(video_id: str, request: UserOffsetRequest):
 
 @router.get("/{video_id}", response_model=SyncLookupResponse)
 async def get_sync(video_id: str, lyrics_hash: str | None = None):
+    _validate_video_id(video_id)
     async with get_session() as session:
         repo = SyncRepository(session)
         user_offset = await VideoOffsetRepository(session).get(video_id)
@@ -329,13 +369,15 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
             source_syncs = await repo.get_by_video(link.source_video_id)
             if source_syncs:
                 src = source_syncs[0]
-                shifted = _shift_sync_timestamps(src.timestamps, link.offset_sec)
+                link_rate = getattr(link, "rate", 1.0) or 1.0
+                shifted = _shift_sync_timestamps(src.timestamps, link.offset_sec, link_rate)
                 resp = _build_sync_response(
                     src,
                     shifted,
                     linked={
                         "source_video_id": link.source_video_id,
                         "offset_sec": link.offset_sec,
+                        "rate": link_rate,
                     },
                 )
                 resp.user_offset = user_offset
@@ -350,6 +392,7 @@ async def reset_video_syncs(video_id: str, x_api_key: str | None = Header(defaul
 
     이 영상이 소유자이거나 소스인 링크도 함께 제거한다 ("/link/{video_id}"가 먼저
     선언돼 있어 링크 삭제 경로와 충돌하지 않는다). 공개 배포에선 일일 한도 적용."""
+    _validate_video_id(video_id)
     async with get_session() as session:
         await _check_destructive_limit(session, "reset", video_id, x_api_key)
         removed_syncs = await SyncRepository(session).delete_by_video(video_id)
@@ -365,7 +408,8 @@ async def reset_video_syncs(video_id: str, x_api_key: str | None = Header(defaul
 async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTasks):
     lyrics_hash_value = hash_lyrics(request.lyrics)
 
-    async with get_session() as session:
+    # 확인(기존 싱크/활성 잡)→생성 사이에 다른 요청이 끼면 중복 잡이 생긴다 — 직렬화
+    async with _CREATE_LOCK, get_session() as session:
         sync_repo = SyncRepository(session)
         existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
         if existing:
@@ -496,7 +540,8 @@ async def regenerate_sync(
 ):
     lyrics_hash_value = hash_lyrics(request.lyrics)
 
-    async with get_session() as session:
+    # 확인(기존 싱크/활성 잡)→생성 사이에 다른 요청이 끼면 중복 잡이 생긴다 — 직렬화
+    async with _CREATE_LOCK, get_session() as session:
         if request.force:
             # 강제 재생성은 GPU 수십 초를 태우는 파괴적 행위 — 공개 배포에선 일일 한도 적용
             await _check_destructive_limit(session, "regenerate", request.video_id, x_api_key)

@@ -32,6 +32,30 @@ def stash_force(job_id: str) -> None:
     _PENDING_FORCE.add(job_id)
 
 
+# 사용자 취소 요청 잡 — 취소 API가 넣고, 워커가 단계 경계에서 확인해 중단한다.
+# 이미 도는 CTC/demucs 스레드 자체는 중단하지 못하므로 '경계 취소'다
+# (대기열 슬롯 진입·다운로드 직후·정렬 시작 전·저장 전). 확인 시 집합에서 제거된다.
+_CANCEL_REQUESTED: set[str] = set()
+
+
+def request_cancel(job_id: str) -> None:
+    _CANCEL_REQUESTED.add(job_id)
+
+
+async def _consume_cancel(job_id: str) -> bool:
+    """취소 요청이 있으면 잡을 실패(취소) 상태로 마감하고 True."""
+    if job_id not in _CANCEL_REQUESTED:
+        return False
+    _CANCEL_REQUESTED.discard(job_id)
+    from everyric2.server.db.connection import get_session
+    from everyric2.server.db.repository import JobRepository
+
+    async with get_session() as session:
+        await JobRepository(session).update_status(job_id, "failed", error="요청으로 취소했어요")
+    logger.info(f"Job {job_id} cancelled at a stage boundary")
+    return True
+
+
 # 진행 단계 → 전역 진행률 창 (lo, hi). 단계 내부의 실제 진행 콜백은 없으므로
 # 창 안에서 시간 기반으로 차오르고, job API가 창 기준 단계별 퍼센트를 계산한다.
 STAGE_WINDOWS: dict[str, tuple[int, int]] = {
@@ -127,6 +151,17 @@ def compute_audio_hash(file_path: Path) -> str:
     return md5.hexdigest()
 
 
+def _audio_duration_sec(file_path: str) -> float | None:
+    """다운로드된 오디오 길이(초) — 헤더만 읽어 즉시 반환. 실패 시 None(상한 검사 생략)."""
+    try:
+        import soundfile as sf
+
+        info = sf.info(file_path)
+        return float(info.frames) / float(info.samplerate or 1)
+    except Exception:
+        return None
+
+
 async def process_job(job_id: str) -> None:
     from everyric2.server.db.connection import get_session
     from everyric2.server.db.repository import JobRepository
@@ -146,7 +181,69 @@ async def process_job(job_id: str) -> None:
     if slot.locked():
         logger.info(f"Job {job_id} waiting for a processing slot")
     async with slot:
+        # 대기열에 있는 동안 취소된 잡은 슬롯을 잡자마자 놓아준다
+        if await _consume_cancel(job_id):
+            return
         await _process_job_inner(job_id, job)
+
+
+async def _try_complete_from_cache(
+    job_id: str, job, audio_hash: str, lyrics_hash_value: str, audio_path: str
+) -> bool:
+    """(audio_hash, lyrics_hash)가 일치하는 기존 싱크가 있으면 정렬 없이 잡을 완료한다.
+
+    교차 영상 재사용: 조회(GET /api/sync·job API)는 전부 video_id 컬럼 기반이라, 다른
+    영상의 행을 재사용만 하면 이 영상은 completed인데 가사가 영영 안 뜨고 초기화(DELETE)도
+    지울 행이 없어 복구 불가였다 (동일 오디오 재업로드/공식 오디오 실측). 이 영상 몫의
+    행을 복사 생성하고, 대기 중인 발음/번역 메타·출처도 원본이 아닌 이 행에만 반영한다.
+    재사용(완료)했으면 True."""
+    from everyric2.server.db.connection import get_session
+    from everyric2.server.db.repository import JobRepository, SyncRepository
+
+    async with get_session() as session:
+        sync_repo = SyncRepository(session)
+        existing = await sync_repo.get_by_audio_and_lyrics_hash(audio_hash, lyrics_hash_value)
+        if not existing:
+            return False
+        meta = _PENDING_LINE_META.pop(job_id, None)
+        attr = _PENDING_ATTRIBUTION.pop(job_id, None)
+        target = existing
+        if existing.video_id != job.video_id:
+            src = dict(existing.timestamps)
+            segments = [dict(s) for s in src.pop("segments", [])]
+            target = await sync_repo.create(
+                video_id=job.video_id,
+                lyrics_hash=lyrics_hash_value,
+                timestamps=segments,
+                language=existing.language,
+                engine=existing.engine,
+                quality_score=existing.quality_score,
+                audio_hash=audio_hash,
+                extra=src,
+            )
+            logger.info(
+                f"Job {job_id}: copied sync from video {existing.video_id} "
+                f"(same audio+lyrics) into {job.video_id}"
+            )
+        updated = dict(target.timestamps)
+        changed = False
+        if meta:
+            segs = [dict(s) for s in updated.get("segments", [])]
+            if merge_line_meta(segs, meta):
+                updated["segments"] = segs
+                changed = True
+        if attr is not None:
+            updated["attribution"] = attr
+            changed = True
+        if changed:
+            # JSON 컬럼은 재할당해야 변경이 감지된다
+            target.timestamps = updated
+        await JobRepository(session).update_status(
+            job_id, "completed", progress=100, result_id=target.id
+        )
+        logger.info(f"Job {job_id} reused existing sync (audio_hash match)")
+        Path(audio_path).unlink(missing_ok=True)
+        return True
 
 
 async def _process_job_inner(job_id: str, job) -> None:
@@ -172,38 +269,43 @@ async def _process_job_inner(job_id: str, job) -> None:
             dl_ticker.cancel()
         audio_hash = download_result["audio_hash"]
         audio_path = download_result["audio_path"]
+        if await _consume_cancel(job_id):
+            Path(audio_path).unlink(missing_ok=True)
+            return
+
+        # 노래가 아닌 초장시간 영상(팟캐스트/라이브 다시보기)이 유일한 GPU 슬롯을 몇 시간씩
+        # 점유하는 것을 막는다 — 상한 초과는 정렬에 들어가기 전에 친절하게 실패시킨다
+        from everyric2.config.settings import get_settings as _get_settings
+
+        max_sec = _get_settings().server.max_job_audio_sec
+        if max_sec > 0:
+            duration = _audio_duration_sec(audio_path)
+            if duration and duration > max_sec:
+                Path(audio_path).unlink(missing_ok=True)
+                async with get_session() as session:
+                    await JobRepository(session).update_status(
+                        job_id,
+                        "failed",
+                        error=(
+                            f"영상이 너무 길어요 ({duration / 60:.0f}분). 싱크 생성은 "
+                            f"{max_sec // 60}분 이하의 노래 영상에서만 지원해요."
+                        ),
+                    )
+                logger.info(f"Job {job_id} rejected: audio {duration:.0f}s > cap {max_sec}s")
+                return
         await _set_progress(job_id, 35, stage="캐시 확인")  # 다운로드 완료
 
         forced = job_id in _PENDING_FORCE
         _PENDING_FORCE.discard(job_id)
 
-        async with get_session() as session:
-            sync_repo = SyncRepository(session)
-            existing = await sync_repo.get_by_audio_and_lyrics_hash(audio_hash, lyrics_hash_value)
-            if existing and not forced:
-                meta = _PENDING_LINE_META.pop(job_id, None)
-                attr = _PENDING_ATTRIBUTION.pop(job_id, None)
-                updated = dict(existing.timestamps)
-                changed = False
-                if meta:
-                    segs = [dict(s) for s in updated.get("segments", [])]
-                    if merge_line_meta(segs, meta):
-                        updated["segments"] = segs
-                        changed = True
-                if attr is not None:
-                    updated["attribution"] = attr
-                    changed = True
-                if changed:
-                    # JSON 컬럼은 재할당해야 변경이 감지된다
-                    existing.timestamps = updated
-                job_repo = JobRepository(session)
-                await job_repo.update_status(
-                    job_id, "completed", progress=100, result_id=existing.id
-                )
-                logger.info(f"Job {job_id} reused existing sync (audio_hash match)")
-                Path(audio_path).unlink(missing_ok=True)
-                return
+        if not forced and await _try_complete_from_cache(
+            job_id, job, audio_hash, lyrics_hash_value, audio_path
+        ):
+            return
 
+        if await _consume_cancel(job_id):
+            Path(audio_path).unlink(missing_ok=True)
+            return
         # 정렬(CTC+분리+보정+멜로디)은 수십 초 걸리는 단일 블록 — 정렬 스레드가 단계명을
         # _JOB_STAGE에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 DB에 반영한다
         _JOB_STAGE[job_id] = "보컬 분리"
@@ -224,6 +326,8 @@ async def _process_job_inner(job_id: str, job) -> None:
         finally:
             monitor.cancel()
             _JOB_STAGE.pop(job_id, None)
+        if await _consume_cancel(job_id):
+            return  # 오디오 파일은 _run_alignment의 finally가 이미 정리했다
         await _set_progress(job_id, 90, stage="저장")  # 정렬 완료, 저장 중
 
         meta = _PENDING_LINE_META.pop(job_id, None)

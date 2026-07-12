@@ -88,7 +88,9 @@ class YouTubeDownloader:
         elif self.config.cookie_file and self.config.cookie_file.exists():
             ydl_opts["cookiefile"] = str(self.config.cookie_file)
         else:
-            default_cookie_file = Path("/tmp/everyric2/youtube_cookies.txt")
+            from everyric2.config.paths import cookies_read_path
+
+            default_cookie_file = cookies_read_path()
             if default_cookie_file.exists():
                 ydl_opts["cookiefile"] = str(default_cookie_file)
 

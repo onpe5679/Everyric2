@@ -85,4 +85,7 @@ class SyncLink(Base):
     video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     source_video_id: Mapped[str] = mapped_column(String(32), index=True)
     offset_sec: Mapped[float] = mapped_column(Float, default=0.0)
+    # 원곡 대비 재생 배속 (nightcore 1.25 등) — 소스 시간 t를 t/rate + offset으로 사상.
+    # 1.0이면 순수 시프트(기존 동작).
+    rate: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

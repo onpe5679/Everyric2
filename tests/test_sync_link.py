@@ -64,12 +64,12 @@ async def _env(seed_source=True, seed_dst_own=False):
         async with test_sessionmaker() as s:
             if seed_source:
                 await SyncRepository(s).create(
-                    video_id="SRC", lyrics_hash="h1", timestamps=SOURCE_SEGMENTS,
+                    video_id="SRCSRCSRC01", lyrics_hash="h1", timestamps=SOURCE_SEGMENTS,
                     engine="ctc", audio_hash="a1", extra=SOURCE_EXTRA,
                 )
             if seed_dst_own:
                 await SyncRepository(s).create(
-                    video_id="DST", lyrics_hash="h2",
+                    video_id="DSTDSTDST01", lyrics_hash="h2",
                     timestamps=[{"text": "자기 싱크", "start": 5.0, "end": 6.0}],
                     engine="ctc", audio_hash="a2",
                 )
@@ -84,13 +84,13 @@ def test_link_resolves_with_positive_offset():
     async def body():
         async with _env():
             link = await create_sync_link(
-                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=10.0)
+                SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="SRCSRCSRC01", offset_sec=10.0)
             )
-            assert link.source_video_id == "SRC"
+            assert link.source_video_id == "SRCSRCSRC01"
 
-            resp = await get_sync("DST")
+            resp = await get_sync("DSTDSTDST01")
             assert resp.found is True
-            assert resp.linked == {"source_video_id": "SRC", "offset_sec": 10.0}
+            assert resp.linked == {"source_video_id": "SRCSRCSRC01", "offset_sec": 10.0, "rate": 1.0}
             seg = resp.timestamps[0]
             assert seg["start"] == 11.0 and seg["end"] == 12.0
             assert seg["words"][0]["start"] == 11.0
@@ -113,9 +113,9 @@ def test_link_resolves_with_negative_offset():
     async def body():
         async with _env():
             await create_sync_link(
-                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=-0.5)
+                SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="SRCSRCSRC01", offset_sec=-0.5)
             )
-            resp = await get_sync("DST")
+            resp = await get_sync("DSTDSTDST01")
             assert resp.timestamps[0]["start"] == 0.5
             assert resp.timestamps[0]["end"] == 1.5
             assert resp.debug["f0_curve"]["t0"] == 0.0
@@ -128,9 +128,9 @@ def test_own_sync_takes_priority_over_link():
         async with _env(seed_dst_own=True):
             # DST는 자기 싱크가 있는데 링크도 걸어 둔다 → 조회는 자기 싱크 우선
             await create_sync_link(
-                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=10.0)
+                SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="SRCSRCSRC01", offset_sec=10.0)
             )
-            resp = await get_sync("DST")
+            resp = await get_sync("DSTDSTDST01")
             assert resp.found is True
             assert resp.linked is None  # 링크 아님
             assert resp.timestamps[0]["text"] == "자기 싱크"
@@ -144,7 +144,7 @@ def test_self_link_rejected():
         async with _env():
             with pytest.raises(HTTPException) as exc:
                 await create_sync_link(
-                    SyncLinkRequest(video_id="SRC", source_video_id="SRC", offset_sec=0.0)
+                    SyncLinkRequest(video_id="SRCSRCSRC01", source_video_id="SRCSRCSRC01", offset_sec=0.0)
                 )
             assert exc.value.status_code == 400
 
@@ -156,7 +156,7 @@ def test_link_to_source_without_sync_rejected():
         async with _env():
             with pytest.raises(HTTPException) as exc:
                 await create_sync_link(
-                    SyncLinkRequest(video_id="DST", source_video_id="NOPE", offset_sec=0.0)
+                    SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="NOPENOPE001", offset_sec=0.0)
                 )
             assert exc.value.status_code == 400
 
@@ -167,16 +167,16 @@ def test_unlink_removes_link():
     async def body():
         async with _env():
             await create_sync_link(
-                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=3.0)
+                SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="SRCSRCSRC01", offset_sec=3.0)
             )
-            assert (await get_sync("DST")).found is True
+            assert (await get_sync("DSTDSTDST01")).found is True
 
-            removed = await delete_sync_link("DST")
+            removed = await delete_sync_link("DSTDSTDST01")
             assert removed["removed"] is True
             # 링크 해제 후 자기 싱크도 없으니 미발견
-            assert (await get_sync("DST")).found is False
+            assert (await get_sync("DSTDSTDST01")).found is False
             # 두 번째 해제는 removed False
-            assert (await delete_sync_link("DST"))["removed"] is False
+            assert (await delete_sync_link("DSTDSTDST01"))["removed"] is False
 
     asyncio.run(body())
 
@@ -185,12 +185,12 @@ def test_relink_is_upsert():
     async def body():
         async with _env():
             await create_sync_link(
-                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=5.0)
+                SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="SRCSRCSRC01", offset_sec=5.0)
             )
             await create_sync_link(
-                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=7.0)
+                SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="SRCSRCSRC01", offset_sec=7.0)
             )
-            resp = await get_sync("DST")
+            resp = await get_sync("DSTDSTDST01")
             assert resp.linked["offset_sec"] == 7.0
             assert resp.timestamps[0]["start"] == 8.0  # 1.0 + 7.0
 
@@ -204,7 +204,7 @@ def test_list_returns_candidates():
             assert isinstance(syncs, list)
             assert len(syncs) == 1
             item = syncs[0]
-            assert item["video_id"] == "SRC"
+            assert item["video_id"] == "SRCSRCSRC01"
             assert item["first_line"] == "테스트 라인"
             assert item["line_count"] == 1
             assert item["attribution_name"] == "보카로 위키"
@@ -226,16 +226,16 @@ def test_reset_deletes_syncs_and_involving_links():
             # DST가 SRC를 빌려 쓰는 링크가 있는 상태에서 SRC를 초기화하면
             # SRC의 싱크와 SRC가 소스인 링크가 함께 사라져야 한다
             await create_sync_link(
-                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=1.0)
+                SyncLinkRequest(video_id="DSTDSTDST01", source_video_id="SRCSRCSRC01", offset_sec=1.0)
             )
-            res = await reset_video_syncs("SRC")
+            res = await reset_video_syncs("SRCSRCSRC01")
             assert res["removed_syncs"] == 1
             assert res["removed_links"] == 1
 
-            resp = await get_sync("SRC")
+            resp = await get_sync("SRCSRCSRC01")
             assert resp.found is False
             # DST의 자기 싱크는 영향받지 않고, 죽은 링크로 빌려 오지도 않는다
-            resp2 = await get_sync("DST")
+            resp2 = await get_sync("DSTDSTDST01")
             assert resp2.found is True
             assert resp2.linked is None
 
@@ -245,7 +245,7 @@ def test_reset_deletes_syncs_and_involving_links():
 def test_reset_on_video_without_sync_is_noop():
     async def body():
         async with _env(seed_source=False):
-            res = await reset_video_syncs("NOPE")
+            res = await reset_video_syncs("NOPENOPE001")
             assert res["removed_syncs"] == 0
             assert res["removed_links"] == 0
 
@@ -273,7 +273,7 @@ def test_generate_joins_active_job():
 
     async def body():
         async with _env(seed_source=False):
-            req = GenerateRequest(video_id="VID", lyrics="가사 한 줄\n두 줄")
+            req = GenerateRequest(video_id="VIDVIDVID01", lyrics="가사 한 줄\n두 줄")
             r1 = await generate_sync(req, BackgroundTasks())
             assert r1.status == "processing"
 
@@ -283,7 +283,7 @@ def test_generate_joins_active_job():
 
             # 다른 가사는 별도 잡 (붙여넣기 내용을 고친 재시도는 막지 않는다)
             r3 = await generate_sync(
-                GenerateRequest(video_id="VID", lyrics="완전히 다른 가사"), BackgroundTasks()
+                GenerateRequest(video_id="VIDVIDVID01", lyrics="완전히 다른 가사"), BackgroundTasks()
             )
             assert r3.job_id != r1.job_id
 
@@ -303,10 +303,10 @@ def test_regenerate_joins_active_job():
     async def body():
         async with _env(seed_source=False):
             r1 = await generate_sync(
-                GenerateRequest(video_id="VID", lyrics="가사"), BackgroundTasks()
+                GenerateRequest(video_id="VIDVIDVID01", lyrics="가사"), BackgroundTasks()
             )
             r2 = await regenerate_sync(
-                RegenerateRequest(video_id="VID", lyrics="가사", force=True), BackgroundTasks()
+                RegenerateRequest(video_id="VIDVIDVID01", lyrics="가사", force=True), BackgroundTasks()
             )
             assert r2.job_id == r1.job_id  # 진행 중이면 재생성도 합류
 
@@ -318,13 +318,13 @@ def test_user_offset_roundtrip():
 
     async def body():
         async with _env():
-            await save_user_offset("SRC", UserOffsetRequest(offset_sec=1.5))
-            resp = await get_sync("SRC")
+            await save_user_offset("SRCSRCSRC01", UserOffsetRequest(offset_sec=1.5))
+            resp = await get_sync("SRCSRCSRC01")
             assert resp.found is True
             assert resp.user_offset == 1.5
             # 싱크 없는 영상도 오프셋은 저장·조회된다 (found=false여도 내려감)
-            await save_user_offset("NOSYNC", UserOffsetRequest(offset_sec=-0.3))
-            resp2 = await get_sync("NOSYNC")
+            await save_user_offset("NOSYNCNOS01", UserOffsetRequest(offset_sec=-0.3))
+            resp2 = await get_sync("NOSYNCNOS01")
             assert resp2.found is False
             assert resp2.user_offset == -0.3
 
@@ -342,12 +342,12 @@ def test_destructive_daily_limit_with_admin_bypass():
             object.__setattr__(server, "daily_destructive_limit", 1)
             try:
                 # 비어드민: 1회 허용, 2회째 429
-                await reset_video_syncs("SRC", x_api_key=None)
+                await reset_video_syncs("SRCSRCSRC01", x_api_key=None)
                 with pytest.raises(HTTPException) as exc:
-                    await reset_video_syncs("SRC", x_api_key="wrong")
+                    await reset_video_syncs("SRCSRCSRC01", x_api_key="wrong")
                 assert exc.value.status_code == 429
                 # 어드민 키는 한도 없이 통과
-                await reset_video_syncs("SRC", x_api_key="admin-secret")
+                await reset_video_syncs("SRCSRCSRC01", x_api_key="admin-secret")
             finally:
                 object.__setattr__(server, "admin_api_key", orig_key)
                 object.__setattr__(server, "daily_destructive_limit", orig_limit)

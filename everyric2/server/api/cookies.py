@@ -1,13 +1,10 @@
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from everyric2.config.paths import LEGACY_COOKIES_PATH, cookies_read_path, cookies_write_path
 from everyric2.config.settings import get_settings
 
 router = APIRouter(prefix="/api/cookies", tags=["cookies"])
-
-COOKIES_FILE_PATH = Path("/tmp/everyric2/youtube_cookies.txt")
 
 
 class CookiesStatus(BaseModel):
@@ -36,11 +33,11 @@ async def get_cookies_status():
             method="file",
             path=str(settings.cookie_file),
         )
-    elif COOKIES_FILE_PATH.exists():
+    elif cookies_read_path().exists():
         return CookiesStatus(
             configured=True,
             method="file",
-            path=str(COOKIES_FILE_PATH),
+            path=str(cookies_read_path()),
         )
 
     return CookiesStatus(configured=False)
@@ -53,14 +50,15 @@ async def upload_cookies_file(file: UploadFile):
 
     content = await file.read()
 
-    COOKIES_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    COOKIES_FILE_PATH.write_bytes(content)
+    target = cookies_write_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
 
     settings = get_settings().audio
-    settings.cookie_file = COOKIES_FILE_PATH
+    settings.cookie_file = target
     settings.cookies_from_browser = None
 
-    return {"status": "ok", "path": str(COOKIES_FILE_PATH)}
+    return {"status": "ok", "path": str(target)}
 
 
 @router.post("/text")
@@ -68,20 +66,22 @@ async def set_cookies_text(request: CookiesTextRequest):
     if not request.content.strip():
         raise HTTPException(status_code=400, detail="Content cannot be empty")
 
-    COOKIES_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    COOKIES_FILE_PATH.write_text(request.content)
+    target = cookies_write_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(request.content)
 
     settings = get_settings().audio
-    settings.cookie_file = COOKIES_FILE_PATH
+    settings.cookie_file = target
     settings.cookies_from_browser = None
 
-    return {"status": "ok", "path": str(COOKIES_FILE_PATH)}
+    return {"status": "ok", "path": str(target)}
 
 
 @router.delete("")
 async def clear_cookies():
-    if COOKIES_FILE_PATH.exists():
-        COOKIES_FILE_PATH.unlink()
+    # 새 위치와 레거시(/tmp → Windows에선 C:\tmp) 둘 다 지워야 완전히 초기화된다
+    for path in (cookies_write_path(), LEGACY_COOKIES_PATH):
+        path.unlink(missing_ok=True)
 
     settings = get_settings().audio
     settings.cookie_file = None
