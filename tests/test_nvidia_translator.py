@@ -7,6 +7,7 @@ import pytest
 from everyric2.config.settings import TranslationSettings
 from everyric2.translation.translator import (
     BaseTranslator,
+    GeminiTranslator,
     NvidiaTranslator,
     OpenAICompatibleTranslator,
     TranslatorFactory,
@@ -50,6 +51,42 @@ class TestTranslatorFactory:
 
         assert translator.model == settings.nvidia_model
         assert translator.model != "gemini-2.0-flash"
+
+    def test_gemini_engine_without_key_auto_switches_to_nvidia(self, monkeypatch, tmp_path):
+        # gemini 키가 없으면 웹 폴백(발음 불가)으로 격하되는 대신 NIM 키가 있으면 NIM으로
+        key_file = tmp_path / "nvapi.txt"
+        key_file.write_text("nim-key", encoding="utf-8")
+        monkeypatch.setattr(NvidiaTranslator, "_KEY_FILE", key_file)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+
+        translator = TranslatorFactory.get_translator(
+            TranslationSettings(engine="gemini", api_key=None)
+        )
+        assert isinstance(translator, NvidiaTranslator)
+
+    def test_gemini_engine_with_key_stays_gemini(self, monkeypatch, tmp_path):
+        key_file = tmp_path / "nvapi.txt"
+        key_file.write_text("nim-key", encoding="utf-8")
+        monkeypatch.setattr(NvidiaTranslator, "_KEY_FILE", key_file)
+        monkeypatch.setenv("GEMINI_API_KEY", "gm-key")
+
+        translator = TranslatorFactory.get_translator(
+            TranslationSettings(engine="gemini", api_key=None)
+        )
+        assert isinstance(translator, GeminiTranslator)
+
+    def test_gemini_engine_without_any_key_keeps_gemini_web_fallback(self, monkeypatch, tmp_path):
+        # NIM 키도 없으면 기존 동작(웹 번역 폴백) 유지 — 번역이라도 나가야 한다
+        missing = tmp_path / "does_not_exist.txt"
+        monkeypatch.setattr(NvidiaTranslator, "_KEY_FILE", missing)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+
+        translator = TranslatorFactory.get_translator(
+            TranslationSettings(engine="gemini", api_key=None)
+        )
+        assert isinstance(translator, GeminiTranslator)
 
 
 class TestApiKeyResolutionOrder:

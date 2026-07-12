@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -12,6 +13,8 @@ from everyric2.config.settings import TranslationSettings, get_settings
 from everyric2.inference.prompt import LyricLine
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -328,6 +331,8 @@ class GeminiTranslator(BaseTranslator):
 class OpenAICompatibleTranslator(BaseTranslator):
     def __init__(self, settings: TranslationSettings | None = None):
         super().__init__(settings)
+        # 결과에 찍는 실제 백엔드 이름 — 자동 전환(gemini 설정→NIM) 시 settings.engine과 다르다
+        self.engine_name = self.settings.engine
         self.api_key = self.settings.api_key or os.getenv("OPENAI_API_KEY") or "local-gen-ai"
         self.model = self.settings.model
 
@@ -354,7 +359,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
 
         if not text.strip():
             return TranslationResult(
-                [], source_lang, target_lang, self.settings.engine, self.settings.tone
+                [], source_lang, target_lang, self.engine_name, self.settings.tone
             )
 
         include_pron = self.settings.include_pronunciation and not self._should_skip_pronunciation(
@@ -402,7 +407,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 lines = self._parse_text_response(content, original_lines)
 
             return TranslationResult(
-                lines, source_lang, target_lang, self.settings.engine, self.settings.tone
+                lines, source_lang, target_lang, self.engine_name, self.settings.tone
             )
 
         except requests.exceptions.ConnectionError as e:
@@ -429,6 +434,8 @@ class NvidiaTranslator(OpenAICompatibleTranslator):
         # OpenAICompatibleTranslator.__init__을 건너뛰고 BaseTranslator.__init__만 호출해
         # OPENAI_API_KEY/로컬 기본 URL 등 다른 엔진 전용 로직이 섞이지 않게 한다.
         BaseTranslator.__init__(self, settings)
+        # settings.engine이 "gemini"여도(키 부재 자동 전환) 결과에는 실제 백엔드를 찍는다
+        self.engine_name = "nvidia"
         self.api_key = (
             self.settings.api_key or os.getenv("NVIDIA_API_KEY") or self._read_key_file()
         )
@@ -455,6 +462,16 @@ class TranslatorFactory:
         settings = settings or get_settings().translation
 
         if settings.engine == "gemini":
+            # gemini 키가 없으면 웹 번역 폴백(번역만 가능, 발음표기 불가·기계번역 톤)으로
+            # 조용히 격하된다 — NVIDIA 키(env 또는 루트 nvapi.txt)가 있으면 NIM으로 자동
+            # 전환한다. env 없이 uvicorn만 띄운 서버에서 발음이 통째로 빠지는 사고 방지.
+            if not (settings.api_key or os.getenv("GEMINI_API_KEY")):
+                nvidia = NvidiaTranslator(settings)
+                if nvidia.api_key:
+                    logger.info(
+                        "No Gemini API key; auto-switching translation engine to NVIDIA NIM"
+                    )
+                    return nvidia
             return GeminiTranslator(settings)
         elif settings.engine == "nvidia":
             return NvidiaTranslator(settings)
