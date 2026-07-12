@@ -4,7 +4,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoSearch: true,
   fontSize: 'medium',
   theme: 'auto',
-  serverUrl: 'http://localhost:8000',
+  serverUrl: 'http://127.0.0.1:8000',
   offsetSec: 0,
   showTranslation: false,
   translationLanguage: 'ko',

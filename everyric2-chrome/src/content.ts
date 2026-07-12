@@ -47,6 +47,9 @@ let searchSeq = 0;
 let lastLineIndex = -1;
 let lastDebugPush = 0;
 const translationCache = new Map<string, TranslatedLine[]>(); // `${videoId}:${lang}` → 라인별 번역+발음
+// 같은 곡의 번역 요청이 동시에 여러 갈래(표시 경로·생성 경로)에서 뜨면 하나로 합친다 —
+// LLM 호출은 수십 초짜리라 중복이 곧 서버 스레드 낭비 + 진행 지연이다
+const pendingTranslate = new Map<string, Promise<TranslatedLine[] | undefined>>();
 
 async function init(): Promise<void> {
   settings = await getSettings();
@@ -443,24 +446,14 @@ async function loadTranslations(): Promise<void> {
   }
 
   overlay?.setTranslationStatus('번역·발음 생성 중…');
-  const res = await sendToBackground<TranslateResult>({
-    type: 'TRANSLATE',
-    payload: {
-      text: data.lines.map(l => l.text).join('\n'),
-      targetLang: lang,
-      title: currentSong?.title,
-      artist: currentSong?.artist ?? undefined,
-    },
-  });
+  const lines = await requestTranslation(videoId, data.lines.map(l => l.text));
   if (currentData !== data || currentVideoId !== videoId) return; // 곡이 바뀜
   if (!settings.showTranslation || settings.translationLanguage !== lang) return;
 
-  const lines = res.data?.lines;
   if (!lines || lines.length === 0) {
     overlay?.setTranslationStatus('번역 실패 — 서버 확인');
     return;
   }
-  translationCache.set(`${videoId}:${lang}`, lines);
   applyTranslations(data, lines);
 }
 
@@ -490,6 +483,31 @@ function expectsPronunciation(texts: string[]): boolean {
   return (cjk?.length ?? 0) >= 5;
 }
 
+/** 서버 번역(발음 포함) 요청 — video+언어 기준으로 동시 요청을 하나로 합치고 캐시에 저장 */
+function requestTranslation(
+  videoId: string, srcLines: string[],
+): Promise<TranslatedLine[] | undefined> {
+  const key = `${videoId}:${settings.translationLanguage}`;
+  const inFlight = pendingTranslate.get(key);
+  if (inFlight) return inFlight;
+  const p = (async () => {
+    const res = await sendToBackground<TranslateResult>({
+      type: 'TRANSLATE',
+      payload: {
+        text: srcLines.join('\n'),
+        targetLang: settings.translationLanguage,
+        title: currentSong?.title,
+        artist: currentSong?.artist ?? undefined,
+      },
+    });
+    const lines = res.data?.lines;
+    if (lines && lines.length > 0) translationCache.set(key, lines);
+    return lines && lines.length > 0 ? lines : undefined;
+  })().finally(() => pendingTranslate.delete(key));
+  pendingTranslate.set(key, p);
+  return p;
+}
+
 /** LLM 번역·한글 독음을 받아 line_meta로 변환 — 캐시 우선, 실패 시 undefined(원문 정렬 폴백).
  *  LLM이 echo한 original 대신 넘겨받은 원문으로 인덱스 매핑한다 (서버 병합은 텍스트 매칭이라
  *  원문이 정확해야 하고, 서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치). */
@@ -505,17 +523,7 @@ async function fetchLlmLineMeta(
       !translated || translated.length !== srcLines.length
       || (expectsPronunciation(srcLines) && !translated.some(l => l.pronunciation))
     ) {
-      const res = await sendToBackground<TranslateResult>({
-        type: 'TRANSLATE',
-        payload: {
-          text: srcLines.join('\n'),
-          targetLang: lang,
-          title: currentSong?.title,
-          artist: currentSong?.artist ?? undefined,
-        },
-      });
-      translated = res.data?.lines;
-      if (translated && translated.length > 0) translationCache.set(`${videoId}:${lang}`, translated);
+      translated = await requestTranslation(videoId, srcLines);
     }
     if (translated && translated.length > 0) {
       return srcLines

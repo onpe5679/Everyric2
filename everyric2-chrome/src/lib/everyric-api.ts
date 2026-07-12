@@ -7,7 +7,11 @@ export interface ServerConfig {
 }
 
 function baseUrl(server: ServerConfig): string {
-  return server.serverUrl.replace(/\/+$/, '');
+  // Windows에서 localhost 해석이 ::1(IPv6)을 먼저 시도해 요청마다 ~2s를 태울 수 있다
+  // (서버는 IPv4 0.0.0.0 바인딩) — 루프백은 127.0.0.1로 정규화해 스톨을 없앤다
+  return server.serverUrl
+    .replace(/^(https?:\/\/)localhost(?=[:/]|$)/i, '$1127.0.0.1')
+    .replace(/\/+$/, '');
 }
 
 function buildHeaders(server: ServerConfig, extra?: Record<string, string>): Record<string, string> {
@@ -119,7 +123,10 @@ export function listSyncs(server: ServerConfig, limit = 50): Promise<SyncListIte
 
 export async function checkHealth(server: ServerConfig): Promise<boolean> {
   const res = await request<{ status: string }>(server, '/health', undefined, 1500);
-  return res !== null;
+  if (res !== null) return true;
+  // 일시적 지연(콜드 스타트 등)으로 서버를 죽었다고 오판하면 생성 버튼이 잠긴다 — 한 번 더
+  const retry = await request<{ status: string }>(server, '/health', undefined, 4000);
+  return retry !== null;
 }
 
 export interface VocaroMatchResponse {

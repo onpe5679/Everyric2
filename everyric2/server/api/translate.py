@@ -35,7 +35,10 @@ class TranslateResponse(BaseModel):
 
 
 @router.post("", response_model=TranslateResponse)
-async def translate_lyrics(request: TranslateRequest):
+def translate_lyrics(request: TranslateRequest):
+    # async def가 아닌 plain def — 내부의 동기 LLM 호출(requests.post, 수십 초)이
+    # 이벤트 루프를 세우면 /health까지 밀려 확장이 서버가 죽은 줄 알게 된다.
+    # FastAPI는 plain def 엔드포인트를 스레드풀에서 돌린다.
     try:
         settings = get_settings().translation
         valid_tones = ("literal", "natural", "poetic", "casual", "formal")
