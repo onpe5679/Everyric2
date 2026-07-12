@@ -97,6 +97,15 @@ export function linkSync(
   });
 }
 
+/** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사로 만든 싱크를 걷어내고 새로 시작 */
+export function resetSync(
+  server: ServerConfig, videoId: string,
+): Promise<{ removed_syncs: number; removed_links: number } | null> {
+  return request<{ removed_syncs: number; removed_links: number }>(
+    server, `/api/sync/${encodeURIComponent(videoId)}`, { method: 'DELETE' },
+  );
+}
+
 export function unlinkSync(server: ServerConfig, videoId: string): Promise<{ removed: boolean } | null> {
   return request<{ removed: boolean }>(server, `/api/sync/link/${encodeURIComponent(videoId)}`, {
     method: 'DELETE',

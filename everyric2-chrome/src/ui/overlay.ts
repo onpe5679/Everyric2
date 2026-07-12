@@ -22,6 +22,8 @@ export interface OverlayCallbacks {
   onUnlinkSync: () => void;
   /** 서버 저장 싱크 목록 요청 — 결과는 showSyncList로 되돌아온다 */
   onRequestSyncList: () => void;
+  /** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사에서 새로 시작 */
+  onResetSync: () => void;
 }
 
 type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search';
@@ -430,6 +432,18 @@ export class LyricsOverlay {
           className: 'ey-secondary-btn',
           text: '자동 검색으로 되돌리기',
           on: { click: () => this.callbacks.onRetrySearch() },
+        }),
+        h('button', {
+          className: 'ey-secondary-btn',
+          text: '이 영상 싱크 초기화 (서버 저장 삭제)',
+          attrs: { title: '잘못 붙여넣은 가사로 만든 싱크를 완전히 지우고 처음부터 다시 시작합니다' },
+          on: {
+            click: () => {
+              if (window.confirm('이 영상의 서버 싱크(정렬·발음·번역 저장본)를 모두 삭제할까요?\n삭제 후 자동 검색이 다시 실행되고, 가사를 새로 붙여넣을 수 있어요.')) {
+                this.callbacks.onResetSync();
+              }
+            },
+          },
         }),
       ),
     );

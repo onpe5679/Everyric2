@@ -308,6 +308,7 @@ export type BgRequest =
   | { type: 'REGENERATE_SYNC'; payload: { videoId: string; lyrics: string; lineMeta?: LineMeta[]; attribution?: SourceAttribution } }
   | { type: 'SYNC_LINK'; payload: { videoId: string; sourceVideoId: string; offsetSec: number } }
   | { type: 'SYNC_UNLINK'; payload: { videoId: string } }
+  | { type: 'SYNC_RESET'; payload: { videoId: string } }
   | { type: 'SYNC_LIST' }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string; title?: string; artist?: string } }

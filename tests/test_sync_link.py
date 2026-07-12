@@ -18,6 +18,7 @@ from everyric2.server.api.sync import (
     delete_sync_link,
     get_sync,
     list_available_syncs,
+    reset_video_syncs,
 )
 from everyric2.server.db import connection as db_conn
 from everyric2.server.db.models import Base
@@ -217,3 +218,47 @@ def test_list_route_declared_before_video_id_route():
     paths = [r.path for r in app.routes if getattr(r, "path", "").startswith("/api/sync")]
     assert "/api/sync/list" in paths and "/api/sync/{video_id}" in paths
     assert paths.index("/api/sync/list") < paths.index("/api/sync/{video_id}")
+
+
+def test_reset_deletes_syncs_and_involving_links():
+    async def body():
+        async with _env(seed_dst_own=True):
+            # DST가 SRC를 빌려 쓰는 링크가 있는 상태에서 SRC를 초기화하면
+            # SRC의 싱크와 SRC가 소스인 링크가 함께 사라져야 한다
+            await create_sync_link(
+                SyncLinkRequest(video_id="DST", source_video_id="SRC", offset_sec=1.0)
+            )
+            res = await reset_video_syncs("SRC")
+            assert res["removed_syncs"] == 1
+            assert res["removed_links"] == 1
+
+            resp = await get_sync("SRC")
+            assert resp.found is False
+            # DST의 자기 싱크는 영향받지 않고, 죽은 링크로 빌려 오지도 않는다
+            resp2 = await get_sync("DST")
+            assert resp2.found is True
+            assert resp2.linked is None
+
+    asyncio.run(body())
+
+
+def test_reset_on_video_without_sync_is_noop():
+    async def body():
+        async with _env(seed_source=False):
+            res = await reset_video_syncs("NOPE")
+            assert res["removed_syncs"] == 0
+            assert res["removed_links"] == 0
+
+    asyncio.run(body())
+
+
+def test_reset_route_does_not_shadow_link_delete():
+    # DELETE /api/sync/link/{video_id} 가 DELETE /api/sync/{video_id} 보다 먼저 선언돼야
+    # 링크 해제가 싱크 초기화로 오인되지 않는다
+    delete_paths = [
+        r.path
+        for r in app.routes
+        if getattr(r, "path", "").startswith("/api/sync") and "DELETE" in getattr(r, "methods", set())
+    ]
+    assert "/api/sync/link/{video_id}" in delete_paths and "/api/sync/{video_id}" in delete_paths
+    assert delete_paths.index("/api/sync/link/{video_id}") < delete_paths.index("/api/sync/{video_id}")

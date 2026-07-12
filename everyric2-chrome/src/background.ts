@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { checkHealth, generateSync, getJobStatus, linkSync, listSyncs, lookupSync, regenerateSync, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
+import { checkHealth, generateSync, getJobStatus, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
 import { getSettings } from './lib/settings';
@@ -116,6 +116,11 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     case 'SYNC_UNLINK': {
       const res = await unlinkSync(await getServerConfig(), message.payload.videoId);
       return res ? { data: res } : { error: 'unlink_failed' };
+    }
+
+    case 'SYNC_RESET': {
+      const res = await resetSync(await getServerConfig(), message.payload.videoId);
+      return res ? { data: res } : { error: 'sync_reset_failed' };
     }
 
     case 'SYNC_LIST': {

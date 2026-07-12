@@ -1,7 +1,7 @@
 import hashlib
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from everyric2.server.db.models import Job, SyncLink, SyncResult
@@ -80,6 +80,14 @@ class SyncRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def delete_by_video(self, video_id: str) -> int:
+        """이 영상의 모든 싱크 삭제(초기화) — 잘못 붙여넣은 가사 등에서 완전히 새로 시작.
+        삭제된 행 수를 반환."""
+        result = await self.session.execute(
+            delete(SyncResult).where(SyncResult.video_id == video_id)
+        )
+        return result.rowcount or 0
 
     async def create(
         self,
@@ -171,6 +179,16 @@ class SyncLinkRepository:
             select(SyncLink).where(SyncLink.video_id == video_id)
         )
         return result.scalar_one_or_none()
+
+    async def delete_involving(self, video_id: str) -> int:
+        """이 영상이 소유자이거나 소스인 링크 전부 삭제 — 싱크 초기화 시 정합성 유지
+        (소스 싱크가 사라진 링크를 남겨두면 빌려 쓰던 영상의 조회가 깨진다)."""
+        result = await self.session.execute(
+            delete(SyncLink).where(
+                or_(SyncLink.video_id == video_id, SyncLink.source_video_id == video_id)
+            )
+        )
+        return result.rowcount or 0
 
     async def upsert(self, video_id: str, source_video_id: str, offset_sec: float) -> SyncLink:
         existing = await self.get(video_id)

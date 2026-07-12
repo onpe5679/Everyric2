@@ -296,6 +296,22 @@ async def get_sync(video_id: str, lyrics_hash: str | None = None):
         return SyncLookupResponse(found=False)
 
 
+@router.delete("/{video_id}")
+async def reset_video_syncs(video_id: str):
+    """이 영상의 서버 싱크를 전부 삭제(초기화) — 잘못 붙여넣은 가사 등에서 새로 시작.
+
+    이 영상이 소유자이거나 소스인 링크도 함께 제거한다 ("/link/{video_id}"가 먼저
+    선언돼 있어 링크 삭제 경로와 충돌하지 않는다)."""
+    async with get_session() as session:
+        removed_syncs = await SyncRepository(session).delete_by_video(video_id)
+        removed_links = await SyncLinkRepository(session).delete_involving(video_id)
+        return {
+            "video_id": video_id,
+            "removed_syncs": removed_syncs,
+            "removed_links": removed_links,
+        }
+
+
 @router.post("/generate", response_model=GenerateResponse)
 async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTasks):
     lyrics_hash_value = hash_lyrics(request.lyrics)

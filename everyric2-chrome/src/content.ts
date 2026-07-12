@@ -180,6 +180,7 @@ function ensureOverlay(): LyricsOverlay {
     onLinkSync: (sourceVideoId, offsetSec) => void handleLinkSync(sourceVideoId, offsetSec),
     onUnlinkSync: () => void handleUnlinkSync(),
     onRequestSyncList: () => void handleRequestSyncList(),
+    onResetSync: () => void handleResetSync(),
   }, initialGeometry);
   return overlay;
 }
@@ -424,12 +425,19 @@ async function loadTranslations(): Promise<void> {
   const videoId = currentVideoId;
   if (!data || !videoId || !settings.showTranslation) return;
   if (data.source === 'vocaro' || data.humanTranslated) return; // 위키가 이미 사람 번역을 제공
-  // 서버 싱크에 번역·발음이 이미 저장돼 있으면(생성 시 LLM 메타 병합) LLM 재호출 생략
-  if (data.lines.every(l => l.translation)) return;
+  // 서버 싱크에 번역·발음이 이미 저장돼 있으면(생성 시 LLM 메타 병합) LLM 재호출 생략.
+  // 단, 발음이 기대되는 원문(일본어 등 CJK)인데 발음이 하나도 없으면 — 번역만 저장된
+  // 낡은 싱크 — 발음까지 다시 받아온다 (그냥 반환하면 발음이 영영 채워지지 않는다)
+  const expectsPron = expectsPronunciation(data.lines.map(l => l.text));
+  if (
+    data.lines.every(l => l.translation)
+    && (data.lines.some(l => l.pronunciation) || !expectsPron)
+  ) return;
 
   const lang = settings.translationLanguage;
   const cached = translationCache.get(`${videoId}:${lang}`);
-  if (cached) {
+  // 캐시도 같은 기준으로 검증 — 발음 빠진 캐시(구버전 응답)는 다시 받아온다
+  if (cached && (!expectsPron || cached.some(l => l.pronunciation))) {
     applyTranslations(data, cached);
     return;
   }
@@ -474,6 +482,54 @@ function applyTranslations(data: LyricsData, translated: TranslatedLine[]): void
   // 발음이 새로 붙었으면 PiP 내부 변환 캐시(setLines 시점 복사)도 다시 채운다
   if (pronApplied && currentData === data) pip.setLines(data.lines);
   pip.refresh();
+}
+
+/** 원문에 CJK(가나·한자 등)가 실질적으로 있으면 발음표기(한글 독음)가 기대되는 곡 */
+function expectsPronunciation(texts: string[]): boolean {
+  const cjk = texts.join('').match(/[぀-ヿ㐀-鿿]/g);
+  return (cjk?.length ?? 0) >= 5;
+}
+
+/** LLM 번역·한글 독음을 받아 line_meta로 변환 — 캐시 우선, 실패 시 undefined(원문 정렬 폴백).
+ *  LLM이 echo한 original 대신 넘겨받은 원문으로 인덱스 매핑한다 (서버 병합은 텍스트 매칭이라
+ *  원문이 정확해야 하고, 서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치). */
+async function fetchLlmLineMeta(
+  videoId: string, srcLines: string[],
+): Promise<{ text: string; pronunciation?: string; translation?: string }[] | undefined> {
+  const lang = settings.translationLanguage;
+  try {
+    overlay?.setTranslationStatus('AI 번역·독음 생성 중…');
+    let translated = translationCache.get(`${videoId}:${lang}`);
+    // 발음이 빠진 캐시(구버전 응답 등)는 다시 받아온다
+    if (
+      !translated || translated.length !== srcLines.length
+      || (expectsPronunciation(srcLines) && !translated.some(l => l.pronunciation))
+    ) {
+      const res = await sendToBackground<TranslateResult>({
+        type: 'TRANSLATE',
+        payload: {
+          text: srcLines.join('\n'),
+          targetLang: lang,
+          title: currentSong?.title,
+          artist: currentSong?.artist ?? undefined,
+        },
+      });
+      translated = res.data?.lines;
+      if (translated && translated.length > 0) translationCache.set(`${videoId}:${lang}`, translated);
+    }
+    if (translated && translated.length > 0) {
+      return srcLines
+        .map((t, i) => ({
+          text: t,
+          pronunciation: translated![i]?.pronunciation?.trim() || undefined,
+          translation: translated![i]?.translation?.trim() || undefined,
+        }))
+        .filter(m => m.pronunciation || m.translation);
+    }
+  } catch { /* 번역 실패 — 메타 없이 진행 */ } finally {
+    if (videoId === currentVideoId) overlay?.setTranslationStatus(null);
+  }
+  return undefined;
 }
 
 async function searchLyrics(queryOverride?: { title: string; artist: string }): Promise<void> {
@@ -720,11 +776,12 @@ async function handleGenerate(lyricsText: string): Promise<void> {
 
   // 보카로 위키 가사로 생성할 때는 발음/사람 번역도 서버에 함께 저장한다
   // (서버 싱크에 병합돼 다른 프로필·사용자에게도 그대로 표시됨)
-  let lineMeta = currentData?.source === 'vocaro'
-    ? currentData.lines
-      .filter(l => l.pronunciation || l.translation)
-      .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }))
-    : undefined;
+  let lineMeta: { text: string; pronunciation?: string; translation?: string }[] | undefined =
+    currentData?.source === 'vocaro'
+      ? currentData.lines
+        .filter(l => l.pronunciation || l.translation)
+        .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }))
+      : undefined;
 
   // 위키 출처는 싱크에 영구 저장돼 조회 시 푸터에 병기된다 (CC BY 표기)
   const attribution = currentData?.source === 'vocaro'
@@ -737,37 +794,8 @@ async function handleGenerate(lyricsText: string): Promise<void> {
   // line_meta로 넘긴다 — 서버가 독음(ko) 정렬 경로를 타고 발음/번역도 싱크에 저장된다.
   // 실패해도 싱크 생성 자체는 계속한다 (원문 정렬 폴백).
   if (!lineMeta || lineMeta.length === 0) {
-    const lang = settings.translationLanguage;
     const srcLines = text.split('\n').map(s => s.trim()).filter(Boolean);
-    try {
-      overlay?.setTranslationStatus('AI 번역·독음 생성 중…');
-      let translated = translationCache.get(`${videoId}:${lang}`);
-      if (!translated || translated.length !== srcLines.length) {
-        const res = await sendToBackground<TranslateResult>({
-          type: 'TRANSLATE',
-          payload: {
-            text: srcLines.join('\n'),
-            targetLang: lang,
-            title: currentSong?.title,
-            artist: currentSong?.artist ?? undefined,
-          },
-        });
-        translated = res.data?.lines;
-        if (translated && translated.length > 0) translationCache.set(`${videoId}:${lang}`, translated);
-      }
-      if (translated && translated.length > 0) {
-        // LLM이 echo한 original 대신 붙여넣은 원문으로 인덱스 매핑 — 서버 병합은 텍스트 매칭이라
-        // 원문이 정확해야 한다 (서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치)
-        lineMeta = srcLines
-          .map((t, i) => ({
-            text: t,
-            pronunciation: translated![i]?.pronunciation?.trim() || undefined,
-            translation: translated![i]?.translation?.trim() || undefined,
-          }))
-          .filter(m => m.pronunciation || m.translation);
-      }
-    } catch { /* 번역 실패 — 메타 없이 진행 */ }
-    if (videoId === currentVideoId) overlay?.setTranslationStatus(null);
+    lineMeta = await fetchLlmLineMeta(videoId, srcLines);
   }
 
   const panel = ensureOverlay();
@@ -806,9 +834,17 @@ async function handleRegenerate(): Promise<void> {
 
   const lyrics = data.lines.map(l => l.text).join('\n').trim();
   if (!lyrics) return;
-  const lineMeta = data.lines
+  let lineMeta: { text: string; pronunciation?: string; translation?: string }[] = data.lines
     .filter(l => l.pronunciation || l.translation)
     .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }));
+
+  // 발음이 기대되는 원문인데 발음이 하나도 없으면(번역만 저장된 낡은 싱크) LLM 독음을
+  // 새로 받아 재생성이 독음 정렬 경로를 타게 한다 — 안 그러면 발음 없는 싱크가 재생산된다
+  const texts = data.lines.map(l => l.text);
+  if (!data.lines.some(l => l.pronunciation) && expectsPronunciation(texts)) {
+    const fetched = await fetchLlmLineMeta(videoId, texts);
+    if (fetched && fetched.length > 0) lineMeta = fetched;
+  }
 
   const res = await sendToBackground<GenerateResponse>({
     type: 'REGENERATE_SYNC',
@@ -826,6 +862,26 @@ async function handleRegenerate(): Promise<void> {
   generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
   updateGenChip();
   ensurePolling();
+}
+
+/** 이 영상의 서버 싱크 전부 삭제(초기화) 후 처음부터 다시 검색 — 잘못 붙여넣은 가사 복구용 */
+async function handleResetSync(): Promise<void> {
+  const videoId = currentVideoId;
+  if (!videoId) return;
+  const res = await sendToBackground<{ removed_syncs: number }>({
+    type: 'SYNC_RESET', payload: { videoId },
+  });
+  if (res.error) {
+    ensureOverlay().showError('싱크 초기화에 실패했어요. 서버 상태를 확인해 주세요.');
+    return;
+  }
+  // 세션 캐시(언어별 번역·발음)와 진행 중 잡 추적도 함께 비워 완전히 처음부터
+  for (const key of [...translationCache.keys()]) {
+    if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+  }
+  generatingJobs.delete(videoId);
+  updateGenChip();
+  void searchLyrics();
 }
 
 async function pollJobs(): Promise<void> {
