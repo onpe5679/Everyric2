@@ -7,6 +7,7 @@ import { LyricsOverlay } from './ui/overlay';
 import { PipController } from './ui/pip';
 import type {
   BgRequest,
+  CaptionLine,
   CaptionTrack,
   ContentMessage,
   GenerateResponse,
@@ -208,15 +209,29 @@ async function handleCaptionTracks(): Promise<void> {
 
 async function handleCaptionPick(track: CaptionTrack): Promise<void> {
   const videoId = currentVideoId;
-  const res = await sendToBackground<string | null>({
-    type: 'YT_CAPTION_TEXT', payload: { baseUrl: track.baseUrl },
+  if (!videoId) return;
+  const res = await sendToBackground<CaptionLine[]>({
+    type: 'YT_CAPTION_TEXT', payload: { videoId, lang: track.lang, auto: track.auto },
   });
   if (videoId !== currentVideoId) return;
-  if (!res.data) {
-    overlay?.setCaptionStatus('자막을 불러오지 못했어요 — 다른 트랙을 시도해 보세요');
+  if (!res.data || res.data.length === 0) {
+    overlay?.setCaptionStatus('자막을 불러오지 못했어요 — 서버 상태를 확인하거나 다른 트랙을 시도해 보세요');
     return;
   }
-  overlay?.setPasteText(res.data);
+  // 자막 타이밍을 그대로 싱크 가사로 표시한다 — 자막이 가사가 아닌 영상이면 눈으로
+  // 바로 확인되고, 그때는 재검색으로 되돌리면 된다. AI 전사(음정·발음)는 배너로 이어진다.
+  const lines: LyricLine[] = res.data.map(l => ({
+    time: l.start,
+    endTime: l.end,
+    text: l.text,
+  }));
+  applyLyricsData({
+    source: 'caption',
+    synced: true,
+    lines,
+    plainText: lines.map(l => l.text).join('\n'),
+    attribution: { name: track.label },
+  });
 }
 
 // ── 싱크 링크 (inst·커버 영상이 다른 영상의 전사를 재사용) ──────────

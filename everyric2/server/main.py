@@ -6,13 +6,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from everyric2 import __version__
+from everyric2.server.api.captions import router as captions_router
 from everyric2.server.api.cookies import router as cookies_router
 from everyric2.server.api.job import router as job_router
 from everyric2.server.api.sync import router as sync_router
 from everyric2.server.api.translate import router as translate_router
 from everyric2.server.api.vocaro import router as vocaro_router
 from everyric2.server.db.connection import close_db, init_db
-
 
 # torch.cuda.is_available()이 GPU 사용 상태에 따라 호출당 ~2초까지 걸린다(드라이버 질의) —
 # /health가 요청마다 부르면 확장 헬스체크 타임아웃(1.5s)을 넘겨 생성 버튼이 잠긴다.
@@ -55,6 +55,7 @@ app.include_router(job_router)
 app.include_router(translate_router)
 app.include_router(cookies_router)
 app.include_router(vocaro_router)
+app.include_router(captions_router)
 
 
 class HealthResponse(BaseModel):

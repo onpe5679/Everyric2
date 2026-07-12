@@ -129,6 +129,25 @@ export async function checkHealth(server: ServerConfig): Promise<boolean> {
   return retry !== null;
 }
 
+/** 유튜브 자막 트랙 목록 — 서버(yt-dlp) 경유. 원격 추출이라 타임아웃을 넉넉히 잡는다. */
+export function listCaptionTracks(
+  server: ServerConfig, videoId: string,
+): Promise<{ tracks: { lang: string; label: string; auto: boolean }[] } | null> {
+  return request(server, `/api/captions/${encodeURIComponent(videoId)}`, undefined, 25000);
+}
+
+/** 선택한 자막 트랙의 라인(타이밍 포함) — 서버가 yt-dlp json3를 파싱해 준다 */
+export function fetchCaptionLines(
+  server: ServerConfig, videoId: string, lang: string, auto: boolean,
+): Promise<{ lines: { start: number; end: number; text: string }[] } | null> {
+  return request(
+    server,
+    `/api/captions/${encodeURIComponent(videoId)}/${encodeURIComponent(lang)}?auto=${auto}`,
+    undefined,
+    35000,
+  );
+}
+
 export interface VocaroMatchResponse {
   found: boolean;
   slug?: string | null;

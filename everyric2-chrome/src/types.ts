@@ -59,7 +59,7 @@ export interface PronSegment {
   resolved?: boolean;
 }
 
-export type LyricsSource = 'everyric' | 'lrclib' | 'vocaro';
+export type LyricsSource = 'everyric' | 'lrclib' | 'vocaro' | 'caption';
 
 export interface LyricsData {
   source: LyricsSource;
@@ -319,15 +319,21 @@ export type SearchCandidate =
   | { source: 'lrclib'; id: number; title: string; artist: string; duration: number; synced: boolean }
   | { source: 'vocaro'; slug: string; title: string; url: string };
 
-/** 유튜브 영상의 자막 트랙 (워치 페이지 captionTracks 파싱 결과) */
+/** 유튜브 영상의 자막 트랙 — 서버(yt-dlp)가 나열한다.
+ * 워치 페이지에서 긁은 timedtext URL은 POT 강제로 빈 응답이라 서버 경유가 유일 경로. */
 export interface CaptionTrack {
-  /** timedtext 요청 URL (fmt 파라미터 추가해 fetch) */
-  baseUrl: string;
+  lang: string;
   /** 표시용 이름 (예: "일본어", "한국어 (자동 생성)") */
   label: string;
-  languageCode: string;
   /** 자동 생성(asr) 여부 — 노래 자막으로는 신뢰도가 낮다 */
   auto: boolean;
+}
+
+/** 자막 한 줄 (타이밍 포함) — 싱크 가사로 바로 표시하는 데 쓴다 */
+export interface CaptionLine {
+  start: number;
+  end: number;
+  text: string;
 }
 
 export type BgRequest =
@@ -347,7 +353,7 @@ export type BgRequest =
   | { type: 'VOCARO_LOOKUP'; payload: { title: string } }
   | { type: 'VOCARO_PAGE'; payload: { slug: string } }
   | { type: 'YT_CAPTION_TRACKS'; payload: { videoId: string } }
-  | { type: 'YT_CAPTION_TEXT'; payload: { baseUrl: string } };
+  | { type: 'YT_CAPTION_TEXT'; payload: { videoId: string; lang: string; auto: boolean } };
 
 export type ContentMessage =
   | { type: 'TOGGLE_OVERLAY' }

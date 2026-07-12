@@ -12,8 +12,7 @@
     "https://api.everyric.com/*",
     "http://vocaro.wikidot.com/*",
     "http://localhost:8000/*",
-    "http://127.0.0.1:8000/*",
-    "https://www.youtube.com/*"
+    "http://127.0.0.1:8000/*"
   ],
 
   "content_scripts": [{

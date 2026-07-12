@@ -680,11 +680,13 @@ export class PipController {
     const hasPronRow = !hasSegs && pages.some(p => p.line.pronunciation);
     const hasTr = pages.some(p => p.line.translation);
     const fs = this.pitchFontScale;
-    const lyricH = Math.max(16, Math.min(34, Math.round(ch * 0.15 * fs)));
+    // 배율은 반드시 클램프 **이후에** 곱한다 — 예전엔 상한(34px 등) 안에서 곱해서,
+    // 레인이 조금만 커져도 상한에 걸려 배율이 계이름(무상한)에만 먹히는 것처럼 보였다
+    const lyricH = Math.round(Math.max(16, Math.min(34, ch * 0.15)) * fs);
     const lyricPx = Math.max(13, Math.round(lyricH * 0.72));
     const pronPx = Math.max(10, Math.round(lyricPx * 0.8));
     const pronRowH = hasPronRow ? pronPx + 6 : 0;
-    const trPx = Math.max(12, Math.min(22, Math.round(ch * 0.085 * fs)));
+    const trPx = Math.round(Math.max(12, Math.min(22, ch * 0.085)) * fs);
     const trH = hasTr ? trPx + 7 : 0;
     const namePx = Math.max(10, Math.round(11 * fs));
     const padTop = 2;

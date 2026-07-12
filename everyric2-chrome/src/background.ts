@@ -1,9 +1,9 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { checkHealth, generateSync, getJobStatus, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
+import { checkHealth, fetchCaptionLines, generateSync, getJobStatus, linkSync, listCaptionTracks, listSyncs, lookupSync, regenerateSync, resetSync, translateLyrics, unlinkSync, vocaroMatch, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
 import { getSettings } from './lib/settings';
-import type { BgRequest, CaptionTrack, LRCLibTrack, LyricsData, MessageResponse, SearchCandidate, SongInfo } from './types';
+import type { BgRequest, LRCLibTrack, LyricsData, MessageResponse, SearchCandidate, SongInfo } from './types';
 
 async function getServerConfig(): Promise<ServerConfig> {
   const { serverUrl, apiKey } = await getSettings();
@@ -131,92 +131,23 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     case 'VOCARO_PAGE':
       return { data: await fetchSongPage(message.payload.slug) };
 
-    case 'YT_CAPTION_TRACKS':
-      return { data: await fetchCaptionTracks(message.payload.videoId) };
+    // 유튜브 자막은 서버(yt-dlp) 경유 — 워치 페이지에서 긁은 timedtext URL은
+    // POT(proof-of-origin) 강제로 브라우저 플레이어 밖에선 빈 응답이 온다 (실측)
+    case 'YT_CAPTION_TRACKS': {
+      const res = await listCaptionTracks(await getServerConfig(), message.payload.videoId);
+      return res ? { data: res.tracks } : { error: 'caption_tracks_failed' };
+    }
 
-    case 'YT_CAPTION_TEXT':
-      return { data: await fetchCaptionText(message.payload.baseUrl) };
+    case 'YT_CAPTION_TEXT': {
+      const res = await fetchCaptionLines(
+        await getServerConfig(),
+        message.payload.videoId, message.payload.lang, message.payload.auto,
+      );
+      return res ? { data: res.lines } : { error: 'caption_text_failed' };
+    }
 
     default:
       return { error: 'unknown_message_type' };
-  }
-}
-
-// ── 유튜브 자막 (가사 소스) ─────────────────────────────────────
-// 영상에 올라간 자막(예: 일본어 가사 자막)을 가사 붙여넣기 칸으로 가져온다.
-// 자막이 가사가 아닌 영상(해설 등)도 있으므로 자동 적용하지 않고, 항상 사용자가
-// 붙여넣기 칸에서 내용을 확인·수정한 뒤 직접 생성 버튼을 누르는 흐름을 유지한다.
-
-/** 워치 페이지 HTML에서 captionTracks JSON 배열을 추출 */
-async function fetchCaptionTracks(videoId: string): Promise<CaptionTrack[]> {
-  const res = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
-    credentials: 'omit',
-  });
-  if (!res.ok) return [];
-  const html = await res.text();
-  const anchor = html.indexOf('"captionTracks":');
-  if (anchor === -1) return [];
-  const start = html.indexOf('[', anchor);
-  if (start === -1) return [];
-  // 대괄호 짝을 맞춰 배열 리터럴 끝을 찾는다 (문자열 내부의 괄호는 이스케이프 처리 감안)
-  let depth = 0;
-  let end = -1;
-  let inStr = false;
-  for (let i = start; i < html.length; i++) {
-    const ch = html[i];
-    if (inStr) {
-      if (ch === '\\') i++;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') inStr = true;
-    else if (ch === '[') depth++;
-    else if (ch === ']' && --depth === 0) {
-      end = i + 1;
-      break;
-    }
-  }
-  if (end === -1) return [];
-  try {
-    const raw = JSON.parse(html.slice(start, end)) as {
-      baseUrl?: string;
-      name?: { simpleText?: string; runs?: { text?: string }[] };
-      languageCode?: string;
-      kind?: string;
-    }[];
-    return raw
-      .filter(t => t.baseUrl)
-      .map(t => ({
-        baseUrl: t.baseUrl as string,
-        label: t.name?.simpleText
-          ?? t.name?.runs?.map(r => r.text ?? '').join('')
-          ?? t.languageCode ?? '?',
-        languageCode: t.languageCode ?? '',
-        auto: t.kind === 'asr',
-      }));
-  } catch {
-    return [];
-  }
-}
-
-/** timedtext(json3)에서 자막 텍스트 라인을 뽑는다 — 연속 중복 제거, 음표/빈 줄 필터 */
-async function fetchCaptionText(baseUrl: string): Promise<string | null> {
-  const url = baseUrl.includes('fmt=') ? baseUrl : `${baseUrl}&fmt=json3`;
-  const res = await fetch(url, { credentials: 'omit' });
-  if (!res.ok) return null;
-  try {
-    const data = await res.json() as { events?: { segs?: { utf8?: string }[] }[] };
-    const lines: string[] = [];
-    for (const ev of data.events ?? []) {
-      const text = (ev.segs ?? []).map(s => s.utf8 ?? '').join('')
-        .replace(/\s+/g, ' ').trim();
-      // 음표 기호만 있는 줄·빈 줄은 가사가 아니다
-      if (!text || /^[♪♫♬\s]+$/.test(text)) continue;
-      if (lines[lines.length - 1] !== text) lines.push(text);
-    }
-    return lines.length > 0 ? lines.join('\n') : null;
-  } catch {
-    return null;
   }
 }
 

@@ -95,8 +95,6 @@ export class LyricsOverlay {
   private attributionName: string | null = null;
   private lastSong: SongInfo | null = null;
   private searchResultsEl: HTMLDivElement | null = null;
-  private pasteArea: HTMLTextAreaElement | null = null;
-  private pasteSectionEl: HTMLDivElement | null = null;
   private captionListEl: HTMLDivElement | null = null;
   private linkListEl: HTMLDivElement | null = null;
   private linkSrcInput: HTMLInputElement | null = null;
@@ -384,17 +382,16 @@ export class LyricsOverlay {
       className: 'ey-textarea',
       attrs: { placeholder: '여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요', rows: '6' },
     });
-    this.pasteArea = lyricsArea;
     this.captionListEl = h('div', { className: 'ey-result-list' });
-    // 영상에 올라간 자막(일본어 가사 자막 등)을 붙여넣기 칸으로 가져오는 버튼 —
-    // 자막이 가사가 아닌 영상도 있으므로 자동 적용하지 않고 사용자가 확인 후 생성한다
+    // 영상에 올라간 자막(일본어 가사 자막 등)을 가사로 가져오는 버튼 — 트랙을 고르면
+    // 자막 타이밍 그대로 싱크 가사로 바로 표시된다 (가사가 아니면 눈으로 확인 후 재검색)
     const captionBtn = h('button', {
       className: 'ey-secondary-btn',
       text: '이 영상 자막에서 가사 가져오기',
-      attrs: { title: '영상에 자막(예: 일본어 가사)이 있으면 그 텍스트를 아래 칸에 채워줘요. 내용을 확인·수정한 뒤 생성하세요.' },
+      attrs: { title: '영상에 자막(예: 일본어 가사)이 있으면 자막 타이밍 그대로 싱크 가사로 표시해요. 이어서 AI 전사(음정·발음)도 만들 수 있어요.' },
       on: {
         click: () => {
-          this.setCaptionStatus('자막 트랙 확인 중…');
+          this.setCaptionStatus('자막 트랙 확인 중… (서버 경유, 몇 초 걸려요)');
           this.callbacks.onCaptionTracks();
         },
       },
@@ -408,7 +405,6 @@ export class LyricsOverlay {
         if (text) this.callbacks.onGenerate(text);
       }),
     );
-    this.pasteSectionEl = pasteSection;
     pasteSection.style.display = startOpen ? '' : 'none';
 
     const pasteToggle = h('button', {
@@ -437,12 +433,12 @@ export class LyricsOverlay {
         className: 'ey-result-item',
         on: {
           click: () => {
-            this.setCaptionStatus('자막 불러오는 중…');
+            this.setCaptionStatus('자막 불러오는 중… (타이밍 포함, 몇 초 걸려요)');
             this.callbacks.onCaptionPick(t);
           },
         },
       },
-        h('span', { className: 'ey-result-src', text: t.languageCode || '자막' }),
+        h('span', { className: 'ey-result-src', text: t.lang || '자막' }),
         h('span', { className: 'ey-result-title', text: t.label }),
         h('span', { className: 'ey-result-meta', text: t.auto ? '자동 생성 — 노래는 부정확할 수 있음' : '업로더 자막' }),
       )));
@@ -451,14 +447,6 @@ export class LyricsOverlay {
   /** 자막 섹션 상태 메시지 */
   setCaptionStatus(message: string): void {
     this.captionListEl?.replaceChildren(h('div', { className: 'ey-state-sub', text: message }));
-  }
-
-  /** 가져온 자막 텍스트를 붙여넣기 칸에 채우고 섹션을 펼친다 (사용자 검토 → 직접 생성) */
-  setPasteText(text: string): void {
-    if (!this.pasteArea) return;
-    this.pasteArea.value = text;
-    if (this.pasteSectionEl) this.pasteSectionEl.style.display = '';
-    this.setCaptionStatus('가사를 확인·수정한 뒤 아래 생성 버튼을 눌러 주세요');
   }
 
   /** 상시 재검색: 현재 곡 정보를 초기값으로 검색 폼 + 소스별 후보 리스트를 연다 */
@@ -871,8 +859,6 @@ export class LyricsOverlay {
     this.progressBar = null;
     this.progressText = null;
     this.searchResultsEl = null;
-    this.pasteArea = null;
-    this.pasteSectionEl = null;
     this.captionListEl = null;
     this.closeSettings();
   }
@@ -884,7 +870,10 @@ export class LyricsOverlay {
   }
 
   private setSourceBadge(source: LyricsSource, synced: boolean): void {
-    const base = source === 'everyric' ? 'Everyric' : source === 'vocaro' ? '보카로 가사 위키' : 'LRCLIB';
+    const base = source === 'everyric' ? 'Everyric'
+      : source === 'vocaro' ? '보카로 가사 위키'
+      : source === 'caption' ? '유튜브 자막'
+      : 'LRCLIB';
     // 가사 원출처(위키 등)를 병기 — 전사는 서버가 했어도 가사의 출처는 따로 표기
     const extra = this.attributionName && this.attributionName !== base ? ` · ${this.attributionName}` : '';
     // 다른 영상의 싱크를 빌려온 경우 링크 표시 (해제는 검색 시트에서)
