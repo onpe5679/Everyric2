@@ -7,6 +7,7 @@ import { LyricsOverlay } from './ui/overlay';
 import { PipController } from './ui/pip';
 import type {
   BgRequest,
+  CaptionTrack,
   ContentMessage,
   GenerateResponse,
   JobStatusResponse,
@@ -42,6 +43,9 @@ const generatingJobs = new Map<string, {
   jobId: string; progress: number; queueLabel?: string;
   stage?: string; stageProgress?: number;
 }>();
+// 생성 요청 준비 단계(LLM 번역·독음 대기, 수십 초) 중인 영상 — 잡 등록 전이라
+// generatingJobs가 비어 있어, 이 가드가 없으면 버튼 연타가 전부 서버로 나간다
+const preparingGenerate = new Set<string>();
 let pollTimer: number | undefined;
 let searchSeq = 0;
 let lastLineIndex = -1;
@@ -184,8 +188,35 @@ function ensureOverlay(): LyricsOverlay {
     onUnlinkSync: () => void handleUnlinkSync(),
     onRequestSyncList: () => void handleRequestSyncList(),
     onResetSync: () => void handleResetSync(),
+    onCaptionTracks: () => void handleCaptionTracks(),
+    onCaptionPick: track => void handleCaptionPick(track),
   }, initialGeometry);
   return overlay;
+}
+
+// ── 유튜브 자막 → 가사 붙여넣기 칸 ─────────────────────────────
+
+async function handleCaptionTracks(): Promise<void> {
+  const videoId = currentVideoId;
+  if (!videoId) return;
+  const res = await sendToBackground<CaptionTrack[]>({
+    type: 'YT_CAPTION_TRACKS', payload: { videoId },
+  });
+  if (videoId !== currentVideoId) return;
+  overlay?.showCaptionTracks(res.data ?? []);
+}
+
+async function handleCaptionPick(track: CaptionTrack): Promise<void> {
+  const videoId = currentVideoId;
+  const res = await sendToBackground<string | null>({
+    type: 'YT_CAPTION_TEXT', payload: { baseUrl: track.baseUrl },
+  });
+  if (videoId !== currentVideoId) return;
+  if (!res.data) {
+    overlay?.setCaptionStatus('자막을 불러오지 못했어요 — 다른 트랙을 시도해 보세요');
+    return;
+  }
+  overlay?.setPasteText(res.data);
 }
 
 // ── 싱크 링크 (inst·커버 영상이 다른 영상의 전사를 재사용) ──────────
@@ -281,14 +312,21 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
     pip.setPitchEnabled(patch.pitchGuide);
   }
 
-  // 멜로디/메트로놈/마이크 — 토글·볼륨·기기 변경 즉시 반영
+  // 멜로디/메트로놈/마이크 — 토글·볼륨·배속·시작박·기기 변경 즉시 반영
   if (
     patch.melodyPlayback !== undefined || patch.melodyVolume !== undefined ||
     patch.metronome !== undefined || patch.metronomeVolume !== undefined ||
+    patch.metronomeRate !== undefined || patch.metronomeBeat !== undefined ||
     patch.audioOutputId !== undefined || patch.micPitch !== undefined ||
     patch.micDeviceId !== undefined
   ) {
     applyAudioSettings();
+  }
+  if (patch.metronomeRate !== undefined || patch.metronomeBeat !== undefined) {
+    pip.setMetronomeConfig(settings.metronomeRate, settings.metronomeBeat);
+  }
+  if (patch.micOctave !== undefined) {
+    pip.setMicOctave(settings.micOctave);
   }
 
   if (patch.debugInfo === true) pushDebug(null);
@@ -301,6 +339,8 @@ function applyAudioSettings(): void {
     melodyVolume: settings.melodyVolume,
     metronome: settings.metronome,
     metronomeVolume: settings.metronomeVolume,
+    metronomeRate: settings.metronomeRate,
+    metronomeBeat: settings.metronomeBeat,
     sinkId: settings.audioOutputId,
   });
   pip.setAudioState(settings.melodyPlayback, settings.metronome);
@@ -704,19 +744,20 @@ function applyLyricsData(data: LyricsData | null): void {
   if (data.synced) {
     if (pip.isOpen()) {
       pip.setTempo(data.tempo ?? null);
+      pip.setKey(data.key ?? null);
       pip.setDebugMeta(data.debugMeta ?? null);
       pip.setLines(data.lines);
       karaokeAudio.setNotes(collectMelodyNotes(data.lines));
       karaokeAudio.setTempo(data.tempo ?? null);
       if (settings.pipKeepPanel) {
-        panel.showSyncedLyrics(data.lines, data.source);
+        panel.showSyncedLyrics(data.lines, data.source, data.plainText);
         panel.setPipEnabled(PipController.isSupported());
       } else {
         panel.showPipPlaceholder();
       }
       panel.setPipActive(true);
     } else {
-      panel.showSyncedLyrics(data.lines, data.source);
+      panel.showSyncedLyrics(data.lines, data.source, data.plainText);
       panel.setPipEnabled(PipController.isSupported());
     }
     void startEngine(data.lines);
@@ -782,55 +823,63 @@ async function handleGenerate(lyricsText: string): Promise<void> {
   const text = lyricsText.trim();
   if (!videoId || !text) return;
 
-  // 보카로 위키 가사로 생성할 때는 발음/사람 번역도 서버에 함께 저장한다
-  // (서버 싱크에 병합돼 다른 프로필·사용자에게도 그대로 표시됨)
-  let lineMeta: { text: string; pronunciation?: string; translation?: string }[] | undefined =
-    currentData?.source === 'vocaro'
-      ? currentData.lines
-        .filter(l => l.pronunciation || l.translation)
-        .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }))
+  // 이미 전사 중이거나 요청 준비 중(LLM 번역·독음 대기) — 연타를 서버로 내보내지 않는다.
+  // 같은 영상의 중복 잡은 임시 오디오 파일을 두고 경합해 다운로드 실패(WinError 32)까지 냈다.
+  if (generatingJobs.has(videoId) || preparingGenerate.has(videoId)) return;
+  preparingGenerate.add(videoId);
+  updateGenChip(); // 버튼을 누르자마자 "준비 중" 칩으로 즉시 반응을 보여준다
+
+  try {
+    // 보카로 위키 가사로 생성할 때는 발음/사람 번역도 서버에 함께 저장한다
+    // (서버 싱크에 병합돼 다른 프로필·사용자에게도 그대로 표시됨)
+    let lineMeta: { text: string; pronunciation?: string; translation?: string }[] | undefined =
+      currentData?.source === 'vocaro'
+        ? currentData.lines
+          .filter(l => l.pronunciation || l.translation)
+          .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }))
+        : undefined;
+
+    // 위키 출처는 싱크에 영구 저장돼 조회 시 푸터에 병기된다 (CC BY 표기)
+    const attribution = currentData?.source === 'vocaro'
+      ? { name: '보카로 가사 위키', url: currentSourceUrl }
       : undefined;
 
-  // 위키 출처는 싱크에 영구 저장돼 조회 시 푸터에 병기된다 (CC BY 표기)
-  const attribution = currentData?.source === 'vocaro'
-    ? { name: '보카로 가사 위키', url: currentSourceUrl }
-    : undefined;
-
-  if (generatingJobs.has(videoId)) return; // 이 영상은 이미 전사 중 — 칩이 진행률을 보여준다
-
-  // 위키 발음이 없으면(수동 붙여넣기·LRCLIB 등) LLM 번역·한글 독음을 먼저 받아
-  // line_meta로 넘긴다 — 서버가 독음(ko) 정렬 경로를 타고 발음/번역도 싱크에 저장된다.
-  // 실패해도 싱크 생성 자체는 계속한다 (원문 정렬 폴백).
-  if (!lineMeta || lineMeta.length === 0) {
-    const srcLines = text.split('\n').map(s => s.trim()).filter(Boolean);
-    lineMeta = await fetchLlmLineMeta(videoId, srcLines);
-  }
-
-  const panel = ensureOverlay();
-  const res = await sendToBackground<GenerateResponse>({
-    type: 'GENERATE_SYNC',
-    payload: {
-      videoId,
-      lyrics: text,
-      lineMeta: lineMeta && lineMeta.length > 0 ? lineMeta : undefined,
-      attribution,
-    },
-  });
-  if (res.error || !res.data) {
-    if (videoId === currentVideoId && seq === searchSeq) {
-      panel.showError('싱크 생성 요청에 실패했어요. 서버 상태를 확인해 주세요.');
+    // 위키 발음이 없으면(수동 붙여넣기·LRCLIB 등) LLM 번역·한글 독음을 먼저 받아
+    // line_meta로 넘긴다 — 서버가 독음(ko) 정렬 경로를 타고 발음/번역도 싱크에 저장된다.
+    // 실패해도 싱크 생성 자체는 계속한다 (원문 정렬 폴백).
+    if (!lineMeta || lineMeta.length === 0) {
+      const srcLines = text.split('\n').map(s => s.trim()).filter(Boolean);
+      lineMeta = await fetchLlmLineMeta(videoId, srcLines);
     }
-    return;
+
+    const panel = ensureOverlay();
+    const res = await sendToBackground<GenerateResponse>({
+      type: 'GENERATE_SYNC',
+      payload: {
+        videoId,
+        lyrics: text,
+        lineMeta: lineMeta && lineMeta.length > 0 ? lineMeta : undefined,
+        attribution,
+      },
+    });
+    if (res.error || !res.data) {
+      if (videoId === currentVideoId && seq === searchSeq) {
+        panel.showError('싱크 생성 요청에 실패했어요. 서버 상태를 확인해 주세요.');
+      }
+      return;
+    }
+    if (res.data.status === 'completed') {
+      if (videoId === currentVideoId) void searchLyrics();
+      return;
+    }
+    // 패널을 점유하지 않는다 — 현재 화면(가사/검색)은 그대로 두고 작은 칩으로 진행률만 표시.
+    // 다른 영상으로 이동해도 잡은 계속 추적되고, 완료 후 돌아오면 조회 시 자동 반영된다.
+    generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
+    ensurePolling();
+  } finally {
+    preparingGenerate.delete(videoId);
+    updateGenChip();
   }
-  if (res.data.status === 'completed') {
-    if (videoId === currentVideoId) void searchLyrics();
-    return;
-  }
-  // 패널을 점유하지 않는다 — 현재 화면(가사/검색)은 그대로 두고 작은 칩으로 진행률만 표시.
-  // 다른 영상으로 이동해도 잡은 계속 추적되고, 완료 후 돌아오면 조회 시 자동 반영된다.
-  generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
-  updateGenChip();
-  ensurePolling();
 }
 
 /** 재생성: 현재 everyric 싱크의 가사·발음·출처 그대로 서버 캐시를 무시하고 다시 정렬 */
@@ -838,38 +887,44 @@ async function handleRegenerate(): Promise<void> {
   const videoId = currentVideoId;
   const data = currentData;
   if (!videoId || !data?.synced || data.source !== 'everyric') return;
-  if (generatingJobs.has(videoId)) return;
-
-  const lyrics = data.lines.map(l => l.text).join('\n').trim();
-  if (!lyrics) return;
-  let lineMeta: { text: string; pronunciation?: string; translation?: string }[] = data.lines
-    .filter(l => l.pronunciation || l.translation)
-    .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }));
-
-  // 발음이 기대되는 원문인데 발음이 하나도 없으면(번역만 저장된 낡은 싱크) LLM 독음을
-  // 새로 받아 재생성이 독음 정렬 경로를 타게 한다 — 안 그러면 발음 없는 싱크가 재생산된다
-  const texts = data.lines.map(l => l.text);
-  if (!data.lines.some(l => l.pronunciation) && expectsPronunciation(texts)) {
-    const fetched = await fetchLlmLineMeta(videoId, texts);
-    if (fetched && fetched.length > 0) lineMeta = fetched;
-  }
-
-  const res = await sendToBackground<GenerateResponse>({
-    type: 'REGENERATE_SYNC',
-    payload: {
-      videoId,
-      lyrics,
-      lineMeta: lineMeta.length > 0 ? lineMeta : undefined,
-      attribution: data.attribution,
-    },
-  });
-  if (res.error || !res.data) {
-    if (videoId === currentVideoId) ensureOverlay().showError('재생성 요청에 실패했어요. 서버 상태를 확인해 주세요.');
-    return;
-  }
-  generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
+  if (generatingJobs.has(videoId) || preparingGenerate.has(videoId)) return;
+  preparingGenerate.add(videoId);
   updateGenChip();
-  ensurePolling();
+
+  try {
+    const lyrics = data.lines.map(l => l.text).join('\n').trim();
+    if (!lyrics) return;
+    let lineMeta: { text: string; pronunciation?: string; translation?: string }[] = data.lines
+      .filter(l => l.pronunciation || l.translation)
+      .map(l => ({ text: l.text, pronunciation: l.pronunciation, translation: l.translation }));
+
+    // 발음이 기대되는 원문인데 발음이 하나도 없으면(번역만 저장된 낡은 싱크) LLM 독음을
+    // 새로 받아 재생성이 독음 정렬 경로를 타게 한다 — 안 그러면 발음 없는 싱크가 재생산된다
+    const texts = data.lines.map(l => l.text);
+    if (!data.lines.some(l => l.pronunciation) && expectsPronunciation(texts)) {
+      const fetched = await fetchLlmLineMeta(videoId, texts);
+      if (fetched && fetched.length > 0) lineMeta = fetched;
+    }
+
+    const res = await sendToBackground<GenerateResponse>({
+      type: 'REGENERATE_SYNC',
+      payload: {
+        videoId,
+        lyrics,
+        lineMeta: lineMeta.length > 0 ? lineMeta : undefined,
+        attribution: data.attribution,
+      },
+    });
+    if (res.error || !res.data) {
+      if (videoId === currentVideoId) ensureOverlay().showError('재생성 요청에 실패했어요. 서버 상태를 확인해 주세요.');
+      return;
+    }
+    generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0 });
+    ensurePolling();
+  } finally {
+    preparingGenerate.delete(videoId);
+    updateGenChip();
+  }
 }
 
 /** 이 영상의 서버 싱크 전부 삭제(초기화) 후 처음부터 다시 검색 — 잘못 붙여넣은 가사 복구용 */
@@ -930,7 +985,10 @@ function updateGenChip(): void {
   const cur = currentVideoId ? generatingJobs.get(currentVideoId) : undefined;
   const others = generatingJobs.size - (cur ? 1 : 0);
   let text: string | null = null;
-  if (cur) {
+  if (!cur && currentVideoId && preparingGenerate.has(currentVideoId)) {
+    // 잡 등록 전 준비 단계 — 버튼이 무반응처럼 보이지 않게 즉시 표시
+    text = '싱크 생성 준비 중 — AI 번역·독음 요청…';
+  } else if (cur) {
     // 단계명이 오면 "보컬 분리 60% · 전체 68%"처럼 무슨 과정인지 함께 보여준다
     const state = cur.queueLabel
       ?? (cur.stage
@@ -1013,6 +1071,11 @@ async function handlePipToggle(): Promise<void> {
     onMelodyToggle: () => void handleSettingsChange({ melodyPlayback: !settings.melodyPlayback }),
     metronomeOn: settings.metronome,
     onMetronomeToggle: () => void handleSettingsChange({ metronome: !settings.metronome }),
+    metronomeRate: settings.metronomeRate,
+    onMetronomeRateChange: rate => void handleSettingsChange({ metronomeRate: rate }),
+    metronomeBeat: settings.metronomeBeat,
+    onMetronomeBeatChange: beat => void handleSettingsChange({ metronomeBeat: beat }),
+    micOctave: settings.micOctave,
     getMicSamples: () => micPitch.samples(),
     onClosed: () => {
       karaokeAudio.setActive(false);
@@ -1030,6 +1093,7 @@ async function handlePipToggle(): Promise<void> {
   }
   pip.setSong(currentSong?.title ?? '', currentSong?.artist ?? '');
   pip.setTempo(currentData.tempo ?? null);
+  pip.setKey(currentData.key ?? null);
   pip.setDebugMeta(currentData.debugMeta ?? null);
   pip.setLines(currentData.lines);
   karaokeAudio.setNotes(collectMelodyNotes(currentData.lines));

@@ -1,4 +1,4 @@
-import type { LyricLine, SongTempo, SyncDebugMeta } from '../types';
+import type { LyricLine, SongKey, SongTempo, SyncDebugMeta } from '../types';
 import type { MicSample } from '../lib/mic-pitch';
 import { h, icon } from './dom';
 import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
@@ -46,6 +46,14 @@ export interface PipOptions {
   /** 메트로놈 초기 상태 + 토글 (footer 버튼) */
   metronomeOn: boolean;
   onMetronomeToggle: () => void;
+  /** 메트로놈 배속 (0.5|1|2) — footer 버튼으로 순환 */
+  metronomeRate: number;
+  onMetronomeRateChange: (rate: number) => void;
+  /** 마디 시작 박(0~3) — 메트로놈 강세와 레인 마디선이 함께 이동 */
+  metronomeBeat: number;
+  onMetronomeBeatChange: (beat: number) => void;
+  /** 마이크 음정 옥타브 보정 (옥타브 단위, -2~+2) */
+  micOctave: number;
   /** 마이크 음정 표시가 켜져 있으면 최근 피치 샘플을 돌려준다 (없으면 null) */
   getMicSamples: (() => MicSample[]) | null;
   onClosed: () => void;
@@ -169,6 +177,12 @@ export class PipController {
   private pitchFontScale = 1.2;
   private pitchCountdown = true;
   private tempo: SongTempo | null = null;
+  private songKey: SongKey | null = null;
+  private metronomeRate = 1;
+  private metronomeBeat = 0;
+  private micOctave = 0;
+  private metroRateBtn: HTMLButtonElement | null = null;
+  private metroBeatBtn: HTMLButtonElement | null = null;
   private showConfidence = false;
   private pitchColors: PitchColors | null = null;
   /** 곡 단위 정렬 진단 (디버그 모드 레인 오버레이: VAD/간주 스트립·RAW f0·정렬 텍스트) */
@@ -206,6 +220,9 @@ export class PipController {
     this.pitchFontScale = opts.pitchFontScale;
     this.pitchCountdown = opts.pitchCountdown;
     this.showConfidence = opts.showConfidence;
+    this.metronomeRate = opts.metronomeRate;
+    this.metronomeBeat = opts.metronomeBeat;
+    this.micOctave = opts.micOctave;
 
     const doc = win.document;
     doc.title = 'Everyric 가사';
@@ -214,6 +231,8 @@ export class PipController {
     doc.head.append(style);
     doc.body.className = 'ey-pip';
     doc.body.classList.toggle('ey-hide-pron', !opts.showPronunciation);
+    // 글자 크기 배율 — 레인(캔버스)뿐 아니라 스테이지 가사/발음/번역(CSS)에도 적용
+    doc.body.style.setProperty('--ey-pip-fs', String(this.pitchFontScale));
 
     // 영상 미러 영역 + 비율 조절 디바이더 (attachVideo 전까지 숨김)
     this.videoWrapEl = h('div', { className: 'ey-pip-video' });
@@ -250,6 +269,30 @@ export class PipController {
       title: '메트로놈',
       on: { click: () => opts.onMetronomeToggle() },
     }, icon(METRO_SVG));
+    // 메트로놈 세부 조절 — 배속(½×/1×/2×)과 마디 시작 박(1~4박)을 창 안에서 바로 순환
+    this.metroRateBtn = h('button', {
+      className: 'ey-pip-play ey-pip-mute ey-pip-metro-opt',
+      title: '메트로놈 배속 (½× → 1× → 2×)',
+      on: {
+        click: () => {
+          const next = this.metronomeRate === 1 ? 2 : this.metronomeRate === 2 ? 0.5 : 1;
+          this.setMetronomeConfig(next, this.metronomeBeat);
+          opts.onMetronomeRateChange(next);
+        },
+      },
+    });
+    this.metroBeatBtn = h('button', {
+      className: 'ey-pip-play ey-pip-mute ey-pip-metro-opt',
+      title: '마디 시작 박 선택 (강세·마디선이 함께 이동)',
+      on: {
+        click: () => {
+          const next = (this.metronomeBeat + 1) % 4;
+          this.setMetronomeConfig(this.metronomeRate, next);
+          opts.onMetronomeBeatChange(next);
+        },
+      },
+    });
+    this.setMetronomeConfig(this.metronomeRate, this.metronomeBeat);
     this.setAudioState(opts.melodyOn, opts.metronomeOn);
     this.getMicSamples = opts.getMicSamples;
 
@@ -291,7 +334,9 @@ export class PipController {
     this.footerEl = h('div', { className: 'ey-pip-footer' },
       this.titleEl,
       h('div', { className: 'ey-pip-controls' },
-        this.playBtn, this.muteBtn, this.melodyBtn, this.metroBtn, this.volumeSlider, progressWrap, this.timeEl),
+        this.playBtn, this.muteBtn, this.melodyBtn, this.metroBtn,
+        this.metroRateBtn, this.metroBeatBtn,
+        this.volumeSlider, progressWrap, this.timeEl),
     );
     doc.body.append(
       this.videoWrapEl,
@@ -321,6 +366,8 @@ export class PipController {
       this.footerEl = null;
       this.melodyBtn = null;
       this.metroBtn = null;
+      this.metroRateBtn = null;
+      this.metroBeatBtn = null;
       this.getMicSamples = null;
       opts.onClosed();
     });
@@ -404,9 +451,30 @@ export class PipController {
     this.pitchScrollMode = mode;
   }
 
-  /** 레인 글자 크기 배율 즉시 반영 */
+  /** 가라오케 글자 크기 배율 즉시 반영 — 레인(캔버스) + 스테이지(CSS 변수) 공통 */
   setPitchFontScale(scale: number): void {
     this.pitchFontScale = Math.min(2, Math.max(0.6, scale));
+    this.win?.document.body.style.setProperty('--ey-pip-fs', String(this.pitchFontScale));
+  }
+
+  /** 서버가 추정한 곡 키 — 레인 좌상단 표시용 */
+  setKey(key: SongKey | null): void {
+    this.songKey = key && key.name ? key : null;
+  }
+
+  /** 메트로놈 배속/시작 박 — footer 버튼 라벨과 레인 마디선 표시에 반영 */
+  setMetronomeConfig(rate: number, beat: number): void {
+    this.metronomeRate = rate;
+    this.metronomeBeat = beat;
+    if (this.metroRateBtn) {
+      this.metroRateBtn.textContent = rate === 0.5 ? '½×' : `${rate}×`;
+    }
+    if (this.metroBeatBtn) this.metroBeatBtn.textContent = `${beat + 1}박`;
+  }
+
+  /** 마이크 음정 옥타브 보정 즉시 반영 */
+  setMicOctave(octave: number): void {
+    this.micOctave = octave;
   }
 
   /** 서버가 추정한 곡 템포 — 마디 창 폭·비트 격자에 사용, null이면 초 단위 폴백 */
@@ -479,14 +547,14 @@ export class PipController {
     }
   }
 
-  /** 레인 높이 상한 — 푸터·영상 최소 영역을 침범해 창 밖으로 밀어내지 않는 한도 */
+  /** 레인 높이 상한 — 푸터·영상 최소 영역만 남기고 창 전체까지 키울 수 있다 (고정 캡 없음) */
   private maxLaneHeight(): number {
     const win = this.win;
     if (!win || win.innerHeight === 0) return 320;
     const footerH = this.footerEl?.offsetHeight || 60;
     const videoShown = this.videoWrapEl ? this.videoWrapEl.style.display !== 'none' : false;
     const reserved = footerH + 8 + (videoShown ? 48 : 0);
-    return Math.max(90, Math.min(320, win.innerHeight - reserved));
+    return Math.max(90, win.innerHeight - reserved);
   }
 
   /** 창이 줄어 현재 레인 높이가 상한을 넘으면 맞춰서 줄인다 (창 resize·레인 토글 시) */
@@ -504,10 +572,12 @@ export class PipController {
     this.showConfidence = enabled;
   }
 
-  /** 멜로디/메트로놈 토글 버튼 활성 상태 반영 */
+  /** 멜로디/메트로놈 토글 버튼 활성 상태 반영 — 세부 버튼은 메트로놈이 켜졌을 때만 노출 */
   setAudioState(melody: boolean, metronome: boolean): void {
     this.melodyBtn?.classList.toggle('on', melody);
     this.metroBtn?.classList.toggle('on', metronome);
+    if (this.metroRateBtn) this.metroRateBtn.style.display = metronome ? '' : 'none';
+    if (this.metroBeatBtn) this.metroBeatBtn.style.display = metronome ? '' : 'none';
   }
 
   /** 레인 위 디바이더 — 위로 끌면 레인이 커진다. 놓으면 설정에 저장. */
@@ -626,9 +696,12 @@ export class PipController {
     let t0: number;
     let playheadX: number;
     if (this.pitchScrollMode === 'page') {
-      // 페이지 모드: 창을 마디 경계(beat_offset 기준)에 고정하고 플레이헤드가 이동
+      // 페이지 모드: 창은 고정한 채 플레이헤드가 이동하되, 페이지를 창 폭의 75%씩만
+      // 전진시킨다 — 플레이헤드가 75% 지점에 닿으면 다음 페이지로 넘어가고, 아직
+      // 안 부른 마지막 25%가 새 페이지 왼쪽에 그대로 보여 다음 가사를 미리 읽을 수 있다
       const offset = this.tempo?.beat_offset ?? 0;
-      t0 = offset + Math.floor((now - offset) / W) * W;
+      const step = W * 0.75;
+      t0 = offset + Math.floor((now - offset) / step) * step;
       playheadX = ((now - t0) / W) * cw;
     } else {
       // 스크롤 모드: 플레이헤드 좌측 28% 고정, 오선이 흐른다
@@ -655,7 +728,8 @@ export class PipController {
       for (let b = Math.ceil((t0 - offset) / secPerBeat); ; b++) {
         const t = offset + b * secPerBeat;
         if (t >= t0 + W) break;
-        const isMeasure = ((b % 4) + 4) % 4 === 0;
+        // 사용자가 고른 마디 시작 박(metronomeBeat)에 맞춰 마디선을 이동 — 메트로놈 강세와 일치
+        const isMeasure = (((b - this.metronomeBeat) % 4) + 4) % 4 === 0;
         ctx.globalAlpha = isMeasure ? 0.55 : 0.18;
         ctx.fillRect(x(t) - (isMeasure ? 0.75 : 0.5), padTop, isMeasure ? 1.5 : 1, staffH);
       }
@@ -738,8 +812,8 @@ export class PipController {
         if (age > 2.5) continue;
         const t = now - age; // 표시용 근사 — 배속 중에는 궤적 간격만 살짝 달라진다
         if (t < t0 || t > t0 + W) continue;
-        // 검출 옥타브 오차·성별 음역 차이를 흡수: 레인 음역으로 옥타브 폴딩
-        let m = s.midi;
+        // 사용자 지정 옥타브 보정(설정) 먼저 적용한 뒤, 남는 오차는 레인 음역으로 폴딩
+        let m = s.midi + this.micOctave * 12;
         while (m < lo && m + 12 <= hi + 6) m += 12;
         while (m > hi && m - 12 >= lo - 6) m -= 12;
         if (m < lo - 1 || m > hi + 1) continue;
@@ -772,21 +846,16 @@ export class PipController {
       }
     }
 
-    // ── 라벨 충돌 회피 (좌→우 최소 간격 + 우측 되밀기)
+    // ── 라벨 충돌 회피 — 이웃 간 최소 간격만 유지한다.
+    // 예전엔 화면 밖 라벨을 뷰포트 가장자리로 되밀어서, 스크롤 모드에서 아직 안 들어온/
+    // 이미 지나간 글자들이 좌우 구석에 멈춰 쌓이는 잔상이 생겼다 — 화면 밖 라벨은
+    // 자연 위치 그대로 두고 캔버스 클리핑에 맡긴다.
     const placeRow = (items: { cx: number; w: number }[]): number[] => {
       const gap = 3;
       const xs = items.map(it => it.cx);
-      for (let i = 0; i < xs.length; i++) {
-        const minCx = i === 0
-          ? items[i].w / 2 + 2
-          : xs[i - 1] + items[i - 1].w / 2 + gap + items[i].w / 2;
+      for (let i = 1; i < xs.length; i++) {
+        const minCx = xs[i - 1] + items[i - 1].w / 2 + gap + items[i].w / 2;
         if (xs[i] < minCx) xs[i] = minCx;
-      }
-      for (let i = xs.length - 1; i >= 0; i--) {
-        const maxCx = i === xs.length - 1
-          ? cw - items[i].w / 2 - 2
-          : xs[i + 1] - items[i + 1].w / 2 - gap - items[i].w / 2;
-        if (xs[i] > maxCx) xs[i] = maxCx;
       }
       return xs;
     };
@@ -828,6 +897,20 @@ export class PipController {
       ctx.font = `${trPx}px system-ui, sans-serif`;
       ctx.fillStyle = colors.dim;
       ctx.fillText(page.line.translation, cw / 2, ty + trH * 0.5, cw - 16);
+    }
+
+    // ── 곡 키·BPM 라벨 (좌상단) — 서버 멜로디 분석이 추정한 키
+    if (this.songKey || this.tempo) {
+      const parts: string[] = [];
+      if (this.songKey) parts.push(`키 ${this.songKey.name}`);
+      if (this.tempo) parts.push(`${Math.round(this.tempo.bpm)}BPM`);
+      ctx.font = `${Math.max(9, Math.round(10 * fs))}px ui-monospace, monospace`;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = colors.dim;
+      ctx.globalAlpha = 0.85;
+      ctx.fillText(parts.join(' · '), 4, padTop + 7);
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'center';
     }
 
     // ── 디버그 전경 레이어: 보정된 라인의 원본 타이밍 고스트 + 곡 전체 confidence 헤더

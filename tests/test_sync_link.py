@@ -262,3 +262,52 @@ def test_reset_route_does_not_shadow_link_delete():
     ]
     assert "/api/sync/link/{video_id}" in delete_paths and "/api/sync/{video_id}" in delete_paths
     assert delete_paths.index("/api/sync/link/{video_id}") < delete_paths.index("/api/sync/{video_id}")
+
+
+def test_generate_joins_active_job():
+    # 버튼 연타 방어: 같은 영상·같은 가사 생성 요청은 진행 중 잡에 합류해야 한다 —
+    # 중복 잡 2개가 동시에 같은 임시 오디오 파일을 다운로드하면 WinError 32로 깨진다
+    from fastapi import BackgroundTasks
+
+    from everyric2.server.api.sync import GenerateRequest, generate_sync
+
+    async def body():
+        async with _env(seed_source=False):
+            req = GenerateRequest(video_id="VID", lyrics="가사 한 줄\n두 줄")
+            r1 = await generate_sync(req, BackgroundTasks())
+            assert r1.status == "processing"
+
+            r2 = await generate_sync(req, BackgroundTasks())
+            assert r2.job_id == r1.job_id  # 새 잡을 만들지 않고 합류
+            assert r2.status == "processing"
+
+            # 다른 가사는 별도 잡 (붙여넣기 내용을 고친 재시도는 막지 않는다)
+            r3 = await generate_sync(
+                GenerateRequest(video_id="VID", lyrics="완전히 다른 가사"), BackgroundTasks()
+            )
+            assert r3.job_id != r1.job_id
+
+    asyncio.run(body())
+
+
+def test_regenerate_joins_active_job():
+    from fastapi import BackgroundTasks
+
+    from everyric2.server.api.sync import (
+        GenerateRequest,
+        RegenerateRequest,
+        generate_sync,
+        regenerate_sync,
+    )
+
+    async def body():
+        async with _env(seed_source=False):
+            r1 = await generate_sync(
+                GenerateRequest(video_id="VID", lyrics="가사"), BackgroundTasks()
+            )
+            r2 = await regenerate_sync(
+                RegenerateRequest(video_id="VID", lyrics="가사", force=True), BackgroundTasks()
+            )
+            assert r2.job_id == r1.job_id  # 진행 중이면 재생성도 합류
+
+    asyncio.run(body())

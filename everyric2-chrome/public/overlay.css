@@ -33,6 +33,9 @@
   max-width: 640px;
   min-height: 180px;
   max-height: calc(100vh - 16px);
+  /* 브라우저 기본 폼 컨트롤(드롭다운 팝업 등)이 패널 테마를 따르게 한다 —
+     이게 없으면 다크 패널에서 OS가 흰 배경 팝업 + 흰 글자를 그려 읽을 수 없다 */
+  color-scheme: dark;
   background: var(--ey-bg);
   color: var(--ey-text);
   font-family: var(--ey-font);
@@ -49,6 +52,7 @@
 }
 
 .ey-panel.ey-light {
+  color-scheme: light;
   --ey-bg: rgba(255, 255, 255, 0.94);
   --ey-bg-solid: #ffffff;
   --ey-elev: rgba(0, 0, 0, 0.05);
@@ -405,6 +409,12 @@
 
 .ey-input:focus, .ey-textarea:focus { border-color: var(--ey-primary); }
 
+/* 드롭다운 항목 — color-scheme과 함께 팝업이 테마 배경/글자색을 확실히 따르게 */
+.ey-select option {
+  background: var(--ey-bg-solid);
+  color: var(--ey-text);
+}
+
 .ey-textarea { resize: vertical; min-height: 90px; line-height: 1.5; }
 
 .ey-primary-btn {
@@ -645,9 +655,13 @@ body.ey-pip {
   height: 100vh;
   background: var(--ey-bg-solid);
   color: var(--ey-text);
+  color-scheme: dark;
   font-family: var(--ey-font);
   overflow: hidden;
   user-select: none;
+  /* 가라오케 글자 크기 배율 — JS(setPitchFontScale)가 갱신. 레인(캔버스)뿐 아니라
+     스테이지 가사/발음/번역까지 함께 커지도록 폰트 계산에 곱해 쓴다 */
+  --ey-pip-fs: 1;
 }
 
 /* 영상 미러 (captureStream) — 창이 가로로 넓어져 16:9 높이가 커져도
@@ -711,7 +725,7 @@ body.ey-pip {
 }
 
 .ey-pip-line.prev, .ey-pip-line.next {
-  font-size: clamp(10px, min(3.6vw, 11cqh), 16px);
+  font-size: calc(clamp(10px, min(3.6vw, 11cqh), 16px) * var(--ey-pip-fs, 1));
   color: var(--ey-text-faint);
   cursor: pointer;
   display: -webkit-box;
@@ -723,7 +737,7 @@ body.ey-pip {
 .ey-pip-line.prev:hover, .ey-pip-line.next:hover { color: var(--ey-text-dim); }
 
 .ey-pip-line.current {
-  font-size: clamp(15px, min(6.5vw, 24cqh), 34px);
+  font-size: calc(clamp(15px, min(6.5vw, 24cqh), 34px) * var(--ey-pip-fs, 1));
   font-weight: 700;
   line-height: 1.35;
   color: var(--ey-text);
@@ -733,7 +747,7 @@ body.ey-pip {
 .ey-pip-line.current .ey-word.sung { color: var(--ey-accent); }
 
 .ey-pip-tr {
-  font-size: clamp(11px, min(4vw, 14cqh), 18px);
+  font-size: calc(clamp(11px, min(4vw, 14cqh), 18px) * var(--ey-pip-fs, 1));
   color: var(--ey-text-dim);
   max-width: 100%;
   word-break: keep-all;
@@ -744,7 +758,7 @@ body.ey-pip {
 
 /* 현재 라인의 발음 표기 (원문과 번역 사이) */
 .ey-pip-pron {
-  font-size: clamp(11px, min(3.8vw, 12cqh), 17px);
+  font-size: calc(clamp(11px, min(3.8vw, 12cqh), 17px) * var(--ey-pip-fs, 1));
   color: var(--ey-text-dim);
   max-width: 100%;
   word-break: keep-all;
@@ -822,6 +836,18 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
 .ey-pip-play.on { color: var(--ey-accent); }
 .ey-pip-play.on:hover { color: var(--ey-accent); }
 
+/* 메트로놈 세부 버튼 (배속·마디 시작 박) — 텍스트 라벨형 미니 버튼 */
+.ey-pip-metro-opt {
+  width: auto;
+  min-width: 26px;
+  padding: 0 4px;
+  font-family: var(--ey-font);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ey-text-dim);
+}
+.ey-pip-metro-opt:hover { color: var(--ey-text); }
+
 /* 설정 시트의 볼륨 슬라이더 */
 .ey-settings-range {
   width: 88px;
@@ -838,6 +864,7 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
 .ey-paste-wrap {
   display: flex;
   flex-direction: column;
+  align-items: center; /* 토글 버튼·붙여넣기 섹션이 다른 요소들처럼 가운데 정렬되게 */
   gap: 8px;
   width: 100%;
 }

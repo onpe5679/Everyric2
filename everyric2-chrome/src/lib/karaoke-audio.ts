@@ -29,6 +29,10 @@ export interface KaraokeAudioConfig {
   melodyVolume: number; // 0..1
   metronome: boolean;
   metronomeVolume: number; // 0..1
+  /** 메트로놈 배속 — 0.5(2분음표)·1(4분음표)·2(8분음표) */
+  metronomeRate: number;
+  /** 마디 시작 박(0~3) — 강세 위치를 이동 (곡 다운비트가 첫 비트와 다를 때) */
+  metronomeBeat: number;
   /** AudioContext.setSinkId용 출력 기기 id — '' = 기본 출력 */
   sinkId: string;
 }
@@ -59,6 +63,8 @@ export class KaraokeAudio {
   private metroOn = false;
   private melodyVol = 0.5;
   private metroVol = 0.5;
+  private metroRate = 1;
+  private metroBeat = 0;
   private sinkId = '';
   /** 가라오케 창(PiP)이 열려 있을 때만 소리 낸다 */
   private active = false;
@@ -89,6 +95,11 @@ export class KaraokeAudio {
     this.metroOn = cfg.metronome;
     this.melodyVol = clamp01(cfg.melodyVolume);
     this.metroVol = clamp01(cfg.metronomeVolume);
+    if (cfg.metronomeRate !== this.metroRate || cfg.metronomeBeat !== this.metroBeat) {
+      this.metroRate = cfg.metronomeRate === 0.5 || cfg.metronomeRate === 2 ? cfg.metronomeRate : 1;
+      this.metroBeat = Math.min(3, Math.max(0, Math.round(cfg.metronomeBeat)));
+      this.resync(); // 이미 스케줄된 틱을 끊고 새 배속/강세로 다시 잇는다
+    }
     if (this.melodyGain) this.melodyGain.gain.value = this.melodyVol * MELODY_GAIN_SCALE;
     if (this.metroGain) this.metroGain.gain.value = this.metroVol;
     if (cfg.sinkId !== this.sinkId) {
@@ -226,14 +237,17 @@ export class KaraokeAudio {
     toCtx: (vt: number) => number,
   ): void {
     if (!this.metroGain || !this.tempo) return;
-    const secPerBeat = 60 / this.tempo.bpm;
+    // 배속: 0.5=2분음표(느린 곡 확인용), 2=8분음표(빠른 세분) — 틱 간격을 나눈다
+    const tick = 60 / this.tempo.bpm / this.metroRate;
     const offset = this.tempo.beat_offset ?? 0;
-    for (let k = Math.ceil((from - offset) / secPerBeat); ; k++) {
-      const bt = offset + k * secPerBeat;
+    // 강세 주기는 배속과 무관하게 음악적 한 마디(4박)를 유지, 시작 박 선택만큼 이동
+    const per = Math.max(1, Math.round(4 * this.metroRate));
+    const shift = Math.round(this.metroBeat * this.metroRate);
+    for (let k = Math.ceil((from - offset) / tick); ; k++) {
+      const bt = offset + k * tick;
       if (bt >= to) break;
       if (bt < from) continue;
-      // 다운비트 정보는 없으므로 첫 비트 기준 4박마다 강세 (4/4 가정 — 레인 격자와 동일)
-      const accent = ((k % 4) + 4) % 4 === 0;
+      const accent = (((k - shift) % per) + per) % per === 0;
       const start = toCtx(bt);
       const osc = ctx.createOscillator();
       osc.type = 'square';

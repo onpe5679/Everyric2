@@ -136,7 +136,7 @@ async def process_job(job_id: str) -> None:
         )
         try:
             download_result = await asyncio.get_event_loop().run_in_executor(
-                None, _download_and_hash, job.video_id
+                None, _download_and_hash, job.video_id, job_id
             )
         finally:
             dl_ticker.cancel()
@@ -281,12 +281,14 @@ async def _stage_monitor(job_id: str, start: int, interval: float = 2.0) -> None
         pass
 
 
-def _download_and_hash(video_id: str) -> dict:
+def _download_and_hash(video_id: str, job_id: str) -> dict:
     from everyric2.audio.downloader import YouTubeDownloader
 
     downloader = YouTubeDownloader()
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-    dl_result = downloader.download(youtube_url)
+    # 잡별 고유 파일명 — 기본 %(title)s 템플릿은 같은 영상의 동시 잡이 한 파일을 두고
+    # 경합해 Windows에서 WinError 32(파일 사용 중)로 다운로드가 깨진다
+    dl_result = downloader.download(youtube_url, filename=f"{video_id}-{job_id[:8]}")
     audio_hash = compute_audio_hash(dl_result.audio_path)
 
     return {
@@ -296,12 +298,14 @@ def _download_and_hash(video_id: str) -> dict:
 
 
 def _build_extra(result: dict[str, Any], attribution: dict[str, Any] | None) -> dict[str, Any] | None:
-    """싱크 JSON의 segments 밖 부가정보(디버그 메타, 출처 표기, 템포) 조립."""
+    """싱크 JSON의 segments 밖 부가정보(디버그 메타, 출처 표기, 템포, 키) 조립."""
     extra: dict[str, Any] = {}
     if result.get("debug"):
         extra["debug"] = result["debug"]
     if result.get("tempo"):
         extra["tempo"] = result["tempo"]
+    if result.get("key"):
+        extra["key"] = result["key"]
     if attribution is not None:
         extra["attribution"] = attribution
     return extra or None
@@ -907,6 +911,7 @@ def _run_alignment(
         # 가라오케용 음정(MIDI 노트) 주석 — 실패해도 싱크 생성 자체는 계속한다
         report("멜로디 분석")
         f0_curve = None
+        song_key = None
         if settings.melody.enabled:
             try:
                 from everyric2.melody.extractor import MelodyExtractor
@@ -918,6 +923,8 @@ def _run_alignment(
                     annotated = extractor.annotate_timestamps(audio, timestamps, vocals=vocals)
                     # 디버그 오버레이용 RAW f0 곡선 (다운샘플, 옥타브 폴딩 전)
                     f0_curve = extractor.last_f0_curve
+                    # 곡 키 (K-S 추정) — 레인 표시용, 스냅 보정은 extractor 내부에서 완료
+                    song_key = extractor.last_key
                     logger.info(f"Melody notes annotated on {annotated} spans")
                 else:
                     logger.warning("Melody enabled but torchfcpe is not installed; skipping")
@@ -958,6 +965,8 @@ def _run_alignment(
             "alignment_text": alignment_text,
             # 가라오케 레인의 마디 단위 고정 창·비트 격자용 — 실패해도 None으로 계속
             "tempo": _estimate_tempo(audio),
+            # 곡 키 (멜로디 분석 부산물) — 레인 좌상단 표시용
+            "key": song_key,
         }
     finally:
         audio_path_obj.unlink(missing_ok=True)

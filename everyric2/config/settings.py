@@ -259,6 +259,17 @@ class MelodySettings(BaseSettings):
         "back toward the melodic trajectory before note quantization "
         "(fixes FCPE octave lock-on; measured 37%→5% large-jump rate)",
     )
+    key_detect: bool = Field(
+        default=True,
+        description="Estimate the song key (Krumhansl-Schmuckler pitch-class correlation) "
+        "and store it with the sync for karaoke display",
+    )
+    key_snap: bool = Field(
+        default=True,
+        description="Snap out-of-scale notes whose span f0 median sits near the semitone "
+        "rounding boundary to the in-scale neighbor (skipped when key confidence is low; "
+        "clear chromatic passing notes are preserved)",
+    )
     anchor_to_words: bool = Field(
         default=True,
         description="Cut notes at aligned character (syllable) boundaries instead of free "

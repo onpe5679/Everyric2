@@ -1,4 +1,4 @@
-import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, Settings, SongInfo } from '../types';
+import type { CaptionTrack, DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, Settings, SongInfo } from '../types';
 import { h, icon, ICONS } from './dom';
 import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
 
@@ -24,6 +24,10 @@ export interface OverlayCallbacks {
   onRequestSyncList: () => void;
   /** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사에서 새로 시작 */
   onResetSync: () => void;
+  /** 이 영상의 유튜브 자막 트랙 목록 요청 — 결과는 showCaptionTracks로 되돌아온다 */
+  onCaptionTracks: () => void;
+  /** 자막 트랙 선택 — 텍스트를 받아 setPasteText로 붙여넣기 칸에 채운다 */
+  onCaptionPick: (track: CaptionTrack) => void;
 }
 
 type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search';
@@ -91,6 +95,9 @@ export class LyricsOverlay {
   private attributionName: string | null = null;
   private lastSong: SongInfo | null = null;
   private searchResultsEl: HTMLDivElement | null = null;
+  private pasteArea: HTMLTextAreaElement | null = null;
+  private pasteSectionEl: HTMLDivElement | null = null;
+  private captionListEl: HTMLDivElement | null = null;
   private linkListEl: HTMLDivElement | null = null;
   private linkSrcInput: HTMLInputElement | null = null;
   /** 현재 표시 중인 싱크의 링크 상태 (없으면 null) — content가 setLinked로 밀어넣는다 */
@@ -240,12 +247,19 @@ export class LyricsOverlay {
     );
   }
 
-  showSyncedLyrics(lines: LyricLine[], source: LyricsSource): void {
+  showSyncedLyrics(lines: LyricLine[], source: LyricsSource, plainText?: string): void {
     this.stateKind = 'synced';
     this.resetBody();
     this.lines = lines;
     this.lineEls = [];
     this.currentIndex = -1;
+
+    // LRCLIB 등 외부 싱크 가사도 서버 전사를 만들면 음정 노트·발음 정렬·가라오케를 쓸 수 있다
+    if (source !== 'everyric') {
+      const text = plainText ?? lines.map(l => l.text).join('\n');
+      this.showBanner('AI 전사로 가라오케(음정·발음)를 만들 수 있어요',
+        this.makeGenerateButton('AI 전사 생성', () => this.callbacks.onGenerate(text)));
+    }
 
     const list = h('div', { className: 'ey-lines' });
     lines.forEach((line, index) => {
@@ -370,13 +384,31 @@ export class LyricsOverlay {
       className: 'ey-textarea',
       attrs: { placeholder: '여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요', rows: '6' },
     });
+    this.pasteArea = lyricsArea;
+    this.captionListEl = h('div', { className: 'ey-result-list' });
+    // 영상에 올라간 자막(일본어 가사 자막 등)을 붙여넣기 칸으로 가져오는 버튼 —
+    // 자막이 가사가 아닌 영상도 있으므로 자동 적용하지 않고 사용자가 확인 후 생성한다
+    const captionBtn = h('button', {
+      className: 'ey-secondary-btn',
+      text: '이 영상 자막에서 가사 가져오기',
+      attrs: { title: '영상에 자막(예: 일본어 가사)이 있으면 그 텍스트를 아래 칸에 채워줘요. 내용을 확인·수정한 뒤 생성하세요.' },
+      on: {
+        click: () => {
+          this.setCaptionStatus('자막 트랙 확인 중…');
+          this.callbacks.onCaptionTracks();
+        },
+      },
+    });
     const pasteSection = h('div', { className: 'ey-paste-section' },
       lyricsArea,
+      captionBtn,
+      this.captionListEl,
       this.makeGenerateButton('붙여넣은 가사로 싱크 생성', () => {
         const text = lyricsArea.value.trim();
         if (text) this.callbacks.onGenerate(text);
       }),
     );
+    this.pasteSectionEl = pasteSection;
     pasteSection.style.display = startOpen ? '' : 'none';
 
     const pasteToggle = h('button', {
@@ -391,6 +423,42 @@ export class LyricsOverlay {
       },
     });
     return h('div', { className: 'ey-paste-wrap' }, pasteToggle, pasteSection);
+  }
+
+  /** YT_CAPTION_TRACKS 응답 반영 — 트랙 선택 버튼 목록 */
+  showCaptionTracks(tracks: CaptionTrack[]): void {
+    if (!this.captionListEl) return;
+    if (tracks.length === 0) {
+      this.setCaptionStatus('이 영상에는 가져올 자막이 없어요');
+      return;
+    }
+    this.captionListEl.replaceChildren(...tracks.map(t =>
+      h('button', {
+        className: 'ey-result-item',
+        on: {
+          click: () => {
+            this.setCaptionStatus('자막 불러오는 중…');
+            this.callbacks.onCaptionPick(t);
+          },
+        },
+      },
+        h('span', { className: 'ey-result-src', text: t.languageCode || '자막' }),
+        h('span', { className: 'ey-result-title', text: t.label }),
+        h('span', { className: 'ey-result-meta', text: t.auto ? '자동 생성 — 노래는 부정확할 수 있음' : '업로더 자막' }),
+      )));
+  }
+
+  /** 자막 섹션 상태 메시지 */
+  setCaptionStatus(message: string): void {
+    this.captionListEl?.replaceChildren(h('div', { className: 'ey-state-sub', text: message }));
+  }
+
+  /** 가져온 자막 텍스트를 붙여넣기 칸에 채우고 섹션을 펼친다 (사용자 검토 → 직접 생성) */
+  setPasteText(text: string): void {
+    if (!this.pasteArea) return;
+    this.pasteArea.value = text;
+    if (this.pasteSectionEl) this.pasteSectionEl.style.display = '';
+    this.setCaptionStatus('가사를 확인·수정한 뒤 아래 생성 버튼을 눌러 주세요');
   }
 
   /** 상시 재검색: 현재 곡 정보를 초기값으로 검색 폼 + 소스별 후보 리스트를 연다 */
@@ -803,6 +871,9 @@ export class LyricsOverlay {
     this.progressBar = null;
     this.progressText = null;
     this.searchResultsEl = null;
+    this.pasteArea = null;
+    this.pasteSectionEl = null;
+    this.captionListEl = null;
     this.closeSettings();
   }
 
@@ -980,11 +1051,26 @@ export class LyricsOverlay {
       this.callbacks.onSettingsChange({ metronome: metronome.checked }));
     const metronomeVolume = this.buildRange(this.settings.metronomeVolume, v =>
       this.callbacks.onSettingsChange({ metronomeVolume: v }));
+    const metronomeRate = this.buildSelect(
+      [['0.5', '½× (2분음표)'], ['1', '1× (4분음표)'], ['2', '2× (8분음표)']],
+      String(this.settings.metronomeRate),
+      v => this.callbacks.onSettingsChange({ metronomeRate: Number(v) }),
+    );
+    const metronomeBeat = this.buildSelect(
+      [['0', '1박'], ['1', '2박'], ['2', '3박'], ['3', '4박']],
+      String(this.settings.metronomeBeat),
+      v => this.callbacks.onSettingsChange({ metronomeBeat: Number(v) }),
+    );
 
     const micPitch = h('input', { attrs: { type: 'checkbox' } });
     micPitch.checked = this.settings.micPitch;
     micPitch.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ micPitch: micPitch.checked }));
+    const micOctave = this.buildSelect(
+      [['-2', '-2옥타브'], ['-1', '-1옥타브'], ['0', '보정 없음'], ['1', '+1옥타브'], ['2', '+2옥타브']],
+      String(this.settings.micOctave),
+      v => this.callbacks.onSettingsChange({ micOctave: Number(v) }),
+    );
 
     const audioOut = h('select', { className: 'ey-select' });
     audioOut.addEventListener('change', () =>
@@ -1036,10 +1122,16 @@ export class LyricsOverlay {
         h('label', { text: '메트로놈', attrs: { title: '서버가 추정한 BPM에 맞춰 박자를 칩니다 (4/4 가정, 4박마다 강세).' } }),
         h('span', { className: 'ey-settings-inline' }, metronomeVolume, metronome)),
       h('div', { className: 'ey-settings-row' },
+        h('label', { text: '메트로놈 배속', attrs: { title: '느리게 느껴지는 곡은 2×(8분음표), 너무 빠른 곡은 ½×로. 가라오케 창 안 버튼으로도 바꿀 수 있어요.' } }), metronomeRate),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '마디 시작 박', attrs: { title: '곡의 첫 강세가 안 맞을 때 마디 시작 박을 옮깁니다. 메트로놈 강세와 레인 마디선이 함께 이동해요.' } }), metronomeBeat),
+      h('div', { className: 'ey-settings-row' },
         h('label', { text: '가라오케 오디오 출력 기기', attrs: { title: '멜로디·메트로놈만 이 기기로 나갑니다. 영상 소리는 기존 출력 그대로.' } }), audioOut),
       h('div', { className: 'ey-settings-row' },
         h('label', { text: '마이크 음정 표시 (레인)', attrs: { title: '마이크로 부른 음정을 가라오케 레인에 청록 궤적으로 표시합니다. 켜면 마이크 권한을 요청해요.' } }), micPitch),
       h('div', { className: 'ey-settings-row' }, h('label', { text: '마이크 기기' }), micDevice),
+      h('div', { className: 'ey-settings-row' },
+        h('label', { text: '마이크 옥타브 보정', attrs: { title: '마이크 궤적이 노트보다 한 옥타브 위/아래로 그려지면 여기서 보정하세요.' } }), micOctave),
       h('div', { className: 'ey-settings-note', text: '기기 이름은 마이크 권한을 한 번 허용해야 표시돼요' }),
       h('div', { className: 'ey-settings-row ey-settings-col' },
         h('label', {}, '싱크 서버 URL ', dot),

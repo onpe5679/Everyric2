@@ -43,6 +43,90 @@ def hz_to_midi(hz: np.ndarray) -> np.ndarray:
     return np.where(np.asarray(hz) > 0, midi, np.nan)
 
 
+# Krumhansl-Schmuckler 키 프로파일 (Krumhansl & Kessler 1982) — pitch class 0 = 으뜸음
+_KS_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+_KS_MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+_KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+_MAJOR_SCALE = (0, 2, 4, 5, 7, 9, 11)
+_MINOR_SCALE = (0, 2, 3, 5, 7, 8, 10)  # 자연 단음계
+
+
+def estimate_key(track: F0Track) -> dict | None:
+    """유성 프레임의 pitch-class 히스토그램을 K-S 프로파일과 상관해 곡 키를 추정.
+
+    프레임 수로 자연 가중되므로 길게 유지되는 음(구조적으로 중요한 음)이 더 세게
+    반영된다. 반환: {"tonic": 0~11, "mode": major|minor, "name": "G#m", "confidence": r}.
+    유성 프레임이 너무 적으면 None (간주 위주 곡 등 — 표시·보정 모두 생략).
+    """
+    voiced = track.voiced & np.isfinite(track.midi)
+    if int(voiced.sum()) < 50:
+        return None
+    pcs = np.round(track.midi[voiced]).astype(int) % 12
+    hist = np.bincount(pcs, minlength=12).astype(np.float64)
+    if hist.sum() <= 0 or np.count_nonzero(hist) < 3:
+        return None
+    best: tuple[float, int, str] | None = None
+    for mode, profile in (("major", _KS_MAJOR), ("minor", _KS_MINOR)):
+        prof = np.asarray(profile, dtype=np.float64)
+        for tonic in range(12):
+            r = float(np.corrcoef(np.roll(hist, -tonic), prof)[0, 1])
+            if not np.isfinite(r):
+                continue
+            if best is None or r > best[0]:
+                best = (r, tonic, mode)
+    if best is None:
+        return None
+    r, tonic, mode = best
+    return {
+        "tonic": tonic,
+        "mode": mode,
+        "name": _KEY_NAMES[tonic] + ("m" if mode == "minor" else ""),
+        "confidence": round(max(0.0, r), 3),
+    }
+
+
+def _scale_pitch_classes(key: dict) -> set[int]:
+    base = _MINOR_SCALE if key.get("mode") == "minor" else _MAJOR_SCALE
+    return {(int(key["tonic"]) + d) % 12 for d in base}
+
+
+def snap_notes_to_key(
+    timestamps: list[dict], track: F0Track, key: dict, *, max_dev: float = 0.6
+) -> int:
+    """스케일 밖 노트 중 반올림 경계가 애매한 것만 이웃 스케일음으로 스냅 (제자리 수정).
+
+    노트 반음은 f0의 최빈/중앙 반올림이라 실제 f0 중심이 x.4~x.6 사이에 걸치면
+    반쯤 무작위로 이웃 반음에 떨어진다 — 그 애매한 경우에 한해 곡 키의 스케일음을
+    타이브레이커로 쓴다. f0 중심이 원 노트에 명백히 가까운 진짜 반음계 경과음은
+    보존한다 (스케일 밖 + 이웃이 f0 중심에서 max_dev 초과면 스냅 안 함).
+    반환: 스냅한 노트 수.
+    """
+    scale = _scale_pitch_classes(key)
+    snapped = 0
+    for seg in timestamps:
+        for n in seg.get("notes") or []:
+            midi = int(n["midi"])
+            if midi % 12 in scale:
+                continue
+            mask = (track.times >= n["start"]) & (track.times < n["end"]) & track.voiced
+            if int(mask.sum()) < 3:
+                continue
+            center = float(np.nanmedian(track.midi[mask]))
+            cands = [
+                c for c in (midi - 1, midi + 1)
+                if c % 12 in scale and abs(c - center) <= max_dev
+            ]
+            if not cands:
+                continue
+            cand = min(cands, key=lambda c: abs(c - center))
+            # 이웃 후보가 f0 중심에서 원 노트보다 확연히 멀면 증거를 거스르는 것 — 보존
+            if abs(cand - center) > abs(midi - center) + 0.25:
+                continue
+            n["midi"] = int(cand)
+            snapped += 1
+    return snapped
+
+
 def downsample_f0_curve(
     track: F0Track, target_dt: float = 0.05, max_points: int = 12000
 ) -> dict | None:
@@ -263,11 +347,18 @@ def fold_line_octaves(
         for idx, m in zip(span_indices, line_medians):
             if m is None or len(idx) == 0:
                 continue
+            # 2옥타브(이중 폴딩·서브서브하모닉)까지 잡도록 개선이 될 때까지 반복 이동
             shift = 0.0
-            if g - m >= global_guard and abs(m + 12 - g) < abs(m - g):
-                shift = 12.0
-            elif m - g >= global_guard and abs(m - 12 - g) < abs(m - g):
-                shift = -12.0
+            cur = m
+            for _ in range(2):
+                if g - cur >= global_guard and abs(cur + 12 - g) < abs(cur - g):
+                    shift += 12.0
+                    cur += 12.0
+                elif cur - g >= global_guard and abs(cur - 12 - g) < abs(cur - g):
+                    shift -= 12.0
+                    cur -= 12.0
+                else:
+                    break
             if shift:
                 track.midi[idx] += shift
                 folded += len(idx)
@@ -372,6 +463,8 @@ class MelodyExtractor:
         self._backend: str | None = None  # "fcpe" | "rmvpe", set once _get_model() runs
         # annotate_timestamps가 채우는 디버그용 RAW f0 곡선 (다운샘플, 폴딩 전)
         self.last_f0_curve: dict | None = None
+        # annotate_timestamps가 채우는 곡 키 추정 결과 — 싱크에 저장돼 레인에 표시된다
+        self.last_key: dict | None = None
 
     def is_available(self) -> bool:
         try:
@@ -582,4 +675,23 @@ class MelodyExtractor:
                     count -= 1
             if dropped:
                 logger.info(f"Dropped {dropped} low-outlier notes (< median-10 = {floor})")
+
+        # 곡 키 추정 + 스케일 기반 반음 타이브레이크 — 표시는 항상, 스냅은 상관이
+        # 충분히 높을 때만 (조성이 약한 곡에서 엉뚱한 스케일로 노트를 옮기지 않게)
+        self.last_key = None
+        if self.config.key_detect:
+            try:
+                self.last_key = estimate_key(track)
+                if self.last_key:
+                    logger.info(
+                        f"Estimated key: {self.last_key['name']} "
+                        f"(r={self.last_key['confidence']})"
+                    )
+                    if self.config.key_snap and self.last_key["confidence"] >= 0.6:
+                        snapped = snap_notes_to_key(timestamps, track, self.last_key)
+                        if snapped:
+                            logger.info(f"Key snap adjusted {snapped} boundary notes")
+            except Exception:
+                logger.exception("Key estimation failed; continuing without key")
+                self.last_key = None
         return count

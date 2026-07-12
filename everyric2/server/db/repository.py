@@ -129,6 +129,24 @@ class JobRepository:
         )
         return list(result.scalars().all())
 
+    async def get_active_by_video(self, video_id: str, lyrics_hash: str) -> Job | None:
+        """같은 영상·같은 가사로 이미 진행 중(pending/processing)인 잡 — 중복 생성 차단용.
+
+        같은 잡이 2개 돌면 같은 임시 오디오 파일을 두 프로세스가 잡아 Windows에서
+        WinError 32(파일 잠금)로 다운로드가 깨진다 — 생성 요청은 진행 중 잡에 합류시킨다.
+        """
+        result = await self.session.execute(
+            select(Job)
+            .where(
+                Job.video_id == video_id,
+                Job.lyrics_hash == lyrics_hash,
+                Job.status.in_(["pending", "processing"]),
+            )
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def create(
         self,
         video_id: str,

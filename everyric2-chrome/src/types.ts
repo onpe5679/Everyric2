@@ -74,6 +74,8 @@ export interface LyricsData {
   attribution?: SourceAttribution;
   /** 곡 템포 (everyric 소스만) — 레인 마디 창/비트 격자 */
   tempo?: SongTempo;
+  /** 곡 키 (everyric 소스만) — 레인 좌상단 표시 */
+  key?: SongKey;
   /** 곡 전체 평균 정렬 신뢰도 (기하평균 확률 평균) — 디버그 표시용 */
   qualityScore?: number;
   /** 다른 영상의 싱크에 링크된 상태 (해제 UI 표시용) */
@@ -121,6 +123,17 @@ export interface SongTempo {
   beat_offset?: number | null;
 }
 
+/** 서버(멜로디 분석)가 추정한 곡 키 — 레인 표시 + 노트 반음 보정에 사용됨 */
+export interface SongKey {
+  /** 으뜸음 pitch class (0=C … 11=B) */
+  tonic: number;
+  mode: 'major' | 'minor';
+  /** 표시용 이름 (예: "G#m", "A") */
+  name: string;
+  /** K-S 프로파일 상관 (0~1) — 낮으면 서버가 보정을 건너뛴다 */
+  confidence?: number | null;
+}
+
 /** 곡 단위 정렬 진단 메타 (서버 debug 필드) */
 export interface SyncDebugMeta {
   /** star 토큰이 흡수한 가사 밖 가창 구간들 */
@@ -159,6 +172,7 @@ export interface EveryricSyncResponse {
   debug?: SyncDebugMeta | null;
   attribution?: SourceAttribution | null;
   tempo?: SongTempo | null;
+  key?: SongKey | null;
   /** 다른 영상의 싱크를 빌려온 경우 (inst·커버 링크) — 타이밍은 이미 오프셋 적용됨 */
   linked?: { source_video_id: string; offset_sec: number } | null;
 }
@@ -231,12 +245,18 @@ export interface Settings {
   metronome: boolean;
   /** 메트로놈 볼륨 (0..1) */
   metronomeVolume: number;
+  /** 메트로놈 배속 (0.5|1|2) — 느린 곡은 2배로 세분, 빠른 곡은 절반으로 */
+  metronomeRate: number;
+  /** 마디 시작 박 (0~3) — 강세·레인 마디선 위치를 함께 이동 */
+  metronomeBeat: number;
   /** 멜로디·메트로놈 출력 기기 id (AudioContext.setSinkId) — '' = 기본 출력 */
   audioOutputId: string;
   /** 마이크로 부른 음정을 가라오케 레인에 표시 */
   micPitch: boolean;
   /** 마이크 입력 기기 id — '' = 기본 마이크 */
   micDeviceId: string;
+  /** 마이크 음정 옥타브 보정 (옥타브 단위, -2~+2) — 자동 폴딩 전에 적용 */
+  micOctave: number;
   /** 패널 하단에 내부 상태(비디오 바인딩, 싱크 소스 등) 표시 */
   debugInfo: boolean;
 }
@@ -299,6 +319,17 @@ export type SearchCandidate =
   | { source: 'lrclib'; id: number; title: string; artist: string; duration: number; synced: boolean }
   | { source: 'vocaro'; slug: string; title: string; url: string };
 
+/** 유튜브 영상의 자막 트랙 (워치 페이지 captionTracks 파싱 결과) */
+export interface CaptionTrack {
+  /** timedtext 요청 URL (fmt 파라미터 추가해 fetch) */
+  baseUrl: string;
+  /** 표시용 이름 (예: "일본어", "한국어 (자동 생성)") */
+  label: string;
+  languageCode: string;
+  /** 자동 생성(asr) 여부 — 노래 자막으로는 신뢰도가 낮다 */
+  auto: boolean;
+}
+
 export type BgRequest =
   | { type: 'FETCH_LYRICS'; payload: SongInfo & { skipLrclib?: boolean } }
   | { type: 'FETCH_LRCLIB'; payload: SongInfo }
@@ -314,7 +345,9 @@ export type BgRequest =
   | { type: 'TRANSLATE'; payload: { text: string; targetLang: string; title?: string; artist?: string } }
   | { type: 'SERVER_HEALTH' }
   | { type: 'VOCARO_LOOKUP'; payload: { title: string } }
-  | { type: 'VOCARO_PAGE'; payload: { slug: string } };
+  | { type: 'VOCARO_PAGE'; payload: { slug: string } }
+  | { type: 'YT_CAPTION_TRACKS'; payload: { videoId: string } }
+  | { type: 'YT_CAPTION_TEXT'; payload: { baseUrl: string } };
 
 export type ContentMessage =
   | { type: 'TOGGLE_OVERLAY' }

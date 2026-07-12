@@ -30,6 +30,8 @@ class SyncLookupResponse(BaseModel):
     attribution: dict[str, Any] | None = None
     # 곡 템포 {bpm, beat_offset} — 가라오케 레인 마디 창/비트 격자용
     tempo: dict[str, Any] | None = None
+    # 곡 키 {tonic, mode, name, confidence} — 멜로디 분석의 K-S 추정, 레인 표시용
+    key: dict[str, Any] | None = None
     # 다른 영상의 싱크를 오프셋과 함께 빌려 왔을 때만 채워진다 (자기 싱크가 있으면 None).
     # 클라이언트가 링크 상태 표시·해제 버튼을 띄우는 데 쓴다.
     linked: dict[str, Any] | None = None
@@ -197,6 +199,7 @@ def _build_sync_response(
         debug=timestamps.get("debug"),
         attribution=timestamps.get("attribution"),
         tempo=timestamps.get("tempo"),
+        key=timestamps.get("key"),
         linked=linked,
     )
 
@@ -330,6 +333,19 @@ async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTa
             )
 
         job_repo = JobRepository(session)
+        # 같은 영상·가사로 이미 돌고 있는 잡이 있으면 새 잡을 만들지 않고 합류한다 —
+        # 버튼 연타로 동일 잡이 중복 생성되면 같은 임시 오디오 파일을 두 작업이 잡아
+        # Windows에서 WinError 32(파일 사용 중)로 다운로드가 깨진다
+        active = await job_repo.get_active_by_video(request.video_id, lyrics_hash_value)
+        if active:
+            if request.line_meta or request.attribution:
+                from everyric2.server.worker import stash_attribution, stash_line_meta
+
+                if request.line_meta:
+                    stash_line_meta(active.id, [m.model_dump() for m in request.line_meta])
+                if request.attribution:
+                    stash_attribution(active.id, request.attribution.model_dump())
+            return GenerateResponse(job_id=active.id, status="processing", estimated_time=15)
         job = await job_repo.create(
             video_id=request.video_id,
             lyrics=request.lyrics,
@@ -444,6 +460,10 @@ async def regenerate_sync(request: RegenerateRequest, background_tasks: Backgrou
                 )
 
         job_repo = JobRepository(session)
+        # 재생성도 같은 잡 진행 중이면 합류 — 연타가 동시 다운로드(WinError 32)를 만들지 않게
+        active = await job_repo.get_active_by_video(request.video_id, lyrics_hash_value)
+        if active:
+            return GenerateResponse(job_id=active.id, status="processing", estimated_time=15)
         job = await job_repo.create(
             video_id=request.video_id,
             lyrics=request.lyrics,

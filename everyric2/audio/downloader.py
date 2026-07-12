@@ -254,8 +254,9 @@ class YouTubeDownloader:
                     audio_path = output_dir / f"{safe_title}.wav"
 
                 if not audio_path.exists():
-                    # Try to find any wav file in output dir
-                    wav_files = list(output_dir.glob("*.wav"))
+                    # Try to find the produced wav; with an explicit filename, never grab
+                    # another concurrent job's file
+                    wav_files = list(output_dir.glob(f"{filename}*.wav" if filename else "*.wav"))
                     if wav_files:
                         audio_path = wav_files[0]
                     else:
