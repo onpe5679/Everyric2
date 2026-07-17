@@ -2,18 +2,15 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "ESNext",
-    "moduleResolution": "bundler",
+    "moduleResolution": "Bundler",
     "lib": ["ES2020", "DOM"],
     "strict": true,
-    "esModuleInterop": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "declaration": false,
-    "noEmit": true,
-    "isolatedModules": true,
-    "types": ["node"]
+    "types": ["node"],
+    "allowJs": false,
+    "noEmit": true
   },
-  "include": ["src/panel/**/*", "src/types/**/*"],
-  "exclude": ["node_modules", "dist", "src/jsx"]
+  "include": ["src/panel/**/*.ts", "tests/**/*.ts"]
 }

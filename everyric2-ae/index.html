@@ -1,217 +1,175 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="ko">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Everyric2</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Everyric Studio</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div id="app">
-    <header class="header">
-      <h1>Everyric2</h1>
-      <button id="settingsBtn" class="icon-btn" title="Settings">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
-        </svg>
-      </button>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="brand-copy">
+        <strong>EVERYRIC</strong>
+        <span>STUDIO · AE</span>
+      </div>
+      <span id="dataBadge" class="data-badge">NO DATA</span>
+      <button id="updateBadge" class="data-badge update-badge" type="button" hidden>UPDATE</button>
+      <button id="openSettingsBtn" class="icon-button" type="button" aria-label="설정">•••</button>
     </header>
 
-    <main class="main-content">
-      <section class="section" id="audioSection">
-        <label class="section-label">Audio Source</label>
-        <div class="audio-selector">
-          <div id="audioInfo" class="audio-info">
-            <span class="placeholder">No audio layer selected</span>
+    <section class="context-panel">
+      <div id="compCard" class="comp-card"></div>
+      <button id="refreshCompBtn" class="refresh-button" type="button" title="컴포지션 새로고침">↻</button>
+    </section>
+
+    <nav class="mode-tabs" aria-label="작업 모드">
+      <button class="active" data-view="sync" type="button"><span>01</span>싱크</button>
+      <button data-view="fill" type="button"><span>02</span>레이어 채우기</button>
+      <button data-view="type" type="button"><span>03</span>타이포 생성</button>
+    </nav>
+
+    <main>
+      <section id="view-sync" class="workspace active">
+        <div class="section-heading">
+          <div><span class="eyebrow">TIMING DOCUMENT</span><h1>싱크 데이터</h1></div>
+          <p>Everyric2 결과를 읽기 좋은 타이포 계획으로 변환합니다.</p>
+        </div>
+
+        <div class="action-row">
+          <button id="loadJsonBtn" class="button secondary" type="button">JSON 불러오기</button>
+        </div>
+        <div id="syncSummary" class="preview-panel"></div>
+
+        <div class="divider"><span>또는 로컬에서 새로 정렬</span></div>
+
+        <label class="field-label" for="lyricsInput">가사 원문</label>
+        <textarea id="lyricsInput" class="lyrics-input" placeholder="노래 가사를 줄 단위로 붙여넣으세요."></textarea>
+        <div class="input-grid">
+          <label><span>ENGINE</span><select id="engineSelect"><option value="ctc">CTC · Recommended</option></select></label>
+          <label><span>LANGUAGE</span><select id="languageSelect"><option value="auto">Auto</option><option value="ko">한국어</option><option value="ja">日本語</option><option value="en">English</option><option value="zh">中文</option></select></label>
+        </div>
+        <div class="action-row sync-actions">
+          <button id="checkEngineBtn" class="button ghost" type="button">환경 확인</button>
+          <button id="runSyncBtn" class="button primary" type="button">현재 오디오 싱크 생성</button>
+          <button id="cancelSyncBtn" class="button danger" type="button" hidden>취소</button>
+        </div>
+        <div id="environmentReport" class="environment-report">
+          <span>환경 확인을 누르면 Everyric2, RAM, GPU/VRAM 상태와 권장 기준을 표시합니다.</span>
+        </div>
+        <div class="action-row" id="engineSetupRow" hidden>
+          <button id="installEngineBtn" class="button primary" type="button">엔진 설치</button>
+        </div>
+        <div class="progress-panel">
+          <div class="progress-head"><span class="eyebrow">PROGRESS</span><small>최근 작업 로그</small></div>
+          <div id="progressLog" class="progress-log"></div>
+        </div>
+        <p class="microcopy">활성 컴포지션의 첫 번째 파일 기반 오디오 레이어를 사용합니다. 서버 코드는 수정하지 않습니다.</p>
+      </section>
+
+      <section id="view-fill" class="workspace">
+        <div class="section-heading">
+          <div><span class="eyebrow">MODE A</span><h1>선택 레이어 채우기</h1></div>
+          <p>레이어의 시간과 디자인은 그대로 두고 Source Text만 교체합니다.</p>
+        </div>
+        <div class="principle-card">
+          <span>보존</span><b>IN / OUT · TRANSFORM · STYLE · EFFECTS</b>
+          <small>Source Text 키프레임과 잠긴 레이어는 안전을 위해 자동으로 건너뜁니다.</small>
+        </div>
+        <div class="action-row two sticky-actions">
+          <button id="previewFillBtn" class="button secondary" type="button">배정 새로고침</button>
+          <button id="applyFillBtn" class="button primary" type="button" disabled>텍스트 적용</button>
+        </div>
+        <div class="action-row two">
+          <button id="addLineMarkersBtn" class="button ghost" type="button">라인 타이밍 마커 추가</button>
+          <button id="removeMarkersBtn" class="button danger" type="button">Everyric 마커 전부 제거</button>
+        </div>
+        <div id="fillPreview" class="preview-panel tall"></div>
+      </section>
+
+      <section id="view-type" class="workspace">
+        <div class="section-heading">
+          <div><span class="eyebrow">MODE B</span><h1>타이포그래피 생성</h1></div>
+          <p>먼저 읽기 호흡을 정하고, 실제 가사가 어떻게 잘리는지 확인한 뒤 생성합니다.</p>
+        </div>
+
+        <div id="typeDataState" class="type-data-state"></div>
+
+        <select id="densitySelect" class="hidden-field" aria-hidden="true">
+          <option value="readable">Readable</option>
+          <option value="balanced">Balanced</option>
+          <option value="rhythmic">Rhythmic</option>
+        </select>
+
+        <section class="intent-panel">
+          <div class="tuning-head"><span class="eyebrow">읽기 리듬</span><small>프리셋을 고르면 실제 가사 샘플이 바로 바뀝니다.</small></div>
+          <div class="rhythm-grid">
+            <button class="rhythm-card" data-density-preset="readable" type="button"><b>Readable</b><span>문장 호흡</span><small>발라드 · OST · 느린 곡</small></button>
+            <button class="rhythm-card" data-density-preset="balanced" type="button"><b>Balanced</b><span>권장 기본</span><small>팝 · 록 · 대부분의 곡</small></button>
+            <button class="rhythm-card" data-density-preset="rhythmic" type="button"><b>Rhythmic</b><span>빠른 호흡</span><small>랩 · 댄스 · 빠른 훅</small></button>
           </div>
-          <button id="selectAudioBtn" class="btn btn-secondary">Select</button>
-        </div>
-      </section>
+          <div id="splitSample" class="split-sample"></div>
+        </section>
 
-      <section class="section" id="lyricsSection">
-        <label class="section-label">Lyrics</label>
-        <textarea id="lyricsInput" class="lyrics-input" placeholder="Paste lyrics here or search LRCLIB..."></textarea>
-        <div class="lyrics-actions">
-          <button id="searchLrcBtn" class="btn btn-text">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
-            </svg>
-            Search LRCLIB
-          </button>
-          <button id="loadLrcBtn" class="btn btn-text">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/>
-            </svg>
-            Load LRC
-          </button>
+        <div class="tuning-panel">
+          <div class="tuning-head"><span class="eyebrow">화면 구성</span><small id="presetStateText">Balanced</small></div>
+          <div class="settings-grid tuning-grid primary-tuning">
+            <label><span>생성 모드</span><select id="typographyModeSelect"><option value="designed">타이포 분할</option><option value="line">줄가사</option></select></label>
+            <label><span>블록 글자 수</span><div class="unit-input"><input id="phraseTargetInput" type="number" min="3" max="24" value="9"><em>자</em></div></label>
+            <label><span>등장 방식</span><select id="revealSelect"><option value="cumulative">구문 싱크</option><option value="simultaneous">줄 시작에 함께</option></select></label>
+            <label><span>레이아웃</span><select id="layoutSelect"><option value="auto">Auto Rotation</option><option value="center">Center Stack</option><option value="editorial">Editorial</option><option value="split">Split Grid</option><option value="diagonal">Diagonal</option></select></label>
+            <label><span>기본 크기</span><div class="unit-input"><input id="fontSizeInput" type="number" min="12" max="400" value="94"><em>px</em></div></label>
+          </div>
+          <details id="advancedTypeControls" class="advanced-controls">
+            <summary>세부 조정</summary>
+            <div class="settings-grid tuning-grid">
+              <label><span>블록당 최대 단어</span><div class="unit-input"><input id="maxTokensInput" type="number" min="1" max="8" value="4"><em>max</em></div></label>
+              <label><span>쉼 분할 기준</span><div class="unit-input"><input id="pauseInput" type="number" min="0.05" max="2" step="0.01" value="0.32"><em>sec</em></div></label>
+              <label><span>미리 등장</span><div class="unit-input"><input id="preRollInput" type="number" min="0" max="60" value="3"><em>fr</em></div></label>
+              <label><span>여운 유지</span><div class="unit-input"><input id="postRollInput" type="number" min="0" max="120" value="8"><em>fr</em></div></label>
+              <label><span>카드당 블록 수</span><div class="unit-input"><input id="maxBlocksInput" type="number" min="1" max="6" value="4"><em>max</em></div></label>
+            </div>
+          </details>
         </div>
-      </section>
 
-      <section class="section" id="outputSection">
-        <label class="section-label">Output Format</label>
-        <div class="radio-group">
-          <label class="radio-label">
-            <input type="radio" name="outputType" value="markers">
-            <span>Markers</span>
-          </label>
-          <label class="radio-label">
-            <input type="radio" name="outputType" value="textLayers">
-            <span>Text Layers</span>
-          </label>
-          <label class="radio-label">
-            <input type="radio" name="outputType" value="both" checked>
-            <span>Both</span>
-          </label>
-        </div>
-      </section>
+        <div id="typePlanSummary" class="plan-summary-panel"></div>
 
-      <section class="section" id="segmentSection">
-        <label class="section-label">Segment Mode</label>
-        <div class="radio-group">
-          <label class="radio-label">
-            <input type="radio" name="segmentMode" value="line" checked>
-            <span>Line</span>
-          </label>
-          <label class="radio-label">
-            <input type="radio" name="segmentMode" value="word">
-            <span>Word</span>
-          </label>
-          <label class="radio-label">
-            <input type="radio" name="segmentMode" value="character">
-            <span>Character</span>
-          </label>
+        <div class="action-row two sticky-actions">
+          <button id="previewTypeBtn" class="button secondary" type="button">카드 상세 보기</button>
+          <button id="generateTypeBtn" class="button primary" type="button" disabled>AE 레이어 생성</button>
         </div>
-      </section>
-
-      <section class="section" id="modeSection">
-        <label class="section-label">Processing Mode</label>
-        <div class="radio-group">
-          <label class="radio-label">
-            <input type="radio" name="processMode" value="local" checked>
-            <span>Local (everyric2 CLI)</span>
-          </label>
-          <label class="radio-label">
-            <input type="radio" name="processMode" value="cloud">
-            <span>Cloud API</span>
-          </label>
-        </div>
-      </section>
-
-      <section class="section" id="optionsSection">
-        <label class="section-label">Options</label>
-        <div class="options-grid">
-          <label class="checkbox-label">
-            <input type="checkbox" id="translateCheck">
-            <span>Translate to Korean</span>
-          </label>
-          <label class="checkbox-label">
-            <input type="checkbox" id="pronunciationCheck">
-            <span>Include pronunciation</span>
-          </label>
-        </div>
-        <div class="select-row">
-          <label for="languageSelect">Language:</label>
-          <select id="languageSelect">
-            <option value="auto">Auto detect</option>
-            <option value="ja">Japanese</option>
-            <option value="en">English</option>
-            <option value="ko">Korean</option>
-            <option value="zh">Chinese</option>
-          </select>
-        </div>
+        <div id="generationConfirm" class="generation-confirm" hidden></div>
+        <div id="typePreview" class="preview-panel tall"></div>
+        <details class="cleanup-panel">
+          <summary>참고 마커 · 정리 도구</summary>
+          <p>Everyric이 만든 것만 지웁니다. 사용자 레이어·마커는 건드리지 않습니다.</p>
+          <div class="action-row two">
+            <button id="removeGeneratedLayersBtn" class="button ghost" type="button">Everyric 레이어 제거</button>
+            <button id="removeTypeMarkersBtn" class="button danger" type="button">Everyric 마커 제거</button>
+          </div>
+        </details>
+        <p class="microcopy">생성물은 일반 텍스트 레이어와 마커뿐입니다. Text Animator와 모션 키는 만들지 않습니다.</p>
       </section>
     </main>
 
-    <footer class="footer">
-      <button id="generateBtn" class="btn btn-primary btn-large">Generate Sync</button>
-      <div id="statusBar" class="status-bar">
-        <span id="statusText">Ready</span>
-      </div>
+    <footer id="statusBar" class="status-bar" data-kind="ready">
+      <i></i><span id="statusText">초기화 중…</span>
     </footer>
 
-    <div id="progressOverlay" class="overlay hidden">
-      <div class="progress-content">
-        <div class="spinner"></div>
-        <p id="progressText">Processing...</p>
-        <div class="progress-bar">
-          <div id="progressFill" class="progress-fill"></div>
-        </div>
-        <button id="cancelBtn" class="btn btn-secondary">Cancel</button>
+    <aside id="settingsDrawer" class="settings-drawer" aria-label="설정">
+      <div class="drawer-head"><div><span class="eyebrow">PREFERENCES</span><h2>작업 설정</h2></div><button id="closeSettingsBtn" class="icon-button" type="button">×</button></div>
+      <div class="drawer-body">
+        <label class="stack-field"><span>UI LANGUAGE</span><select id="uiLocaleSelect"><option value="ko">한국어</option><option value="ja">日本語</option><option value="en">English</option></select><small>패널 UI 언어입니다.</small></label>
+        <label class="stack-field"><span>PYTHON EXECUTABLE</span><input id="pythonPathInput" type="text" value="python" placeholder="python 또는 .venv\\Scripts\\python.exe"><small>Everyric2가 설치된 Python 실행 파일입니다.</small></label>
+        <label class="stack-field"><span>LAYER ORDER</span><select id="layerOrderSelect"><option value="bottom-to-top">Time rises upward · 기본</option><option value="top-to-bottom">Time flows downward</option></select><small>타임라인 레이어 스택 방향입니다.</small></label>
+        <label class="toggle-row"><input id="autoLabelColorsCheck" type="checkbox"><span><b>레이어 라벨 컬러 자동 분할</b><small>카드/라인 번호별로 AE 라벨 색을 나눕니다.</small></span></label>
+        <label class="toggle-row"><input id="replacePreviousCheck" type="checkbox" checked><span><b>이전 Everyric 생성물 교체</b><small>EV2 메타데이터가 있는 레이어만 정리합니다.</small></span></label>
       </div>
-    </div>
-
-    <div id="resultOverlay" class="overlay hidden">
-      <div class="result-content">
-        <div class="result-icon success">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-          </svg>
-        </div>
-        <h2>Sync Complete!</h2>
-        <div id="resultStats" class="result-stats"></div>
-        <div class="result-actions">
-          <button id="saveLrcBtn" class="btn btn-secondary">Save LRC</button>
-          <button id="saveSrtBtn" class="btn btn-secondary">Save SRT</button>
-          <button id="newTaskBtn" class="btn btn-primary">New Task</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="settingsOverlay" class="overlay hidden">
-      <div class="settings-content">
-        <h2>Settings</h2>
-        <div class="settings-form">
-          <div class="form-group">
-            <label for="cliPathInput">everyric2 CLI Path</label>
-            <input type="text" id="cliPathInput" placeholder="everyric2 (auto-detect)">
-          </div>
-          <div class="form-group">
-            <label for="apiUrlInput">Cloud API URL</label>
-            <input type="text" id="apiUrlInput" placeholder="https://api.everyric.com">
-          </div>
-          <div class="form-group">
-            <label for="markerColorSelect">Marker Color</label>
-            <select id="markerColorSelect">
-              <option value="green">Green</option>
-              <option value="red">Red</option>
-              <option value="blue">Blue</option>
-              <option value="yellow">Yellow</option>
-              <option value="orange">Orange</option>
-              <option value="purple">Purple</option>
-              <option value="cyan">Cyan</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="fontSizeInput">Text Layer Font Size</label>
-            <input type="number" id="fontSizeInput" value="60" min="12" max="200">
-          </div>
-        </div>
-        <div class="settings-actions">
-          <button id="settingsCancelBtn" class="btn btn-secondary">Cancel</button>
-          <button id="settingsSaveBtn" class="btn btn-primary">Save</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="searchOverlay" class="overlay hidden">
-      <div class="search-content">
-        <h2>Search LRCLIB</h2>
-        <div class="search-form">
-          <input type="text" id="searchQueryInput" placeholder="Song title or artist...">
-          <button id="searchExecuteBtn" class="btn btn-primary">Search</button>
-        </div>
-        <div id="searchResults" class="search-results">
-          <p class="placeholder">Enter a search query above</p>
-        </div>
-        <div class="search-actions">
-          <button id="searchCancelBtn" class="btn btn-secondary">Cancel</button>
-          <button id="searchSelectBtn" class="btn btn-primary" disabled>Select</button>
-        </div>
-      </div>
-    </div>
+      <div class="drawer-footer"><button id="saveSettingsBtn" class="button primary full" type="button">설정 저장</button></div>
+    </aside>
+    <div class="drawer-scrim"></div>
   </div>
-
-  <script src="lib/CSInterface.js"></script>
   <script src="dist/js/main.js"></script>
 </body>
 </html>

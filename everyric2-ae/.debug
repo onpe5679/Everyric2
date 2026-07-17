@@ -1,7 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <ExtensionList>
-  <Extension Id="com.everyric.ae.panel">
-    <HostList>
-      <Host Name="AEFT" Port="8088"/>
-    </HostList>
+  <Extension Id="com.everyric.studio.panel">
+    <HostList><Host Name="AEFT" Port="8094"/></HostList>
   </Extension>
 </ExtensionList>

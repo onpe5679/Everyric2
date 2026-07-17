@@ -96,6 +96,13 @@ everyric2-chrome/debug-lane-*.png
 # Secrets
 nvapi.txt
 *.apikey
+secrets/
+*.p12
+
+# AE 확장 릴리즈 산출물 · 서명 도구 캐시 · 테스트 산출물
+everyric2-ae/release/
+everyric2-ae/scripts/.tools/
+everyric2-ae/artifacts/
 
 # 런타임 데이터/로그/AI 세션 아티팩트 — 공개 리포에 포함 금지
 *.db

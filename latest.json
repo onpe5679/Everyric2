@@ -1,0 +1,17 @@
+{
+  "ae": {
+    "version": "2.0.0",
+    "zxpUrl": "https://github.com/onpe5679/Everyric2/releases/download/ae-v2.0.0/Everyric-Studio-2.0.0.zxp",
+    "releaseUrl": "https://github.com/onpe5679/Everyric2/releases/tag/ae-v2.0.0",
+    "engineRange": ">=0.1.0 <1.0.0"
+  },
+  "engine": {
+    "version": "0.1.0",
+    "wheelUrl": "https://github.com/onpe5679/Everyric2/releases/download/engine-v0.1.0/everyric2-0.1.0-py3-none-any.whl",
+    "releaseUrl": "https://github.com/onpe5679/Everyric2/releases/tag/engine-v0.1.0"
+  },
+  "chrome": {
+    "version": "0.0.0",
+    "releaseUrl": "https://github.com/onpe5679/Everyric2/releases"
+  }
+}
