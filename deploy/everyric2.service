@@ -1,0 +1,20 @@
+[Unit]
+Description=Everyric2 lyrics sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 실제 서버 계정으로 변경 (deno·HF 모델 캐시가 이 계정 홈 기준으로 잡힌다)
+User=CHANGE_ME
+# 핵심: SQLite 상대 경로·nvapi.txt·.env 해석이 전부 이 디렉터리 기준
+WorkingDirectory=/opt/everyric2
+# .env의 모든 항목을 프로세스 환경변수로 주입
+# (DATABASE_URL·NVIDIA_API_KEY는 os.getenv로만 읽혀서 pydantic .env 로딩만으로는 부족)
+EnvironmentFile=/opt/everyric2/.env
+ExecStart=/opt/everyric2/.venv/bin/uvicorn everyric2.server.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
