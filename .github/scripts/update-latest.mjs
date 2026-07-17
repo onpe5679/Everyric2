@@ -8,7 +8,7 @@ const REPO_URL = "https://github.com/onpe5679/Everyric2";
 
 const tag = process.argv[2];
 if (!tag) {
-  console.error("usage: node update-latest.mjs <tag>  (ae-v2.0.0 | engine-v0.1.0)");
+  console.error("usage: node update-latest.mjs <tag>  (ae-v2.0.0 | engine-v0.1.0 | chrome-v1.1.0)");
   process.exit(1);
 }
 
@@ -28,6 +28,14 @@ if (tag.startsWith("ae-v")) {
     ...manifest.engine,
     version,
     wheelUrl: `${REPO_URL}/releases/download/${tag}/everyric2-${version}-py3-none-any.whl`,
+    releaseUrl: `${REPO_URL}/releases/tag/${tag}`,
+  };
+} else if (tag.startsWith("chrome-v")) {
+  const version = tag.slice("chrome-v".length);
+  manifest.chrome = {
+    ...manifest.chrome,
+    version,
+    zipUrl: `${REPO_URL}/releases/download/${tag}/Everyric-Chrome-${version}.zip`,
     releaseUrl: `${REPO_URL}/releases/tag/${tag}`,
   };
 } else {

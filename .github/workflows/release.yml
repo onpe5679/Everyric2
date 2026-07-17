@@ -5,6 +5,7 @@ on:
     tags:
       - "ae-v*"
       - "engine-v*"
+      - "chrome-v*"
 
 permissions:
   contents: write
@@ -85,9 +86,52 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
 
+  chrome:
+    if: startsWith(github.ref_name, 'chrome-v')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: everyric2-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: everyric2-chrome/package-lock.json
+      - name: Verify tag matches package/manifest version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#chrome-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          MF_VERSION="$(node -p "require('./manifest.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ] || [ "$TAG_VERSION" != "$MF_VERSION" ]; then
+            echo "tag ($TAG_VERSION) != package.json ($PKG_VERSION) / manifest.json ($MF_VERSION)"
+            exit 1
+          fi
+      - run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - run: npm run build
+      - name: Zip extension
+        run: |
+          cd dist
+          zip -r "../Everyric-Chrome-${GITHUB_REF_NAME#chrome-v}.zip" .
+      - name: Pick release notes
+        id: notes
+        working-directory: .
+        run: |
+          if [ -f "docs/releases/${GITHUB_REF_NAME}.md" ]; then
+            echo "path=docs/releases/${GITHUB_REF_NAME}.md" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: true
+          files: everyric2-chrome/Everyric-Chrome-*.zip
+
   update-latest:
-    needs: [ae, engine]
-    if: always() && (needs.ae.result == 'success' || needs.engine.result == 'success')
+    needs: [ae, engine, chrome]
+    if: always() && (needs.ae.result == 'success' || needs.engine.result == 'success' || needs.chrome.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

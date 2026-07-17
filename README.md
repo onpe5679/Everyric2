@@ -4,6 +4,12 @@
 
 가사 텍스트만 있으면 CTC 강제 정렬(GPU 가속)로 줄·글자 단위 타이밍을 만들고, LLM으로 자연스러운 가사체 번역과 한글 독음을 붙이고, 보컬 멜로디(f0)를 전사해 노래방 스타일 음정 바까지 그려 줍니다.
 
+![유튜브 가사 오버레이](docs/images/chrome-overlay.png)
+
+*가라오케 모드(PiP) — 멜로디 노트·계이름·한글 독음·가사체 번역:*
+
+![가라오케 음정 바 (PiP)](docs/images/karaoke-pip.png)
+
 ```
 ┌────────────────┐   가사 검색/생성/번역     ┌───────────────────────────┐
 │ Chrome 확장     │ ◄───────────────────► │ Everyric2 서버 (FastAPI)   │
@@ -31,6 +37,19 @@
 - **타이밍 보정 체인**: demucs 보컬 분리 → VAD 기반 라인 클램프·늘임음 연장·간주 스냅
 - **멜로디 전사**: RMVPE(폴백 FCPE) f0 → 음절 앵커 노트, 옥타브 폴딩, 키 추정(K-S) + 스케일 스냅
 - **번역 엔진**: Gemini / NVIDIA NIM / OpenAI 호환(로컬 LLM) — 키가 없으면 자동 전환, 독음 가나 혼입 자동 검증·재시도
+
+### After Effects 패널 (`everyric2-ae/`)
+- **Everyric Studio**: 정렬 결과를 편집 가능한 AE 텍스트 레이어 타이포그래피로 변환 — 패널에서 직접 로컬 정렬 실행, 엔진 원클릭 설치, 업데이트 확인
+
+## 다운로드
+
+빌드된 배포본은 [Releases](https://github.com/onpe5679/Everyric2/releases)에서 받을 수 있습니다:
+
+| 구성 요소 | 파일 | 설치 |
+|---|---|---|
+| Chrome 확장 | `Everyric-Chrome-<버전>.zip` | 압축 해제 → `chrome://extensions` → 개발자 모드 → **압축해제된 확장 프로그램 로드** |
+| 서버/엔진 | `everyric2-<버전>-py3-none-any.whl` | `pip install <경로/URL>` (소스 설치는 아래 빠른 시작 참고) |
+| After Effects 패널 | `Everyric-Studio-<버전>.zxp` | [aescripts ZXP Installer](https://aescripts.com/learn/zxp-installer/)로 열기 (AE 2024+) |
 
 ## 빠른 시작
 
@@ -75,12 +94,14 @@ export NVIDIA_API_KEY=nvapi-...   # 또는 저장소 루트에 nvapi.txt (gitign
 
 ### 2. Chrome 확장
 
+[Releases](https://github.com/onpe5679/Everyric2/releases)의 `Everyric-Chrome-<버전>.zip`을 받아 압축 해제하거나, 소스에서 빌드합니다:
+
 ```bash
 cd everyric2-chrome
 npm install && npm run build
 ```
 
-`chrome://extensions` → 개발자 모드 → **압축해제된 확장 프로그램 로드** → `everyric2-chrome/dist` 선택.
+`chrome://extensions` → 개발자 모드 → **압축해제된 확장 프로그램 로드** → 압축 해제한 폴더(또는 `everyric2-chrome/dist`) 선택.
 유튜브에서 음악 영상을 열면 자동으로 패널이 뜹니다 (툴바 아이콘으로 수동 토글).
 
 > Windows에서 서버 URL은 `http://127.0.0.1:8000`을 쓰세요 — `localhost`는 IPv6 선시도로 요청당 ~2초 지연될 수 있습니다 (확장 기본값이 이미 127.0.0.1).
