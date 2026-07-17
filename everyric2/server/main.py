@@ -12,6 +12,7 @@ from everyric2.server.api.job import router as job_router
 from everyric2.server.api.sync import router as sync_router
 from everyric2.server.api.translate import router as translate_router
 from everyric2.server.api.vocaro import router as vocaro_router
+from everyric2.server.api.worker import router as worker_router
 from everyric2.server.db.connection import close_db, init_db
 
 # torch.cuda.is_available()이 GPU 사용 상태에 따라 호출당 ~2초까지 걸린다(드라이버 질의) —
@@ -69,12 +70,21 @@ async def require_api_key(request, call_next):
     server = get_settings().server
     # OPTIONS(CORS 프리플라이트)는 브라우저가 커스텀 헤더 없이 보낸다 — 키 검사 제외
     if server.api_key and request.method != "OPTIONS" and request.url.path.startswith("/api"):
-        provided = request.headers.get("x-api-key")
-        if provided not in (server.api_key, server.admin_api_key or None):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "API 키가 필요해요 (확장 설정의 API 키 칸에 입력)"},
-            )
+        # 원격 워커 엔드포인트는 클라이언트 API 키를 모른다 — 유효한 X-Worker-Key가 있으면
+        # X-API-Key 검사를 면제한다 (워커 라우터가 X-Worker-Key를 다시 검증한다)
+        worker_key = server.worker_key
+        worker_authed = (
+            request.url.path.startswith("/api/worker")
+            and bool(worker_key)
+            and request.headers.get("x-worker-key") == worker_key
+        )
+        if not worker_authed:
+            provided = request.headers.get("x-api-key")
+            if provided not in (server.api_key, server.admin_api_key or None):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "API 키가 필요해요 (확장 설정의 API 키 칸에 입력)"},
+                )
     return await call_next(request)
 
 app.include_router(sync_router)
@@ -83,6 +93,7 @@ app.include_router(translate_router)
 app.include_router(cookies_router)
 app.include_router(vocaro_router)
 app.include_router(captions_router)
+app.include_router(worker_router)
 
 
 class HealthResponse(BaseModel):

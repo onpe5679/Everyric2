@@ -54,6 +54,21 @@ def _validate_video_id(video_id: str) -> None:
         raise HTTPException(status_code=422, detail="invalid video_id")
 
 
+async def _dispatch_job(job_id: str, background_tasks: BackgroundTasks) -> None:
+    """생성 잡을 처리 경로에 넘긴다.
+
+    local_worker면 기존처럼 인프로세스로 처리(add_task → process_job)한다. False면 GPU
+    없는 API 전용 서버로 보고, add_task 없이 status=queued로만 마킹해 원격 워커가 클레임
+    하도록 둔다 (스태시 적재는 호출부가 이미 마쳤고, queue_position 표시도 그대로 동작)."""
+    if get_settings().server.local_worker:
+        from everyric2.server.worker import process_job
+
+        background_tasks.add_task(process_job, job_id)
+    else:
+        async with get_session() as session:
+            await JobRepository(session).update_status(job_id, "queued", progress=0)
+
+
 class SyncLookupResponse(BaseModel):
     found: bool
     sync_id: str | None = None
@@ -443,13 +458,13 @@ async def generate_sync(request: GenerateRequest, background_tasks: BackgroundTa
         )
         job_id = job.id
 
-    from everyric2.server.worker import process_job, stash_attribution, stash_line_meta
+    from everyric2.server.worker import stash_attribution, stash_line_meta
 
     if request.line_meta:
         stash_line_meta(job_id, [m.model_dump() for m in request.line_meta])
     if request.attribution:
         stash_attribution(job_id, request.attribution.model_dump())
-    background_tasks.add_task(process_job, job_id)
+    await _dispatch_job(job_id, background_tasks)
 
     return GenerateResponse(
         job_id=job_id,
@@ -569,7 +584,7 @@ async def regenerate_sync(
         )
         job_id = job.id
 
-    from everyric2.server.worker import process_job, stash_attribution, stash_force, stash_line_meta
+    from everyric2.server.worker import stash_attribution, stash_force, stash_line_meta
 
     if request.force:
         # 워커의 (audio_hash, lyrics_hash) 재사용 검사까지 건너뛰어야 진짜 재생성이 된다
@@ -578,7 +593,7 @@ async def regenerate_sync(
         stash_line_meta(job_id, [m.model_dump() for m in request.line_meta])
     if request.attribution:
         stash_attribution(job_id, request.attribution.model_dump())
-    background_tasks.add_task(process_job, job_id)
+    await _dispatch_job(job_id, background_tasks)
 
     return GenerateResponse(
         job_id=job_id,

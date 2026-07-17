@@ -130,6 +130,13 @@ class JobRepository:
         )
         return list(result.scalars().all())
 
+    async def get_oldest_queued(self) -> Job | None:
+        """가장 오래 대기(queued)한 잡 — 원격 워커 claim이 FIFO로 하나씩 가져간다."""
+        result = await self.session.execute(
+            select(Job).where(Job.status == "queued").order_by(Job.created_at).limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def get_active_by_video(self, video_id: str, lyrics_hash: str) -> Job | None:
         """같은 영상·같은 가사로 이미 진행 중(pending/processing)인 잡 — 중복 생성 차단용.
 
@@ -148,12 +155,18 @@ class JobRepository:
         )
         return result.scalar_one_or_none()
 
-    async def count_queued_before(self, created_at) -> int:
-        """대기열 순번 계산 — 나보다 먼저 등록된 대기(queued) 잡 수."""
+    async def count_queued_before(self, created_at, exclude_id: str | None = None) -> int:
+        """대기열 순번 계산 — 나보다 먼저 등록된 대기(queued) 잡 수.
+
+        created_at은 server_default=func.now()라 SQLite에 초 단위 문자열로 저장되는데,
+        파이썬 datetime 바인딩은 마이크로초까지 붙어 문자열 비교에서 자기 자신이
+        "나보다 먼저"로 세어졌다 (첫 대기 잡이 대기열 2번으로 표시). `<=` + 자기 id
+        제외로 바로잡는다 — 같은 초의 다른 잡끼리 순번을 공유하는 건 허용."""
+        conditions = [Job.status == "queued", Job.created_at <= created_at]
+        if exclude_id is not None:
+            conditions.append(Job.id != exclude_id)
         result = await self.session.execute(
-            select(func.count())
-            .select_from(Job)
-            .where(Job.status == "queued", Job.created_at < created_at)
+            select(func.count()).select_from(Job).where(*conditions)
         )
         return int(result.scalar_one())
 

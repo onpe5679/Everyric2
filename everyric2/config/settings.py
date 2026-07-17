@@ -357,6 +357,25 @@ class ServerSettings(BaseSettings):
         description="Max force-regenerations/resets per video per 24h for non-admin "
         "callers (only enforced when admin_api_key is set). 0 disables the limit.",
     )
+    worker_key: str = Field(
+        default="",
+        description="원격 GPU 워커 풀 인증 키 (X-Worker-Key). 설정하면 /api/worker/* "
+        "엔드포인트가 켜져 원격 워커가 잡을 클레임·처리한다. 빈 값이면 워커 API 전체가 "
+        "403 (기능 비활성). 개인 풀 모델이라 워커들이 이 키 하나를 공유하고 worker_id로 "
+        "머신을 구분한다.",
+    )
+    local_worker: bool = Field(
+        default=True,
+        description="서버 프로세스가 직접 생성 파이프라인을 돌릴지 여부. True면 기존처럼 "
+        "인프로세스로 처리한다. False면 GPU 없는 API 전용 서버로 보고, 생성 잡을 add_task "
+        "없이 status=queued로만 마킹해 원격 워커가 클레임하도록 둔다 (queue_position 표시 유지).",
+    )
+    worker_lease_sec: int = Field(
+        default=120,
+        description="원격 워커가 클레임한 잡의 리스 만료(초). 진행률 보고(≤2s 간격)가 "
+        "하트비트를 겸해 리스를 갱신한다. 만료되면(워커 하트비트 끊김) 다음 claim 처리 "
+        "시 잡을 queued로 되돌려 다른 워커가 다시 가져가게 한다.",
+    )
 
 
 class Settings(BaseSettings):

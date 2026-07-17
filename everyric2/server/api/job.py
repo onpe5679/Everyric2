@@ -74,7 +74,7 @@ async def get_job_status(job_id: str):
 
         queue_position = None
         if job.status == "queued":
-            queue_position = await job_repo.count_queued_before(job.created_at) + 1
+            queue_position = await job_repo.count_queued_before(job.created_at, exclude_id=job.id) + 1
 
         response = JobStatusResponse(
             job_id=job.id,

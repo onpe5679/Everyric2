@@ -4,8 +4,9 @@ import logging
 import math
 import re
 import statistics
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +68,6 @@ STAGE_WINDOWS: dict[str, tuple[int, int]] = {
     "멜로디 분석": (80, 88),
     "저장": (90, 100),
 }
-
-# 잡별 현재 단계 — 정렬 스레드(_run_alignment의 on_stage 콜백)가 쓰고 모니터가 읽는다
-_JOB_STAGE: dict[str, str] = {}
 
 # 동시 처리 슬롯 — 정렬(demucs+CTC+멜로디)은 GPU/RAM을 크게 쓰므로 상한 없이 병렬로
 # 돌리면 OOM이 난다. 초과분은 status=queued로 대기하고 확장이 "대기열"로 표시한다.
@@ -187,8 +185,8 @@ async def process_job(job_id: str) -> None:
         await _process_job_inner(job_id, job)
 
 
-async def _try_complete_from_cache(
-    job_id: str, job, audio_hash: str, lyrics_hash_value: str, audio_path: str
+async def _complete_from_cache_db(
+    job_id: str, job, audio_hash: str, lyrics_hash_value: str
 ) -> bool:
     """(audio_hash, lyrics_hash)가 일치하는 기존 싱크가 있으면 정렬 없이 잡을 완료한다.
 
@@ -196,7 +194,8 @@ async def _try_complete_from_cache(
     영상의 행을 재사용만 하면 이 영상은 completed인데 가사가 영영 안 뜨고 초기화(DELETE)도
     지울 행이 없어 복구 불가였다 (동일 오디오 재업로드/공식 오디오 실측). 이 영상 몫의
     행을 복사 생성하고, 대기 중인 발음/번역 메타·출처도 원본이 아닌 이 행에만 반영한다.
-    재사용(완료)했으면 True."""
+    재사용(완료)했으면 True. 오디오 파일 정리는 호출부 몫이다 (원격 워커는 서버에 파일이
+    없고 로컬에서 지운다 — _try_complete_from_cache가 인프로세스용 래퍼)."""
     from everyric2.server.db.connection import get_session
     from everyric2.server.db.repository import JobRepository, SyncRepository
 
@@ -242,99 +241,203 @@ async def _try_complete_from_cache(
             job_id, "completed", progress=100, result_id=target.id
         )
         logger.info(f"Job {job_id} reused existing sync (audio_hash match)")
-        Path(audio_path).unlink(missing_ok=True)
         return True
 
 
+async def _try_complete_from_cache(
+    job_id: str, job, audio_hash: str, lyrics_hash_value: str, audio_path: str
+) -> bool:
+    """캐시 완결 시 다운로드한 오디오까지 정리하는 인프로세스 래퍼.
+
+    원격 워커 경로는 서버에 오디오 파일이 없으므로 이 래퍼 대신 _complete_from_cache_db를
+    직접 부르고, 로컬 오디오는 워커 쪽 hooks.cache_check가 지운다."""
+    completed = await _complete_from_cache_db(job_id, job, audio_hash, lyrics_hash_value)
+    if completed:
+        Path(audio_path).unlink(missing_ok=True)
+    return completed
+
+
+class PipelineError(Exception):
+    """사용자에게 보이는 파이프라인 실패 (예: 영상 과길이). str(e)가 실패 문구가 된다."""
+
+
+@dataclass
+class JobInput:
+    """run_pipeline 입력 — 인프로세스는 스태시를 peek해, 원격은 claim 응답으로 채운다."""
+
+    job_id: str
+    video_id: str
+    lyrics: str
+    language: str | None = None
+    line_meta: list[dict[str, Any]] | None = None
+    attribution: dict[str, Any] | None = None
+    force: bool = False
+    max_audio_sec: int = 0
+
+
+@dataclass
+class PipelineResult:
+    """run_pipeline 성공 결과 — 인프로세스 저장 경로/원격 result 제출이 그대로 저장한다."""
+
+    timestamps: list[dict[str, Any]]
+    language: str | None
+    quality_score: float | None
+    audio_hash: str
+    extra: dict[str, Any] | None
+
+
+class PipelineHooks(Protocol):
+    """파이프라인 코어가 앞뒤(진행률·취소·캐시)를 위임하는 콜백 묶음.
+
+    - report: 순수 진행률 보고(취소 소진 없음). 다운로드 틱·단계 모니터가 쓴다.
+    - progress: 진행률 보고 + 취소 확인. False면 취소 요청됨 → 코어가 중단(None 반환).
+    - cache_check: (audio_hash, lyrics) 캐시 완결 판정. True면 잡 완료·오디오 정리까지
+      끝났으므로 코어가 정렬을 건너뛰고 중단한다.
+    """
+
+    async def report(self, progress: int, stage: str) -> None: ...
+
+    async def progress(self, progress: int, stage: str) -> bool: ...
+
+    async def cache_check(self, audio_hash: str, audio_path: str) -> bool: ...
+
+
+class InProcessHooks:
+    """서버 프로세스가 직접 처리할 때의 hooks — 기존 _set_progress/_consume_cancel/
+    _try_complete_from_cache를 감싸 리팩터 전과 같은 관찰 동작을 낸다."""
+
+    def __init__(self, job_id: str, job) -> None:
+        self.job_id = job_id
+        self.job = job
+
+    async def report(self, progress: int, stage: str) -> None:
+        await _set_progress(self.job_id, progress, stage)
+
+    async def progress(self, progress: int, stage: str) -> bool:
+        # _set_progress는 취소 대기 중이면 쓰기를 건너뛴다(가드). 이어 취소를 소진해
+        # 리팩터 전의 "경계에서 취소 확인" 동작을 그대로 재현한다.
+        await _set_progress(self.job_id, progress, stage)
+        return not await _consume_cancel(self.job_id)
+
+    async def cache_check(self, audio_hash: str, audio_path: str) -> bool:
+        from everyric2.server.db.repository import hash_lyrics
+
+        return await _try_complete_from_cache(
+            self.job_id, self.job, audio_hash, hash_lyrics(self.job.lyrics), audio_path
+        )
+
+
+async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | None:
+    """생성 파이프라인 코어 — 인프로세스 워커와 원격 워커가 공유한다.
+
+    hooks.progress로 단계·진행률을 보고하고(False면 취소 → None 반환으로 중단),
+    hooks.cache_check로 (audio_hash, lyrics) 캐시 완결을 판정한다(True면 정렬 생략,
+    None 반환). 성공하면 PipelineResult를, 취소/캐시 완결이면 None을 돌려준다. 영상
+    과길이 등 사용자 노출 실패는 PipelineError로 올린다. 관찰 가능한 동작(단계 문구·
+    진행률 값·취소 경계·캐시 동작·실패 문구·틱/모니터 UX)은 리팩터 전과 동일하다."""
+    if not await hooks.progress(10, "다운로드"):
+        return None
+
+    dl_ticker = asyncio.create_task(
+        _tick_progress(hooks.report, start=10, cap=33, interval=2.0, stage="다운로드")
+    )
+    try:
+        download_result = await asyncio.get_event_loop().run_in_executor(
+            None, _download_and_hash, job.video_id, job.job_id
+        )
+    finally:
+        dl_ticker.cancel()
+    audio_hash = download_result["audio_hash"]
+    audio_path = download_result["audio_path"]
+
+    # 노래가 아닌 초장시간 영상(팟캐스트/라이브 다시보기)이 GPU 슬롯을 몇 시간씩 점유하는
+    # 것을 막는다 — 상한 초과는 정렬 전에 친절하게 실패. 취소 경계(아래 progress)보다 먼저
+    # 검사해 리팩터 전 "다운로드 직후 → 과길이 검사 → 캐시 확인" 순서를 보존한다.
+    if job.max_audio_sec > 0:
+        duration = _audio_duration_sec(audio_path)
+        if duration and duration > job.max_audio_sec:
+            Path(audio_path).unlink(missing_ok=True)
+            raise PipelineError(
+                f"영상이 너무 길어요 ({duration / 60:.0f}분). 싱크 생성은 "
+                f"{job.max_audio_sec // 60}분 이하의 노래 영상에서만 지원해요."
+            )
+
+    # 다운로드 완료 → 캐시 확인 (취소 경계 겸)
+    if not await hooks.progress(35, "캐시 확인"):
+        Path(audio_path).unlink(missing_ok=True)
+        return None
+
+    if not job.force and await hooks.cache_check(audio_hash, audio_path):
+        # 캐시로 완결 — 오디오는 hooks.cache_check가 이미 정리했다
+        return None
+
+    # 캐시 미스 → 정렬 진입 (취소 경계 겸)
+    if not await hooks.progress(36, "보컬 분리"):
+        Path(audio_path).unlink(missing_ok=True)
+        return None
+
+    # 정렬(CTC+분리+보정+멜로디)은 수십 초 걸리는 단일 블록 — 정렬 스레드가 단계명을
+    # stage_holder에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 보고한다
+    stage_holder: dict[str, str] = {"stage": "보컬 분리"}
+    monitor = asyncio.create_task(_stage_monitor(hooks.report, stage_holder, start=36))
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            _run_alignment,
+            audio_path,
+            job.lyrics,
+            job.language,
+            job.line_meta,
+            lambda name: stage_holder.__setitem__("stage", name),
+        )
+    finally:
+        monitor.cancel()
+
+    # 정렬 완료, 저장 단계 (취소 경계 겸) — 오디오는 _run_alignment의 finally가 정리했다
+    if not await hooks.progress(90, "저장"):
+        return None
+
+    # 독음 정렬 경로는 발음/번역/pron_segments를 이미 세그먼트에 붙였으므로 재병합 생략
+    if job.line_meta and result.get("alignment_text") != "pronunciation":
+        merged = merge_line_meta(result["timestamps"], job.line_meta)
+        logger.info(f"Line meta merged on {merged} segments")
+
+    return PipelineResult(
+        timestamps=result["timestamps"],
+        language=result.get("language"),
+        quality_score=result.get("quality_score"),
+        audio_hash=audio_hash,
+        extra=_build_extra(result, job.attribution),
+    )
+
+
 async def _process_job_inner(job_id: str, job) -> None:
+    from everyric2.config.settings import get_settings as _get_settings
     from everyric2.server.db.connection import get_session
     from everyric2.server.db.repository import JobRepository, SyncRepository, hash_lyrics
 
-    async with get_session() as session:
-        await JobRepository(session).update_status(
-            job_id, "processing", progress=10, stage="다운로드"
-        )
-
+    # 스태시(발음/번역 메타·출처·강제)를 peek해 코어 입력을 만든다. 정상 완료/실패 시
+    # 아래에서 pop한다 (캐시 완결 경로는 _complete_from_cache_db가 이미 pop). force는
+    # 코어 입력으로 캡처했으니 여기서 discard한다.
+    force = job_id in _PENDING_FORCE
+    _PENDING_FORCE.discard(job_id)
+    job_input = JobInput(
+        job_id=job_id,
+        video_id=job.video_id,
+        lyrics=job.lyrics,
+        language=job.language,
+        line_meta=_PENDING_LINE_META.get(job_id),
+        attribution=_PENDING_ATTRIBUTION.get(job_id),
+        force=force,
+        max_audio_sec=_get_settings().server.max_job_audio_sec,
+    )
     try:
-        lyrics_hash_value = hash_lyrics(job.lyrics)
-
-        dl_ticker = asyncio.create_task(
-            _tick_progress(job_id, start=10, cap=33, interval=2.0, stage="다운로드")
-        )
-        try:
-            download_result = await asyncio.get_event_loop().run_in_executor(
-                None, _download_and_hash, job.video_id, job_id
-            )
-        finally:
-            dl_ticker.cancel()
-        audio_hash = download_result["audio_hash"]
-        audio_path = download_result["audio_path"]
-        if await _consume_cancel(job_id):
-            Path(audio_path).unlink(missing_ok=True)
+        result = await run_pipeline(job_input, InProcessHooks(job_id, job))
+        if result is None:
+            # 취소 또는 캐시 완결 — 잡 상태·오디오 정리는 각 경로가 이미 끝냈다
+            _PENDING_LINE_META.pop(job_id, None)
+            _PENDING_ATTRIBUTION.pop(job_id, None)
             return
-
-        # 노래가 아닌 초장시간 영상(팟캐스트/라이브 다시보기)이 유일한 GPU 슬롯을 몇 시간씩
-        # 점유하는 것을 막는다 — 상한 초과는 정렬에 들어가기 전에 친절하게 실패시킨다
-        from everyric2.config.settings import get_settings as _get_settings
-
-        max_sec = _get_settings().server.max_job_audio_sec
-        if max_sec > 0:
-            duration = _audio_duration_sec(audio_path)
-            if duration and duration > max_sec:
-                Path(audio_path).unlink(missing_ok=True)
-                async with get_session() as session:
-                    await JobRepository(session).update_status(
-                        job_id,
-                        "failed",
-                        error=(
-                            f"영상이 너무 길어요 ({duration / 60:.0f}분). 싱크 생성은 "
-                            f"{max_sec // 60}분 이하의 노래 영상에서만 지원해요."
-                        ),
-                    )
-                logger.info(f"Job {job_id} rejected: audio {duration:.0f}s > cap {max_sec}s")
-                return
-        await _set_progress(job_id, 35, stage="캐시 확인")  # 다운로드 완료
-
-        forced = job_id in _PENDING_FORCE
-        _PENDING_FORCE.discard(job_id)
-
-        if not forced and await _try_complete_from_cache(
-            job_id, job, audio_hash, lyrics_hash_value, audio_path
-        ):
-            return
-
-        if await _consume_cancel(job_id):
-            Path(audio_path).unlink(missing_ok=True)
-            return
-        # 정렬(CTC+분리+보정+멜로디)은 수십 초 걸리는 단일 블록 — 정렬 스레드가 단계명을
-        # _JOB_STAGE에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 DB에 반영한다
-        _JOB_STAGE[job_id] = "보컬 분리"
-        await _set_progress(job_id, 36, stage="보컬 분리")
-        # 라인 메타(발음)를 정렬 단계로 넘겨 독음(ko) 정렬 경로 판단에 쓴다 (아직 pop 안 함)
-        pending_meta = _PENDING_LINE_META.get(job_id)
-        monitor = asyncio.create_task(_stage_monitor(job_id, start=36))
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                _run_alignment,
-                audio_path,
-                job.lyrics,
-                job.language,
-                pending_meta,
-                lambda name: _JOB_STAGE.__setitem__(job_id, name),
-            )
-        finally:
-            monitor.cancel()
-            _JOB_STAGE.pop(job_id, None)
-        if await _consume_cancel(job_id):
-            return  # 오디오 파일은 _run_alignment의 finally가 이미 정리했다
-        await _set_progress(job_id, 90, stage="저장")  # 정렬 완료, 저장 중
-
-        meta = _PENDING_LINE_META.pop(job_id, None)
-        # 독음 정렬 경로는 발음/번역/pron_segments를 이미 세그먼트에 붙였으므로 재병합 생략
-        if meta and result.get("alignment_text") != "pronunciation":
-            merged = merge_line_meta(result["timestamps"], meta)
-            logger.info(f"Line meta merged on {merged} segments")
 
         async with get_session() as session:
             job_repo = JobRepository(session)
@@ -342,26 +445,35 @@ async def _process_job_inner(job_id: str, job) -> None:
 
             sync_result = await sync_repo.create(
                 video_id=job.video_id,
-                lyrics_hash=lyrics_hash_value,
-                timestamps=result["timestamps"],
-                language=result.get("language"),
+                lyrics_hash=hash_lyrics(job.lyrics),
+                timestamps=result.timestamps,
+                language=result.language,
                 engine="ctc",
-                quality_score=result.get("quality_score"),
-                audio_hash=audio_hash,
-                extra=_build_extra(result, _PENDING_ATTRIBUTION.pop(job_id, None)),
+                quality_score=result.quality_score,
+                audio_hash=result.audio_hash,
+                extra=result.extra,
             )
 
             await job_repo.update_status(
                 job_id, "completed", progress=100, result_id=sync_result.id
             )
             logger.info(f"Job completed: {job_id}")
+        _PENDING_LINE_META.pop(job_id, None)
+        _PENDING_ATTRIBUTION.pop(job_id, None)
+
+    except PipelineError as e:
+        # 사용자 노출 실패 (과길이 등) — 친절한 한국어 문구를 그대로 보존
+        _PENDING_LINE_META.pop(job_id, None)
+        _PENDING_ATTRIBUTION.pop(job_id, None)
+        async with get_session() as session:
+            await JobRepository(session).update_status(job_id, "failed", error=str(e))
+        logger.info(f"Job {job_id} rejected: {e}")
 
     except Exception as e:
         logger.exception(f"Job failed: {job_id}")
         _PENDING_LINE_META.pop(job_id, None)
         _PENDING_ATTRIBUTION.pop(job_id, None)
         _PENDING_FORCE.discard(job_id)
-        _JOB_STAGE.pop(job_id, None)
         async with get_session() as session:
             job_repo = JobRepository(session)
             await job_repo.update_status(job_id, "failed", error=str(e))
@@ -382,21 +494,24 @@ async def _set_progress(job_id: str, progress: int, stage: str | None = None) ->
 
 
 async def _tick_progress(
-    job_id: str, start: int, cap: int, interval: float = 4.0, stage: str | None = None
+    report, start: int, cap: int, interval: float = 4.0, stage: str | None = None
 ) -> None:
-    """긴 단계 동안 진행률을 cap까지 천천히 올린다 — 취소되면 그대로 멈춘다."""
+    """긴 단계 동안 진행률을 cap까지 천천히 올린다 — 취소되면 그대로 멈춘다.
+
+    report는 순수 진행률 보고 콜백(hooks.report) — 취소를 소진하지 않는다. 틱이 취소를
+    소진해 버리면 경계의 progress가 취소를 못 보고 잡이 그대로 진행되므로 반드시 report다."""
     progress = start
     try:
         while progress < cap:
             await asyncio.sleep(interval)
             progress = min(cap, progress + 4)
-            await _set_progress(job_id, progress, stage=stage)
+            await report(progress, stage)
     except asyncio.CancelledError:
         pass
 
 
-async def _stage_monitor(job_id: str, start: int, interval: float = 2.0) -> None:
-    """정렬 블록 동안 _JOB_STAGE의 현재 단계를 읽어 단계명+진행률을 DB에 쓴다.
+async def _stage_monitor(report, stage_holder: dict[str, str], start: int, interval: float = 2.0) -> None:
+    """정렬 블록 동안 stage_holder의 현재 단계를 읽어 단계명+진행률을 report로 보고한다.
 
     단계가 바뀌면 그 단계 창의 시작으로 점프하고, 같은 단계가 유지되는 동안은
     틱마다 창 폭의 1/6씩 상한까지 차오른다 (내부 진행 콜백이 없는 근사치)."""
@@ -405,7 +520,7 @@ async def _stage_monitor(job_id: str, start: int, interval: float = 2.0) -> None
     try:
         while True:
             await asyncio.sleep(interval)
-            stage = _JOB_STAGE.get(job_id)
+            stage = stage_holder.get("stage")
             if not stage:
                 continue
             lo, hi = STAGE_WINDOWS.get(stage, (36, 88))
@@ -414,7 +529,7 @@ async def _stage_monitor(job_id: str, start: int, interval: float = 2.0) -> None
                 progress = max(progress, float(lo))
             else:
                 progress = min(float(hi), progress + (hi - lo) / 6.0)
-            await _set_progress(job_id, int(progress), stage=stage)
+            await report(int(progress), stage)
     except asyncio.CancelledError:
         pass
 

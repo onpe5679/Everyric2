@@ -1,5 +1,6 @@
 """Command-line interface for Everyric2."""
 
+import asyncio
 import sys
 
 # Windows cp949 등 비(非)UTF-8 콘솔에서 Rich 스피너(유니코드)·한글 출력이
@@ -909,6 +910,231 @@ def serve(
             "[red]Error:[/red] uvicorn not installed. Install with: pip install uvicorn[standard]"
         )
         raise typer.Exit(1)
+
+
+class WorkerVersionError(Exception):
+    """워커/서버 버전 불일치 (claim 409) — 워커를 종료시킨다."""
+
+
+class RemoteHooks:
+    """원격 워커의 PipelineHooks 구현 — 진행률·취소·캐시 판정을 서버 워커 API로 위임한다.
+
+    run_pipeline은 async라 이벤트 루프에서 돌고, HTTP는 동기 requests를 asyncio.to_thread로
+    감싼다. report(하트비트)는 실패를 삼키고, progress(경계)는 몇 번 재시도 후 포기한다."""
+
+    def __init__(self, base: str, key: str, worker_id: str, job_id: str) -> None:
+        self.base = base
+        self.key = key
+        self.worker_id = worker_id
+        self.job_id = job_id
+
+    def _headers(self) -> dict:
+        return {"X-Worker-Key": self.key, "X-Worker-Id": self.worker_id}
+
+    def _post(self, path: str, body: dict) -> dict:
+        import requests
+
+        r = requests.post(f"{self.base}{path}", json=body, headers=self._headers(), timeout=60)
+        r.raise_for_status()
+        return r.json()
+
+    async def report(self, progress: int, stage: str) -> None:
+        try:
+            await asyncio.to_thread(
+                self._post,
+                f"/api/worker/jobs/{self.job_id}/progress",
+                {"progress": progress, "stage": stage},
+            )
+        except Exception:
+            pass  # 하트비트 보고 실패는 무시 — 경계 progress가 취소를 최종 확인한다
+
+    async def progress(self, progress: int, stage: str) -> bool:
+        last: Exception | None = None
+        for attempt in range(3):
+            try:
+                data = await asyncio.to_thread(
+                    self._post,
+                    f"/api/worker/jobs/{self.job_id}/progress",
+                    {"progress": progress, "stage": stage},
+                )
+                return not data.get("cancel_requested", False)
+            except Exception as e:
+                last = e
+                await asyncio.sleep(1.0 * (attempt + 1))
+        raise RuntimeError(f"진행률 보고가 연속 실패했어요: {last}")
+
+    async def cache_check(self, audio_hash: str, audio_path: str) -> bool:
+        data = await asyncio.to_thread(
+            self._post,
+            f"/api/worker/jobs/{self.job_id}/cache-check",
+            {"audio_hash": audio_hash},
+        )
+        completed = bool(data.get("completed", False))
+        if completed:
+            Path(audio_path).unlink(missing_ok=True)
+        return completed
+
+
+def _worker_claim(base: str, key: str, worker_id: str) -> dict | None:
+    import requests
+
+    r = requests.post(
+        f"{base}/api/worker/claim",
+        json={"worker_id": worker_id, "version": __version__},
+        headers={"X-Worker-Key": key, "X-Worker-Id": worker_id},
+        timeout=30,
+    )
+    if r.status_code == 409:
+        raise WorkerVersionError(r.json().get("detail", "버전 불일치"))
+    r.raise_for_status()
+    return r.json().get("job")
+
+
+def _worker_submit_result(base: str, key: str, worker_id: str, job_id: str, result) -> None:
+    import requests
+
+    r = requests.post(
+        f"{base}/api/worker/jobs/{job_id}/result",
+        json={
+            "timestamps": result.timestamps,
+            "language": result.language,
+            "quality_score": result.quality_score,
+            "audio_hash": result.audio_hash,
+            "extra": result.extra,
+        },
+        headers={"X-Worker-Key": key, "X-Worker-Id": worker_id},
+        timeout=120,
+    )
+    r.raise_for_status()
+
+
+def _worker_fail(base: str, key: str, worker_id: str, job_id: str, error: str) -> None:
+    import requests
+
+    try:
+        r = requests.post(
+            f"{base}/api/worker/jobs/{job_id}/fail",
+            json={"error": error},
+            headers={"X-Worker-Key": key, "X-Worker-Id": worker_id},
+            timeout=30,
+        )
+        r.raise_for_status()
+    except Exception:
+        pass  # 실패 보고가 실패하면 리스 만료로 서버가 알아서 정리한다
+
+
+async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: bool) -> None:
+    from everyric2.server.worker import JobInput, PipelineError, run_pipeline
+
+    backoff = 1.0
+    while True:
+        try:
+            job = await asyncio.to_thread(_worker_claim, base, key, worker_id)
+            backoff = 1.0
+        except WorkerVersionError as e:
+            console.print(f"[red]버전 불일치로 종료해요:[/red] {e}")
+            raise typer.Exit(1)
+        except Exception as e:
+            console.print(f"[yellow]claim 실패 — {backoff:.0f}s 후 재시도:[/yellow] {e}")
+            await asyncio.sleep(backoff)
+            backoff = min(60.0, backoff * 2)
+            continue
+
+        if job is None:
+            if once:
+                console.print("[dim]큐가 비어 있어 종료해요 (--once)[/dim]")
+                return
+            await asyncio.sleep(poll)
+            continue
+
+        job_id = job["job_id"]
+        console.print(f"[cyan]잡 클레임:[/cyan] {job_id} (video {job['video_id']})")
+        hooks = RemoteHooks(base, key, worker_id, job_id)
+        job_input = JobInput(
+            job_id=job_id,
+            video_id=job["video_id"],
+            lyrics=job["lyrics"],
+            language=job.get("language"),
+            line_meta=job.get("line_meta"),
+            attribution=job.get("attribution"),
+            force=bool(job.get("force")),
+            max_audio_sec=int(job.get("max_audio_sec") or 0),
+        )
+        try:
+            result = await run_pipeline(job_input, hooks)
+        except PipelineError as e:
+            # 사용자 노출 실패(과길이 등) — 친절한 문구를 그대로 서버에 올린다
+            console.print(f"[yellow]사용자 노출 실패:[/yellow] {e}")
+            await asyncio.to_thread(_worker_fail, base, key, worker_id, job_id, str(e))
+        except Exception as e:
+            console.print(f"[red]잡 처리 오류:[/red] {e}")
+            await asyncio.to_thread(_worker_fail, base, key, worker_id, job_id, str(e))
+        else:
+            if result is None:
+                # 취소 또는 캐시 완결 — 제출 없음 (서버가 이미 상태 확정)
+                console.print(f"[dim]잡 종료(취소/캐시): {job_id}[/dim]")
+            else:
+                try:
+                    await asyncio.to_thread(
+                        _worker_submit_result, base, key, worker_id, job_id, result
+                    )
+                    console.print(f"[green]잡 완료:[/green] {job_id}")
+                except Exception as e:
+                    console.print(f"[red]결과 제출 실패:[/red] {e}")
+
+        if once:
+            return
+
+
+@app.command()
+def worker(
+    server: Annotated[
+        str, typer.Option("--server", help="서버 URL (예: https://everyric.example.com)")
+    ],
+    key: Annotated[
+        str, typer.Option("--key", help="워커 키 (서버 EVERYRIC_SERVER_WORKER_KEY와 동일)")
+    ],
+    worker_id: Annotated[
+        str | None, typer.Option("--worker-id", help="워커 이름 (기본: 호스트명)")
+    ] = None,
+    poll: Annotated[float, typer.Option("--poll", help="빈 큐일 때 폴링 간격(초)")] = 5.0,
+    once: Annotated[bool, typer.Option("--once", help="한 잡만 처리하고 종료")] = False,
+) -> None:
+    """원격 GPU 워커 — 서버 잡을 클레임해 생성 파이프라인을 돌리고 결과를 제출한다.
+
+    서버는 API+DB+큐만 맡고(EVERYRIC_SERVER_LOCAL_WORKER=false), 이 워커가 다운로드·분리·
+    정렬·멜로디를 처리한다. 개인 풀 모델이라 워커 키 하나를 공유한다.
+
+    Example:
+        everyric2 worker --server https://everyric.example.com --key <워커키>
+    """
+    import socket
+
+    import requests
+
+    wid = worker_id or socket.gethostname()
+    base = server.rstrip("/")
+
+    # 시작 시 /health로 서버 확인 + 버전 로그
+    try:
+        r = requests.get(f"{base}/health", timeout=10)
+        r.raise_for_status()
+        info = r.json()
+    except Exception as e:
+        console.print(f"[red]서버에 연결할 수 없어요:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[green]서버 연결됨[/green] {base} "
+        f"(버전 {info.get('version')}, GPU {info.get('gpu_available')})"
+    )
+    if info.get("version") != __version__:
+        console.print(
+            f"[yellow]경고:[/yellow] 워커 {__version__} ≠ 서버 {info.get('version')} — "
+            "claim이 409로 거부될 수 있어요. 버전을 맞춰 주세요."
+        )
+    console.print(f"[cyan]워커 시작[/cyan] id={wid}, poll={poll}s" + (" (once)" if once else ""))
+    asyncio.run(_worker_loop(base, key, wid, poll, once))
 
 
 @app.command()
