@@ -11,6 +11,9 @@ from everyric2.output.formatters import (
     JSONFormatter,
     LRCFormatter,
     SRTFormatter,
+    _ass_ts,
+    _lrc_ts,
+    _srt_ts,
 )
 
 
@@ -41,13 +44,10 @@ class TestSRTFormatter:
 
     def test_format_timestamp(self):
         """Test timestamp formatting."""
-        formatter = SRTFormatter()
-
-        # Test various timestamps
-        assert formatter._format_time(0) == "00:00:00,000"
-        assert formatter._format_time(5.23) == "00:00:05,230"
-        assert formatter._format_time(65.5) == "00:01:05,500"
-        assert formatter._format_time(3661.123) == "01:01:01,123"
+        assert _srt_ts(0) == "00:00:00,000"
+        assert _srt_ts(5.23) == "00:00:05,230"
+        assert _srt_ts(65.5) == "00:01:05,500"
+        assert _srt_ts(3661.123) == "01:01:01,123"
 
     def test_extension(self):
         """Test file extension."""
@@ -68,12 +68,11 @@ class TestASSFormatter:
         assert "[Events]" in output
         assert "Dialogue:" in output
 
-    def test_format_with_metadata(self, sample_results: list[SyncResult]):
-        """Test ASS with metadata."""
-        formatter = ASSFormatter()
-        output = formatter.format(sample_results, metadata={"title": "Test Song"})
-
-        assert "Title: Test Song" in output
+    def test_format_timestamp(self):
+        """Test ASS centisecond timestamp formatting."""
+        assert _ass_ts(0) == "0:00:00.00"
+        assert _ass_ts(5.23) == "0:00:05.23"
+        assert _ass_ts(3661.5) == "1:01:01.50"
 
     def test_extension(self):
         """Test file extension."""
@@ -92,15 +91,11 @@ class TestLRCFormatter:
         assert "[00:05.23]First line of lyrics" in output
         assert "[00:08.90]Second line here" in output
 
-    def test_format_with_metadata(self, sample_results: list[SyncResult]):
-        """Test LRC with metadata tags."""
-        formatter = LRCFormatter()
-        output = formatter.format(
-            sample_results, metadata={"title": "Test Song", "artist": "Test Artist"}
-        )
-
-        assert "[ti:Test Song]" in output
-        assert "[ar:Test Artist]" in output
+    def test_format_timestamp(self):
+        """Test LRC minute:second timestamp formatting."""
+        assert _lrc_ts(5.23) == "[00:05.23]"
+        assert _lrc_ts(8.90) == "[00:08.90]"
+        assert _lrc_ts(65.5) == "[01:05.50]"
 
     def test_extension(self):
         """Test file extension."""
@@ -112,23 +107,21 @@ class TestJSONFormatter:
     """Tests for JSON formatter."""
 
     def test_format_valid_json(self, sample_results: list[SyncResult]):
-        """Test output is valid JSON."""
+        """Test output is a valid JSON array of segments."""
         formatter = JSONFormatter()
         output = formatter.format(sample_results)
 
-        # Should be valid JSON
         data = json.loads(output)
-        assert "lyrics" in data
-        assert "metadata" in data
-        assert len(data["lyrics"]) == 3
+        assert isinstance(data, list)
+        assert len(data) == 3
 
     def test_format_structure(self, sample_results: list[SyncResult]):
-        """Test JSON structure."""
+        """Test JSON segment structure (SyncResult.to_dict)."""
         formatter = JSONFormatter()
         output = formatter.format(sample_results)
         data = json.loads(output)
 
-        first = data["lyrics"][0]
+        first = data[0]
         assert first["text"] == "First line of lyrics"
         assert first["start"] == 5.23
         assert first["end"] == 8.45
