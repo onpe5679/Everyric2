@@ -1054,9 +1054,18 @@ def _worker_link_fail(base: str, key: str, worker_id: str, link_id: str, error: 
 
 
 def _download_audio_for_link(video_id: str, tag: str):
-    """링크 검증용 오디오 확보 — yt-dlp로 받아 로드한다 (반환: (AudioData, 정리할 Path))."""
-    from everyric2.audio.downloader import YouTubeDownloader
+    """링크 검증용 오디오 확보 — 미디어 캐시 우선, 미스 시 yt-dlp (반환: (AudioData, 정리할 Path)).
+
+    시드 쌍은 대부분 캐시 코퍼스 영상이라 캐시 우선이면 배치에서 유튜브 접촉(403 리스크)이
+    사실상 사라진다 — 실측: 소량 배치 5쌍 중 1쌍이 yt-dlp 403으로 실패했던 사고의 재발 방지."""
     from everyric2.audio.loader import AudioLoader
+    from everyric2.server.media_cache import fetch_cached_audio_sync
+
+    cached = fetch_cached_audio_sync(video_id, tag)
+    if cached:
+        return AudioLoader().load(cached), cached
+
+    from everyric2.audio.downloader import YouTubeDownloader
 
     downloader = YouTubeDownloader()
     dl = downloader.download(

@@ -96,6 +96,37 @@ async def prepare_cached_audio(
     return str(dest), None
 
 
+def fetch_cached_audio_sync(video_id: str, tag: str) -> str | None:
+    """워커 컨텍스트(동기)용 미디어 캐시 조달 — 조회+추출을 현재 스레드에서 수행.
+
+    링크 검증처럼 서버 프로세스 밖(같은 호스트 워커)에서 쓴다. 워커는 잡을 한 번에 하나만
+    처리하므로 추출이 자연 직렬이라 전역 세마포어는 생략한다. 미설정/미스/경로 비가독/추출
+    실패는 전부 None → 호출부가 yt-dlp로 폴백. NAS가 이 호스트에 안 붙은 원격 워커는
+    조회는 성공해도 경로 검사에서 미스가 나 자연 폴백된다."""
+    from everyric2.config.settings import get_settings
+
+    settings = get_settings()
+    server = settings.server
+    if not server.media_cache_url:
+        return None
+    try:
+        data = _lookup(server.media_cache_url, server.media_cache_key, video_id)
+    except Exception:
+        logger.info("미디어 캐시 조회 실패 — yt-dlp로 폴백해요 (video %s)", video_id)
+        return None
+    if not data.get("found"):
+        return None
+    src = data.get("path")
+    if not src or not os.path.isfile(src) or not os.access(src, os.R_OK):
+        return None
+    dest = settings.audio.temp_dir / f"linkcache-{tag}-{video_id}.m4a"
+    if not _run_ffmpeg(src, dest):
+        logger.info("미디어 캐시 오디오 추출 실패 — yt-dlp로 폴백해요 (video %s)", video_id)
+        return None
+    logger.info("미디어 캐시 히트 — 링크 검증 오디오 사용 (video %s)", video_id)
+    return str(dest)
+
+
 async def _extract(src: str, dest: Path) -> bool:
     async with _extract_semaphore():
         return await asyncio.to_thread(_run_ffmpeg, src, dest)
