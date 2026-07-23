@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 
-import torch
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,13 +17,24 @@ from everyric2.server.db.connection import close_db, init_db
 # torch.cuda.is_available()이 GPU 사용 상태에 따라 호출당 ~2초까지 걸린다(드라이버 질의) —
 # /health가 요청마다 부르면 확장 헬스체크 타임아웃(1.5s)을 넘겨 생성 버튼이 잠긴다.
 # 런타임에 바뀌는 값이 아니므로 기동 시 1회만 확인해 캐시한다.
+# torch 임포트는 이 함수 안에서만 한다 — API 전용 모드(local_worker=false)는 처리를
+# 원격 워커 풀이 맡아 이 프로세스에 torch가 필요 없고, 최상위 임포트는 상주 RAM만
+# 수 GB 늘린다 (동거 호스트 RAM 예산 조건).
 _GPU_AVAILABLE: bool | None = None
 
 
 def _gpu_available() -> bool:
     global _GPU_AVAILABLE
     if _GPU_AVAILABLE is None:
-        _GPU_AVAILABLE = torch.cuda.is_available()
+        from everyric2.config.settings import get_settings
+
+        if not get_settings().server.local_worker:
+            # 생성은 원격 워커 풀이 수행 — 이 서버의 GPU 유무와 무관하게 가용
+            _GPU_AVAILABLE = True
+        else:
+            import torch
+
+            _GPU_AVAILABLE = torch.cuda.is_available()
     return _GPU_AVAILABLE
 
 
