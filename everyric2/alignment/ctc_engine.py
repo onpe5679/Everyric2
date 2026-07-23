@@ -658,3 +658,10 @@ def get_shared_ctc_engine(config: AlignmentSettings | None = None) -> "CTCEngine
         else:
             logger.info("warm model reuse: ctc")
         return _shared_ctc_engine
+
+
+def clear_shared_ctc_engine() -> None:
+    """웜 캐시 해제 (VRAM 가드용) — 다음 요청에서 지연 재생성된다."""
+    global _shared_ctc_engine
+    with _shared_ctc_lock:
+        _shared_ctc_engine = None

@@ -407,6 +407,12 @@ class ServerSettings(BaseSettings):
         "상관 최고 피크 절대높이) 하한. 실측 캘리브레이션(2026-07-24): 동일 인스트 커버 "
         "0.93, 무관 곡 쌍 0.02 — 0.55는 그 사이의 보수적 경계다.",
     )
+    worker_vram_guard_gb: float = Field(
+        default=8.0,
+        description="잡 경계 VRAM 회수(empty_cache) 후에도 예약이 이 값(GiB)을 넘으면 참조 "
+        "누수 회귀로 보고 웜 모델 캐시를 버리고 재적재한다. 동거 호스트 실측(2026-07-24): "
+        "모델 실중량 3~6GiB, 앨로케이터 사재기 방치 시 18.4GiB까지 부풂. 0 = 가드 비활성.",
+    )
     link_min_offset_margin: float = Field(
         default=0.08,
         description="링크 검증에서 오프셋 유일성 게이트 — (최고 피크 − 이차 피크)가 이 값 "

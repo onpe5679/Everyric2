@@ -11,6 +11,9 @@ After=network-online.target
 [Service]
 WorkingDirectory=%h/everyric2
 EnvironmentFile=%h/everyric2/.env
+# 캐싱 앨로케이터의 예약 사재기 완화 — 웜 캐시 상주 워커의 idle VRAM을 실중량 수준으로
+# 유지한다 (잡 경계 empty_cache 회수와 한 세트, 동거 호스트 VRAM 기근 사고 재발 방지)
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ExecStart=%h/everyric2/.venv/bin/everyric2 worker --server ${EVERYRIC_WORKER_SERVER_URL} --key ${EVERYRIC_SERVER_WORKER_KEY}
 Restart=always
 RestartSec=10

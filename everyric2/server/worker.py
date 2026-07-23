@@ -508,6 +508,13 @@ async def _process_job_inner(job_id: str, job) -> None:
             job_repo = JobRepository(session)
             await job_repo.update_status(job_id, "failed", error=str(e))
 
+    finally:
+        # 잡 경계 VRAM 위생 (인프로세스 워커 경로) — 앨로케이터가 사재기한 활성 스파이크
+        # 예약을 반환한다. 원격 워커는 cli._worker_loop가 같은 훅을 부른다.
+        from everyric2.gpu_mem import reclaim_after_job
+
+        await asyncio.get_event_loop().run_in_executor(None, reclaim_after_job)
+
 
 async def _set_progress(job_id: str, progress: int, stage: str | None = None) -> None:
     from everyric2.server.db.connection import get_session

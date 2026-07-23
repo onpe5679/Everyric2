@@ -1160,6 +1160,7 @@ async def _process_link_job(base: str, key: str, worker_id: str, link_job: dict)
 
 
 async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: bool) -> None:
+    from everyric2.gpu_mem import reclaim_after_job
     from everyric2.server.worker import JobInput, PipelineError, run_pipeline
 
     backoff = 1.0
@@ -1183,6 +1184,7 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
         # 링크 검증 잡 — sync 잡이 없을 때만 배정된다 (반주 상관 → SyncLink 자동 생성)
         if kind == "link_validate" and link_job is not None:
             await _process_link_job(base, key, worker_id, link_job)
+            await asyncio.to_thread(reclaim_after_job)
             if once:
                 return
             continue
@@ -1235,6 +1237,10 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
                     console.print(f"[green]잡 완료:[/green] {job_id}")
                 except Exception as e:
                     console.print(f"[red]결과 제출 실패:[/red] {e}")
+
+        # 잡 경계 VRAM 위생 — 앨로케이터가 사재기한 활성 스파이크 예약을 반환한다
+        # (동거 호스트에서 18.4GiB까지 부풀어 본 서비스 기근을 낸 실사고의 재발 방지)
+        await asyncio.to_thread(reclaim_after_job)
 
         if once:
             return

@@ -755,3 +755,10 @@ def get_shared_extractor(config: MelodySettings | None = None) -> "MelodyExtract
         else:
             logger.info("warm model reuse: melody")
         return _shared_extractor
+
+
+def clear_shared_extractor() -> None:
+    """웜 캐시 해제 (VRAM 가드용) — 다음 요청에서 지연 재생성된다."""
+    global _shared_extractor
+    with _shared_extractor_lock:
+        _shared_extractor = None

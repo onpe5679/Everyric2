@@ -36,6 +36,13 @@ def get_shared_separator(config: "AudioSettings | None" = None) -> "VocalSeparat
         return _shared_separator
 
 
+def clear_shared_separator() -> None:
+    """웜 캐시 해제 (VRAM 가드용) — 다음 요청에서 지연 재생성된다."""
+    global _shared_separator
+    with _shared_separator_lock:
+        _shared_separator = None
+
+
 class SeparationError(Exception):
     """Base exception for separation operations."""
 
