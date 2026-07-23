@@ -68,6 +68,9 @@ export class LyricsOverlay {
   private banner: HTMLDivElement;
   private resumeChip: HTMLButtonElement;
   private genChip: HTMLDivElement;
+  private genList: HTMLDivElement;
+  private genListOpen = false;
+  private genListItems: { title: string; state: string; isCurrent: boolean }[] = [];
   private warnBar: HTMLDivElement;
   private pipBtn: HTMLButtonElement;
   private regenBtn: HTMLButtonElement;
@@ -155,6 +158,17 @@ export class LyricsOverlay {
     this.genChip = h('div', { className: 'ey-gen-chip' }, icon(ICONS.sparkle), '');
     this.genChip.style.display = 'none';
 
+    // 칩 클릭 시 펼쳐지는 내 생성 대기열 목록 — 이 브라우저에서 시킨 잡만 저장돼
+    // 있으므로(activeJobs) 다른 사용자의 큐는 구조적으로 보이지 않는다
+    this.genList = h('div', { className: 'ey-gen-list' });
+    this.genList.style.display = 'none';
+    this.genChip.style.cursor = 'pointer';
+    this.genChip.title = '클릭하면 내 생성 대기열 목록을 펼쳐요';
+    this.genChip.addEventListener('click', () => {
+      this.genListOpen = !this.genListOpen;
+      this.renderGenList();
+    });
+
     // 낮은 정렬 신뢰도 경고 바 — X로 닫을 수 있고 설정에서 아예 끌 수 있다
     this.warnBar = h('div', { className: 'ey-warn-bar' });
     this.warnBar.style.display = 'none';
@@ -201,7 +215,7 @@ export class LyricsOverlay {
     this.debugEl.style.display = 'none';
 
     this.panel = h('div', { className: 'ey-panel' },
-      this.header, this.banner, this.genChip, this.warnBar, this.body, this.resumeChip, this.footer, this.debugEl,
+      this.header, this.banner, this.genChip, this.genList, this.warnBar, this.body, this.resumeChip, this.footer, this.debugEl,
     );
     // 패널 안 타이핑(검색창·가사 붙여넣기)이 유튜브 전역 단축키(스페이스=재생/정지,
     // 방향키=시킹 등)로 새지 않도록 키 이벤트를 패널에서 끊는다
@@ -848,6 +862,7 @@ export class LyricsOverlay {
   setGenerationChip(text: string | null, cancellable = false): void {
     if (!text) {
       this.genChip.style.display = 'none';
+      this.genList.style.display = 'none';
       return;
     }
     this.genChip.replaceChildren(icon(ICONS.sparkle), text);
@@ -857,13 +872,40 @@ export class LyricsOverlay {
         text: '×',
         title: '전사 취소',
         on: {
-          click: () => {
+          click: (e) => {
+            e.stopPropagation(); // 칩의 대기열 목록 토글로 새지 않게
             if (window.confirm('진행 중인 전사를 취소할까요?')) this.callbacks.onCancelGenerate();
           },
         },
       }));
     }
     this.genChip.style.display = '';
+    this.renderGenList();
+  }
+
+  /** 내 생성 대기열 목록 데이터 갱신 — 진행 칩 클릭으로 펼친다.
+   *  이 브라우저(activeJobs)가 시킨 잡만 들어오므로 타인 큐는 노출되지 않는다. */
+  setGenerationList(items: { title: string; state: string; isCurrent: boolean }[]): void {
+    this.genListItems = items;
+    this.renderGenList();
+  }
+
+  private renderGenList(): void {
+    const chipHidden = this.genChip.style.display === 'none';
+    if (!this.genListOpen || chipHidden || this.genListItems.length === 0) {
+      this.genList.style.display = 'none';
+      return;
+    }
+    this.genList.replaceChildren(...this.genListItems.map((it) =>
+      h('div', { className: `ey-gen-list-row${it.isCurrent ? ' current' : ''}` },
+        h('span', {
+          className: 'ey-gen-list-title',
+          text: it.isCurrent ? `${it.title} (현재 영상)` : it.title,
+          title: it.title,
+        }),
+        h('span', { className: 'ey-gen-list-state', text: it.state }),
+      )));
+    this.genList.style.display = '';
   }
 
   updateDebug(info: DebugInfo): void {

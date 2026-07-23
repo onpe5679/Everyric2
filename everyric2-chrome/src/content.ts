@@ -1254,6 +1254,17 @@ function updateGenChip(): void {
   } else if (others > 0) {
     text = `다른 영상 전사 중 ${others}건`;
   }
+  // 칩 클릭 시 펼칠 내 대기열 목록 — 곡명+상태. activeJobs에 이 브라우저가 시킨
+  // 잡만 저장되므로 다른 사용자의 큐는 구조적으로 노출되지 않는다.
+  const items = [...generatingJobs.entries()]
+    .map(([v, j]) => ({
+      title: j.title ?? v,
+      state: j.queueLabel
+        ?? (j.stage ? `${j.stage} ${j.stageProgress ?? 0}%` : `${j.progress}%`),
+      isCurrent: v === currentVideoId,
+    }))
+    .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+  overlay.setGenerationList(items);
   // 잡이 등록된 뒤에만 취소 가능 (준비 단계는 잡 id가 아직 없다)
   overlay.setGenerationChip(text, Boolean(cur));
 }
