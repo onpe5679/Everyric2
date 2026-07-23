@@ -1,0 +1,24 @@
+# 유저 systemd 유닛 (sudo 불필요) — ~/.config/systemd/user/everyric2.service 로 심링크
+#   ln -s <리포>/deploy/everyric2-user.service ~/.config/systemd/user/everyric2.service
+#   systemctl --user daemon-reload && systemctl --user enable --now everyric2
+# 로그아웃 후에도 유지하려면: loginctl enable-linger $USER
+# 리포 위치가 %h/everyric2 가 아니면 drop-in으로 덮는다:
+#   systemctl --user edit everyric2  →  [Service] WorkingDirectory=/실제/경로 ...
+[Unit]
+Description=Everyric2 lyrics sync server
+After=network-online.target
+
+[Service]
+# 핵심: SQLite 상대 경로·nvapi.txt·.env 해석이 전부 이 디렉터리 기준
+WorkingDirectory=%h/everyric2
+# .env의 모든 항목을 프로세스 환경변수로 주입
+EnvironmentFile=%h/everyric2/.env
+# 포트는 .env의 EVERYRIC_PORT로 변경 (기본 8000)
+Environment=EVERYRIC_PORT=8000
+ExecStart=%h/everyric2/.venv/bin/uvicorn everyric2.server.main:app --host 127.0.0.1 --port ${EVERYRIC_PORT}
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

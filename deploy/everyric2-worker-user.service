@@ -1,0 +1,20 @@
+# GPU 워커 유저 유닛 — API 서버(everyric2-user.service)와 같은 호스트든 다른 호스트든 동일.
+#   ln -s <리포>/deploy/everyric2-worker-user.service ~/.config/systemd/user/everyric2-worker.service
+#   systemctl --user daemon-reload && systemctl --user enable --now everyric2-worker
+# .env 필수 항목:
+#   EVERYRIC_WORKER_SERVER_URL=http://127.0.0.1:8000   # 폴링할 서버 (원격이면 해당 URL)
+#   EVERYRIC_SERVER_WORKER_KEY=<서버와 동일한 워커 키>
+[Unit]
+Description=Everyric2 GPU worker
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/everyric2
+EnvironmentFile=%h/everyric2/.env
+ExecStart=%h/everyric2/.venv/bin/everyric2 worker --server ${EVERYRIC_WORKER_SERVER_URL} --key ${EVERYRIC_SERVER_WORKER_KEY}
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
