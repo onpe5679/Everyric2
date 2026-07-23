@@ -185,9 +185,11 @@ class TranslationSettings(BaseSettings):
     )
     model: str = Field(default="gemini-2.0-flash", description="Model name")
     nvidia_model: str = Field(
-        default="qwen/qwen3.5-122b-a10b",
+        default="openai/gpt-oss-120b",
         description="Model name for the NVIDIA NIM engine (separate from `model` so the "
-        "gemini default doesn't leak into NIM requests)",
+        "gemini default doesn't leak into NIM requests). 2026-07 실측: gpt-oss-120b가 "
+        "ja→ko 30줄 기준 오역 0·22s로 최선 (qwen3.5-122b는 2026-07-20 EOL, "
+        "qwen3-next-80b는 君→쿤 오독·정반대 오역, deepseek-v4-pro는 장문 120s 타임아웃)",
     )
     api_url: str | None = Field(default=None, description="Custom API URL for local LLM")
     api_key: str | None = Field(default=None, description="API key (env var takes precedence)")
@@ -204,10 +206,12 @@ class TranslationSettings(BaseSettings):
     target_language: str = Field(default="ko", description="Target language for translation")
     timeout: int = Field(default=120, description="API timeout in seconds")
     max_tokens: int = Field(
-        default=4096,
+        default=8192,
         description="Max completion tokens for OpenAI-compatible chat endpoints (openai/local/"
         "nvidia). Without this, some NIM-hosted models default to a small completion budget "
-        "and truncate the pronunciation JSON array mid-response for multi-line lyrics.",
+        "and truncate the pronunciation JSON array mid-response for multi-line lyrics. "
+        "reasoning 모델(gpt-oss 등)은 사고 토큰이 이 예산을 같이 쓰므로 4096이면 "
+        "30줄 곡에서 JSON이 잘렸다 — 8192로 상향.",
     )
 
 

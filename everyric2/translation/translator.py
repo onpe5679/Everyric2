@@ -514,10 +514,15 @@ class NvidiaTranslator(OpenAICompatibleTranslator):
             return None
 
     def _payload_extras(self) -> dict:
+        model = self.model.lower()
         # qwen3 계열은 reasoning 모델 — 사고 모드를 끄지 않으면 max_tokens를 사고에
         # 소진해 content가 비거나(빈 응답) 타임아웃이 난다. NIM qwen 챗 템플릿 스위치.
-        if "qwen" in self.model.lower():
+        if "qwen" in model:
             return {"chat_template_kwargs": {"thinking": False}}
+        # gpt-oss도 reasoning 모델인데 thinking off 스위치가 없다 — effort를 최저로.
+        # 기본 effort로는 30줄 가사에서 사고가 예산을 소진해 빈 응답/잘린 JSON이 났다.
+        if "gpt-oss" in model:
+            return {"reasoning_effort": "low"}
         return {}
 
 

@@ -172,6 +172,34 @@ class TestPronunciationGateHeuristic:
         assert self.probe._should_skip_pronunciation(text, "auto") is False
 
 
+class TestPayloadExtras:
+    """reasoning 모델별 추가 페이로드 — qwen은 thinking off, gpt-oss는 effort low.
+    안 보내면 사고가 max_tokens 예산을 소진해 빈 응답/잘린 JSON이 난다."""
+
+    def _make(self, model: str) -> NvidiaTranslator:
+        settings = TranslationSettings(
+            engine="nvidia", api_key="dummy-key", nvidia_model=model
+        )
+        return NvidiaTranslator(settings)
+
+    def test_qwen_disables_thinking(self):
+        extras = self._make("qwen/qwen3-next-80b-a3b-instruct")._payload_extras()
+        assert extras == {"chat_template_kwargs": {"thinking": False}}
+
+    def test_gpt_oss_uses_low_reasoning_effort(self):
+        extras = self._make("openai/gpt-oss-120b")._payload_extras()
+        assert extras == {"reasoning_effort": "low"}
+
+    def test_default_model_is_covered_by_extras(self):
+        # 기본 모델이 reasoning 계열로 바뀌면 extras 분기도 함께 따라와야 한다
+        settings = TranslationSettings(engine="nvidia", api_key="dummy-key")
+        extras = NvidiaTranslator(settings)._payload_extras()
+        assert extras == {"reasoning_effort": "low"}
+
+    def test_other_models_send_no_extras(self):
+        assert self._make("mistralai/mistral-large")._payload_extras() == {}
+
+
 class TestTranslateAppliesGate:
     """The gate must apply inside translate(), overriding settings.include_pronunciation,
     and the request payload must always include max_tokens (NIM truncates long
