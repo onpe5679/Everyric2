@@ -53,7 +53,7 @@ htmlcov/
 *.flac
 *.ogg
 *.m4a
-output/
+/output/
 temp/
 cache/
 
