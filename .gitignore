@@ -67,8 +67,8 @@ separated/
 # Downloaded model weights (e.g. RMVPE rmvpe.pt) — fetched on demand, not committed
 models/
 
-# for test
-output/
+# for test — 루트 산출물 디렉터리만 (everyric2/output/ 소스 패키지를 잡지 않게 앵커)
+/output/
 ftest1/
 
 # Spec Kit
