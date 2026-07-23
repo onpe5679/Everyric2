@@ -6,6 +6,7 @@ For other languages: Uses torchaudio MMS_FA with Latin alphabet.
 
 import logging
 import math
+import threading
 from collections.abc import Callable
 from typing import Literal
 
@@ -631,3 +632,29 @@ class CTCEngine(BaseAlignmentEngine):
     @staticmethod
     def get_engine_type() -> Literal["ctc"]:
         return "ctc"
+
+
+# 웜 캐시 싱글턴 (WS2-A) — 프로세스 수명 동안 CTC 엔진(과 그 안에 lazy 로드된 wav2vec2/MMS
+# 모델)을 상주시킨다. torch를 최상위에서 import하는 모듈이라, 이 접근자는 반드시 호출부에서
+# 지연 import해야 API 전용 모드(local_worker=false)에 torch가 딸려 들어오지 않는다.
+_shared_ctc_engine: "CTCEngine | None" = None
+_shared_ctc_lock = threading.Lock()
+
+
+def get_shared_ctc_engine(config: AlignmentSettings | None = None) -> "CTCEngine":
+    """웜 캐시된 CTCEngine을 돌려준다 (EVERYRIC_SERVER_WARM_MODELS 기준).
+
+    엔진 인스턴스는 _ensure_model_loaded가 로드한 모델을 _current_lang로 캐시하므로, 같은
+    엔진을 재사용하면 같은 언어의 두 번째 잡부터 모델 재로드가 0회다. 재사용 시 "warm model
+    reuse: ctc" 1줄. warm이 꺼져 있으면 매번 새 엔진(기존 동작)."""
+    from everyric2.config.settings import get_settings
+
+    if not get_settings().server.warm_models:
+        return CTCEngine(config)
+    global _shared_ctc_engine
+    with _shared_ctc_lock:
+        if _shared_ctc_engine is None:
+            _shared_ctc_engine = CTCEngine(config)
+        else:
+            logger.info("warm model reuse: ctc")
+        return _shared_ctc_engine

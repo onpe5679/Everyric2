@@ -670,13 +670,15 @@ def _estimate_tempo(audio) -> dict[str, Any] | None:
 
 
 def _separate_vocals(audio):
-    """demucs 보컬 분리 (실패/미설치 시 None) — VAD 클램프와 멜로디 f0가 공유한다."""
+    """demucs 보컬 분리 (실패/미설치 시 None) — VAD 클램프와 멜로디 f0가 공유한다.
+
+    분리기는 웜 캐시 싱글턴(get_shared_separator)에서 가져와 잡마다 재생성하지 않는다 (WS2-A)."""
     try:
         import torch
 
-        from everyric2.audio.separator import VocalSeparator
+        from everyric2.audio.separator import get_shared_separator
 
-        separator = VocalSeparator()
+        separator = get_shared_separator()
         if not separator.is_available():
             logger.info("demucs not installed; skipping VAD clamp / using mix for melody")
             return None
@@ -1098,7 +1100,6 @@ def _run_alignment(
     line_meta: list[dict[str, Any]] | None = None,
     on_stage: Any | None = None,
 ) -> dict:
-    from everyric2.alignment.factory import EngineFactory
     from everyric2.audio.loader import AudioLoader
     from everyric2.config.settings import get_settings
     from everyric2.inference.prompt import LyricLine
@@ -1115,11 +1116,19 @@ def _run_alignment(
     loader = AudioLoader()
     audio_path_obj = Path(audio_path)
 
+    # WS2-B 병렬 f0 실행기 — 정렬 도중 예외가 나도 outer finally가 반드시 정리하도록 밖에 둔다
+    f0_executor = None
+
     try:
         audio = loader.load(audio_path_obj)
         lyric_lines = LyricLine.from_text(lyrics)
 
-        engine = EngineFactory.get_engine("ctc", settings.alignment)
+        # CTC 엔진은 웜 캐시 싱글턴 — 같은 언어의 두 번째 잡부터 모델 재로드 0회 (WS2-A).
+        # torch를 최상위 import하는 모듈이라 반드시 여기서 지연 import한다 (API 전용 모드
+        # 프로세스에 torch가 딸려 들어오지 않게 — main.py 지연 임포트 계약).
+        from everyric2.alignment.ctc_engine import get_shared_ctc_engine
+
+        engine = get_shared_ctc_engine(settings.alignment)
         if not engine.is_available():
             raise RuntimeError("CTC engine not available")
 
@@ -1132,6 +1141,26 @@ def _run_alignment(
         align_audio = (
             vocals if (vocals is not None and settings.alignment.align_on_vocals) else audio
         )
+
+        # WS2-B: 멜로디 f0 전곡 추론을 CTC 정렬과 병렬로 시작한다 — f0 추론은 정렬 결과에
+        # 무의존이라(전곡 신호만 처리) GPU 유휴를 줄인다. 노트 부착(annotate)은 정렬·타이밍
+        # 보정이 끝난 뒤 이 f0를 주입해 수행한다. 진행 stage 표시 순서(보컬 분리→전사 정렬→
+        # 타이밍 보정→멜로디 분석)는 그대로 — f0는 백그라운드라 보고 stage를 바꾸지 않는다.
+        # 멜로디 실패는 비치명(노트 없이 계속)이므로 여기서 예외를 삼키지 않고 result()에서 처리.
+        f0_future = None
+        melody_extractor = None
+        if settings.melody.enabled:
+            from everyric2.melody.extractor import get_shared_extractor
+
+            melody_extractor = get_shared_extractor(settings.melody)
+            if melody_extractor.is_available():
+                import concurrent.futures
+
+                f0_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                f0_future = f0_executor.submit(melody_extractor.precompute_f0, audio, vocals)
+            else:
+                logger.warning("Melody enabled but torchfcpe is not installed; skipping")
+                melody_extractor = None
 
         report("전사 정렬")
         # 독음(ko) 정렬 경로: 커버리지가 충분하면 한국어 발음 텍스트+kor adapter로 정렬하고
@@ -1307,28 +1336,31 @@ def _run_alignment(
                     seg["debug"]["fixes"] = fx
             timestamps.append(seg)
 
-        # 가라오케용 음정(MIDI 노트) 주석 — 실패해도 싱크 생성 자체는 계속한다
+        # 가라오케용 음정(MIDI 노트) 주석 — 실패해도 싱크 생성 자체는 계속한다.
+        # f0 전곡 추론은 위에서 정렬과 병렬로 이미 돌고 있다(f0_future) — 여기서 그 결과를
+        # 받아 정렬 결과에 노트만 부착한다. 미가용/미설정은 위에서 이미 걸러 melody_extractor가
+        # None이다(경고도 이미 1줄 기록). 멜로디 실패는 비치명 — 노트 없이 계속.
         report("멜로디 분석")
         f0_curve = None
         song_key = None
-        if settings.melody.enabled:
+        if melody_extractor is not None:
             try:
-                from everyric2.melody.extractor import MelodyExtractor
-
-                extractor = MelodyExtractor(settings.melody)
-                if extractor.is_available():
-                    # vocal_regions는 넘기지 않는다 — extractor가 라인 스팬 합집합으로
-                    # 자체 마스킹한다 (VAD 마스크는 조용한 벌스 노트를 소실시킴)
-                    annotated = extractor.annotate_timestamps(audio, timestamps, vocals=vocals)
-                    # 디버그 오버레이용 RAW f0 곡선 (다운샘플, 옥타브 폴딩 전)
-                    f0_curve = extractor.last_f0_curve
-                    # 곡 키 (K-S 추정) — 레인 표시용, 스냅 보정은 extractor 내부에서 완료
-                    song_key = extractor.last_key
-                    logger.info(f"Melody notes annotated on {annotated} spans")
-                else:
-                    logger.warning("Melody enabled but torchfcpe is not installed; skipping")
+                precomputed_f0 = f0_future.result() if f0_future is not None else None
+                # vocal_regions는 넘기지 않는다 — extractor가 라인 스팬 합집합으로
+                # 자체 마스킹한다 (VAD 마스크는 조용한 벌스 노트를 소실시킴)
+                annotated = melody_extractor.annotate_timestamps(
+                    audio, timestamps, vocals=vocals, precomputed_f0=precomputed_f0
+                )
+                # 디버그 오버레이용 RAW f0 곡선 (다운샘플, 옥타브 폴딩 전)
+                f0_curve = melody_extractor.last_f0_curve
+                # 곡 키 (K-S 추정) — 레인 표시용, 스냅 보정은 extractor 내부에서 완료
+                song_key = melody_extractor.last_key
+                logger.info(f"Melody notes annotated on {annotated} spans")
             except Exception:
                 logger.exception("Melody extraction failed; continuing without notes")
+            finally:
+                if f0_executor is not None:
+                    f0_executor.shutdown(wait=True)
 
         avg_confidence = None
         confidences = [t.get("confidence") for t in timestamps if t.get("confidence") is not None]
@@ -1369,4 +1401,8 @@ def _run_alignment(
             "key": song_key,
         }
     finally:
+        # 성공 경로는 멜로디 블록의 finally가 이미 shutdown(wait=True)했다 — 정렬 예외로
+        # 여기로 빠졌을 때만 남은 f0 스레드를 정리한다(멱등, 실행 중 future는 기다리지 않음)
+        if f0_executor is not None:
+            f0_executor.shutdown(wait=False)
         audio_path_obj.unlink(missing_ok=True)

@@ -1,12 +1,39 @@
 """Vocal separation using Demucs."""
 
+import logging
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from everyric2.audio.loader import AudioData, AudioLoader
 from everyric2.config.settings import AudioSettings, get_settings
+
+logger = logging.getLogger(__name__)
+
+# 웜 캐시 싱글턴 (WS2-A) — 프로세스 수명 동안 상주. 지연 생성이라 import만으로는 아무것도
+# 로드하지 않는다 (API 전용 모드에서 절대 만들어지지 않게 하는 유일한 근거).
+_shared_separator: "VocalSeparator | None" = None
+_shared_separator_lock = threading.Lock()
+
+
+def get_shared_separator(config: "AudioSettings | None" = None) -> "VocalSeparator":
+    """웜 캐시된 VocalSeparator를 돌려준다 (EVERYRIC_SERVER_WARM_MODELS 기준).
+
+    warm이 켜져 있으면 프로세스 수명 싱글턴을 재사용하고(두 번째 잡부터 재생성 0회), 재사용
+    시 "warm model reuse: demucs" 1줄을 남긴다. 꺼져 있으면 매번 새 인스턴스(기존 동작).
+    demucs는 서브프로세스로 도는 구조라 인스턴스 재사용이 인프로세스 모델 재로드를 없애지는
+    않지만, 스펙의 싱글턴 규약을 동일하게 따른다."""
+    if not get_settings().server.warm_models:
+        return VocalSeparator(config)
+    global _shared_separator
+    with _shared_separator_lock:
+        if _shared_separator is None:
+            _shared_separator = VocalSeparator(config)
+        else:
+            logger.info("warm model reuse: demucs")
+        return _shared_separator
 
 
 class SeparationError(Exception):

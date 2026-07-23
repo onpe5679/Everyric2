@@ -407,6 +407,14 @@ class ServerSettings(BaseSettings):
         "정규화 크로스 코릴레이션의 (최고 피크 − 이차 피크) 점수가 이 값 이상이면 커버가 "
         "원곡과 같은 반주를 쓴다고 보고 SyncLink를 자동 생성한다.",
     )
+    warm_models: bool = Field(
+        default=True,
+        description="생성 파이프라인의 무거운 모델(demucs 분리기·CTC 정렬 엔진·멜로디 f0 "
+        "백엔드)을 프로세스 수명 동안 지연 싱글턴으로 상주시켜 두 번째 잡부터 재로드 0회로 "
+        "만든다. 상주 주체는 원격 워커(CLI)와 인프로세스 서버뿐 — API 전용 모드(local_worker="
+        "false)는 생성을 돌리지 않으므로 어떤 모델도 로드되지 않는다(torch 지연 임포트 불변). "
+        "false면 기존처럼 잡마다 인스턴스를 새로 만든다.",
+    )
 
 
 class Settings(BaseSettings):

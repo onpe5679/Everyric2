@@ -1069,10 +1069,11 @@ def _download_audio_for_link(video_id: str, tag: str):
 def _instrumental(audio):
     """반주(인스트) 스템 확보 — demucs가 있으면 accompaniment(no_vocals)를, 없으면 믹스로 폴백.
 
-    separator는 --two-stems vocals로 vocals/no_vocals를 내므로 accompaniment가 곧 반주다."""
-    from everyric2.audio.separator import VocalSeparator
+    separator는 --two-stems vocals로 vocals/no_vocals를 내므로 accompaniment가 곧 반주다.
+    웜 캐시 싱글턴(get_shared_separator)에서 가져와 링크 검증에서도 분리기를 재사용한다 (WS2-A)."""
+    from everyric2.audio.separator import get_shared_separator
 
-    separator = VocalSeparator()
+    separator = get_shared_separator()
     if not separator.is_available():
         return audio
     try:

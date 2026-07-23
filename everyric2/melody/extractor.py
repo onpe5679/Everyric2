@@ -15,6 +15,7 @@ torchfcpe는 필요).
 """
 
 import logging
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -525,21 +526,14 @@ class MelodyExtractor:
             logger.exception("Vocal separation failed; falling back to the mix")
             return audio
 
-    def extract_f0(
-        self,
-        audio: AudioData,
-        vocals: AudioData | None = None,
-        vocal_regions: list[tuple[float, float]] | None = None,
-        apply_snap: bool | None = None,
-    ) -> F0Track:
-        """곡 전체에서 프레임 단위 f0 트랙을 뽑는다 (분리 옵션 적용 후 FCPE 1회 추론).
+    def _infer_f0(
+        self, audio: AudioData, vocals: AudioData | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """곡 전체에 f0 백엔드를 1회 통과시켜 (f0_hz, times)를 낸다 — 정렬 결과에 무의존.
 
-        vocals가 주어지면 이미 분리된 보컬 스템으로 간주하고 재분리를 건너뛴다
-        (워커가 VAD용으로 분리한 스템을 재사용 — demucs 이중 실행 방지).
-        vocal_regions(VAD 발성 구간)가 주어지면 구간 밖 프레임을 무성 처리한다 —
-        분리 잔여 노이즈가 라인 사이를 '유성'으로 이어버리면 옥타브 스냅의 리셋이
-        막혀 저음 기준이 라인 경계를 넘어 전파되는 실측 실패 모드를 차단한다.
-        """
+        이 부분이 파이프라인에서 무거운(GPU) 단계라 WS2-B가 CTC 정렬과 병렬로 돌린다
+        (precompute_f0). vocals가 주어지면 이미 분리된 스템으로 간주하고 재분리를 건너뛴다.
+        vocal_regions 마스킹·옥타브 스냅 같은 정렬 의존 후처리는 여기서 하지 않는다."""
         import librosa
         import torch
 
@@ -566,9 +560,41 @@ class MelodyExtractor:
                 )
             f0 = f0.squeeze().cpu().numpy().astype(np.float64)
 
+        f0 = np.asarray(f0, dtype=np.float64)
         duration = len(waveform) / MELODY_SAMPLE_RATE
         frame_dt = duration / max(1, len(f0))
         times = (np.arange(len(f0)) + 0.5) * frame_dt
+        return f0, times
+
+    def precompute_f0(
+        self, audio: AudioData, vocals: AudioData | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """f0 전곡 추론만 수행(정렬 무의존) → (f0_hz, times). CTC 정렬과 병렬 실행용 (WS2-B).
+
+        결과를 annotate_timestamps(..., precomputed_f0=...)로 주입하면 재추론 없이 노트를
+        부착한다. 모델 로드/추론은 이 호출에서 일어나므로 별도 스레드에서 부르면 정렬과 겹친다.
+        """
+        return self._infer_f0(audio, vocals=vocals)
+
+    def extract_f0(
+        self,
+        audio: AudioData,
+        vocals: AudioData | None = None,
+        vocal_regions: list[tuple[float, float]] | None = None,
+        apply_snap: bool | None = None,
+        precomputed: tuple[np.ndarray, np.ndarray] | None = None,
+    ) -> F0Track:
+        """곡 전체에서 프레임 단위 f0 트랙을 뽑는다 (분리 옵션 적용 후 f0 백엔드 1회 추론).
+
+        precomputed=(f0_hz, times)가 주어지면 재추론을 건너뛰고 그 값으로 트랙을 구성한다
+        (WS2-B: 정렬과 병렬로 미리 계산한 f0 주입). vocals가 주어지면 이미 분리된 보컬 스템으로
+        간주하고 재분리를 건너뛴다 (워커가 VAD용으로 분리한 스템을 재사용 — demucs 이중 실행
+        방지). vocal_regions(VAD 발성 구간)가 주어지면 구간 밖 프레임을 무성 처리한다 — 분리
+        잔여 노이즈가 라인 사이를 '유성'으로 이어버리면 옥타브 스냅의 리셋이 막혀 저음 기준이
+        라인 경계를 넘어 전파되는 실측 실패 모드를 차단한다.
+        """
+        f0, times = precomputed if precomputed is not None else self._infer_f0(audio, vocals=vocals)
+        f0 = np.asarray(f0, dtype=np.float64)
         voiced = (f0 >= self.config.f0_min) & (f0 <= self.config.f0_max)
         if vocal_regions:
             in_vocal = np.zeros_like(voiced)
@@ -590,6 +616,7 @@ class MelodyExtractor:
         timestamps: list[dict],
         vocals: AudioData | None = None,
         vocal_regions: list[tuple[float, float]] | None = None,
+        precomputed_f0: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> int:
         """정렬 결과(worker 포맷)의 각 세그먼트(라인)에 notes를 붙인다.
 
@@ -597,6 +624,8 @@ class MelodyExtractor:
         단어/글자 경계와 무관하게 멜리스마·이음도 자연스럽게 나뉜다.
         (CTC의 word_segments는 글자 단위 span이라 노트 산출에는 너무 짧다.)
         vocals: 호출부가 이미 분리해 둔 보컬 스템 (있으면 재분리 생략).
+        precomputed_f0: precompute_f0가 정렬과 병렬로 미리 계산한 (f0_hz, times) (WS2-B).
+        주어지면 f0 재추론을 건너뛰고 정렬 의존 후처리(마스킹·폴딩·노트 부착)만 수행한다.
         반환값: notes가 붙은 세그먼트 수.
         """
         # 스냅 오염 방지 마스크는 라인 스팬 합집합이 기본 — VAD 구간을 쓰면 전곡 RMS
@@ -608,8 +637,15 @@ class MelodyExtractor:
                 for s in timestamps
                 if s.get("start") is not None and s.get("end") is not None
             ]
-        # 체인 스냅 대신 라인별 지배 옥타브 창 폴딩 — 라인 단위라 오염 전파가 없다
-        track = self.extract_f0(audio, vocals=vocals, vocal_regions=vocal_regions, apply_snap=False)
+        # 체인 스냅 대신 라인별 지배 옥타브 창 폴딩 — 라인 단위라 오염 전파가 없다.
+        # precomputed_f0가 있으면 재추론 없이 주입값으로 트랙을 만든다 (정렬과 병렬 계산 결과).
+        track = self.extract_f0(
+            audio,
+            vocals=vocals,
+            vocal_regions=vocal_regions,
+            apply_snap=False,
+            precomputed=precomputed_f0,
+        )
         # 디버그 오버레이용 RAW 곡선 — 폴딩 전에 캡처해야 모델 원본 거동이 보인다
         self.last_f0_curve = downsample_f0_curve(track)
         if self.config.octave_snap and vocal_regions:
@@ -695,3 +731,27 @@ class MelodyExtractor:
                 logger.exception("Key estimation failed; continuing without key")
                 self.last_key = None
         return count
+
+
+# 웜 캐시 싱글턴 (WS2-A) — 프로세스 수명 동안 MelodyExtractor(와 그 안에 lazy 로드된 f0
+# 백엔드 모델)를 상주시킨다. 지연 생성이라 import만으로는 아무것도 로드하지 않는다.
+_shared_extractor: "MelodyExtractor | None" = None
+_shared_extractor_lock = threading.Lock()
+
+
+def get_shared_extractor(config: MelodySettings | None = None) -> "MelodyExtractor":
+    """웜 캐시된 MelodyExtractor를 돌려준다 (EVERYRIC_SERVER_WARM_MODELS 기준).
+
+    _get_model이 로드한 f0 백엔드(RMVPE/FCPE)는 인스턴스에 상주하므로, 같은 추출기를 재사용하면
+    두 번째 잡부터 f0 모델 재로드가 0회다. 재사용 시 "warm model reuse: melody" 1줄. warm이
+    꺼져 있으면 매번 새 인스턴스(기존 동작). 잡별 상태(last_f0_curve/last_key)는 annotate가
+    매번 덮어쓰므로 직렬 잡 처리(max_concurrent_jobs=1·순차 워커 루프) 전제에서 안전하다."""
+    if not get_settings().server.warm_models:
+        return MelodyExtractor(config)
+    global _shared_extractor
+    with _shared_extractor_lock:
+        if _shared_extractor is None:
+            _shared_extractor = MelodyExtractor(config)
+        else:
+            logger.info("warm model reuse: melody")
+        return _shared_extractor
