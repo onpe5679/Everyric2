@@ -402,10 +402,17 @@ class ServerSettings(BaseSettings):
         description="외부 미디어 캐시 인증 키 — 조회 요청에 Authorization: Bearer <key>로 실린다.",
     )
     link_match_threshold: float = Field(
-        default=0.35,
-        description="반주 상관 링크 검증(link-jobs)에서 match로 판정하는 confidence 하한. "
-        "정규화 크로스 코릴레이션의 (최고 피크 − 이차 피크) 점수가 이 값 이상이면 커버가 "
-        "원곡과 같은 반주를 쓴다고 보고 SyncLink를 자동 생성한다.",
+        default=0.55,
+        description="반주 상관 링크 검증(link-jobs)에서 match로 판정하는 confidence(정규화 "
+        "상관 최고 피크 절대높이) 하한. 실측 캘리브레이션(2026-07-24): 동일 인스트 커버 "
+        "0.93, 무관 곡 쌍 0.02 — 0.55는 그 사이의 보수적 경계다.",
+    )
+    link_min_offset_margin: float = Field(
+        default=0.08,
+        description="링크 검증에서 오프셋 유일성 게이트 — (최고 피크 − 이차 피크)가 이 값 "
+        "미만이면 confidence가 높아도 자동 링크를 보류한다. 루프 구조 곡은 마디 간격의 "
+        "이차 피크가 최고 피크에 근접하는데, 그 간극이 너무 작으면 이웃 박자 오프셋을 "
+        "잘못 고를 위험이 있다 (틀린 오프셋 링크는 no-link보다 해롭다).",
     )
     warm_models: bool = Field(
         default=True,

@@ -1112,8 +1112,17 @@ def _run_link_validation(link_job: dict) -> tuple[bool, float, float]:
     finally:
         Path(cover_file).unlink(missing_ok=True)
 
-    threshold = get_settings().server.link_match_threshold
-    match = result.confidence >= threshold
+    server = get_settings().server
+    # confidence(피크 높이)=같은 반주 증거, offset_margin=오프셋 유일성 — 둘 다 통과해야
+    # 자동 링크한다 (모호한 오프셋으로 링크하면 이웃 박자만큼 어긋난 싱크가 나간다)
+    match = (
+        result.confidence >= server.link_match_threshold
+        and result.offset_margin >= server.link_min_offset_margin
+    )
+    console.print(
+        f"[dim]상관 판정: peak={result.confidence:.4f} margin={result.offset_margin:.4f} "
+        f"offset={result.offset_sec:+.3f}s → match={match}[/dim]"
+    )
     return match, result.offset_sec, result.confidence
 
 

@@ -33,7 +33,13 @@ _EPS = 1e-9
 @dataclass
 class CorrelationResult:
     offset_sec: float
+    # 매치 증거 = 정규화 상관의 최고 피크 절대높이 [0,1]. 실측: 동일 인스트 커버 0.93,
+    # 무관 곡 쌍 0.02 (47배 분리). "피크 − 이차피크"를 confidence로 쓰면 루프 구조 곡에서
+    # 마디 간격 이차 피크(실측 0.75) 때문에 진짜 매치가 0.18로 깎여 오판한다 — 그래서
+    # 두 역할을 분리한다: confidence는 "같은 반주인가", offset_margin은 "이 오프셋이
+    # 유일한가"(낮으면 이웃 박자 오프셋과 혼동 위험 → 자동 링크 보류).
     confidence: float
+    offset_margin: float = 0.0
 
 
 def _onset_envelope(waveform: np.ndarray, sr: int) -> np.ndarray:
@@ -46,7 +52,10 @@ def _onset_envelope(waveform: np.ndarray, sr: int) -> np.ndarray:
     if sr != CORR_SR:
         y = librosa.resample(y, orig_sr=sr, target_sr=CORR_SR)
     env = librosa.onset.onset_strength(y=y, sr=CORR_SR, hop_length=HOP)
-    return np.asarray(env, dtype=np.float64)
+    env = np.asarray(env, dtype=np.float64)
+    # 선두 프레임은 프레이밍 에지 스파이크(신호 내용과 무관한 아티팩트)가 실려, 길이가
+    # 같은 두 신호라면 lag 0에서 가짜 상관을 만든다 — 몇 프레임 잘라낸다 (~0.12s)
+    return env[5:] if env.size > 10 else env
 
 
 def _normalize(env: np.ndarray) -> np.ndarray | None:
@@ -64,19 +73,19 @@ def correlate_envelopes(
     env_reference: np.ndarray,
     max_lag_frames: int,
     exclude_frames: int = 1,
-) -> tuple[int, float]:
-    """정규화된 두 엔벨로프의 크로스 코릴레이션 → (best_lag_frames, confidence).
+) -> tuple[int, float, float]:
+    """정규화된 두 엔벨로프의 크로스 코릴레이션 → (best_lag_frames, peak, secondary).
 
-    best_lag_frames는 target이 reference보다 늦은 프레임 수(양수 = target이 뒤). confidence는
-    최고 피크와 (그 주변을 제외한) 이차 피크의 격차를 최고 피크로 정규화한 [0, 1) 점수 —
-    뾰족한 유일 매칭이면 1에 가깝고, 평평한(무관) 상관이면 0에 가깝다. 순수 numpy/scipy라
-    합성 신호로 직접 테스트한다."""
+    best_lag_frames는 target이 reference보다 늦은 프레임 수(양수 = target이 뒤). peak는
+    최고 피크값 [0,1] — 같은 반주면 1에 가깝고 무관 신호면 0에 가깝다. secondary는 최고
+    피크 주변(exclude_frames)을 제외한 이차 피크값 — 루프 구조 곡은 마디 간격에서 peak에
+    근접한 secondary가 나오는 게 정상이다. 순수 numpy/scipy라 합성 신호로 직접 테스트한다."""
     from scipy.signal import correlate, correlation_lags
 
     a = _normalize(env_target)
     b = _normalize(env_reference)
     if a is None or b is None:
-        return 0, 0.0
+        return 0, 0.0, 0.0
 
     corr = correlate(a, b, mode="full", method="fft")
     lags = correlation_lags(len(a), len(b), mode="full")
@@ -86,13 +95,13 @@ def correlate_envelopes(
     corr_w = corr[window]
     lags_w = lags[window]
     if corr_w.size == 0:
-        return 0, 0.0
+        return 0, 0.0, 0.0
 
     best_i = int(np.argmax(corr_w))
     best_lag = int(lags_w[best_i])
     peak = float(corr_w[best_i])
     if peak <= 0.0:
-        return best_lag, 0.0
+        return best_lag, 0.0, 0.0
 
     # 최고 피크 주변(같은 정렬)을 제외한 이차 피크 = 다음으로 그럴듯한 대안 정렬의 강도
     lo = max(0, best_i - exclude_frames)
@@ -102,11 +111,7 @@ def correlate_envelopes(
     secondary = float(np.max(masked)) if np.isfinite(np.max(masked)) else 0.0
     secondary = max(0.0, secondary)
 
-    # 정규화 엔벨로프(평균0·단위노름)의 크로스 코릴레이션은 값이 [-1, 1]이라, 최고 피크와
-    # 이차 피크의 격차 자체가 이미 정규화된 신뢰도다: 강하고(peak↑) 유일한(secondary↓)
-    # 매칭이면 1에 가깝고, 약하거나(무관 신호) 모호한(주기적 곡) 정렬이면 0에 가깝다.
-    confidence = max(0.0, peak - secondary)
-    return best_lag, confidence
+    return best_lag, peak, secondary
 
 
 def correlate_offset(
@@ -122,8 +127,12 @@ def correlate_offset(
     env_r = _onset_envelope(reference_waveform, reference_sr)
     max_lag_frames = int(round(max_lag_sec * CORR_SR / HOP))
     exclude_frames = max(1, int(round(_PEAK_EXCLUDE_SEC * CORR_SR / HOP)))
-    best_lag, confidence = correlate_envelopes(
+    best_lag, peak, secondary = correlate_envelopes(
         env_t, env_r, max_lag_frames, exclude_frames=exclude_frames
     )
     offset_sec = round(best_lag * HOP / CORR_SR, 3)
-    return CorrelationResult(offset_sec=offset_sec, confidence=round(confidence, 4))
+    return CorrelationResult(
+        offset_sec=offset_sec,
+        confidence=round(min(1.0, max(0.0, peak)), 4),
+        offset_margin=round(max(0.0, peak - secondary), 4),
+    )
