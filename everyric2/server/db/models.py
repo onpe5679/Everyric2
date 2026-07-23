@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, Float, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text, func
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -88,4 +88,26 @@ class SyncLink(Base):
     # 원곡 대비 재생 배속 (nightcore 1.25 등) — 소스 시간 t를 t/rate + offset으로 사상.
     # 1.0이면 순수 시프트(기존 동작).
     rate: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class LinkJob(Base):
+    """링크 후보 검증 잡 — "커버(video_id)가 원곡(source_video_id)과 같은 반주를 쓰는가"를
+    반주 상관으로 자동 판정한다. 외부 오케스트레이터가 POST /api/link-jobs로 넣고, 원격 GPU
+    워커가 claim해 처리한다. match=true면 워커 result 수신부가 SyncLink를 자동 생성한다.
+
+    created_at은 server_default라 SQLite에 초 단위 문자열로 저장된다 — 카운트/순번 비교 시
+    마이크로초 바인딩 off-by-one 교훈(JobRepository.count_queued_before) 주의.
+    """
+
+    __tablename__ = "link_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    video_id: Mapped[str] = mapped_column(String(32), index=True)
+    source_video_id: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    match: Mapped[bool | None] = mapped_column(Boolean)
+    offset_sec: Mapped[float | None] = mapped_column(Float)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -8,6 +8,7 @@ from everyric2 import __version__
 from everyric2.server.api.captions import router as captions_router
 from everyric2.server.api.cookies import router as cookies_router
 from everyric2.server.api.job import router as job_router
+from everyric2.server.api.link_jobs import router as link_jobs_router
 from everyric2.server.api.sync import router as sync_router
 from everyric2.server.api.translate import router as translate_router
 from everyric2.server.api.vocaro import router as vocaro_router
@@ -99,6 +100,7 @@ async def require_api_key(request, call_next):
 
 app.include_router(sync_router)
 app.include_router(job_router)
+app.include_router(link_jobs_router)
 app.include_router(translate_router)
 app.include_router(cookies_router)
 app.include_router(vocaro_router)

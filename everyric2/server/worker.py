@@ -261,9 +261,22 @@ class PipelineError(Exception):
     """사용자에게 보이는 파이프라인 실패 (예: 영상 과길이). str(e)가 실패 문구가 된다."""
 
 
+def over_length_message(duration_sec: float, max_audio_sec: int) -> str:
+    """과길이 영상 거부 문구 — run_pipeline(다운로드 후)과 미디어 캐시 프리플라이트가 공유한다."""
+    return (
+        f"영상이 너무 길어요 ({duration_sec / 60:.0f}분). 싱크 생성은 "
+        f"{max_audio_sec // 60}분 이하의 노래 영상에서만 지원해요."
+    )
+
+
 @dataclass
 class JobInput:
-    """run_pipeline 입력 — 인프로세스는 스태시를 peek해, 원격은 claim 응답으로 채운다."""
+    """run_pipeline 입력 — 인프로세스는 스태시를 peek해, 원격은 claim 응답으로 채운다.
+
+    오디오 확보 우선순위(_acquire_audio): audio_path(인프로세스가 미디어 캐시에서 추출해 둔
+    로컬 파일) > audio_url(원격 워커가 서버 캐시 파일을 HTTP로 받음) > yt-dlp 다운로드.
+    앞의 두 경로가 실패하면 yt-dlp로 폴백하고, audio_hash는 어느 경로든 받은 파일로 동일 계산.
+    """
 
     job_id: str
     video_id: str
@@ -273,6 +286,10 @@ class JobInput:
     attribution: dict[str, Any] | None = None
     force: bool = False
     max_audio_sec: int = 0
+    # 미디어 캐시 연동 — 인프로세스는 로컬 파일 경로, 원격 워커는 인증 헤더 딸린 HTTP URL
+    audio_path: str | None = None
+    audio_url: str | None = None
+    audio_url_headers: dict[str, str] | None = None
 
 
 @dataclass
@@ -343,7 +360,7 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
     )
     try:
         download_result = await asyncio.get_event_loop().run_in_executor(
-            None, _download_and_hash, job.video_id, job.job_id
+            None, _acquire_audio, job
         )
     finally:
         dl_ticker.cancel()
@@ -357,10 +374,7 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
         duration = _audio_duration_sec(audio_path)
         if duration and duration > job.max_audio_sec:
             Path(audio_path).unlink(missing_ok=True)
-            raise PipelineError(
-                f"영상이 너무 길어요 ({duration / 60:.0f}분). 싱크 생성은 "
-                f"{job.max_audio_sec // 60}분 이하의 노래 영상에서만 지원해요."
-            )
+            raise PipelineError(over_length_message(duration, job.max_audio_sec))
 
     # 다운로드 완료 → 캐시 확인 (취소 경계 겸)
     if not await hooks.progress(35, "캐시 확인"):
@@ -421,6 +435,21 @@ async def _process_job_inner(job_id: str, job) -> None:
     # 코어 입력으로 캡처했으니 여기서 discard한다.
     force = job_id in _PENDING_FORCE
     _PENDING_FORCE.discard(job_id)
+    max_audio_sec = _get_settings().server.max_job_audio_sec
+
+    # 슬롯 획득 직후 = 잡이 이 프로세스로 넘어오는 순간 → 미디어 캐시 조회(있으면 추출 사용).
+    # 과길이 프리플라이트는 다운로드 없이 즉시 실패시킨다.
+    from everyric2.server.media_cache import prepare_cached_audio
+
+    cache_path, fail_reason = await prepare_cached_audio(job.video_id, job_id, max_audio_sec)
+    if fail_reason:
+        _PENDING_LINE_META.pop(job_id, None)
+        _PENDING_ATTRIBUTION.pop(job_id, None)
+        async with get_session() as session:
+            await JobRepository(session).update_status(job_id, "failed", error=fail_reason)
+        logger.info(f"Job {job_id} rejected (media cache preflight): {fail_reason}")
+        return
+
     job_input = JobInput(
         job_id=job_id,
         video_id=job.video_id,
@@ -429,7 +458,8 @@ async def _process_job_inner(job_id: str, job) -> None:
         line_meta=_PENDING_LINE_META.get(job_id),
         attribution=_PENDING_ATTRIBUTION.get(job_id),
         force=force,
-        max_audio_sec=_get_settings().server.max_job_audio_sec,
+        max_audio_sec=max_audio_sec,
+        audio_path=cache_path,
     )
     try:
         result = await run_pipeline(job_input, InProcessHooks(job_id, job))
@@ -532,6 +562,54 @@ async def _stage_monitor(report, stage_holder: dict[str, str], start: int, inter
             await report(int(progress), stage)
     except asyncio.CancelledError:
         pass
+
+
+def _acquire_audio(job: "JobInput") -> dict:
+    """오디오 확보 — audio_path(로컬 캐시 추출) > audio_url(서버 캐시 HTTP) > yt-dlp.
+
+    앞선 캐시 경로가 실패하면 조용히 yt-dlp로 폴백한다(INFO 로그 1줄). audio_hash는 어느
+    경로든 확보한 파일로 동일하게 계산한다 — 캐시/다운로드가 같은 원본이면 해시도 같아
+    교차 영상 캐시 재사용이 그대로 동작한다."""
+    # 인프로세스: 서버가 미디어 캐시에서 추출해 넘긴 로컬 파일 직사용
+    if job.audio_path:
+        p = Path(job.audio_path)
+        if p.exists():
+            try:
+                return {"audio_path": str(p), "audio_hash": compute_audio_hash(p)}
+            except Exception:
+                logger.info("캐시 오디오 파일을 읽지 못해 yt-dlp로 폴백해요 (video %s)", job.video_id)
+        else:
+            logger.info("캐시 오디오 파일이 없어 yt-dlp로 폴백해요 (video %s)", job.video_id)
+    # 원격 워커: 서버 캐시 파일을 인증 헤더로 HTTP 다운로드
+    if job.audio_url:
+        try:
+            path = _http_download_audio(
+                job.audio_url, job.audio_url_headers, job.video_id, job.job_id
+            )
+            return {"audio_path": str(path), "audio_hash": compute_audio_hash(path)}
+        except Exception:
+            logger.info("서버 캐시 오디오 받기 실패 — yt-dlp로 폴백해요 (video %s)", job.video_id)
+    return _download_and_hash(job.video_id, job.job_id)
+
+
+def _http_download_audio(
+    url: str, headers: dict[str, str] | None, video_id: str, job_id: str
+) -> Path:
+    """서버 캐시 오디오를 HTTP로 받아 임시 파일에 저장 (원격 워커 전용). 의존성 없이 requests."""
+    import requests
+
+    from everyric2.config.settings import get_settings
+
+    temp_dir = get_settings().audio.temp_dir
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    dest = temp_dir / f"{video_id}-{job_id[:8]}-cache.m4a"
+    with requests.get(url, headers=headers or {}, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+    return dest
 
 
 def _download_and_hash(video_id: str, job_id: str) -> dict:

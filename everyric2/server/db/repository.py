@@ -5,7 +5,14 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from everyric2.server.db.models import ActionLog, Job, SyncLink, SyncResult, VideoOffset
+from everyric2.server.db.models import (
+    ActionLog,
+    Job,
+    LinkJob,
+    SyncLink,
+    SyncResult,
+    VideoOffset,
+)
 
 
 def hash_lyrics(lyrics: str) -> str:
@@ -304,3 +311,62 @@ class SyncLinkRepository:
         await self.session.delete(existing)
         await self.session.flush()
         return True
+
+
+class LinkJobRepository:
+    """링크 검증 잡 CRUD — 중복 쌍 병합·FIFO claim·결과 마감."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_by_id(self, link_job_id: str) -> LinkJob | None:
+        result = await self.session.execute(select(LinkJob).where(LinkJob.id == link_job_id))
+        return result.scalar_one_or_none()
+
+    async def get_active_pair(self, video_id: str, source_video_id: str) -> LinkJob | None:
+        """같은 (video_id, source_video_id)로 이미 진행 중(queued/processing)인 잡 — 중복 방지."""
+        result = await self.session.execute(
+            select(LinkJob)
+            .where(
+                LinkJob.video_id == video_id,
+                LinkJob.source_video_id == source_video_id,
+                LinkJob.status.in_(["queued", "processing"]),
+            )
+            .order_by(LinkJob.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_oldest_queued(self) -> LinkJob | None:
+        """가장 오래 대기(queued)한 링크 잡 — 워커 claim이 sync 잡 다음으로 FIFO 소비한다."""
+        result = await self.session.execute(
+            select(LinkJob).where(LinkJob.status == "queued").order_by(LinkJob.created_at).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def create(self, video_id: str, source_video_id: str) -> LinkJob:
+        link_job = LinkJob(video_id=video_id, source_video_id=source_video_id, status="queued")
+        self.session.add(link_job)
+        await self.session.flush()
+        return link_job
+
+    async def update_status(self, link_job_id: str, status: str) -> None:
+        await self.session.execute(
+            update(LinkJob).where(LinkJob.id == link_job_id).values(status=status)
+        )
+
+    async def mark_done(
+        self, link_job_id: str, match: bool, offset_sec: float, confidence: float
+    ) -> None:
+        await self.session.execute(
+            update(LinkJob)
+            .where(LinkJob.id == link_job_id)
+            .values(
+                status="done", match=match, offset_sec=offset_sec, confidence=confidence, error=None
+            )
+        )
+
+    async def mark_failed(self, link_job_id: str, error: str) -> None:
+        await self.session.execute(
+            update(LinkJob).where(LinkJob.id == link_job_id).values(status="failed", error=error)
+        )

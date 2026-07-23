@@ -975,7 +975,8 @@ class RemoteHooks:
         return completed
 
 
-def _worker_claim(base: str, key: str, worker_id: str) -> dict | None:
+def _worker_claim(base: str, key: str, worker_id: str) -> dict:
+    """claim → ClaimResponse dict 전체를 돌려준다 (kind로 sync/link 잡을 구분한다)."""
     import requests
 
     r = requests.post(
@@ -987,7 +988,7 @@ def _worker_claim(base: str, key: str, worker_id: str) -> dict | None:
     if r.status_code == 409:
         raise WorkerVersionError(r.json().get("detail", "버전 불일치"))
     r.raise_for_status()
-    return r.json().get("job")
+    return r.json()
 
 
 def _worker_submit_result(base: str, key: str, worker_id: str, job_id: str, result) -> None:
@@ -1023,13 +1024,129 @@ def _worker_fail(base: str, key: str, worker_id: str, job_id: str, error: str) -
         pass  # 실패 보고가 실패하면 리스 만료로 서버가 알아서 정리한다
 
 
+def _worker_link_result(
+    base: str, key: str, worker_id: str, link_id: str, match: bool, offset: float, confidence: float
+) -> None:
+    import requests
+
+    r = requests.post(
+        f"{base}/api/worker/link-jobs/{link_id}/result",
+        json={"match": match, "offset_sec": offset, "confidence": confidence},
+        headers={"X-Worker-Key": key, "X-Worker-Id": worker_id},
+        timeout=30,
+    )
+    r.raise_for_status()
+
+
+def _worker_link_fail(base: str, key: str, worker_id: str, link_id: str, error: str) -> None:
+    import requests
+
+    try:
+        r = requests.post(
+            f"{base}/api/worker/link-jobs/{link_id}/fail",
+            json={"error": error},
+            headers={"X-Worker-Key": key, "X-Worker-Id": worker_id},
+            timeout=30,
+        )
+        r.raise_for_status()
+    except Exception:
+        pass
+
+
+def _download_audio_for_link(video_id: str, tag: str):
+    """링크 검증용 오디오 확보 — yt-dlp로 받아 로드한다 (반환: (AudioData, 정리할 Path))."""
+    from everyric2.audio.downloader import YouTubeDownloader
+    from everyric2.audio.loader import AudioLoader
+
+    downloader = YouTubeDownloader()
+    dl = downloader.download(
+        f"https://www.youtube.com/watch?v={video_id}", filename=f"link-{tag}-{video_id}"
+    )
+    audio = AudioLoader().load(dl.audio_path)
+    return audio, dl.audio_path
+
+
+def _instrumental(audio):
+    """반주(인스트) 스템 확보 — demucs가 있으면 accompaniment(no_vocals)를, 없으면 믹스로 폴백.
+
+    separator는 --two-stems vocals로 vocals/no_vocals를 내므로 accompaniment가 곧 반주다."""
+    from everyric2.audio.separator import VocalSeparator
+
+    separator = VocalSeparator()
+    if not separator.is_available():
+        return audio
+    try:
+        import torch
+
+        use_gpu = torch.cuda.is_available()
+    except Exception:
+        use_gpu = False
+    return separator.separate(audio, use_gpu=use_gpu).accompaniment
+
+
+def _run_link_validation(link_job: dict) -> tuple[bool, float, float]:
+    """두 영상의 반주를 상관해 (match, offset_sec, confidence)를 낸다 (워커 스레드에서 실행).
+
+    offset_sec 부호: target=커버(video_id), reference=원곡(source_video_id)으로 correlate_offset을
+    부르면 offset = t_cover - t_source가 되어 서버 SyncLink 소비부와 일치한다."""
+    from pathlib import Path
+
+    from everyric2.audio.correlate import correlate_offset
+    from everyric2.config.settings import get_settings
+
+    cover_audio, cover_file = _download_audio_for_link(link_job["video_id"], "t")
+    try:
+        source_audio, source_file = _download_audio_for_link(link_job["source_video_id"], "s")
+        try:
+            cover_inst = _instrumental(cover_audio)
+            source_inst = _instrumental(source_audio)
+            result = correlate_offset(
+                cover_inst.waveform,
+                cover_inst.sample_rate,
+                source_inst.waveform,
+                source_inst.sample_rate,
+            )
+        finally:
+            Path(source_file).unlink(missing_ok=True)
+    finally:
+        Path(cover_file).unlink(missing_ok=True)
+
+    threshold = get_settings().server.link_match_threshold
+    match = result.confidence >= threshold
+    return match, result.offset_sec, result.confidence
+
+
+async def _process_link_job(base: str, key: str, worker_id: str, link_job: dict) -> None:
+    link_id = link_job["link_job_id"]
+    console.print(
+        f"[cyan]링크 잡 클레임:[/cyan] {link_id} "
+        f"(cover {link_job['video_id']} vs source {link_job['source_video_id']})"
+    )
+    try:
+        match, offset, confidence = await asyncio.to_thread(_run_link_validation, link_job)
+    except Exception as e:
+        console.print(f"[red]링크 검증 오류:[/red] {e}")
+        await asyncio.to_thread(_worker_link_fail, base, key, worker_id, link_id, str(e))
+        return
+    try:
+        await asyncio.to_thread(
+            _worker_link_result, base, key, worker_id, link_id, match, offset, confidence
+        )
+        console.print(
+            f"[green]링크 검증 완료:[/green] {link_id} "
+            f"(match={match}, offset={offset:.2f}s, conf={confidence:.2f})"
+        )
+    except Exception as e:
+        console.print(f"[red]링크 결과 제출 실패:[/red] {e}")
+
+
 async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: bool) -> None:
     from everyric2.server.worker import JobInput, PipelineError, run_pipeline
 
     backoff = 1.0
     while True:
         try:
-            job = await asyncio.to_thread(_worker_claim, base, key, worker_id)
+            claim = await asyncio.to_thread(_worker_claim, base, key, worker_id)
             backoff = 1.0
         except WorkerVersionError as e:
             console.print(f"[red]버전 불일치로 종료해요:[/red] {e}")
@@ -1038,6 +1155,17 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
             console.print(f"[yellow]claim 실패 — {backoff:.0f}s 후 재시도:[/yellow] {e}")
             await asyncio.sleep(backoff)
             backoff = min(60.0, backoff * 2)
+            continue
+
+        kind = claim.get("kind", "sync")
+        job = claim.get("job")
+        link_job = claim.get("link_job")
+
+        # 링크 검증 잡 — sync 잡이 없을 때만 배정된다 (반주 상관 → SyncLink 자동 생성)
+        if kind == "link_validate" and link_job is not None:
+            await _process_link_job(base, key, worker_id, link_job)
+            if once:
+                return
             continue
 
         if job is None:
@@ -1050,6 +1178,9 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
         job_id = job["job_id"]
         console.print(f"[cyan]잡 클레임:[/cyan] {job_id} (video {job['video_id']})")
         hooks = RemoteHooks(base, key, worker_id, job_id)
+        # 서버 미디어 캐시 히트면 audio_url(상대경로)로 온다 — base를 붙이고 워커 키 헤더를 실어
+        # run_pipeline의 다운로드 블록이 yt-dlp 대신 HTTP로 받게 한다 (실패 시 yt-dlp 폴백)
+        audio_rel = job.get("audio_url")
         job_input = JobInput(
             job_id=job_id,
             video_id=job["video_id"],
@@ -1059,6 +1190,10 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
             attribution=job.get("attribution"),
             force=bool(job.get("force")),
             max_audio_sec=int(job.get("max_audio_sec") or 0),
+            audio_url=f"{base}{audio_rel}" if audio_rel else None,
+            audio_url_headers=(
+                {"X-Worker-Key": key, "X-Worker-Id": worker_id} if audio_rel else None
+            ),
         )
         try:
             result = await run_pipeline(job_input, hooks)

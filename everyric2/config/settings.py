@@ -380,6 +380,33 @@ class ServerSettings(BaseSettings):
         "하트비트를 겸해 리스를 갱신한다. 만료되면(워커 하트비트 끊김) 다음 claim 처리 "
         "시 잡을 queued로 되돌려 다른 워커가 다시 가져가게 한다.",
     )
+    # ── 중립 연동 (외부 곡 인덱스 / 외부 미디어 캐시) ──────────────────────────
+    song_index_url: str = Field(
+        default="",
+        description="외부 곡 인덱스(songindex/1)의 베이스 URL. 설정하면 /api/vocaro/match를 "
+        "업스트림 GET {url}/match?title=... 프록시로 전환한다(확장 응답 형태 무변경). 빈 값이면 "
+        "기존 로컬 인덱스 경로 그대로.",
+    )
+    song_index_key: str = Field(
+        default="",
+        description="외부 곡 인덱스 인증 키 — 프록시 요청에 Authorization: Bearer <key>로 실린다.",
+    )
+    media_cache_url: str = Field(
+        default="",
+        description="외부 미디어 캐시(mediacache/1)의 베이스 URL. 설정하면 잡이 처리 주체에게 "
+        "넘어가는 순간 GET {url}/lookup?platform=youtube&id=<video_id>로 조회해, 히트 시 "
+        "재다운로드 없이 로컬 원본에서 오디오만 추출해 쓴다. 빈 값이면 항상 yt-dlp 경로.",
+    )
+    media_cache_key: str = Field(
+        default="",
+        description="외부 미디어 캐시 인증 키 — 조회 요청에 Authorization: Bearer <key>로 실린다.",
+    )
+    link_match_threshold: float = Field(
+        default=0.35,
+        description="반주 상관 링크 검증(link-jobs)에서 match로 판정하는 confidence 하한. "
+        "정규화 크로스 코릴레이션의 (최고 피크 − 이차 피크) 점수가 이 값 이상이면 커버가 "
+        "원곡과 같은 반주를 쓴다고 보고 SyncLink를 자동 생성한다.",
+    )
 
 
 class Settings(BaseSettings):
