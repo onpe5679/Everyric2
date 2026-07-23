@@ -4,7 +4,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoSearch: true,
   fontSize: 'medium',
   theme: 'auto',
-  serverUrl: 'http://127.0.0.1:8000',
+  serverUrl: 'https://everyric.moref.co',
   offsetSec: 0,
   showTranslation: false,
   translationLanguage: 'ko',
