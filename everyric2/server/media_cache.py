@@ -47,6 +47,60 @@ def _lookup(url: str, key: str, video_id: str) -> dict:
     return resp.json()
 
 
+_REPORT_TIMEOUT_SEC = 1.5
+
+
+def report_download_event(
+    *,
+    outcome: str,
+    video_id: str | None = None,
+    code: str | None = None,
+    egress: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """다운로드 결과를 캐시 계약 상대에게 **보고**한다 (mediacache/1 확장, 중립).
+
+    왜 보고하는가: 출구(egress)별 성공/실패는 **우리만 아는 사실**이다. 상대는 우리 로그를
+    긁어서 알아내고 있었는데, 그 방식으로는 (a) 첫 시도에 성공한 다운로드는 로그에 흔적이
+    없어 성공을 셀 수 없고 (b) 사람이 스크립트를 돌릴 때만 갱신되니 경보의 토대가 못 된다.
+    실측(2026-07-30): 상대 쪽에 403이 84건 쌓이는 동안 통지가 한 건도 없었다.
+
+    **완전 fire-and-forget** — 응답을 기다리지 않고, 어떤 실패도 삼킨다. 이 보고가 실패해서
+    다운로드가 죽으면 관측을 위해 기능을 잃는 것이고 그건 언제나 잘못된 교환이다.
+    미설정(URL 없음)이면 아무것도 하지 않는다.
+    """
+    from everyric2.config.settings import get_settings
+
+    try:
+        server = get_settings().server
+        if not server.media_cache_url:
+            return
+
+        import datetime as _dt
+
+        import requests
+
+        requests.post(
+            f"{server.media_cache_url.rstrip('/')}/download-event",
+            json={
+                "outcome": outcome,
+                "video_id": video_id,
+                "code": code,
+                "egress": egress,
+                "detail": detail,
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            },
+            headers=(
+                {"Authorization": f"Bearer {server.media_cache_key}"}
+                if server.media_cache_key
+                else {}
+            ),
+            timeout=_REPORT_TIMEOUT_SEC,
+        )
+    except Exception as e:  # noqa: BLE001 — 관측이 기능을 죽이면 안 된다
+        logger.debug("다운로드 결과 보고 실패(무시): %s", e)
+
+
 def lookup_cached(video_id: str) -> bool:
     """캐시에 원본 미디어가 있는지 **조회만** 한다(추출 없음) — 링크 자동 제출 게이트용.
 
