@@ -287,6 +287,30 @@ class OmniASRCTCAligner(HFCTCAligner):
 # fp32 candidate's cached runs.
 OMNI_ASR_CTC_300M_BF16 = dataclasses.replace(OMNI_ASR_CTC_300M, name="omniasr-ctc-bf16")
 OMNI_ASR_CTC_300M_FP16 = dataclasses.replace(OMNI_ASR_CTC_300M, name="omniasr-ctc-fp16")
+# 라틴 곡을 IPA로 정렬하고 한글·가나로 표시하는 변형. **앵커 없는 단독 경로**라 2패스
+# (owsm 앵커 + 이 모델, 곡당 15~18초)와 달리 0.6초대로 끝난다. 2패스가 필요했던 이유는
+# 「라틴 원문으로는 CTC가 약해 라인 경계가 무너진다」였는데, 타깃을 모델 vocab에 실제로 있는
+# IPA 기호로 바꾸면 그 전제가 성립하는지부터 다시 물어야 한다 — 그 대조군이다.
+OMNI_ASR_CTC_IPA_HANGUL = dataclasses.replace(
+    OMNI_ASR_CTC_300M, name="omniasr-ctc-ipa-hangul", latin_ipa_display="hangul"
+)
+OMNI_ASR_CTC_IPA_KANA = dataclasses.replace(
+    OMNI_ASR_CTC_300M, name="omniasr-ctc-ipa-kana", latin_ipa_display="kana"
+)
+
+
+class OmniASRCTCIpaHangulAligner(OmniASRCTCAligner):
+    """앵커 없는 IPA 단독 정렬 — 표시는 한글 음절."""
+
+    name = "omniasr-ctc-ipa-hangul"
+    model_config = OMNI_ASR_CTC_IPA_HANGUL
+
+
+class OmniASRCTCIpaKanaAligner(OmniASRCTCAligner):
+    """위와 같은 정렬, 표시만 가나."""
+
+    name = "omniasr-ctc-ipa-kana"
+    model_config = OMNI_ASR_CTC_IPA_KANA
 
 
 class OmniASRCTCBf16Aligner(OmniASRCTCAligner):
@@ -321,3 +345,5 @@ def register(aligner_registry: dict[str, type[AlignerAdapter]]) -> None:
     aligner_registry[OmniASRCTCAligner.name] = OmniASRCTCAligner
     aligner_registry[OmniASRCTCBf16Aligner.name] = OmniASRCTCBf16Aligner
     aligner_registry[OmniASRCTCFp16Aligner.name] = OmniASRCTCFp16Aligner
+    aligner_registry[OmniASRCTCIpaHangulAligner.name] = OmniASRCTCIpaHangulAligner
+    aligner_registry[OmniASRCTCIpaKanaAligner.name] = OmniASRCTCIpaKanaAligner

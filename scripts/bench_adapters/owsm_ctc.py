@@ -111,6 +111,10 @@ class OwsmCTCAligner:
     # padded buffer, not of song length (every song in the fp32 sweep reported the same peak).
     dtype: str = "float32"
     buffer_sec: float | None = None
+    # 인코더 청크를 한 번에 몇 개씩 태울지. 1이 기존 순차 경로와 완전히 동일하다.
+    # 30초 버퍼 하나로는 카드가 놀아서(279초 곡 12청크 = 11.66초, 정렬 총시간의 88%)
+    # 배치가 활성화 메모리를 주고 그 유휴 시간을 산다.
+    batch_size: int = 1
     # torch's caching allocator reserves far more than it allocates here (fp32: 8,968MB reserved
     # vs 5,165MB allocated). Expandable segments hand that fragmentation back without touching a
     # single number the model computes, so it is the one lever with no quality risk at all.
@@ -149,6 +153,7 @@ class OwsmCTCAligner:
             "overlap_sec": ALIGN_CHUNK_OVERLAP_SEC,
             "dtype": self.dtype,
             "buffer_sec": self.buffer_sec,
+            "batch_size": self.batch_size,
         }
 
         started = time.perf_counter()
@@ -309,6 +314,16 @@ VRAM_VARIANTS: tuple[dict[str, Any], ...] = (
     # overwriting the pre-fix baseline runs the sweep already recorded under the plain name.
     {"suffix": "fp32"},
     {"suffix": "bf16", "dtype": "bfloat16"},
+    # 인코더 배치 — 실측 결과 **이득 없음**(279초 곡 11.13s → b4 10.47s, b8 10.67s)에
+    # VRAM만 2,622 → 4,573/5,653MB로 늘었다. 30초 버퍼로도 카드는 이미 포화 상태였다는 뜻이라
+    # 이 축은 닫혔다. 재실험 없이 되풀이하지 않도록 변형은 남겨 둔다.
+    {"suffix": "bf16-b4", "dtype": "bfloat16", "batch_size": 4},
+    {"suffix": "bf16-b8", "dtype": "bfloat16", "batch_size": 8},
+    # 버퍼 길이 — 연산량 자체를 줄이는 축이다. 30초 버퍼 + 5초 겹침이면 279초 곡이 12청크
+    # (=360초 분량)로 불어나 원곡보다 81초를 더 계산한다. 버퍼를 키우면 청크 수와 겹침 낭비가
+    # 같이 준다. 대가는 훈련 길이(30초) 이탈이라 품질을 반드시 UST로 재확인해야 한다.
+    {"suffix": "bf16-60s", "dtype": "bfloat16", "buffer_sec": 60.0},
+    {"suffix": "bf16-90s", "dtype": "bfloat16", "buffer_sec": 90.0},
     {"suffix": "bf16-20s", "dtype": "bfloat16", "buffer_sec": 20.0},
     {"suffix": "bf16-15s", "dtype": "bfloat16", "buffer_sec": 15.0},
     {"suffix": "20s", "buffer_sec": 20.0},
@@ -321,6 +336,7 @@ def _variant_class(spec: dict[str, Any]) -> type[OwsmCTCAligner]:
         dtype = spec.get("dtype", "float32")
         buffer_sec = spec.get("buffer_sec")
         expandable_segments = spec.get("expandable_segments", False)
+        batch_size = spec.get("batch_size", 1)
 
     VariantOwsmCTCAligner.__name__ = "OwsmCTC_" + spec["suffix"].replace("-", "_")
     VariantOwsmCTCAligner.__qualname__ = VariantOwsmCTCAligner.__name__
@@ -506,22 +522,38 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
+    # Chunks are all padded to the same ``buffer_samples`` length, so several of them can ride
+    # one encoder call. Measured on a 279s song (12 chunks): the sequential loop spent 11.66s
+    # of the 13.26s total alignment time -- the encoder was latency-bound, not throughput-bound,
+    # because each 30s buffer is far too small to saturate the card. Batching trades activation
+    # memory for that idle time; ``batch_size`` is the knob and 1 reproduces the old path
+    # exactly (same tensors, same order), which is how the equivalence check is run.
+    batch_size = max(1, int(payload.get("batch_size") or 1))
+    buffer_frames = _expected_audio_frames(buffer_samples)
     pieces: list[Any] = []
-    for start, end in windows:
-        segment = waveform[start:end]
-        real = int(segment.numel())
-        if real < buffer_samples:
-            segment = torch.nn.functional.pad(segment, (0, buffer_samples - real))
-        speech = segment.unsqueeze(0).to(device=device, dtype=torch_dtype)
-        speech_lengths = torch.full([1], speech.size(1), dtype=torch.long, device=device)
+    for offset in range(0, len(windows), batch_size):
+        batch = windows[offset : offset + batch_size]
+        segments, reals = [], []
+        for start, end in batch:
+            segment = waveform[start:end]
+            real = int(segment.numel())
+            reals.append(real)
+            if real < buffer_samples:
+                segment = torch.nn.functional.pad(segment, (0, buffer_samples - real))
+            segments.append(segment)
+        count = len(segments)
+        speech = torch.stack(segments).to(device=device, dtype=torch_dtype)
+        speech_lengths = torch.full([count], speech.size(1), dtype=torch.long, device=device)
         with torch.no_grad():
             enc, _ = model.encode(
                 speech=speech,
                 speech_lengths=speech_lengths,
-                text_prev=text_prev,
-                text_prev_lengths=text_prev_lengths,
-                prefix=prefix,
-                prefix_lengths=prefix_lengths,
+                # ``repeat`` rather than ``expand``: the encoder may write into these, and a
+                # broadcast view would alias every row of the batch onto one buffer.
+                text_prev=text_prev.repeat(count, 1),
+                text_prev_lengths=text_prev_lengths.repeat(count),
+                prefix=prefix.repeat(count, 1),
+                prefix_lengths=prefix_lengths.repeat(count),
             )
             if isinstance(enc, tuple):
                 enc = enc[0]
@@ -532,16 +564,16 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
 
         # The prefix states sit in front of the audio frames; dropping the wrong count would
         # bias every timestamp, so verify rather than assume.
-        buffer_frames = _expected_audio_frames(buffer_samples)
         surplus = int(logp.shape[1]) - buffer_frames
         if surplus != int(prefix.size(1)):
             raise RuntimeError(
                 f"unexpected OWSM encoder length: got {logp.shape[1]} frames, expected "
                 f"{buffer_frames} audio frames + {int(prefix.size(1))} prefix frames"
             )
-        logp = logp[:, surplus:, :]
-        valid = max(1, min(buffer_frames, round(buffer_frames * real / buffer_samples)))
-        pieces.append(torch.index_select(logp[:, :valid, :], 2, column_index).cpu())
+        compact = torch.index_select(logp[:, surplus:, :], 2, column_index).cpu()
+        for row, real in enumerate(reals):
+            valid = max(1, min(buffer_frames, round(buffer_frames * real / buffer_samples)))
+            pieces.append(compact[row : row + 1, :valid, :])
 
     emission = (
         pieces[0] if len(pieces) == 1 else chunking.stitch_chunk_outputs(pieces, windows, n_samples, frame_axis=1)

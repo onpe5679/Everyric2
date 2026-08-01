@@ -15,13 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from scripts.benchmark_alignment import AlignOut, AlignerAdapter, VramProbe
+from scripts.benchmark_alignment import AlignerAdapter, AlignOut, VramProbe
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,16 @@ class HFCTCModelConfig:
     # utterance budget (OWSM-CTC's 30s buffer, omniASR's short corpus) align better when the
     # inference window matches training rather than the 60s VRAM-driven default.
     align_chunk_sec: float | None = None
+    # 라틴 가사를 **IPA로 정렬하고 한글·가나로 표시**하는 모드("hangul" | "kana").
+    #
+    # 다른 변환 옵션(jamo_style·phoneme_style·hiragana_conversion)은 전부 «글자 하나»를 토큰
+    # 여럿으로 펴는 것이라 글자 루프 안에서 처리된다. IPA는 **낱말 단위로 사전을 봐야** 하므로
+    # (beautiful → B Y UW1 T AH0 F AH0 L) 그 루프에 못 들어간다 — `_prepare_lines`가 라인
+    # 통째로 따로 처리한다.
+    #
+    # `_PreparedUnit`이 이미 «표시 글자 1 : CTC 토큰 N» 구조라 그대로 얹힌다(자모 분해가 쓰던
+    # 바로 그 구조다). source="쉿", tokens=["s","w","i","t"]가 되는 식이다.
+    latin_ipa_display: str | None = None
 
 
 CANDIDATES: tuple[HFCTCModelConfig, ...] = (
@@ -248,6 +259,87 @@ class _PreparedUnit:
     tokens: list[str]
     alignable: bool
     matched: bool
+
+
+_LATIN_WORD_RE = re.compile(r"[A-Za-z']+")
+# 앞 글자와 한 모라를 이루는 가나 — OOV 표시를 철자에 배분할 때 갈라지면 안 된다.
+_COMBINING_KANA = frozenset("ャュョァィゥェォッーゃゅょぁぃぅぇぉっ")
+
+
+def _latin_ipa_units(line: str, display: str, vocab) -> list[_PreparedUnit]:
+    """라틴 한 줄 → 정렬 유닛. **정렬은 IPA, 표시는 한글(또는 가나)**.
+
+    ``_PreparedUnit``이 이미 «표시 1글자 : CTC 토큰 N개» 구조라(자모 분해가 쓰던 그 구조)
+    표시와 정렬이 갈라지는 이 경로가 그대로 얹힌다 — ``source="쉿"``, ``tokens=[s,w,i,t]``.
+    덕분에 세그는 음절 단위로 나오면서 정렬은 음소 단위로 정밀해진다.
+
+    OOV(전체 낱말의 0.3%)는 철자를 타깃으로 두고 표시 음차를 철자 길이에 비례 배분한다.
+    통째로 첫 글자에 몰면 그 낱말이 세그 하나가 되어 그 구간만 카라오케가 멈춘다.
+    """
+    from scripts.bench_adapters.en_g2p import units_for_word
+
+    if display == "kana":
+        from everyric2.text.ko_reading import latin_to_kana as fallback_display
+    else:
+        from everyric2.text.latin_hangul import transliterate_latin as fallback_display
+
+    units: list[_PreparedUnit] = []
+
+    def add(source: str, target: str) -> None:
+        """표시 ``source``를 정렬 타깃 ``target``(IPA 또는 철자)에 묶어 유닛 하나로."""
+        normalized = [_lookup_token(char, vocab) for char in target]
+        tokens = [token for token in normalized if token is not None]
+        matched = bool(tokens) and len(tokens) == len(target)
+        units.append(_PreparedUnit(source, tokens if matched else [], True, matched))
+
+    def passthrough(char: str) -> None:
+        units.append(_PreparedUnit(char, [], _is_alignment_character(char), False))
+
+    pos = 0
+    for match in _LATIN_WORD_RE.finditer(line):
+        for char in line[pos : match.start()]:  # 낱말 사이 공백·구두점
+            passthrough(char)
+        word = match.group(0)
+        parsed = units_for_word(word)
+        if parsed:
+            for unit in parsed:
+                shown = unit.kana if display == "kana" else unit.hangul
+                if unit.ipa:
+                    add(shown, unit.ipa)
+                elif units:  # IPA가 빈 유닛 — 표시만 앞 글자에 얹는다
+                    units[-1].source += shown
+        else:
+            shown = fallback_display(word) or word
+            slots = [""] * len(word)
+            cursor = -1
+            for index, char in enumerate(shown):
+                if char in _COMBINING_KANA and cursor >= 0:
+                    slot = cursor
+                else:
+                    slot = max(min(index * len(word) // len(shown), len(word) - 1), cursor)
+                slots[slot] += char
+                cursor = slot
+            for char, slot in zip(word, slots):
+                add(slot, char)
+        pos = match.end()
+    for char in line[pos:]:
+        passthrough(char)
+    return units
+
+
+@dataclass
+class HFEmission:
+    """한 곡 전체의 CTC emission과 그 프레임 척도.
+
+    2패스 정렬기(``two_pass``)가 라인 창만큼 프레임 축을 잘라 쓰는 입력이다. 라인마다 forward를
+    다시 돌리면 곡 길이에 비례해 낭비이므로 통째로 한 번만 계산해 넘긴다.
+    """
+
+    emission: Any  # [1, T, V] log-softmax
+    blank_id: int
+    frame_sec: float
+    audio_sec: float
+    chunks: int
 
 
 @dataclass
@@ -415,6 +507,46 @@ class HFCTCAligner(AlignerAdapter):
             },
         )
 
+    def emission_for(self, vocals_path: Path) -> HFEmission:
+        """곡 전체의 CTC emission을 한 번만 계산해 돌려준다 — 2패스 정렬기의 2패스 입력.
+
+        ``align``이 쓰는 경로(``_ensure_model`` → ``_load_audio`` → ``_chunked_emission``)를
+        그대로 조합할 뿐이라 정렬 결과와 같은 emission이 나온다. 호출부가 VRAM을 재려면 이
+        호출을 자기 probe 안에 넣으면 된다 — 모델 적재는 캐시되므로 첫 호출만 무겁다.
+        """
+
+        processor, model = self._ensure_model()
+        device = next(model.parameters()).device
+        waveform, sample_rate = self._load_audio(vocals_path)
+        emission, chunks = self._chunked_emission(processor, model, waveform, sample_rate, device)
+        return HFEmission(
+            emission=emission,
+            blank_id=self._blank_id(model),
+            frame_sec=waveform.numel() / emission.shape[1] / TARGET_SAMPLE_RATE,
+            audio_sec=waveform.numel() / TARGET_SAMPLE_RATE,
+            chunks=chunks,
+        )
+
+    def prepare_line_targets(self, text: str) -> tuple[list[int], list[tuple[int, int] | None]]:
+        """한 줄을 이 후보의 vocab id 열과 «문자별 토큰 구간»으로 바꾼다.
+
+        구간은 입력 문자와 1:1로 늘어서고, 정렬 대상이 아니거나(공백·기호) vocab에 없는
+        문자는 ``None``이다. 2패스 정렬기가 창 안에서 이 줄만 DP를 돌릴 때 쓴다.
+        """
+
+        vocab = self._ensure_vocab()
+        token_ids: list[int] = []
+        ranges: list[tuple[int, int] | None] = []
+        for line in self._prepare_lines([text]):
+            for unit in line.units:
+                if not unit.matched:
+                    ranges.append(None)
+                    continue
+                first = len(token_ids)
+                token_ids.extend(vocab[token] for token in unit.tokens)
+                ranges.append((first, len(token_ids)))
+        return token_ids, ranges
+
     def _chunk_sec(self) -> float:
         override = self.model_config.align_chunk_sec
         return ALIGN_CHUNK_SEC if override is None else float(override)
@@ -528,6 +660,10 @@ class HFCTCAligner(AlignerAdapter):
         vocab = self._ensure_vocab()
         prepared: list[_PreparedLine] = []
         for line in lines:
+            if self.model_config.latin_ipa_display:
+                units = _latin_ipa_units(line, self.model_config.latin_ipa_display, vocab)
+                prepared.append(_PreparedLine(line, units, converted=True))
+                continue
             units: list[_PreparedUnit] = []
             converted = False
             for char in line:

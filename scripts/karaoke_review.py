@@ -18,20 +18,111 @@ REPO = Path(__file__).resolve().parents[1]
 BENCH = REPO / "benchmark"
 # 트랙 색 — 곡·뷰어가 달라도 같은 조합은 항상 같은 색이 나오게 결정론으로 만든다.
 # 색상(hue)=전사 라우트, 밝기(lightness)=분리기, 채도(saturation)=음차(@hangul*) 여부.
+#
+# 각도는 «계열이 구역으로 읽히게»가 아니라 **지각 거리(ΔE)로** 깔았다. 같은 간격으로 벌려도
+# 눈에는 안 갈린다 — 초록~청록 구간은 둔하고 빨강~노랑은 민감해서, 19°씩 고르게 벌린 배치가
+# 실측 ΔE 9.6까지 붙는 쌍을 남겼다(2pass-en-ipa ↔ -ipa-hangul).
+#
+# 계열 소속감은 **세그 바 모양**(`_track_shape`: 단독 민바 / 2패스 흰 캡 / 라우팅 테두리)이
+# 진다. 그래서 색은 «같은 모양 안에서 유일할 것»만 책임지면 되고, 그 완화 덕에 그룹당 색
+# 공간이 넓어져 같은 모양 쌍은 전부 ΔE 15 이상으로 벌었다. 모양이 다른 쌍은 최소 ΔE 12.7까지
+# 붙지만 모양이 갈라 준다(단, 완전히 겹치면 「같은 것의 변형」으로 오독되므로 면제는 아니다 —
+# 좁은 세그 바에서는 장식이 생략된다).
+#
+# 어댑터를 추가할 때는 빈 각도를 눈대중으로 고르지 말 것. 같은 모양 그룹 안에서 ΔE가 최대가
+# 되는 자리를 찾아야 한다(고정 5종은 사용자에게 익은 색이라 움직이지 않는다).
 ALIGNER_HUE = {
-    "omniasr-ctc": 210 / 360,          # 파랑 계열
-    "owsm-ctc-v4-1b": 172 / 360,       # 청록 — 구세대 fp32, bf16 현역과 같은 초록 계열이되 구분
-    "owsm-ctc-v4-1b-bf16": 150 / 360,  # 초록 계열
-    "nemo-nfa": 25 / 360,              # 주황 계열
-    "hf-kkonjeong": 320 / 360,         # 자홍 — ko CTC 계열(nemo와 같은 음차 구조, 다른 모델)
+    "2pass-owsm-omniasr": 4 / 360,
+    # ja 독음 쌍 — 짝끼리 나란히 보도록 가까이 두되 2pass-owsm-omniasr(4°)와는 띄운다.
+    "2pass-owsm-reading": 64 / 360,        # 2패스 · ja 가나 독음 + n-best 심판(기각판)
+    "2pass-owsm-reading-noref": 80 / 360,  # 2패스 · 표기형 독음
+    "2pass-owsm-reading-joshi": 96 / 360,  # 2패스 · 조사만 발음형
+    "2pass-owsm-reading-phon": 108 / 360,  # 2패스 · 전체 발음형
+    # ★심판 비교 쌍 — 짝끼리 붙여 둔다
+    "2pass-owsm-prod": 16 / 360,           # 2패스 · ★프로드 독음 + 심판
+    "2pass-owsm-prod-noref": 28 / 360,     # 2패스 · 같은 독음, 심판 끔       # 2패스
+    "nemo-nfa": 25 / 360,                # 단독 · 고정(현재 뷰어 제외 — 자리는 비워 둔다)
+    "2pass-en-hangul": 36 / 360,         # 2패스 · 철자 기반 음차(뷰어 제외 — 자리는 비워 둔다)
+    # ★원문 영어 층 — 2pass-asr-ipa-hangul과 **같은 정렬**을 원문 철자 음절로 묶은 레인.
+    # 제외된 2pass-en-hangul 자리를 물려받는다(en 전용 경로라 같은 곡에 같이 뜨지 않는다).
+    "2pass-asr-ipa-en": 36 / 360,        # 2패스 · ★en 원문 음절 스팬
+    # 가나 레인이 비운 자리(204°)를 IPA 전사 레인이 물려받는다.
+    "2pass-asr-ipa-phonetic": 204 / 360,  # 2패스 · ★IPA 전사(음절 단위)
+    # 심판 대조군은 각자의 짝과 **나란히 놓고 비교**하는 레인이라 짝의 색에서 조금만 띄운다
+    # — 계열이 갈리면 «다른 실험»으로 읽혀 대조가 안 된다(hangul 308°↔292°, en 36°↔20°).
+    "2pass-asr-ipa-hangul-noref": 292 / 360,  # 2패스 · 심판 끈 대조군(한글)
+    "2pass-asr-ipa-en-noref": 20 / 360,       # 2패스 · 심판 끈 대조군(영어 원문)
+    "2pass-asr-ipa-en-energy": 28 / 360,      # 2패스 · 강도 봉우리 켠 대조군(36°와 20° 사이)
+    "routed-2mode+pp": 46 / 360,         # 라우팅
+    # ★en 채택 후보 — IPA 정렬을 **앵커 없이** 단독으로 한다. owsm 2패스 대비 정렬 22배 빠르고
+    # MAE는 절반(0.08 vs 0.15)이라 앵커가 필요 없음이 실측으로 드러났다.
+    "omniasr-ctc-ipa-hangul": 56 / 360,  # 단독 · IPA 정렬 → 한글 표시
+    "2pass-owsm-reazon": 72 / 360,       # 2패스
+    "routed-2mode": 90 / 360,            # 라우팅 · 기준 경로
+    # 58°에 뒀다가 polar 분리 밝기에서 2pass-owsm-reazon(72°)과 ΔE 9.2까지 붙었다.
+    # 대표 밝기(nosep) 하나로만 자리를 고르면 이렇게 다른 분리기에서 충돌한다 — 전 밝기·채도
+    # 조합을 훑어 다시 고른 자리가 112°다.
+    "hf-slplab-phone-mfa": 112 / 360,    # 단독 · 음소 43 vocab
+    "2pass-en-ipa-hangul": 134 / 360,    # 2패스 · ★IPA 정렬 → 한글 표시
+    "owsm-ctc-v4-1b-bf16": 150 / 360,    # 단독 · 고정(초록 — 앵커 현역)
+    "2pass-en-ipa": 162 / 360,           # 2패스 · IPA 음소 그대로(묶기 전)
+    "owsm-ctc-v4-1b": 172 / 360,         # 단독 · 고정(청록 — 구세대 fp32)
+    "2pass-owsm-kkonjeong": 188 / 360,   # 2패스
+    "routed-2mode-nosanchor": 198 / 360,  # 라우팅
+    "2pass-asr-ipa-kana": 204 / 360,     # 2패스 · ★en 채택판의 가나 표시
+    "omniasr-ctc": 210 / 360,            # 단독 · 고정(파랑 — 다국어 주력)
+    "2pass-en-cmu": 218 / 360,           # 2패스 · CMU → 한글 음차
+    "routed-2mode-safe": 226 / 360,      # 라우팅 · 임계 −11.0
+    "hf-reazon-hubert-base": 236 / 360,  # 단독 · ja 네이티브
+    "2pass-en-kana": 272 / 360,          # 2패스 · 철자 기반 음차
+    "routed-2mode-lang": 296 / 360,      # 라우팅 · ★언어 배선(en 강제 구원)
+    # ★en 최종 채택 — asr이 1패스로 라인 창을 잡고 2패스에서 그 창 안만 IPA로 음절 분리.
+    # owsm 앵커판(2pass-en-ipa-*)보다 정렬 12배 빠르고 MAE 절반이다.
+    "2pass-asr-ipa-hangul": 308 / 360,   # 2패스 · ★en 채택
+    "hf-kkonjeong": 320 / 360,           # 단독 · 고정(자홍 — ko CTC)
+    "2pass-en-ipa-kana": 332 / 360,      # 2패스 · ★IPA 정렬 → 가나 표시
+    "routed-2mode-lang-kana": 344 / 360,  # 라우팅 · 위의 가나 표시판
+    "omniasr-ctc-ipa-kana": 352 / 360,   # 단독 · 위와 같은 정렬, 표시만 가나
 }
-# 레인 왼쪽 세로 띠 — 분리기를 색으로 즉시 구분(특히 무분리). 정렬기 색과 독립된 축.
-SEP_BAND = {
-    "nosep": "#e0a03c",              # 주황 — 무분리(분리기 없음)
-    "bs-polarformer": "#4f9bd9", "bs-polarformer-fp16": "#4f9bd9",   # 파랑
-    "kimft-melband": "#63c88a", "kimft-melband-fp16": "#63c88a",     # 초록
-    "umx-l": "#9a7bd0", "htdemucs": "#8a8f99", "demucs-onnx-fp16": "#8a8f99",
+# 레인 왼쪽 세로 띠 — **연산 깊이**를 색으로. 분리기 종류를 구분하던 자리인데, 후보가
+# polar 하나로 좁혀지면서 그 축이 «분리했나 안 했나»만 남았고, 실제로 읽고 싶은 것은
+# 「이 레인이 시간을 얼마나 들이부었나」이기 때문이다(사용자 지시 2026-08-01).
+#
+# 계단을 가르는 축은 **분리 여부**와 **owsm 앵커 여부** 둘이다. 「2패스인가」로 가르면 안 된다
+# — 같은 2패스라도 앵커가 자기 자신(asr)이면 +0.7~3.2초지만 owsm이면 +17초다. 실측(en 5곡,
+# 정렬 시간 · polar 분리는 +10초):
+#   무분리+단독 0.9 · 무분리+asr앵커 4.1  │ 분리+단독 10.8 · 분리+asr앵커 11.5 · 무분리+owsm 16.3 │ 분리+owsm 28.1
+#   └─────── 1 얕음 ───────┘              └──────────────── 2 중간 ────────────────┘              └─ 3 깊음 ─┘
+# ja는 계단마다 오르고(극한 음절 47.4 → 73.5 → 79.5) en은 2단계에서 포화한다 — 그 차이를
+# 눈으로 보라고 색을 나눈다.
+DEPTH_BAND = {
+    1: "#4fb87a",  # 초록 — 싸다
+    2: "#e0a03c",  # 주황
+    3: "#d9534f",  # 빨강 — 비싸다
 }
+
+
+def _depth_band(separator: str, aligner: str, run: dict) -> str:
+    """이 레인이 실제로 지른 연산 깊이 → 띠 색.
+
+    라우팅 레인은 **곡마다 경로가 갈리므로** 설정이 아니라 그 곡에서 실제로 탄 경로를 본다
+    (같은 레인이 어떤 곡에서는 초록, 어떤 곡에서는 빨강으로 뜬다 — 그게 라우팅의 요점이다).
+    """
+    meta = run.get("align_meta") or {}
+    routing = meta.get("routing") or {}
+    if routing.get("route"):
+        if routing["route"] == "fast":
+            return DEPTH_BAND[1]
+        separated = bool(routing.get("rescue_separator"))
+        heavy_anchor = "owsm" in str(routing.get("rescue_aligner") or "")
+    else:
+        separated = separator not in ("", "nosep")
+        heavy_anchor = "owsm" in str((meta.get("two_pass") or {}).get("anchor") or "")
+    if separated and heavy_anchor:
+        return DEPTH_BAND[3]
+    if separated or heavy_anchor:
+        return DEPTH_BAND[2]
+    return DEPTH_BAND[1]
 SEP_LIGHTNESS = {
     "kimft-melband": 0.55, "kimft-melband-fp16": 0.55,  # 주력 — 가장 잘 보이는 중간 밝기
     "bs-leap-xe": 0.42, "bs-polarformer": 0.48, "bs-polarformer-fp16": 0.48,
@@ -50,6 +141,68 @@ def _track_color(separator: str, aligner: str) -> str:
         sat = 0.38 if suffix else 0.72  # 음차 모드는 채도를 낮춰 같은 계열의 변형으로 보이게
     r, g, b = colorsys.hls_to_rgb(hue, light, sat)
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+
+def _track_shape(aligner: str) -> str:
+    """세그 바 장식 힌트 — 색 축 하나로는 20개 넘는 레인을 못 가르므로 모양 축을 하나 더 준다.
+
+    구조가 다른 세 부류(단독 1패스 / 2패스 / 라우팅)를 갈라, 색이 비슷하게 보여도
+    «어느 계열인지»는 항상 읽히게 한다. 빈 문자열이면 장식 없음(단독 1패스 현행 그대로).
+    """
+    base = aligner.partition("@")[0]
+    if base.startswith("routed-"):
+        return "routed"
+    if base.startswith("2pass-"):
+        return "twopass"
+    return ""
+
+
+def _song_language(song: dict) -> str:
+    """곡의 기본 언어 — 뷰어가 stratum을 우선 읽는 규칙(payload["stratum"])과 같은 순서로 본다.
+
+    eval_set의 ``ja_mms`` 같은 라벨은 접미를 벗겨야 언어로 쓸 수 있다(benchmark_alignment의
+    ``base_language``와 같은 규칙 — 이 스크립트는 그 모듈을 임포트하지 않으므로 여기 둔다).
+    """
+    lang = str(song.get("stratum") or song.get("language") or "").strip()
+    return lang[: -len("_mms")] if lang.endswith("_mms") else lang
+
+
+def _compact_by_default(separator: str, aligner: str, language: str) -> bool:
+    """기본으로 절반 높이(참고용)로 내려 둘 레인 — 결론이 난 비교는 «있되 자리를 덜 먹게» 둔다.
+
+    숨기기가 아니라 단축인 이유: 체크박스를 끈 채 시작해 봤더니 «안 보이면 없는 것과 같다»는
+    판정이었다(사용자, 2026-08-01). 결론의 근거는 화면에 남아 있어야 그 결론을 되짚을 수 있다.
+    """
+    base = aligner.partition("@")[0]
+    if base == "routed-2mode+pp":
+        # VAD 보정층 이식은 세그를 깨고 라인 지표도 낮춰 기각됐다(「VAD 보정층 이식 — 기각」).
+        return True
+    if base == "routed-2mode":
+        # 임계 −11.5판. 2026-08-01에 −11.0(routed-2mode-safe)으로 확정돼 비교 대상 자리가 끝났다.
+        return True
+    if language == "en":
+        if separator.startswith("bs-polarformer") and not base.startswith("2pass-asr-ipa-"):
+            # en 채택은 **분리 + asr 자기앵커 창 + IPA**다. 그 조합만 주력으로 남기고 같은
+            # 분리기의 나머지 레인은 참고용으로 내린다.
+            return True
+    # owsm 앵커를 붙인 en 2패스는 값을 못 한다 — 세 구성 대조(2026-08-01)에서 앵커를 빼면
+    # 정렬이 22배 빨라지는데(18.1초 → 0.8초) MAE는 오히려 절반이다(0.15 → 0.08). 앵커의 원래
+    # 근거였던 「라틴은 CTC가 약해 라인이 무너진다」가 타깃을 IPA로 바꾸면서 사라졌다.
+    return base.startswith("2pass-en-")
+
+
+def _drop_lane(aligner: str, language: str) -> bool:
+    """뷰어에 아예 안 그릴 레인. 단축(_compact_by_default)과의 경계가 있다 —
+
+    결론의 근거로 **되짚을 일이 남았으면** 단축, 그 근거를 다른 레인이 이미 더 잘 보여주면
+    제거다. 단축은 자리를 절반으로 줄일 뿐 레인 수는 그대로라, 「레인이 너무 많다」는 문제
+    자체는 단축으로 안 풀린다(사용자, 2026-08-01).
+    """
+    # 지금은 VIEWER_ALIGNERS에서 거르는 것으로 충분해 비어 있다. 레인별(정렬기 이름만으로는
+    # 못 가르는) 제거가 다시 필요해지면 여기에 조건을 둔다 — 예전에 창 없는 IPA 대조군과
+    # 음차 1·2세대를 여기서 뺐고, 지금은 그 정렬기들이 아예 후보 목록에 없다.
+    del aligner, language
+    return False
 
 
 def _number(value: object) -> float | None:
@@ -296,6 +449,10 @@ def parse_ustx_tracks(path: Path, offset: float = 0.0) -> list[tuple[str, list[d
 # 그대로 가져오므로 없는 타이밍을 지어내지 않는다(짝수 다리였다면 평균이라 조작이 된다).
 FUSION_SEPARATOR = "bs-polarformer-fp16"
 FUSION_LANES = ("omniasr-ctc", "hf-slplab-phone-mfa@hangul-local", "hf-kkonjeong@hangul-local")
+# 끄기(사용자 지시 2026-08-01) — 레인이 많아 시인성을 깎는데, 융합은 2모드 라우팅 채택으로
+# 후보 자리에서 내려왔다. 세 레인을 **전부** 돌려야 나오는 합성이라 곡당 4.3초짜리 라우팅과는
+# 비용 비교 자체가 성립하지 않는다. 계산 로직은 그대로 두므로 다시 볼 일이 생기면 True로 켠다.
+SHOW_FUSED_LANE = False
 
 
 def _fused_track(runs: list[tuple[Path, dict]], prod_segs: list[dict]) -> dict | None:
@@ -320,7 +477,8 @@ def _fused_track(runs: list[tuple[Path, dict]], prod_segs: list[dict]) -> dict |
     return {
         "name": "융합 · 클린3 중앙값",
         "color": "#ffd166",
-        "band": SEP_BAND.get(FUSION_SEPARATOR, ""),
+        # 융합은 세 레인을 전부 돌려야 나오므로 가장 깊은 칸이다(현재 꺼져 있다).
+        "band": DEPTH_BAND[3],
         "lines": _normalise_lines(picked),
         "segs": segs,
         "no_segs": not segs,
@@ -364,6 +522,57 @@ def _audio_paths(root: Path) -> list[dict] | None:
     return sources
 
 
+# 2패스 레인 표시용 짧은 모델명 — 레인 라벨은 폭이 좁아 정식 어댑터명이 다 안 들어간다.
+_SHORT_MODEL = {
+    "owsm-ctc-v4-1b-bf16": "owsm",
+    "owsm-ctc-v4-1b": "owsm-fp32",
+    "omniasr-ctc": "omniasr",
+    "hf-reazon-hubert-base": "reazon",
+    "hf-kkonjeong": "kkonjeong",
+}
+
+
+def _lane_label(aligner: str, run: dict) -> str:
+    """레인 표시명 — 2패스는 «입력 표기»와 «경량 모델이 실제로 본 표기»가 다를 수 있다.
+
+    `@kana` 같은 접미사는 하네스가 **입력 모드**에 붙이는 라벨이라 어댑터 바깥의 소스 가사만
+    가리킨다. 2패스는 그 안에서 경량 모델 몫만 다시 음차하는데, ko 모델은 애초에 가나를 못
+    먹으므로(kkonjeong vocab 54개 중 가나 토큰 0개 — 그대로 넣으면 정렬 타깃이 0개다) 이름만
+    보면 "kkonjeong이 가나로 정렬했다"로 읽힌다. 실제 표기를 화살표로 덧붙여 그 오독을 막는다.
+
+    판정은 설정값이 아니라 **실측 변환 줄 수**(``script_converted_lines``)로 한다. 같은 hangul
+    설정도 ko 곡에서는 변환이 항등이라(입력이 이미 한글) 붙이면 거짓이 되기 때문이다.
+    그 필드가 없는 구식 런은 설정값 대조로 폴백한다.
+    """
+    meta = run.get("align_meta") or {}
+    # 라우팅 레인은 **곡마다 다른 경로**를 탄다. 어느 쪽으로 갔는지가 그 곡 결과를 읽는
+    # 전제이므로 레인 이름에 드러낸다(fast=무분리 ASR, rescue=분리+앵커 2패스).
+    routing = meta.get("routing") or {}
+    if routing.get("route"):
+        score = routing.get("line_log_conf_median")
+        return f"{aligner} [{routing['route']}{'' if score is None else f' {score:g}'}]"
+    two_pass = meta.get("two_pass") or {}
+    if not two_pass:
+        return aligner
+    label = aligner
+    script = two_pass.get("refiner_script")
+    # 어댑터 이름이 이미 그 표기를 말하고 있으면(2pass-en-hangul ← latin-hangul) 덧붙이지 않는다.
+    if script and script != "native" and script.removeprefix("latin-") not in aligner:
+        converted = two_pass.get("script_converted_lines")
+        if converted is None:  # 구식 런 — 입력 접미사와 설정값이 다르면 변환된 것으로 본다
+            converted = script != aligner.partition("@")[2]
+        if converted:
+            label = f"{label}→{script}"
+    # 어떤 «모델 조합»인지는 레인 이름만으로 알 수 없는 경우가 있다(2pass-en-kana는 음차
+    # 방식만 말한다). 앵커·경량 모델을 짧은 이름으로 덧붙여 조합을 항상 읽히게 한다.
+    pair = " + ".join(
+        _SHORT_MODEL.get(m, m) for m in (two_pass.get("anchor"), two_pass.get("refiner")) if m
+    )
+    if pair and not all(part in aligner for part in pair.split(" + ")):
+        label = f"{label} [{pair}]"
+    return label
+
+
 # 뷰어 레인은 베이스라인 + 현역 후보만 — 탈락 후보(qwen3, 구 hf 계열, owsm 실험 변형)는
 # 런 캐시는 남기되 표시에서 뺀다. 기준은 combo 디렉터리명의 base 정렬기(@suffix 제거).
 VIEWER_ALIGNERS = {
@@ -371,14 +580,80 @@ VIEWER_ALIGNERS = {
     "omniasr-ctc",
     "owsm-ctc-v4-1b",
     "owsm-ctc-v4-1b-bf16",
-    # nemo-nfa 제외(사용자 지시 2026-08-01) — ko 체크포인트가 Riva EULA 위반 정황이라 채택 불가.
-    # 성능 최상위였으나 권원이 없어 비교 대상에서도 뺀다(런 캐시는 보존).
-    # ko CTC + 한글 음차 경로 — 극한곡에서 omniasr 대비 +8.8pp(2026-08-01 UST 실측)로 복권
-    "hf-kkonjeong",
-    # ja 네이티브 — 구 프론티어 재평가에서 UST 73.3%로 생존(2026-08-01)
-    "hf-reazon-hubert-base",
-    # 음소 43 vocab — vocab 축소 가설 검증용 클린 후보(Apache-2.0)
-    "hf-slplab-phone-mfa",
+    # ── 하차한 정렬기(런 캐시는 보존, 표시만 뺀다) ────────────────────────────
+    # nemo-nfa      — ko 체크포인트가 Riva EULA 위반 정황이라 채택 불가(사용자 지시 2026-08-01).
+    #                 성능 최상위였으나 권원이 없어 비교 대상에서도 뺀다.
+    # hf-kkonjeong  — 극한곡에서 omniasr 대비 +8.8pp였고 그 우위의 **원인이 아직 설명되지
+    #                 않았다**(≤0.3s 80%로 1위, 2위 69%). 채택 스택에는 안 들어가므로 레인은
+    #                 빼되, 극한곡을 다시 파고들면 이 기록이 출발점이다.
+    # hf-reazon-hubert-base — ja 네이티브, 재평가에서 UST 73.3%로 생존했으나 2pass-owsm-omniasr
+    #                 (음절 86.7%)에 밀렸다. 같은 자리를 노리는 대체재라 남길 이유가 없다.
+    # hf-slplab-phone-mfa — vocab 축소 가설 검증용이었고 그 가설은 IPA 실험이 대신 답했다.
+    # 2pass-owsm-{reazon,kkonjeong} — 위 두 모델을 경량 몫으로 쓰던 2패스. 모델이 빠지면 같이 빠진다.
+    # 2pass-en-{kana,hangul,cmu} — 음차 세대. 셋이 span score 1나트 안쪽이라 서로 안 갈리고,
+    #                 IPA에 7점 차로 졌다(−15.5 vs −7.8). 「왜 IPA로 갔는가」는 문서가 든다.
+    # omniasr-ctc-ipa-{hangul,kana} — 창 없는 대조군. 창 있는 쪽이 낫다고 청취 판정(2026-08-01).
+    #
+    # 남은 것은 **채택 스택(omniASR·OWSM·polar 분리) 조합**과 그 기준선(mms·PROD·UST)뿐이다.
+    # 2패스 조합 — owsm이 라인 창을 잡고 경량 모델이 그 안에서 음절만 다시 잡는다.
+    "2pass-owsm-omniasr",  # ja 17곡 음절 86.7%로 최고 · 다국어 단일 경로
+    # ★ja 독음 경로 — 원문(한자) 대신 MeCab 가나 독음을 타깃으로. 한자의 99.1%가 vocab에
+    # 있어 지금은 **중국어 음가로** 정렬에 참여하고 있다(가사 문자의 20~30%).
+    # 독음이 갈리는 자리는 N-best 후보를 오디오 심판이 고른다.
+    "2pass-owsm-reading",
+    "2pass-owsm-reading-noref",
+    # 독음 표기 축 — 조사만(は→わ) vs 전체 발음형(장음 ー 포함, vocab 밖이라 커버리지 손실)
+    "2pass-owsm-reading-joshi",
+    "2pass-owsm-reading-phon",
+    # ★프로드가 서버에서 쓰는 독음·후보 위에서 심판만 갈린 쌍
+    "2pass-owsm-prod",
+    "2pass-owsm-prod-noref",
+    "routed-2mode-safe",
+    "2pass-en-ipa",
+    # ★IPA로 정렬하고 사람이 읽는 글자로 표시하는 경로. 정렬 결과는 2pass-en-ipa와 **완전히
+    # 같고**(span score 소수점까지 일치) 세그 텍스트·묶음만 다르다(음소 단위 → 음절 단위).
+    # 표시가 갈리므로 청취 판정은 «글자가 소리와 맞게 넘어가는가»로 한다.
+    "2pass-en-ipa-hangul",
+    # ★en 최종 채택 — asr 자기앵커 창 + IPA 음절. owsm 없이 창을 얻는다.
+    "2pass-asr-ipa-hangul",
+    # 타깃 자신을 표시 — 표기 변환을 안 거치므로 정렬기가 무엇을 맞추는지 그대로 보인다.
+    # 가나 음차 레인(2pass-*-ipa-kana)은 결과가 한글과 사실상 같아 이 자리로 교체했다
+    # (사용자 판정 2026-08-01).
+    "2pass-asr-ipa-phonetic",
+    # ★원문 영어 층 — 위와 같은 정렬을 **원문 철자 음절**로 묶는다(beau-ti-ful). 영어 악보가
+    # 음표마다 음절을 배치하는 그 단위이고, 낱말로 묶으면 한 낱말 안의 음높이·박자 변화를
+    # 버린다. 음절 수는 CMU가 주고 철자 경계는 모음 글자로 맞춘다(실제 가사 97.46%).
+    "2pass-asr-ipa-en",
+    # 심판을 끈 대조군 — 위 셋은 오디오 심판이 **기본으로 켜져** 있다(사전 첫 발음 고정은
+    # 음절 수까지 사전이 정해 버리는데, 후보가 있던 라인의 76.3%에서 그 발음이 뒤집혔다).
+    "2pass-asr-ipa-hangul-noref",
+    "2pass-asr-ipa-en-noref",
+    # 음절 수를 오디오 강도 봉우리에 맡긴 대조군 — 실측에서 손해라 기본은 꺼져 있다.
+    # 봉우리가 무엇을 바꿨는지는 ``2pass-asr-ipa-en``과 **이 레인**을 견줘야 읽힌다
+    # (``-noref``는 심판 자체가 없어 다른 물음이다).
+    "2pass-asr-ipa-en-energy",
+    # ★최종 아키텍처 — 무분리 omniASR 기본, 붕괴 의심 시에만 polar+owsm 2패스.
+    "routed-2mode",
+    "routed-2mode+pp",
+    # ★언어 배선판 — 위에 en 강제 구원을 얹었다(신호가 en에서 작동하지 않는다).
+    "routed-2mode-lang",
+}
+
+# 표기까지 포함한 레인 단위 제외 — **모국어가 아닌 표기를 강요한 레인**을 뺀다.
+# 실측(2026-08-01): 한글 강제는 다국어·ja 네이티브 모델의 라인 정확도를 크게 깎는다
+# (owsm 76.0 → 63.9, omniasr 73.0 → 69.6). 같은 독음을 **가나**로 펼치면 반대로 오르므로
+# (owsm 79.7, omniasr 78.5) 문제는 독음 확장이 아니라 낯선 표기 강요다.
+# ko 모델(kkonjeong·slplab·kresnik·hjlee)의 @hangul-local은 모국어 표기이므로 유지한다.
+VIEWER_LANE_EXCLUDE = {
+    "owsm-ctc-v4-1b-bf16@hangul-local",
+    "owsm-ctc-v4-1b-bf16@hangul",
+    "owsm-ctc-v4-1b@hangul-local",
+    "owsm-ctc-v4-1b@hangul",
+    "omniasr-ctc@hangul-local",
+    "omniasr-ctc@hangul",
+    "hf-reazon-hubert-base@hangul-local",
+    "hf-reazon-hubert-base@hangul",
+    "mms-baseline@hangul-local",
 }
 
 # 분리기 필터 — mini-bsrofo-18m은 분리 품질 미달로 전면 제외(청취 판정),
@@ -406,6 +681,31 @@ VIEWER_SEPARATOR_EXCLUDE = {
 VIEWER_EXCLUDE_SONGS = {
     "emrt46SRyYs", "HyBxn5gzpn0", "LaEgpNBt-bQ", "-glcrfq-Sw4", "uGWsbwZtmeY", "JcvWe8EHdek",
 }
+
+
+def allin1_sections(song: dict) -> dict | None:
+    """allin1 구조 분석 → **배경 구간**. 레인이 아니라 캔버스 전체에 깔리는 세로선이 된다.
+
+    원래는 참조 레인 하나를 차지했는데(간주/솔로 마스킹 가설 눈 검증용), 구간 경계는 «어느
+    레인의 값»이 아니라 **모든 레인에 공통인 시간축 눈금**이다. 레인으로 두면 그 한 줄에서만
+    보이고 다른 레인의 세그와 세로로 맞춰 보려면 눈이 그 줄까지 오갔다 해야 한다. 세로선으로
+    깔면 모든 레인을 한 번에 가로지르므로 「이 붕괴가 간주 구간인가」를 바로 읽는다.
+    """
+    path = BENCH / "allin1" / f"{song['video_id']}.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"allin1 결과 무시 ({path}): {error}")
+        return None
+    spans = [
+        {"t": round(float(s["start"]), 3), "e": round(float(s["end"]), 3),
+         "l": str(s.get("label") or "?")}
+        for s in (data.get("segments") or [])
+        if s.get("start") is not None and s.get("end") is not None
+    ]
+    return {"bpm": data.get("bpm"), "spans": spans} if spans else None
 
 
 def build_tracks(
@@ -468,38 +768,23 @@ def build_tracks(
                     "lines": u_lines,
                     "segs": u_segs,
                     "ust": True,  # 뷰어에서 Shift+드래그 오프셋 조정 대상
+                    # 준정답 레인은 «맞았는지 대보는» 기준이라 늘 떠 있어야 하지만, 후보 레인처럼
+                    # 자세히 들여다볼 일은 없다. 전체 높이를 계속 먹을 값을 못 한다(사용자, 2026-08-01).
+                    "compact": True,
                 }
             )
-    # allin1 구조 분석 결과가 있으면 참조 레인으로 자동 표시 (간주/솔로 마스킹 가설 눈 검증용)
-    allin1_path = BENCH / "allin1" / f"{song['video_id']}.json"
-    if allin1_path.is_file():
-        try:
-            aj = json.loads(allin1_path.read_text(encoding="utf-8"))
-            seg_lines = [
-                {"text": str(s.get("label") or "?"), "start": s.get("start"), "end": s.get("end")}
-                for s in (aj.get("segments") or [])
-            ]
-            if seg_lines:
-                tracks.append(
-                    {
-                        "name": f"ALLIN1 구간 (BPM {aj.get('bpm')})",
-                        "color": "#7bd88f",
-                        "lines": _normalise_lines(seg_lines),
-                        "segs": [],
-                        "line_reference": True,
-                    }
-                )
-        except (OSError, json.JSONDecodeError) as error:
-            print(f"allin1 결과 무시 ({allin1_path}): {error}")
 
     video_id = song["video_id"]
+    language = _song_language(song)  # 어느 레인을 참고용으로 내릴지는 곡 언어에 따라 갈린다
     runs: list[tuple[Path, dict]] = []
     # fp32→fp16 대체: fp16 런이 같은 레인을 제공하면 fp32 변형은 숨긴다(결과 동일 실측).
     FP16_REPLACES = {"kimft-melband-fp16": "kimft-melband", "bs-polarformer-fp16": "bs-polarformer"}
     fp16_lanes: dict[str, set[str]] = {}  # fp32 분리기명 → fp16이 커버한 레인들
     for path in sorted((BENCH / "runs").glob(f"*/{video_id}__r1.json")):
         separator, _, aligner = path.parent.name.partition("__")
-        if aligner.partition("@")[0] not in VIEWER_ALIGNERS or separator in VIEWER_SEPARATOR_EXCLUDE:
+        if (aligner.partition("@")[0] not in VIEWER_ALIGNERS
+                or aligner in VIEWER_LANE_EXCLUDE
+                or separator in VIEWER_SEPARATOR_EXCLUDE):
             continue
         try:
             run = json.loads(path.read_text(encoding="utf-8"))
@@ -515,6 +800,18 @@ def build_tracks(
         for path, run in runs
         if path.parent.name.partition("__")[2] not in fp16_lanes.get(path.parent.name.partition("__")[0], set())
     ]
+    # 정렬기 쪽 정밀도 중복도 같은 규칙 — 같은 분리기·같은 표기에서 저정밀 런이 자리를 채우면
+    # fp32 변형은 숨긴다(품질 무회귀 실측 완료). 표기 접미사(@hangul-local 등)까지 맞춰 본다.
+    ALIGNER_PRECISION_REPLACES = {"owsm-ctc-v4-1b": "owsm-ctc-v4-1b-bf16"}
+    present = {path.parent.name for path, _ in runs}
+
+    def _superseded(dirname: str) -> bool:
+        separator, _, lane = dirname.partition("__")
+        base, at, suffix = lane.partition("@")
+        better = ALIGNER_PRECISION_REPLACES.get(base)
+        return bool(better) and f"{separator}__{better}{at}{suffix}" in present
+
+    runs = [(path, run) for path, run in runs if not _superseded(path.parent.name)]
     # htdemucs는 demucs-onnx-fp16(htdemucs_ft 보컬 타깃 ONNX)에 전 라우트 지표로 밀리고
     # 스템도 청취상 구분이 안 돼(사용자 판정) 같은 레인을 다른 분리기가 제공하면 숨긴다.
     # 유일 커버리지(예: mms-baseline@hangul은 htdemucs에만 있음)는 남긴다.
@@ -534,24 +831,38 @@ def build_tracks(
     for path, run in runs:
         separator, _, lane = path.parent.name.partition("__")
         aligner = str(run.get("aligner") or lane or path.parent.name)
+        # 신호를 묻지 않는 라우팅(route=forced)은 늘 같은 경로를 타므로 그 구원 레인과
+        # **바이트 단위로 같다**(en 5곡 실측: 세그·라인 최대 Δ 0.0000). 레인 하나를 더 그려도
+        # 얻는 정보가 없다. fast/rescue는 곡마다 갈리므로 그대로 둔다 — 그게 라우팅의 요점이다.
+        if ((run.get("align_meta") or {}).get("routing") or {}).get("route") == "forced":
+            continue
+        if _drop_lane(aligner, language):
+            continue
         # 항상 "분리기 · 정렬기" — 첫 조합만 접두사를 생략하던 규칙은 곡마다 다른 레인이
         # 무접두사 이름을 차지해 뷰어 간 비교를 흐렸다.
-        name = f"{separator} · {aligner}" if lane else aligner
+        label = _lane_label(aligner, run)
+        name = f"{separator} · {label}" if lane else label
         segs = _normalise_segs(seg for line in run["lines"] for seg in (line.get("segs") or []))
         _attach_prod_matches(segs, prod_segs)
-        tracks.append(
-            {
-                "name": name,
-                "color": _track_color(separator if lane else "", aligner),
-                "band": SEP_BAND.get(separator, ""),  # 레인 왼쪽 세로 띠 = 분리기 구분
-                "lines": _normalise_lines(run["lines"]),
-                "segs": segs,
-                "no_segs": not segs,
-            }
-        )
-    fused = _fused_track(runs, prod_segs)
-    if fused:
-        tracks.append(fused)
+        track = {
+            "name": name,
+            "color": _track_color(separator if lane else "", aligner),
+            "band": _depth_band(separator, aligner, run),  # 레인 왼쪽 세로 띠 = 연산 깊이
+            "lines": _normalise_lines(run["lines"]),
+            "segs": segs,
+            "no_segs": not segs,
+        }
+        # 없을 때가 기본값(장식 없음·전체 높이)이라 해당할 때만 붙인다 — 데이터 파일도 그만큼 짧아진다.
+        shape = _track_shape(aligner)
+        if shape:
+            track["shape"] = shape
+        if _compact_by_default(separator, aligner, language):
+            track["compact"] = True
+        tracks.append(track)
+    if SHOW_FUSED_LANE:
+        fused = _fused_track(runs, prod_segs)
+        if fused:
+            tracks.append(fused)
     return tracks
 
 
@@ -636,6 +947,27 @@ def _ust_truth_anchors(video_id: str, tracks: list[dict]) -> dict | None:
             anchors[str(i)] = round(n_time[hits[0]], 3)
     if len(anchors) / max(len(prod["lines"]), 1) < 0.4:
         return None
+
+    # 음절 축 — 후보 세그마다 대응 UST 노트 시각을 붙인다. 라인 시작만 보는 지표는 BPE 보간
+    # 손실(owsm)을 못 잡는다: 라인 시작은 항상 토큰 경계라 오차가 안 나타난다.
+    for track in tracks:
+        if track.get("ust") or track.get("line_reference") or not track.get("segs"):
+            continue
+        s_ranges, s_parts, pos = [], [], 0
+        for seg in track["segs"]:
+            r = norm(seg.get("t", ""))
+            s_ranges.append((pos, pos + len(r)))
+            s_parts.append(r)
+            pos += len(r)
+        smap = {}
+        matcher = difflib.SequenceMatcher(None, "".join(s_parts), "".join(n_chars), autojunk=False)
+        for blk in matcher.get_matching_blocks():
+            for k in range(blk.size):
+                smap[blk.a + k] = blk.b + k
+        for seg, (a0, a1) in zip(track["segs"], s_ranges):
+            hits = [smap[c] for c in range(a0, a1) if c in smap]
+            if hits:
+                seg["truth"] = round(n_time[hits[0]], 3)
     return {"anchors": anchors, "lines": len(prod["lines"])}
 
 
@@ -670,31 +1002,63 @@ function toReadable(text){const h=String(text).replace(/[ァ-ヶ]/g,c=>String.fr
 const songLabel=s=>`[${s.stratum}] ${s.title}${s.ust_tracks?` · UST${s.ust_tracks>1?'×'+s.ust_tracks:''}`:''} · q ${Number(s.quality_score||0).toFixed(4)} · ${s.has_syllable_spans?'syllables':'no syllables'} · ${s.video_id}`;
 function fillSelector(){const query=filter.value.trim().toLowerCase(),previous=select.value,ustOnly=$('#ust-only').checked;select.replaceChildren();const songs=index.filter(s=>(!ustOnly||s.ust_tracks)&&songLabel(s).toLowerCase().includes(query));for(const song of songs){const option=document.createElement('option');option.value=song.video_id;option.textContent=songLabel(song);select.append(option)}if(songs.some(s=>s.video_id===previous))select.value=previous;else if(songs.length)select.value=songs[0].video_id;status.textContent=songs.length?`${songs.length} songs`:'No matching songs'}
 function activeRows(){return DATA?DATA.tracks.map((_,i)=>i).filter(i=>visible[i]):[]}
+// 결론이 난 레인(track.compact)은 절반 높이로 그린다 — 지워 버리면 결론의 근거까지 사라진다.
+// 행 높이가 두 가지가 되는 순간 «y ÷ ROW_H»로 행을 찾던 역산이 전부 무효라, 켜진 행의 높이를
+// 누적한 경계 배열을 만들어 두고 좌표 변환은 전부 여기를 거친다.
+function rowHeight(ti){const t=DATA&&DATA.tracks[ti];return t&&t.compact?ROW_H/2:ROW_H}
+let LAY=null;
+// 레이아웃이 바뀌는 건 곡 교체와 체크박스 토글뿐이라 그때만 버린다(매 프레임 다시 쌓지 않는다).
+function invalidateLayout(){LAY=null}
+function layout(){if(LAY)return LAY;const rows=activeRows(),tops=[],hs=[];let y=0;for(const ti of rows){const h=rowHeight(ti);tops.push(y);hs.push(h);y+=h}return LAY={rows,tops,hs,total:y}}
+// 마우스 y(스크롤 포함 콘텐츠 좌표) → 트랙 인덱스. 행이 수십 개라 선형 탐색으로 충분하고,
+// 범위 밖이면 undefined — 호출부의 `DATA.tracks[ti]` 가드가 예전과 똑같이 걸린다.
+function rowAt(y){const l=layout();for(let i=0;i<l.rows.length;i++)if(y>=l.tops[i]&&y<l.tops[i]+l.hs[i])return l.rows[i];return undefined}
 function lowerBound(items,time){let low=0,high=items.length;while(low<high){const mid=(low+high)>>1;if(items[mid].start<time)low=mid+1;else high=mid}return low}
 function queueRender(){if(!scheduled){scheduled=true;requestAnimationFrame(()=>{scheduled=false;render()})}}
-function render(){if(!DATA)return;const rows=activeRows(),width=Math.max(1,wrap.clientWidth),height=Math.max(1,wrap.clientHeight),dpr=devicePixelRatio||1;if(cv.width!==Math.ceil(width*dpr)||cv.height!==Math.ceil(height*dpr)){cv.width=Math.ceil(width*dpr);cv.height=Math.ceil(height*dpr);cv.style.width=width+'px';cv.style.height=height+'px'}const contentWidth=Math.max(width,LABEL_W+Math.ceil(dur*pps)),contentHeight=Math.max(height,rows.length*ROW_H);timeline.style.width=contentWidth+'px';timeline.style.height=contentHeight+'px';ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);ctx.fillStyle='#14161a';ctx.fillRect(0,0,width,height);const followMode=$('#followmode').value,span=Math.max(1,width-LABEL_W);let timeScroll;if(!au.paused&&followMode==='pin'){timeScroll=Math.max(0,au.currentTime*pps-span*.38)}else if(!au.paused&&followMode==='page'){const headX=au.currentTime*pps;if(headX<PAGE_TS||headX>PAGE_TS+span*.85)PAGE_TS=Math.max(0,headX-span*.15);timeScroll=PAGE_TS}else{timeScroll=Math.max(0,wrap.scrollLeft-LABEL_W)}RENDER_TS=timeScroll;const viewStart=timeScroll/pps,viewEnd=(timeScroll+Math.max(0,width-LABEL_W))/pps,yScroll=wrap.scrollTop;ctx.fillStyle='#1d2026';ctx.fillRect(0,0,LABEL_W,height);ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(LABEL_W-.5,0);ctx.lineTo(LABEL_W-.5,height);ctx.stroke();ctx.font='10px system-ui';ctx.fillStyle='#788392';ctx.strokeStyle='#292e36';for(let sec=Math.floor(viewStart/10)*10;sec<=viewEnd+10;sec+=10){const x=LABEL_W+sec*pps-timeScroll;ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,height);ctx.stroke();ctx.fillText(stamp(sec),x+3,11)}rows.forEach((trackIndex,row)=>{const track=DATA.tracks[trackIndex],top=row*ROW_H-yScroll,bottom=top+ROW_H;if(bottom<0||top>height)return;ctx.save();ctx.beginPath();ctx.rect(0,top,LABEL_W-4,ROW_H);ctx.clip();if(track.band){ctx.fillStyle=track.band;ctx.fillRect(0,top+1,4,ROW_H-2)}ctx.fillStyle=track.color;ctx.font='12px system-ui';ctx.fillText(track.name,8,top+14);ctx.fillStyle='#788392';ctx.font='9px system-ui';ctx.fillText(track.line_reference?'caption mapping':track.no_segs?'no measured syllables'+ustScore(track):track.ust?`Shift=레인 Ctrl=범위선택 Alt=이동 · δadj ${((OFFS[trackIndex]||0)>=0?'+':'')+(OFFS[trackIndex]||0).toFixed(2)}s${Object.keys(LOFFS[trackIndex]||{}).length?` (+소절 ${Object.keys(LOFFS[trackIndex]).length})`:''} · dblclick reset · E=복사`:`${track.segs.length} syllable spans${ustScore(track)}`,8,top+26);const nowT=au.currentTime-(track.ust?OFFS[trackIndex]||0:0);let liveTxt='';if(track.segs.length){const s=track.segs[lowerBound(track.segs,nowT)-1];if(s)liveTxt=s.t}else if(track.lines.length){const l=track.lines[lowerBound(track.lines,nowT)-1];if(l&&nowT<=l.end+1)liveTxt=l.label}if(liveTxt){const conv=toReadable(liveTxt),subst=conv!==liveTxt;ctx.font='bold 15px system-ui';const convW=ctx.measureText(conv).width;ctx.fillStyle=subst?'#a9b6c9':'#f2f5f8';ctx.fillText(conv,8,top+45);if(subst){ctx.font='10px system-ui';ctx.fillStyle='#5a6472';ctx.fillText(liveTxt,14+convW,top+45)}}ctx.restore();ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(0,bottom-.5);ctx.lineTo(width,bottom-.5);ctx.stroke();const toff=track.ust?OFFS[trackIndex]||0:0;const noSegTrack=track.line_reference||track.no_segs,drawLines=MODE!=='segs'||noSegTrack,drawSegs=MODE!=='lines'&&!noSegTrack;if(drawLines){const big=!drawSegs;const lineStart=track.ust?0:Math.max(0,lowerBound(track.lines,viewStart-toff)-1);for(let i=lineStart;i<track.lines.length&&(track.ust||track.lines[i].start+toff<=viewEnd);i++){const line=track.lines[i],leff=track.ust?toff+lineOff(trackIndex,i):toff;if(track.ust&&(line.end+leff<viewStart||line.start+leff>viewEnd))continue;const x=LABEL_W+(line.start+leff)*pps-timeScroll,w=Math.max(1,(line.end-line.start)*pps),ly=big?top+10:top+5,lh=big?30:9;ctx.fillStyle=track.color+(big?'55':'22');ctx.fillRect(x,ly,w,lh);ctx.strokeStyle=track.color+'88';ctx.strokeRect(x+.5,ly+.5,Math.max(1,w-1),lh-1);if(w>=24){ctx.save();ctx.beginPath();ctx.rect(x+1,ly,w-2,lh);ctx.clip();ctx.fillStyle=big?'#eef2f7':'#c7cede';ctx.font=big?'11px system-ui':'9px system-ui';ctx.fillText(line.label,x+3,big?ly+19:ly+8);ctx.restore()}}}if(drawSegs){const st=MODE==='both'?top+17:top+13,sh=MODE==='both'?23:25;const segStart=track.ust?0:Math.max(0,lowerBound(track.segs,viewStart-toff)-1);ctx.fillStyle=track.color;for(let i=segStart;i<track.segs.length&&(track.ust||track.segs[i].start+toff<=viewEnd);i++){const seg=track.segs[i],seff=track.ust?segEff(track,trackIndex,i):toff;if(track.ust&&(seg.end+seff<viewStart||seg.start+seff>viewEnd))continue;const x=LABEL_W+(seg.start+seff)*pps-timeScroll,w=Math.max(2,(seg.end-seg.start)*pps);ctx.fillRect(x,st,w,sh);if(track.ust&&SEL&&SEL.ti===trackIndex&&track._segLine&&SEL.set.has(track._segLine[i])){ctx.strokeStyle='#ffffff';ctx.strokeRect(x+.5,st+.5,Math.max(1,w-1),sh-1)}if(w>=11){ctx.fillStyle='#101318';ctx.font='11px system-ui';ctx.fillText(seg.t,x+2,st+sh-7);ctx.fillStyle=track.color}}}});if(MARQ){const rowIdx=rows.indexOf(MARQ.ti);if(rowIdx>=0){const lo=Math.min(MARQ.t0,MARQ.t1),hi=Math.max(MARQ.t0,MARQ.t1),mx=LABEL_W+lo*pps-timeScroll,mw=Math.max(1,(hi-lo)*pps),my=rowIdx*ROW_H-yScroll;ctx.fillStyle='#8ab4ff22';ctx.fillRect(mx,my,mw,ROW_H);ctx.strokeStyle='#8ab4ff';ctx.strokeRect(mx+.5,my+.5,mw-1,ROW_H-1)}}const playX=LABEL_W+au.currentTime*pps-timeScroll;if(playX>=LABEL_W&&playX<=width){ctx.strokeStyle='#ff5c67';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(playX+.5,0);ctx.lineTo(playX+.5,height);ctx.stroke();ctx.lineWidth=1}}
+// ALLIN1 구조 구간 — 레인 하나를 먹던 것을 «모든 레인을 가로지르는» 세로선으로 바꿨다.
+// 구간 경계는 어느 한 레인의 값이 아니라 시간축 공통 눈금이라, 레인으로 두면 다른 레인의
+// 세그와 세로로 맞춰 보려고 눈이 그 줄까지 오갔다 해야 했다.
+// pass 0 = 세그 «아래»(선), pass 1 = 세그 «위»(라벨). 선까지 위에 그리면 구간 정보가 정렬
+// 결과를 가려 주객이 뒤바뀐다. 라벨은 반대로 가려지면 못 읽으니 위로 올린다.
+function drawSections(pass,viewStart,viewEnd,timeScroll,width,height){const S=DATA.sections;if(!S)return;if(pass)ctx.font='9px system-ui';for(const sp of S.spans){if(sp.e<viewStart||sp.t>viewEnd)continue;const x=LABEL_W+sp.t*pps-timeScroll;if(x>width)continue;if(!pass){if(x<LABEL_W)continue;
+// 노래 구간은 진하게, 비가창 구간(intro/inst/outro)은 흐리게 — 「이 붕괴가 간주에 걸렸나」를 색으로 읽는다.
+ctx.strokeStyle=/verse|chorus|bridge/i.test(sp.l)?'#7bd88f55':'#7bd88f22';ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,height);ctx.stroke()}else{const lx=Math.max(LABEL_W+2,x+3);if(lx>width-10)continue;const w=ctx.measureText(sp.l).width;
+// 10초 눈금(y=11) 아래 줄에 둔다. 첫 레인 위에 겹치므로 배경을 깔지 않으면 세그와 섞여 못 읽는다.
+ctx.fillStyle='#14161ad0';ctx.fillRect(lx-2,14,w+4,11);ctx.fillStyle='#7bd88f';ctx.fillText(sp.l,lx,23)}}}
+// 세그 바 장식(track.shape): 2패스=윗변 2px 밝은 캡, 라우팅=어두운 테두리, 단독=민바.
+// 바는 2px까지 좁아지므로 «색을 통째로 덮지 않는» 장식만 쓴다. 캡과 테두리의 위·아래 변은
+// 높이만 먹으므로 폭과 무관하게 안전하고, **세로 변은 색이 4px 이상 남는 폭(w>=6)에서만**
+// 그린다 — 그래서 좁을 때 라우팅은 가로 두 줄로, 넓어지면 닫힌 타일로 보인다.
+// 행 안의 좌표는 전부 행 높이 비례(k)로 잡는다 — 고정 픽셀을 쓰면 절반 높이 행에서 바가 행
+// 밖으로 삐져나간다. 라벨은 비례로 안 되는 축이라(글자는 반으로 줄면 못 읽는다) compact 행에서만
+// 세 줄 중 이름만 남긴다. 부제·현재 글자를 잃어도 «어느 레인이 여기 있다»는 읽혀야 하기 때문.
+function render(){if(!DATA)return;const L=layout(),rows=L.rows,width=Math.max(1,wrap.clientWidth),height=Math.max(1,wrap.clientHeight),dpr=devicePixelRatio||1;if(cv.width!==Math.ceil(width*dpr)||cv.height!==Math.ceil(height*dpr)){cv.width=Math.ceil(width*dpr);cv.height=Math.ceil(height*dpr);cv.style.width=width+'px';cv.style.height=height+'px'}const contentWidth=Math.max(width,LABEL_W+Math.ceil(dur*pps)),contentHeight=Math.max(height,L.total);timeline.style.width=contentWidth+'px';timeline.style.height=contentHeight+'px';ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);ctx.fillStyle='#14161a';ctx.fillRect(0,0,width,height);const followMode=$('#followmode').value,span=Math.max(1,width-LABEL_W);let timeScroll;if(!au.paused&&followMode==='pin'){timeScroll=Math.max(0,au.currentTime*pps-span*.38)}else if(!au.paused&&followMode==='page'){const headX=au.currentTime*pps;if(headX<PAGE_TS||headX>PAGE_TS+span*.85)PAGE_TS=Math.max(0,headX-span*.15);timeScroll=PAGE_TS}else{timeScroll=Math.max(0,wrap.scrollLeft-LABEL_W)}RENDER_TS=timeScroll;const viewStart=timeScroll/pps,viewEnd=(timeScroll+Math.max(0,width-LABEL_W))/pps,yScroll=wrap.scrollTop;ctx.fillStyle='#1d2026';ctx.fillRect(0,0,LABEL_W,height);ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(LABEL_W-.5,0);ctx.lineTo(LABEL_W-.5,height);ctx.stroke();ctx.font='10px system-ui';ctx.fillStyle='#788392';ctx.strokeStyle='#292e36';for(let sec=Math.floor(viewStart/10)*10;sec<=viewEnd+10;sec+=10){const x=LABEL_W+sec*pps-timeScroll;ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,height);ctx.stroke();ctx.fillText(stamp(sec),x+3,11)}drawSections(0,viewStart,viewEnd,timeScroll,width,height);rows.forEach((trackIndex,row)=>{const track=DATA.tracks[trackIndex],rh=L.hs[row],top=L.tops[row]-yScroll,bottom=top+rh,k=rh/ROW_H;if(bottom<0||top>height)return;ctx.save();ctx.beginPath();ctx.rect(0,top,LABEL_W-4,rh);ctx.clip();if(track.band){ctx.fillStyle=track.band;ctx.fillRect(0,top+1,4,rh-2)}ctx.fillStyle=track.color;const nowT=au.currentTime-(track.ust?OFFS[trackIndex]||0:0);let liveTxt='';if(track.segs.length){const s=track.segs[lowerBound(track.segs,nowT)-1];if(s)liveTxt=s.t}else if(track.lines.length){const l=track.lines[lowerBound(track.lines,nowT)-1];if(l&&nowT<=l.end+1)liveTxt=l.label}if(track.compact){ctx.font='9px system-ui';ctx.fillText(track.name,8,top+10);if(track._score){const nameW=ctx.measureText(track.name).width;ctx.fillStyle='#788392';ctx.fillText(track._score,11+nameW,top+10)}if(liveTxt){const conv=toReadable(liveTxt);ctx.fillStyle='#f2f5f8';ctx.font='bold 11px system-ui';ctx.fillText(conv,8,top+22)}}else{ctx.font='12px system-ui';ctx.fillText(track.name,8,top+14);ctx.fillStyle='#788392';ctx.font='9px system-ui';ctx.fillText(track.line_reference?'caption mapping':track.no_segs?'no measured syllables'+(track._score||''):track.ust?`Shift=레인 Ctrl=범위선택 Alt=이동 · δadj ${((OFFS[trackIndex]||0)>=0?'+':'')+(OFFS[trackIndex]||0).toFixed(2)}s${Object.keys(LOFFS[trackIndex]||{}).length?` (+소절 ${Object.keys(LOFFS[trackIndex]).length})`:''} · dblclick reset · E=복사`:(track._score?`${track._score.slice(3)} · ${track.segs.length}조각`:`${track.segs.length} syllable spans`),8,top+26);if(liveTxt){const conv=toReadable(liveTxt),subst=conv!==liveTxt;ctx.font='bold 15px system-ui';const convW=ctx.measureText(conv).width;ctx.fillStyle=subst?'#a9b6c9':'#f2f5f8';ctx.fillText(conv,8,top+45);if(subst){ctx.font='10px system-ui';ctx.fillStyle='#5a6472';ctx.fillText(liveTxt,14+convW,top+45)}}}ctx.restore();ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(0,bottom-.5);ctx.lineTo(width,bottom-.5);ctx.stroke();const toff=track.ust?OFFS[trackIndex]||0:0;const noSegTrack=track.line_reference||track.no_segs,drawLines=MODE!=='segs'||noSegTrack,drawSegs=MODE!=='lines'&&!noSegTrack;if(drawLines){const big=!drawSegs;const lineStart=track.ust?0:Math.max(0,lowerBound(track.lines,viewStart-toff)-1);for(let i=lineStart;i<track.lines.length&&(track.ust||track.lines[i].start+toff<=viewEnd);i++){const line=track.lines[i],leff=track.ust?toff+lineOff(trackIndex,i):toff;if(track.ust&&(line.end+leff<viewStart||line.start+leff>viewEnd))continue;const x=LABEL_W+(line.start+leff)*pps-timeScroll,w=Math.max(1,(line.end-line.start)*pps),ly=top+(big?10:5)*k,lh=(big?30:9)*k;ctx.fillStyle=track.color+(big?'55':'22');ctx.fillRect(x,ly,w,lh);ctx.strokeStyle=track.color+'88';ctx.strokeRect(x+.5,ly+.5,Math.max(1,w-1),lh-1);if(w>=24){ctx.save();ctx.beginPath();ctx.rect(x+1,ly,w-2,lh);ctx.clip();ctx.fillStyle=big?'#eef2f7':'#c7cede';ctx.font=`${Math.max(8,Math.round((big?11:9)*k))}px system-ui`;ctx.fillText(line.label,x+3,ly+(big?19:8)*k);ctx.restore()}}}if(drawSegs){const st=top+(MODE==='both'?17:13)*k,sh=(MODE==='both'?23:25)*k;const segStart=track.ust?0:Math.max(0,lowerBound(track.segs,viewStart-toff)-1),shape=track.shape||'';ctx.fillStyle=track.color;for(let i=segStart;i<track.segs.length&&(track.ust||track.segs[i].start+toff<=viewEnd);i++){const seg=track.segs[i],seff=track.ust?segEff(track,trackIndex,i):toff;if(track.ust&&(seg.end+seff<viewStart||seg.start+seff>viewEnd))continue;const x=LABEL_W+(seg.start+seff)*pps-timeScroll,w=Math.max(2,(seg.end-seg.start)*pps);ctx.fillRect(x,st,w,sh);if(shape==='twopass'){ctx.fillStyle='#ffffff99';ctx.fillRect(x,st,w,2);ctx.fillStyle=track.color}else if(shape==='routed'){ctx.fillStyle='#0b0e12';ctx.fillRect(x,st,w,1);ctx.fillRect(x,st+sh-1,w,1);if(w>=6){ctx.fillRect(x,st,1,sh);ctx.fillRect(x+w-1,st,1,sh)}ctx.fillStyle=track.color}if(track.ust&&SEL&&SEL.ti===trackIndex&&track._segLine&&SEL.set.has(track._segLine[i])){ctx.strokeStyle='#ffffff';ctx.strokeRect(x+.5,st+.5,Math.max(1,w-1),sh-1)}if(w>=11){ctx.fillStyle='#101318';ctx.font=`${Math.max(8,Math.round(11*k))}px system-ui`;ctx.fillText(seg.t,x+2,st+sh-7*k);ctx.fillStyle=track.color}}}});drawSections(1,viewStart,viewEnd,timeScroll,width,height);if(MARQ){const rowIdx=rows.indexOf(MARQ.ti);if(rowIdx>=0){const lo=Math.min(MARQ.t0,MARQ.t1),hi=Math.max(MARQ.t0,MARQ.t1),mx=LABEL_W+lo*pps-timeScroll,mw=Math.max(1,(hi-lo)*pps),my=L.tops[rowIdx]-yScroll,mh=L.hs[rowIdx];ctx.fillStyle='#8ab4ff22';ctx.fillRect(mx,my,mw,mh);ctx.strokeStyle='#8ab4ff';ctx.strokeRect(mx+.5,my+.5,mw-1,mh-1)}}const playX=LABEL_W+au.currentTime*pps-timeScroll;if(playX>=LABEL_W&&playX<=width){ctx.strokeStyle='#ff5c67';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(playX+.5,0);ctx.lineTo(playX+.5,height);ctx.stroke();ctx.lineWidth=1}}
 function ustScoreVal(track){if(!DATA||!DATA.ust_truth||track.ust||track.line_reference||!track.lines)return null;const anch=DATA.ust_truth.anchors;let adj=0;for(let i=0;i<DATA.tracks.length;i++){const u=DATA.tracks[i];if(u.ust&&!/harm/i.test(u.name)){adj=OFFS[i]||0;break}}let n=0,hit=0;for(const k in anch){const line=track.lines[+k];if(!line)continue;n++;if(Math.abs(line.start-(anch[k]+adj))<=0.15)hit++}return n?hit/n:null}
-function ustScore(track){const v=ustScoreVal(track);return v==null?'':` · UST ${Math.round(100*v)}%`}
+function ustScore(track){const v=ustScoreVal(track);return v==null?'':` · 라인 ${Math.round(100*v)}%`+syllScore(track)}
+// 음절 축 — 세그에 박아둔 대응 UST 노트 시각과 비교. 라인 채점이 못 보는 BPE 보간 손실이 여기 보인다.
+function syllScore(track){if(!DATA||!DATA.ust_truth||!track.segs||!track.segs.length)return'';let adj=0;for(let i=0;i<DATA.tracks.length;i++){const u=DATA.tracks[i];if(u.ust&&!/harm/i.test(u.name)){adj=OFFS[i]||0;break}}let n=0,hit=0;for(const s of track.segs){if(s.truth==null)continue;n++;if(Math.abs(s.start-(s.truth+adj))<=0.10)hit++}return n?` · 음절 ${Math.round(100*hit/n)}%`:''}
+// 채점은 세그 전량을 훑으므로 매 프레임 계산하면 렌더가 죽는다. 곡 로드·드래그 종료 때만 갱신한다.
+function refreshScores(){if(DATA)DATA.tracks.forEach(t=>{t._score=ustScore(t)})}
 // UST 준정답이 있는 곡은 레인을 채점 순으로 — 정답(UST)·참조 레인을 위에, 후보는 적중률 내림차순
 function sortTracksByUst(song){if(!song.ust_truth)return;const grp=t=>t.ust?2:t.line_reference?1:0;song.tracks.sort((a,b)=>{const ga=grp(a),gb=grp(b);if(ga!==gb)return gb-ga;const va=ustScoreVal(a),vb=ustScoreVal(b);return (vb==null?-1:vb)-(va==null?-1:va)})}
-function renderTrackToggles(){toggles.replaceChildren();DATA.tracks.forEach((track,i)=>{const label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.checked=visible[i];box.addEventListener('change',()=>{visible[i]=box.checked;queueRender()});label.append(box);if(track.band){const bar=document.createElement('span');bar.className='swatch';bar.style.background=track.band;bar.style.width='4px';label.append(bar)}const swatch=document.createElement('span');swatch.className='swatch';swatch.style.background=track.color;label.append(swatch,document.createTextNode(track.name+(track.no_segs?' (no segs)':track.line_reference?' (caption)':'')));toggles.append(label)})}
+function renderTrackToggles(){toggles.replaceChildren();DATA.tracks.forEach((track,i)=>{const label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.checked=visible[i];box.addEventListener('change',()=>{visible[i]=box.checked;invalidateLayout();queueRender()});label.append(box);if(track.band){const bar=document.createElement('span');bar.className='swatch';bar.style.background=track.band;bar.style.width='4px';label.append(bar)}const swatch=document.createElement('span');swatch.className='swatch';swatch.style.background=track.color;label.append(swatch,document.createTextNode(track.name+(track.no_segs?' (no segs)':track.line_reference?' (caption)':'')));toggles.append(label)})}
 function pointAt(event){const rect=cv.getBoundingClientRect();return{x:event.clientX-rect.left,y:event.clientY-rect.top,time:(RENDER_TS+event.clientX-rect.left-LABEL_W)/pps}}
 function findSpan(track,time){if(!track?.segs.length)return null;const index=lowerBound(track.segs,time);for(const candidate of [index,index-1]){const seg=track.segs[candidate];if(seg&&time>=seg.start-4/pps&&time<=seg.end+4/pps)return seg}return null}
 function findLine(track,time){if(!track?.lines?.length)return null;const index=lowerBound(track.lines,time);for(const candidate of [index,index-1]){const line=track.lines[candidate];if(line&&time>=line.start-2/pps&&time<=line.end+2/pps)return line}return null}
 function showTip(event,html){tip.innerHTML=html;tip.style.display='block';tip.style.left=Math.min(event.clientX+14,innerWidth-325)+'px';tip.style.top=Math.min(event.clientY+14,innerHeight-90)+'px'}
-cv.addEventListener('mousemove',event=>{if(MARQ){MARQ.t1=pointAt(event).time;queueRender();return}if(USTDRAG){const d=(event.clientX-USTDRAG.x)/pps;if(USTDRAG.lis){const m=LOFFS[USTDRAG.ti]=LOFFS[USTDRAG.ti]||{};USTDRAG.lis.forEach(k=>m[k]=USTDRAG.bases[k]+d)}else if(USTDRAG.li!=null){(LOFFS[USTDRAG.ti]=LOFFS[USTDRAG.ti]||{})[USTDRAG.li]=USTDRAG.base+d}else{OFFS[USTDRAG.ti]=USTDRAG.base+d}queueRender();return}const point=pointAt(event),ti=activeRows()[Math.floor((wrap.scrollTop+point.y)/ROW_H)],track=DATA?.tracks[ti];if(!track){tip.style.display='none';return}const toff=track.ust?OFFS[ti]||0:0;let seg=null,segE=toff;if(MODE!=='lines'){if(track.ust){for(let k=0;k<track.segs.length;k++){const e=segEff(track,ti,k);if(point.time>=track.segs[k].start+e-4/pps&&point.time<=track.segs[k].end+e+4/pps){seg=track.segs[k];segE=e;break}}}else{seg=findSpan(track,point.time-toff)}}if(seg){const prod=seg.prod,delta=prod?`PROD: ${stamp(prod[0])}–${stamp(prod[1])}\nΔ start ${signed(seg.start+segE-prod[0])} · Δ end ${signed(seg.end+segE-prod[1])}`:'PROD: no same-character span';showTip(event,`<b>${esc(track.name)} · ${esc(seg.t||'(empty)')}</b>\n${stamp(seg.start+segE)}–${stamp(seg.end+segE)}\n${delta}`);return}let line=null,lineE=toff;if(track.ust){for(let k=0;k<track.lines.length;k++){const e=toff+lineOff(ti,k);if(point.time>=track.lines[k].start+e-2/pps&&point.time<=track.lines[k].end+e+2/pps){line=track.lines[k];lineE=e;break}}}else{line=findLine(track,point.time-toff)}if(!line){tip.style.display='none';return}const text=line.text.length>140?line.text.slice(0,139)+'…':line.text;showTip(event,`<b>${esc(track.name)} · line</b>\n${esc(text)}\n${stamp(line.start+lineE)}–${stamp(line.end+lineE)} · ${(line.end-line.start).toFixed(2)}s`)});cv.addEventListener('mouseleave',()=>tip.style.display='none');function saveOff(ti){const t=DATA&&DATA.tracks[ti];if(!t)return;try{localStorage.setItem('ustoff:'+activeId+':'+t.name,String(OFFS[ti]||0));localStorage.setItem('ustloff:'+activeId+':'+t.name,JSON.stringify(LOFFS[ti]||{}))}catch(e){}}
-cv.addEventListener('mousedown',event=>{if(!(event.shiftKey||event.altKey||event.ctrlKey)||!DATA)return;const point=pointAt(event),ti=activeRows()[Math.floor((wrap.scrollTop+point.y)/ROW_H)],track=DATA.tracks[ti];if(!track||!track.ust)return;event.preventDefault();
+cv.addEventListener('mousemove',event=>{if(MARQ){MARQ.t1=pointAt(event).time;queueRender();return}if(USTDRAG){const d=(event.clientX-USTDRAG.x)/pps;if(USTDRAG.lis){const m=LOFFS[USTDRAG.ti]=LOFFS[USTDRAG.ti]||{};USTDRAG.lis.forEach(k=>m[k]=USTDRAG.bases[k]+d)}else if(USTDRAG.li!=null){(LOFFS[USTDRAG.ti]=LOFFS[USTDRAG.ti]||{})[USTDRAG.li]=USTDRAG.base+d}else{OFFS[USTDRAG.ti]=USTDRAG.base+d}queueRender();return}const point=pointAt(event),ti=rowAt(wrap.scrollTop+point.y),track=DATA?.tracks[ti];if(!track){tip.style.display='none';return}const toff=track.ust?OFFS[ti]||0:0;let seg=null,segE=toff;if(MODE!=='lines'){if(track.ust){for(let k=0;k<track.segs.length;k++){const e=segEff(track,ti,k);if(point.time>=track.segs[k].start+e-4/pps&&point.time<=track.segs[k].end+e+4/pps){seg=track.segs[k];segE=e;break}}}else{seg=findSpan(track,point.time-toff)}}if(seg){const prod=seg.prod,delta=prod?`PROD: ${stamp(prod[0])}–${stamp(prod[1])}\nΔ start ${signed(seg.start+segE-prod[0])} · Δ end ${signed(seg.end+segE-prod[1])}`:'PROD: no same-character span';showTip(event,`<b>${esc(track.name)} · ${esc(seg.t||'(empty)')}</b>\n${stamp(seg.start+segE)}–${stamp(seg.end+segE)}\n${delta}`);return}let line=null,lineE=toff;if(track.ust){for(let k=0;k<track.lines.length;k++){const e=toff+lineOff(ti,k);if(point.time>=track.lines[k].start+e-2/pps&&point.time<=track.lines[k].end+e+2/pps){line=track.lines[k];lineE=e;break}}}else{line=findLine(track,point.time-toff)}if(!line){tip.style.display='none';return}const text=line.text.length>140?line.text.slice(0,139)+'…':line.text;showTip(event,`<b>${esc(track.name)} · line</b>\n${esc(text)}\n${stamp(line.start+lineE)}–${stamp(line.end+lineE)} · ${(line.end-line.start).toFixed(2)}s`)});cv.addEventListener('mouseleave',()=>tip.style.display='none');function saveOff(ti){const t=DATA&&DATA.tracks[ti];if(!t)return;try{localStorage.setItem('ustoff:'+activeId+':'+t.name,String(OFFS[ti]||0));localStorage.setItem('ustloff:'+activeId+':'+t.name,JSON.stringify(LOFFS[ti]||{}))}catch(e){}}
+cv.addEventListener('mousedown',event=>{if(!(event.shiftKey||event.altKey||event.ctrlKey)||!DATA)return;const point=pointAt(event),ti=rowAt(wrap.scrollTop+point.y),track=DATA.tracks[ti];if(!track||!track.ust)return;event.preventDefault();
 if(event.ctrlKey){MARQ={ti,t0:point.time,t1:point.time};return}
 if(event.altKey){const toff=OFFS[ti]||0;let li=-1;for(let k=0;k<track.lines.length;k++){const e=toff+lineOff(ti,k);if(point.time>=track.lines[k].start+e-0.2&&point.time<=track.lines[k].end+e+0.2){li=k;break}}
 if(SEL&&SEL.ti===ti&&(li<0||SEL.set.has(li))){const bases={};SEL.set.forEach(k=>bases[k]=lineOff(ti,k));USTDRAG={ti,lis:[...SEL.set],bases,x:event.clientX};return}
 if(li<0)return;USTDRAG={ti,li,x:event.clientX,base:lineOff(ti,li)}}
 else{USTDRAG={ti,x:event.clientX,base:OFFS[ti]||0}}});
-window.addEventListener('mouseup',()=>{if(MARQ){const track=DATA&&DATA.tracks[MARQ.ti];if(track){const lo=Math.min(MARQ.t0,MARQ.t1),hi=Math.max(MARQ.t0,MARQ.t1),toff=OFFS[MARQ.ti]||0,set=new Set();track.lines.forEach((l,k)=>{const e=toff+lineOff(MARQ.ti,k);if(l.start+e<=hi&&l.end+e>=lo)set.add(k)});SEL=set.size?{ti:MARQ.ti,set}:null}MARQ=null;queueRender();return}if(!USTDRAG)return;saveOff(USTDRAG.ti);USTDRAG=null;queueRender()});
-cv.addEventListener('dblclick',event=>{const point=pointAt(event),ti=activeRows()[Math.floor((wrap.scrollTop+point.y)/ROW_H)],track=DATA?.tracks[ti];if(!track||!track.ust)return;OFFS[ti]=0;delete LOFFS[ti];saveOff(ti);queueRender()});
+window.addEventListener('mouseup',()=>{if(MARQ){const track=DATA&&DATA.tracks[MARQ.ti];if(track){const lo=Math.min(MARQ.t0,MARQ.t1),hi=Math.max(MARQ.t0,MARQ.t1),toff=OFFS[MARQ.ti]||0,set=new Set();track.lines.forEach((l,k)=>{const e=toff+lineOff(MARQ.ti,k);if(l.start+e<=hi&&l.end+e>=lo)set.add(k)});SEL=set.size?{ti:MARQ.ti,set}:null}MARQ=null;queueRender();return}if(!USTDRAG)return;saveOff(USTDRAG.ti);USTDRAG=null;refreshScores();queueRender()});
+cv.addEventListener('dblclick',event=>{const point=pointAt(event),ti=rowAt(wrap.scrollTop+point.y),track=DATA?.tracks[ti];if(!track||!track.ust)return;OFFS[ti]=0;delete LOFFS[ti];saveOff(ti);refreshScores();queueRender()});
 cv.addEventListener('click',event=>{if(event.shiftKey||event.ctrlKey||event.altKey)return;const point=pointAt(event);if(point.x>=LABEL_W){au.currentTime=Math.max(0,Math.min(dur,point.time));queueRender()}});wrap.addEventListener('scroll',queueRender,{passive:true});wrap.addEventListener('wheel',event=>{if(!DATA)return;event.preventDefault();const rect=cv.getBoundingClientRect(),cursorX=event.clientX-rect.left,anchorTime=(RENDER_TS+cursorX-LABEL_W)/pps,old=pps;pps=Math.min(500,Math.max(5,pps*Math.pow(1.0015,-event.deltaY)));const ratio=pps/old;PAGE_TS=Math.max(0,PAGE_TS*ratio);if(au.paused||$('#followmode').value==='off'){const ts=anchorTime*pps-(cursorX-LABEL_W);wrap.scrollLeft=ts>0?ts+LABEL_W:0}queueRender()},{passive:false});new ResizeObserver(queueRender).observe(wrap);
 $('#zi').onclick=()=>{pps=Math.min(pps*1.5,500);queueRender()};$('#zo').onclick=()=>{pps=Math.max(pps/1.5,5);queueRender()};$('#viewmode').onchange=event=>{MODE=event.target.value;queueRender()};$('#followmode').onchange=()=>queueRender();$('#audiosrc').onchange=function(){const time=au.currentTime,playing=!au.paused,source=SOURCES[+this.value];if(!source)return;au.setAttribute('src',dataUrl(source.path));au.load();au.addEventListener('loadedmetadata',()=>{au.currentTime=time;if(playing)au.play()},{once:true})};document.addEventListener('keydown',event=>{if(['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName))return;if(event.code==='Space'){event.preventDefault();au.paused?au.play():au.pause()}else if(event.code==='ArrowLeft')au.currentTime=Math.max(0,au.currentTime-2);else if(event.code==='ArrowRight')au.currentTime=Math.min(dur,au.currentTime+2);else if(event.code==='Escape'){SEL=null;queueRender()}else if(event.code==='KeyE'&&DATA){const parts=[];DATA.tracks.forEach((t,i)=>{if(t.ust)parts.push({track:t.name,lane_offset:+(OFFS[i]||0).toFixed(3),phrase_offsets:Object.fromEntries(Object.entries(LOFFS[i]||{}).filter(([,v])=>Math.abs(v)>1e-3).map(([k,v])=>[k,+v.toFixed(3)]))})});if(parts.length){const txt=JSON.stringify({song:activeId,ust:parts});if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(()=>{status.textContent='UST 오프셋 JSON 복사됨'})}else{console.log(txt);status.textContent='UST 오프셋 콘솔 출력'}}}});
 function dataUrl(path){return new URL(`data/${path}`,location.href).href}
-function loadSong(videoId){if(!videoId||videoId===activeId)return;const apply=()=>{const song=window.__SONG_DATA__[videoId];if(!song){status.textContent=`Could not load ${videoId}`;status.className='error';return}activeId=videoId;DATA=song;dur=Math.max(Number(song.duration)||0,...song.tracks.flatMap(track=>[...track.lines,...track.segs].map(item=>item.end)),1);SOURCES=(song.audio&&song.audio.sources)||[];const srcSel=$('#audiosrc');srcSel.replaceChildren();SOURCES.forEach((source,i)=>{const option=document.createElement('option');option.value=i;option.textContent=source.name;srcSel.append(option)});srcSel.value='0';au.pause();if(SOURCES.length)au.setAttribute('src',dataUrl(SOURCES[0].path));au.load();$('#page-title').textContent=`[${song.stratum}] ${song.title} · Karaoke alignment review`;OFFS={};LOFFS={};sortTracksByUst(song);visible=song.tracks.map(()=>true);song.tracks.forEach((t,i)=>{if(t.ust){const v=parseFloat(localStorage.getItem('ustoff:'+videoId+':'+t.name));if(Number.isFinite(v)&&v)OFFS[i]=v;try{const m=JSON.parse(localStorage.getItem('ustloff:'+videoId+':'+t.name)||'null');if(m&&typeof m==='object'&&Object.keys(m).length)LOFFS[i]=m}catch(e){}t._segLine=t.segs.map(s=>{let j=lowerBound(t.lines,s.start+1e-4)-1;return j<0?0:j})}});renderTrackToggles();status.textContent=song.no_segs_tracks?`${song.no_segs_tracks} track(s) without syllables`:'Syllable spans available';status.className=song.no_segs_tracks?'warn':'tag';wrap.scrollLeft=0;wrap.scrollTop=0;PAGE_TS=0;queueRender()};if(window.__SONG_DATA__[videoId]){apply();return}const script=document.createElement('script');script.src=`data/${encodeURIComponent(videoId)}.js`;script.onload=apply;script.onerror=()=>{status.textContent=`Failed to load data/${videoId}.js`;status.className='error'};document.head.append(script)}
+function loadSong(videoId){if(!videoId||videoId===activeId)return;const apply=()=>{const song=window.__SONG_DATA__[videoId];if(!song){status.textContent=`Could not load ${videoId}`;status.className='error';return}activeId=videoId;DATA=song;dur=Math.max(Number(song.duration)||0,...song.tracks.flatMap(track=>[...track.lines,...track.segs].map(item=>item.end)),1);SOURCES=(song.audio&&song.audio.sources)||[];const srcSel=$('#audiosrc');srcSel.replaceChildren();SOURCES.forEach((source,i)=>{const option=document.createElement('option');option.value=i;option.textContent=source.name;srcSel.append(option)});srcSel.value='0';au.pause();if(SOURCES.length)au.setAttribute('src',dataUrl(SOURCES[0].path));au.load();$('#page-title').textContent=`[${song.stratum}] ${song.title} · Karaoke alignment review`;OFFS={};LOFFS={};sortTracksByUst(song);visible=song.tracks.map(()=>true);invalidateLayout();song.tracks.forEach((t,i)=>{if(t.ust){const v=parseFloat(localStorage.getItem('ustoff:'+videoId+':'+t.name));if(Number.isFinite(v)&&v)OFFS[i]=v;try{const m=JSON.parse(localStorage.getItem('ustloff:'+videoId+':'+t.name)||'null');if(m&&typeof m==='object'&&Object.keys(m).length)LOFFS[i]=m}catch(e){}t._segLine=t.segs.map(s=>{let j=lowerBound(t.lines,s.start+1e-4)-1;return j<0?0:j})}});refreshScores();renderTrackToggles();status.textContent=song.no_segs_tracks?`${song.no_segs_tracks} track(s) without syllables`:'Syllable spans available';status.className=song.no_segs_tracks?'warn':'tag';wrap.scrollLeft=0;wrap.scrollTop=0;PAGE_TS=0;queueRender()};if(window.__SONG_DATA__[videoId]){apply();return}const script=document.createElement('script');script.src=`data/${encodeURIComponent(videoId)}.js`;script.onload=apply;script.onerror=()=>{status.textContent=`Failed to load data/${videoId}.js`;status.className='error'};document.head.append(script)}
 filter.addEventListener('input',fillSelector);$('#ust-only').addEventListener('change',()=>{try{localStorage.setItem('ustonly',$('#ust-only').checked?'1':'')}catch(e){}fillSelector()});try{$('#ust-only').checked=!!localStorage.getItem('ustonly')}catch(e){}select.addEventListener('change',()=>loadSong(select.value));au.addEventListener('loadedmetadata',()=>{if(Number.isFinite(au.duration)&&au.duration>0){dur=au.duration;queueRender()}});function tick(){pos.textContent=`${stamp(au.currentTime)} / ${stamp(dur)} · ${pps.toFixed(0)} px/s`;if(DATA&&!au.paused&&$('#followmode').value!=='off'){wrap.scrollLeft=RENDER_TS>0?RENDER_TS+LABEL_W:0}queueRender();requestAnimationFrame(tick)}fillSelector();const wanted=new URLSearchParams(location.search).get('song');if(wanted&&[...select.options].some(option=>option.value===wanted))select.value=wanted;if(select.value)loadSong(select.value);tick();
 </script></body></html>'''
 
@@ -785,7 +1149,12 @@ def generate_song_data(
     if audio is None:
         return None
     tracks = build_tracks(song, srt_path, ust_specs, ust_shifts)
+    sections = allin1_sections(song)
     latest = max((item["end"] for track in tracks for item in track["lines"] + track["segs"]), default=0.0)
+    # 구간은 레인을 안 쓰지만 곡 끝까지 덮으므로 길이 계산에는 여전히 들어가야 한다 —
+    # 레인이던 시절엔 위 max가 알아서 봤다.
+    if sections:
+        latest = max(latest, max(span["e"] for span in sections["spans"]))
     relative_root = root.relative_to(BENCH / "results").as_posix()
     payload = {
         "video_id": song["video_id"],
@@ -802,6 +1171,8 @@ def generate_song_data(
         "tracks": tracks,
         "no_segs_tracks": sum(1 for track in tracks if track.get("no_segs")),
     }
+    if sections:
+        payload["sections"] = sections
     truth = _ust_truth_anchors(song["video_id"], tracks)
     if truth:
         payload["ust_truth"] = truth

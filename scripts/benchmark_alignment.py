@@ -392,12 +392,47 @@ class MMSBaselineAligner(AlignerAdapter):
         )
 
 
+class MMSChunkedAligner(MMSBaselineAligner):
+    """구 스택에 «최대한 유리한 조건»을 준 대조군 — MMS-1B를 60초 창으로 청킹한다.
+
+    구 스택의 정렬 VRAM은 곡 길이에 비례해 늘어난다(119s 6,492MB → 279s 10,157MB, 9GB 게이트
+    초과). 프로드 기본 ``align_chunk_sec``이 360초라 벤치 곡 대부분이 통짜 한 청크로 들어가기
+    때문이다 — 청킹 기능 자체는 이미 있고 값이 안 걸렸을 뿐이다.
+
+    이 어댑터는 그 값을 hf_ctc 후보들과 같은 60초로 낮춰, **VRAM을 동등하게 맞춘 상태에서**
+    정확도를 비교한다. 「구 스택이 진 게 VRAM 조건 탓 아니냐」를 잘라내는 대조군이고, 청킹
+    스티칭이 정확도를 깎는지도 같이 드러난다. 이름을 따로 두어 기존 mms-baseline 런 캐시를
+    덮지 않는다.
+    """
+
+    name = "mms-baseline-chunk60"
+    chunk_sec: float = 60.0
+
+    def _engine_and_loader(self):
+        if self._engine is None:
+            from everyric2.alignment.factory import EngineFactory
+            from everyric2.audio.loader import AudioLoader
+            from everyric2.config.settings import get_settings
+
+            settings = get_settings()
+            alignment = settings.alignment.model_copy(
+                update={"align_chunk_sec": self.chunk_sec}
+            )
+            engine = EngineFactory.get_engine("ctc", alignment)
+            if not engine.is_available():
+                raise RuntimeError("CTC engine unavailable (transformers/torchaudio missing)")
+            self._engine = engine
+            self._loader = AudioLoader(settings.audio)
+        return self._engine, self._loader
+
+
 SEPARATORS: dict[str, type[SeparatorAdapter]] = {
     HtdemucsSeparator.name: HtdemucsSeparator,
     NosepSeparator.name: NosepSeparator,
 }
 ALIGNERS: dict[str, type[AlignerAdapter]] = {
     MMSBaselineAligner.name: MMSBaselineAligner,
+    MMSChunkedAligner.name: MMSChunkedAligner,
 }
 
 
@@ -430,6 +465,28 @@ def _register_optional_aligners() -> None:
         _register_owsm(ALIGNERS)
     except Exception as exc:
         print(f"[bench_adapters] OWSM 후보 배선 실패, 건너뜀: {exc!r}", file=sys.stderr)
+    try:
+        # 2패스 조합(앵커 라인 창 + 경량 모델 음절). hf_ctc·owsm_ctc 배선 뒤에 와야 한다 —
+        # 두 모듈의 register를 그대로 재사용해 구성 요소를 해석한다.
+        from scripts.bench_adapters.two_pass import register as _register_two_pass
+
+        _register_two_pass(ALIGNERS)
+    except Exception as exc:
+        print(f"[bench_adapters] 2패스 후보 배선 실패, 건너뜀: {exc!r}", file=sys.stderr)
+    try:
+        # 2모드 라우팅 — two_pass·분리기 배선 뒤에 와야 구성 요소를 해석할 수 있다.
+        from scripts.bench_adapters.routed import register as _register_routed
+
+        _register_routed(ALIGNERS)
+    except Exception as exc:
+        print(f"[bench_adapters] 라우팅 후보 배선 실패, 건너뜀: {exc!r}", file=sys.stderr)
+    try:
+        # 프로드 VAD 보정층 래퍼 — 기반 정렬기를 레지스트리에서 찾으므로 맨 뒤에 온다.
+        from scripts.bench_adapters.postprocess import register as _register_pp
+
+        _register_pp(ALIGNERS)
+    except Exception as exc:
+        print(f"[bench_adapters] 후처리 래퍼 배선 실패, 건너뜀: {exc!r}", file=sys.stderr)
     try:
         from scripts.bench_adapters.separators_roformer import register as _register_sep
 
@@ -1187,6 +1244,33 @@ def alignment_input(song: dict, mode: str = "auto") -> tuple[str | None, list[st
             return None, None, "pron_hangul_local_unavailable"
         return "\n".join(_line_to_hangul(l) for l in display), display, "forced_pron_hangul_local"
 
+    if mode == "pron-kana":
+        # 한자를 **가나 독음**으로 펼쳐 정렬한다. 목적은 «음절(모라) 단위 타이밍»이다 —
+        # 원문으로 정렬하면 한자 1글자에 스팬 1개뿐이라 그 독음의 모라들이 스팬을 나눠 가질 수
+        # 없고(owsm은 BPE라 토큰 내부가 보간이라 더 나쁘다), 그 손실은 라인 시작 지표에 안 잡힌다.
+        # 한글 음차(pron-hangul-local)와 달리 모델의 모국어 표기를 유지하므로 ja 네이티브 후보의
+        # 음향 강점을 버리지 않는다. 독음은 프로드와 같은 형태소 분석 경로를 그대로 쓴다.
+        import sys as _sys
+
+        repo = str(Path(__file__).resolve().parents[1])
+        if repo not in _sys.path:
+            _sys.path.insert(0, repo)
+        from everyric2.text.ja_reading import tokenize_reading
+
+        def _line_to_kana(line: str) -> str:
+            try:
+                tokens = tokenize_reading(line)
+            except Exception:
+                return line
+            # 읽기가 없는 토큰(라틴·숫자·기호)은 표면을 그대로 둔다 — 표면을 이어 붙이면
+            # 원문이 복원된다는 ja_reading의 계약 덕에 길이 계산이 어긋나지 않는다.
+            return "".join(t.reading or t.surface for t in tokens) or line
+
+        display = [l for l in lyrics.splitlines() if l.strip()]
+        if not display:
+            return None, None, "pron_kana_unavailable"
+        return "\n".join(_line_to_kana(l) for l in display), display, "forced_pron_kana"
+
     lang = base_language(song.get("language"))
     key = {"ko": "hangul", "en": "romaji"}.get(lang)
     if not key:
@@ -1329,13 +1413,16 @@ def sweep(args: argparse.Namespace) -> int:
             print(f"{label}: 강제 독음 입력 불가(pron.hangul 미보유) → 건너뜀", flush=True)
             skipped += 1
             continue
+        # pron-kana는 언어를 바꾸지 않는다 — 가나는 ja 모델의 모국어 표기이므로 ja로 정렬해야 한다.
         if args.input_mode in ("pron-hangul", "pron-hangul-local"):
             # 독음은 한글이므로 어댑터에는 ko로 정렬시킨다. 러너 라벨에 @hangul을 붙여
             # 같은 정렬기의 raw 입력 런과 캐시·리포트가 절대 섞이지 않게 한다.
             language = "ko"
-        aln_suffix = {"pron-hangul": "@hangul", "pron-hangul-local": "@hangul-local"}.get(
-            args.input_mode, ""
-        )
+        aln_suffix = {
+            "pron-hangul": "@hangul",
+            "pron-hangul-local": "@hangul-local",
+            "pron-kana": "@kana",
+        }.get(args.input_mode, "")
         song_runs: list[dict] = []
 
         for sep_name, sep_adapter in separators.items():
@@ -1539,7 +1626,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--input-mode",
-        choices=("auto", "pron-hangul", "pron-hangul-local"),
+        choices=("auto", "pron-hangul", "pron-hangul-local", "pron-kana"),
         default="auto",
         help="auto: 프로드가 정렬한 입력 재현(기본). pron-hangul: 모든 곡을 baseline의 한글 "
         "독음(pron.hangul)으로 강제 정렬 — «전 언어→한글 단일 경로» 아키텍처 탐색용. "
