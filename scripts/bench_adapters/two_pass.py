@@ -296,7 +296,11 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         refiner_script="ja-prod",
         note="같은 독음, 심판만 끔 — 이 둘의 차이가 곧 심판의 값이다",
     ),
-    # ★혼합 표기 — 위와 같은 ja 독음에 **라틴 낱말 음절화 + 장음 펴기**만 얹는다. ja·mixed
+    # ★혼합 표기 — 위와 같은 ja 독음에 **라틴 낱말 음절화 + 장음 펴기**만 얹는다.
+    #
+    # 이름 주의: 평가셋의 stratum: mixed와 **다른 뜻**이다. 그 층에만 도는 레인이 아니라
+    # ja 전곡에 도는 채택 스택이고, 라틴이 하나도 없는 곡(深海少女·Kikuo)에도 그대로 돈다.
+    # 「표기가 섞인 가사를 계열별로 나눠 각자에게 넘긴다」는 뜻이다. ja·mixed
     # 45곡에서 라틴이 타깃의 12.4%이고 5%를 넘는 곡이 16곡이라(numb numb 53.7%), 그 곡들은
     # 지금 가사 절반이 `n|u|m|b`처럼 글자 단위로 쪼개져 나온다.
     TwoPassConfig(
@@ -306,6 +310,17 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         refiner_script="ja-mixed",
         referee=True,
         note="프로드 독음 + 라틴 음절화 + 장음 펴기 + 오디오 심판",
+    ),
+    # ★줄 사이 star 앵커 — 추임새·애드립·반복 후렴을 와일드카드가 흡수하게 한다. 정렬·표시는
+    # 위와 같고 **앵커만** 갈린다. ja 7곡에서 라인이 반복 가창 위로 늘어난 자리가 둘 남아
+    # 있었고(ほら ほら ほら 9.30s·6음절, Boo boo booing 6.65s·8음절) VAD 클램프로는 못 잡는다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-star",
+        anchor="owsm-ctc-v4-1b-bf16-star",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        note="혼합 표기 + 줄 사이 star 앵커(추임새 흡수 실험)",
     ),
     # ★한글 표시층 — **위와 정렬이 완전히 같고 표시만** 한글이다(``ja-mixed-hangul``).
     # 한국어 사용자가 일본어 곡을 읽는 층이고 프로드의 실제 기능이다. 한글을 정렬 타깃으로

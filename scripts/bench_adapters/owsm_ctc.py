@@ -146,6 +146,7 @@ class OwsmCTCAligner:
 
         lang_sym = LANGUAGE_SYMBOLS.get(_base_language(language or ""), DEFAULT_LANGUAGE_SYMBOL)
         payload = {
+            "star": bool(getattr(self, "star_tokens", False)),
             "vocals_path": str(vocals_path),
             "lines": lines,
             "lang_sym": lang_sym,
@@ -187,6 +188,9 @@ class OwsmCTCAligner:
                 "align_chunk_sec": result.get("chunk_sec"),
                 "frame_sec": result.get("frame_sec"),
                 "preprocessing": PREPROCESSING_LABEL,
+                # 줄 사이 star가 실제로 얼마를 흡수했는가 — 채택 판단의 핵심 수치다.
+                "star_tokens": result.get("star_tokens"),
+                "star_frames": result.get("star_frames"),
                 "quality": quality_meta,
                 "worker_python": str(OWSM_PYTHON),
             },
@@ -327,6 +331,8 @@ VRAM_VARIANTS: tuple[dict[str, Any], ...] = (
     {"suffix": "bf16-20s", "dtype": "bfloat16", "buffer_sec": 20.0},
     {"suffix": "bf16-15s", "dtype": "bfloat16", "buffer_sec": 15.0},
     {"suffix": "20s", "buffer_sec": 20.0},
+    # ★줄 사이 star — 추임새·애드립·반복 후렴 흡수. 채택 스택(bf16)에 얹은 실험 변형이다.
+    {"suffix": "bf16-star", "dtype": "bfloat16", "star_tokens": True},
 )
 
 
@@ -337,6 +343,7 @@ def _variant_class(spec: dict[str, Any]) -> type[OwsmCTCAligner]:
         buffer_sec = spec.get("buffer_sec")
         expandable_segments = spec.get("expandable_segments", False)
         batch_size = spec.get("batch_size", 1)
+        star_tokens = spec.get("star_tokens", False)
 
     VariantOwsmCTCAligner.__name__ = "OwsmCTC_" + spec["suffix"].replace("-", "_")
     VariantOwsmCTCAligner.__qualname__ = VariantOwsmCTCAligner.__name__
@@ -504,6 +511,30 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
     column_index = torch.tensor(compact_tokens, dtype=torch.long, device=device)
     compact_targets = [compact_index[t] for t in target_ids]
 
+    # ── 줄 사이 와일드카드 star ──
+    # 가사에 없는 가창(추임새·애드립·반복 후렴)을 흡수시켜 이웃 라인이 그 위로 늘어나는 것을
+    # 막는다. 프로드가 하는 일이고(``star_tokens`` 기본 켬) 하네스에는 없었다 — ja 7곡에서
+    # ``ほら ほら ほら``(9.30s·6음절)·``Boo boo booing``(6.65s·8음절)처럼 라인이 반복 가창
+    # 위로 늘어난 자리가 남아 있었고, VAD 기반 클램프는 거기에 실제로 노래가 있어 못 잡는다.
+    #
+    # 성형(``star_prior``)은 하지 않는다. 프로드가 3곡 A/B로 기각했고 이유가 구조적이다 —
+    # 실제 방출에서 blank가 거의 무료 필러라(사전확률 ~0.8) star에만 가격을 매기면 배치
+    # 동점이 blank로 우회할 뿐이다. 프로드도 성형 없이 켜 둔 상태다.
+    use_star = bool(payload.get("star"))
+    star_id = len(compact_tokens)
+    if use_star:
+        starred_targets: list[int] = []
+        starred_owners: list[Any] = []
+        previous_line: int | None = None
+        for token, owner in zip(compact_targets, token_owners):
+            if previous_line is not None and owner[0] != previous_line:
+                starred_targets.append(star_id)
+                starred_owners.append(None)  # star는 어느 라인의 몫도 아니다
+            starred_targets.append(token)
+            starred_owners.append(owner)
+            previous_line = owner[0]
+        compact_targets, token_owners = starred_targets, starred_owners
+
     text_prev = torch.tensor([[model.na]], dtype=torch.long, device=device)
     text_prev_lengths = text_prev.new_full([1], dtype=torch.long, fill_value=1)
     prefix = torch.tensor(
@@ -582,6 +613,14 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
 
     import torchaudio.functional as functional
 
+    if use_star:
+        # star는 log(1.0)=0 — 어느 프레임에서든 실제 토큰보다 싸다. ``forced_align``이
+        # 정규화된 log_probs를 기대하므로 이 트릭은 log_softmax **이후에만** 성립한다.
+        emission = torch.cat(
+            [emission, torch.zeros((emission.shape[0], emission.shape[1], 1), dtype=emission.dtype)],
+            dim=-1,
+        ).contiguous()
+
     targets = torch.tensor([compact_targets], dtype=torch.int32)
     aligned_tokens, alignment_scores = functional.forced_align(emission, targets, blank=0)
     token_spans = functional.merge_tokens(aligned_tokens[0], alignment_scores[0], blank=0)
@@ -597,7 +636,12 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
         {"segs": [], "total_chars": total, "matched_chars": 0, "tokens": 0, "_scores": []}
         for total in line_totals
     ]
-    for span, (line_index, covered) in zip(token_spans, token_owners):
+    star_frames = 0
+    for span, owner in zip(token_spans, token_owners):
+        if owner is None:  # star가 흡수한 구간 — 어느 라인에도 안 준다
+            star_frames += int(span.end) - int(span.start)
+            continue
+        line_index, covered = owner
         start_sec = float(span.start) * ratio
         end_sec = float(span.end) * ratio
         entry = out_lines[line_index]
@@ -630,6 +674,8 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
         "vocab_size": len(token_list),
         "compact_vocab_size": len(compact_tokens),
         "target_tokens": len(compact_targets),
+        "star_tokens": sum(1 for owner in token_owners if owner is None),
+        "star_frames": star_frames,
         "lines": out_lines,
     }
     if device == "cuda":
