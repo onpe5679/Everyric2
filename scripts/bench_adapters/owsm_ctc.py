@@ -192,6 +192,7 @@ class OwsmCTCAligner:
             "dtype": self.dtype,
             "buffer_sec": self.buffer_sec,
             "batch_size": self.batch_size,
+            "emit_curves": bool(getattr(self, "emit_curves", False)),
         }
 
         started = time.perf_counter()
@@ -605,7 +606,9 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
     # exactly (same tensors, same order), which is how the equivalence check is run.
     batch_size = max(1, int(payload.get("batch_size") or 1))
     buffer_frames = _expected_audio_frames(buffer_samples)
+    want_curves = bool(payload.get("emit_curves"))
     pieces: list[Any] = []
+    free_pieces: list[Any] = []
     for offset in range(0, len(windows), batch_size):
         batch = windows[offset : offset + batch_size]
         segments, reals = [], []
@@ -645,10 +648,20 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
                 f"unexpected OWSM encoder length: got {logp.shape[1]} frames, expected "
                 f"{buffer_frames} audio frames + {int(prefix.size(1))} prefix frames"
             )
-        compact = torch.index_select(logp[:, surplus:, :], 2, column_index).cpu()
+        sliced = logp[:, surplus:, :]
+        compact = torch.index_select(sliced, 2, column_index).cpu()
+        # 자유 디코드 = 어휘 **전체**의 argmax. 「모델이 실제로 무엇을 들었나」이고, 강제 정렬
+        # 점수와 달리 가사에 매이지 않는다. compact로 줄이고 나면 영영 복원할 수 없으므로
+        # 여기서만 뽑을 수 있다. 비용은 마지막 축 max 한 번.
+        free = None
+        if want_curves:
+            top_logp, top_id = sliced.max(dim=-1)
+            free = torch.stack([top_logp, top_id.to(top_logp.dtype)], dim=-1).cpu()
         for row, real in enumerate(reals):
             valid = max(1, min(buffer_frames, round(buffer_frames * real / buffer_samples)))
             pieces.append(compact[row : row + 1, :valid, :])
+            if free is not None:
+                free_pieces.append(free[row : row + 1, :valid, :])
 
     emission = (
         pieces[0] if len(pieces) == 1 else chunking.stitch_chunk_outputs(pieces, windows, n_samples, frame_axis=1)
@@ -756,6 +769,28 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
         entry["segs"].sort(key=lambda seg: seg["start"])
         entry["mean_log_score"] = (sum(scores) / len(scores)) if scores else None
 
+    # ── 추임새 진단용 프레임 곡선 ──
+    # log_softmax는 어휘 **전체**에서 돌고 나서 gather했으므로, 압축된 열들은 여전히 전체
+    # 정규화 상태다. 따라서 프레임마다
+    #     p_기타 = 1 − p_blank − Σp_가사토큰
+    # 이 「모델이 가사에 없는 무언가를 들었다」는 질량이 된다 — 추가 연산 없이 얻는 신호.
+    curves = None
+    if want_curves:
+        free = (
+            free_pieces[0]
+            if len(free_pieces) == 1
+            else chunking.stitch_chunk_outputs(free_pieces, windows, n_samples, frame_axis=1)
+        )
+        probs = emission[0].exp()
+        top_ids = free[0, :, 1].long().tolist()
+        curves = {
+            "blank": [round(float(x), 5) for x in probs[:, 0].tolist()],
+            "lyric": [round(float(x), 5) for x in probs[:, 1:].sum(dim=1).tolist()],
+            "top_p": [round(float(x), 5) for x in free[0, :, 0].float().exp().tolist()],
+            "top_id": top_ids,
+            "vocab": {str(i): token_list[i] for i in sorted(set(top_ids))},
+        }
+
     response = {
         "audio_sec": round(audio_sec, 3),
         "frames": int(emission.shape[1]),
@@ -773,6 +808,36 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
         "star_frames": star_frames,
         "lines": out_lines,
     }
+    if curves is not None:
+        response["curves"] = curves
+
+    # ── 압축 emission 덤프(진단 전용) ──
+    # 인코더는 정렬 시간의 88%다. 탐지 규칙을 바꿔 가며 재실험하려면 emission을 한 번 남겨
+    # 두고 DP만 다시 도는 편이 유일하게 현실적이다. 열은 [blank, *정렬 타깃 토큰]이고
+    # ``compact_targets``의 인덱스가 그대로 이 열을 가리킨다.
+    dump_dir = payload.get("dump_dir")
+    if dump_dir:
+        import numpy as np
+
+        target_dir = Path(dump_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        np.save(target_dir / "emission.npy", emission[0].numpy().astype(np.float16))
+        (target_dir / "targets.json").write_text(
+            json.dumps(
+                {
+                    "compact_targets": compact_targets,
+                    "compact_tokens": compact_tokens,
+                    "token_pieces": [token_list[t] for t in compact_tokens],
+                    "token_owners": [None if o is None else [o[0], o[1]] for o in token_owners],
+                    "lines": lines,
+                    "frame_sec": ratio,
+                    "frames": int(emission.shape[1]),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        response["dump_dir"] = str(target_dir)
     if device == "cuda":
         response["vram_peak_mb"] = round(torch.cuda.max_memory_allocated() / 2**20, 1)
         response["vram_reserved_peak_mb"] = round(torch.cuda.max_memory_reserved() / 2**20, 1)

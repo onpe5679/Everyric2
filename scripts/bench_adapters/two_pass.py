@@ -79,6 +79,14 @@ class TwoPassConfig:
     # 세그 끝을 다음 세그 시작까지 늘릴 것인가(노래방 표시 규약). 프로드가 이미 하는 일이고
     # 하네스만 빠져 있었다 — ``_extend_segments`` 참조.
     extend_segments: bool = True
+    # 늘이기를 «시간 길이»가 아니라 «그 시간의 상태»로 정할 것인가(``_ExtendGate``).
+    # 우세도 × 발화 2축. 켜면 seg_hold_max_sec은 오디오가 반박할 수 있는 기본값이 된다.
+    # **실측 기각**(구간 IoU 49.71 → 49.46) — 자를 곳만 있고 늘릴 곳이 없었다. 아래를 쓴다.
+    extend_gate: bool = False
+    # 라인 마지막 세그의 끝을 우세도가 이어지는 동안 다음 라인 전까지 민다. 자르지 않는다.
+    # **채택**(2026-08-02, 짝지은 7곡 3,837세그): 구간 IoU 50.28 → 51.15, 덮음 60.66 →
+    # 62.09, 음절 75.29 → 75.32(불변 — start를 안 건드리므로). 7곡 전부 상승, 지는 곡 없음.
+    extend_line_tails: bool = True
     # 혼합 경로에서 **라틴 낱말**도 심판에 올릴 것인가. 기본은 끔 — numb numb에서 ``color``를
     # 12번 전부 ``코러``로 바꿨는데 사용자 청취는 ``커러``였다(2026-08-02). 타이밍에는 영향이
     # 없고(두 후보가 같은 음절 구조라 세그가 동일) **발음 표기만** 갈리므로 지금 지표로는
@@ -314,6 +322,20 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         refiner_script="ja-mixed",
         referee=True,
         note="프로드 독음 + 라틴 음절화 + 장음 펴기 + 오디오 심판",
+    ),
+    # ★늘이기 게이트 — 위와 **늘이기 축만** 다른 대조군. 세그를 어디까지 켜 둘지 시간 길이가
+    # 아니라 «그 시간의 상태»(우세도 × 발화)로 정한다. 지금은 1.5초 상한 하나가 서로 반대인
+    # 두 증상을 함께 쥐고 있다 — 노래가 끝났는데 1.5초 안이면 늘어나고, 계속 끄는데 1.5초를
+    # 넘으면 잘린다. 정렬이 주장 안 한 시간 중 우세도가 높은 구간이 82.8초·113.1초 있고 그
+    # 발화율이 1/15이라는 실측이 근거다(2026-08-02).
+    TwoPassConfig(
+        name="2pass-owsm-mixed-hold",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        extend_gate=True,
+        note="위와 같은 정렬, 늘이기만 오디오 게이트(우세도 × 발화)",
     ),
     # ★줄 사이 star 앵커 — 추임새·애드립·반복 후렴을 와일드카드가 흡수하게 한다. 정렬·표시는
     # 위와 같고 **앵커만** 갈린다. ja 7곡에서 라인이 반복 가창 위로 늘어난 자리가 둘 남아
@@ -1186,6 +1208,12 @@ class TwoPassAligner(AlignerAdapter):
     # 세그를 늘일 수 있는 최대 길이(초). UST 노트 15,503개에서 99.5퍼센타일 1.111s이고
     # 1.5s 초과는 0.29%뿐이라, 그보다 긴 공백은 늘임음이 아니라 쉼으로 본다.
     seg_hold_max_sec: float = 1.5
+    # 게이트가 «내내 부르고 있다»고 판정했을 때 풀어 주는 한도(초). 위 1.5초는 오디오를 안 보고
+    # 정한 값이라, 오디오가 늘임음이라고 말하는 자리에서까지 지킬 이유가 없다.
+    seg_hold_max_held_sec: float = 3.0
+    # 라인 꼬리를 최대 얼마나 밀 것인가(초). UST 노트 99.5퍼센타일이 1.111초라 2초면 실제
+    # 늘임음은 다 담고, 그보다 길게 가는 것은 우세도가 먼저 끊어 준다.
+    line_tail_max_sec: float = 2.0
 
     def __init__(self, config: TwoPassConfig | None = None) -> None:
         if config is None:
@@ -1239,7 +1267,9 @@ class TwoPassAligner(AlignerAdapter):
             emission = refiner.emission_for(vocals_path)
             _cuda_sync()
             refine_started = time.perf_counter()
-            stats = self._refine(anchor_out.lines, source_lines, refiner, emission, envelope)
+            stats = self._refine(
+                anchor_out.lines, source_lines, refiner, emission, envelope, vocals_path
+            )
             _cuda_sync()
             stats["emission_sec"] = round(refine_started - emission_started, 3)
             stats["refine_sec"] = round(time.perf_counter() - refine_started, 3)
@@ -1295,6 +1325,7 @@ class TwoPassAligner(AlignerAdapter):
         refiner: Any,
         emission: Any,
         envelope: tuple[Any, float] | None = None,
+        vocals_path: Path | None = None,
     ) -> dict[str, Any]:
         """라인마다 창 안에서 재정렬하고 ``segs``만 갈아 끼운다. 실패한 라인은 손대지 않는다."""
 
@@ -1313,13 +1344,49 @@ class TwoPassAligner(AlignerAdapter):
         # 뭉침을 펼 때 쓸 프레임별 «지금 소리가 나고 있을 확률» — 방출에서 바로 얻는다.
         # VAD를 따로 돌릴 필요가 없고, 정렬이 본 것과 **같은 신호**라 판단이 어긋나지 않는다.
         presence = None
-        if self.config.spread_piles:
+        if self.config.spread_piles or self.config.extend_gate:
             try:
                 presence = (
                     (1 - emission.emission[0][:, emission.blank_id].exp()).float().cpu().numpy()
                 )
             except Exception:
                 logger.warning("%s: presence 계산 실패, 뭉침 펴기 생략", self.name, exc_info=True)
+
+        # ── 늘이기 게이트 ──
+        gate = None
+        if self.config.extend_gate or self.config.extend_line_tails:
+            import numpy as np
+
+            made = _dominance_curve(vocals_path) if vocals_path is not None else None
+            # 「발화 있음」의 문턱은 **이 곡의** 값이다 — 고정 상수를 놓으면 한쪽에서만 동작한다
+            # (numb numb 라틴 0.244 vs rookie 0.627).
+            #
+            # 라인 구간 발화의 **90퍼센타일**을 쓴다. 처음에 중앙값으로 뒀다가 실패했다 —
+            # omniASR도 blank 우세라 라인 안 프레임의 중앙값이 0.0116까지 내려가고, 그러면
+            # 어떤 틈이든 「새 발성」으로 읽혀 늘이기가 계속 잘린다(토스트 세그 길이 중앙값
+            # 0.120 → 0.060s, 최대 1.500 → 0.481s). 실제로 토큰이 서는 프레임은 라인 구간의
+            # 10~15%뿐이므로(세그 525개 × 1~2프레임) 그 봉우리 높이를 재려면 상위 백분위여야
+            # 한다. 자르기는 파괴적이라 보수적으로 잡는다.
+            speak_level = 2.0  # presence는 1을 못 넘으므로 «절대 안 걸림»의 뜻
+            if presence is not None:
+                mask = np.zeros(len(presence), dtype=bool)
+                for line in lines:
+                    lo = max(0, int(line["start"] / frame_sec))
+                    hi = min(len(presence), int(line["end"] / frame_sec))
+                    if hi > lo:
+                        mask[lo:hi] = True
+                if bool(mask.any()):
+                    speak_level = float(np.percentile(presence[mask], 90))
+            if made is not None or presence is not None:
+                gate = _ExtendGate(
+                    made[0] if made else None,
+                    made[1] if made else 0.01,
+                    presence,
+                    frame_sec,
+                    speak_level,
+                )
+        # 세그 사이 게이트는 «자르는» 쪽이라 기각됐다 — 라인 꼬리만 늘릴 때는 물리지 않는다.
+        seg_gate = gate if self.config.extend_gate else None
         converted = 0
         # 경량 모델이 자기 타깃을 얼마나 확신하는지. 라인 confidence는 **앵커** 값이라
         # 표기를 바꿔도 안 움직인다 — 표기 적합도(가나 vs 한글 vs IPA)를 비교하려면
@@ -1645,7 +1712,9 @@ class TwoPassAligner(AlignerAdapter):
                 skip("no_segments_produced")
                 continue
             if self.config.extend_segments:
-                stretched += _extend_segments(segs, line["end"], self.seg_hold_max_sec)
+                stretched += _extend_segments(
+                    segs, line["end"], self.seg_hold_max_sec, seg_gate, self.seg_hold_max_held_sec
+                )
             line["segs"] = segs
             line.setdefault("meta", {})["refined_by"] = self.config.refiner
             refined += 1
@@ -1663,21 +1732,37 @@ class TwoPassAligner(AlignerAdapter):
                 moved = _spread_piled_segments(line_segs, presence, frame_sec)
                 spread += moved
                 if moved and self.config.extend_segments:
-                    _extend_segments(line_segs, line["end"], self.seg_hold_max_sec)
-        # 뭉침 펴기는 **단조 보정 뒤에** 돈다. 뭉침을 만드는 것이 그 보정이기 때문이다 —
-        # 라인 창이 심하게 겹치면 «완전 역전» 처리가 앞뒤 세그를 같은 시각으로 눌러 버린다
-        # (熱異常 boundary_fixes 104건 = 뭉친 세그 102개). 앞에서 돌리면 볼 것이 없다.
-        if self.config.spread_piles and presence is not None:
-            for line in lines:
-                line_segs = line.get("segs") or []
-                spread += _spread_piled_segments(line_segs, presence, frame_sec)
-                if self.config.extend_segments and spread:
-                    _extend_segments(line_segs, line["end"], self.seg_hold_max_sec)
+                    _extend_segments(
+                        line_segs,
+                        line["end"],
+                        self.seg_hold_max_sec,
+                        seg_gate,
+                        self.seg_hold_max_held_sec,
+                    )
         if self.config.spread_piles:
             stats["segments_spread"] = spread
         if self.config.extend_segments:
             stats["segments_stretched"] = stretched
             stats["seg_hold_max_sec"] = self.seg_hold_max_sec
+        if self.config.extend_gate:
+            # 게이트가 실제로 재료를 받았는지. 우세도가 없으면 상한만 남아 기존과 같아진다 —
+            # 그걸 모르고 «게이트를 켰는데 변화가 없다»고 읽으면 안 된다.
+            stats["extend_gate"] = (
+                "off"
+                if gate is None
+                else ("dominance+presence" if gate.dominance is not None else "presence")
+            )
+            if gate is not None:
+                stats["extend_gate_speak_level"] = round(gate.speak_level, 4)
+                stats["seg_hold_max_held_sec"] = self.seg_hold_max_held_sec
+        # 라인 꼬리 늘이기는 **맨 마지막**이다. 앞의 어떤 보정도 라인 끝을 다시 옮기므로,
+        # 중간에 밀어 두면 그 뒤 단계가 도로 당긴다.
+        if self.config.extend_line_tails:
+            stats["line_tails_extended"] = (
+                _extend_line_tails(lines, gate, self.line_tail_max_sec) if gate is not None else 0
+            )
+            stats["line_tail_max_sec"] = self.line_tail_max_sec
+            stats["line_tail_gate"] = "dominance" if (gate and gate.dominance is not None) else "off"
         stats["compact_vocab_size"] = len(columns)
         stats["full_vocab_size"] = vocab_width
         if span_scores:
@@ -1803,7 +1888,150 @@ def _spread_piled_segments(segs: list[dict[str, Any]], presence, frame_sec: floa
     return fixed
 
 
-def _extend_segments(segs: list[dict[str, Any]], line_end: float, hold_max: float) -> int:
+# ── 늘이기 게이트 ──
+# 우세도가 높은데 정렬이 아무것도 주장하지 않는 시간이 ルーキー 82.8초·熱異常 113.1초 있고,
+# 그 시간의 발화율은 가사가 주장한 시간의 1/15였다(0.013 vs 0.198 · 0.004 vs 0.052,
+# 2026-08-02 OWSM 방출 실측). 즉 그 시간은 새로 부르는 것이 아니라 **끌고 있는 소리**다.
+# 늘여야 할 바로 그 구간인데 지금은 시간 길이만 보는 1.5초 상한이 자른다.
+_DOMINANCE_CACHE: dict[str, Any] = {}
+
+
+def _dominance_curve(vocals_path: Path) -> tuple[Any, float] | None:
+    """보컬 우세도 곡선 — ``OwsmCTCAligner._dominance``와 같은 신호·같은 인자.
+
+    프로드의 측정된 구현을 그대로 부른다. 복제하면 신호가 갈린다. smooth 0.2s도 그쪽과
+    맞춘다(기본 0.4s는 star 가격 성형용이라 짧은 쉼을 뭉갠다 — 여기서는 그 쉼이 판단 대상이다).
+    """
+    key = str(vocals_path)
+    if key in _DOMINANCE_CACHE:
+        return _DOMINANCE_CACHE[key]
+    made = None
+    instrumental = vocals_path.with_name("inst.wav")
+    if instrumental.is_file():
+        try:
+            import librosa
+
+            from everyric2.alignment.star_prior import vocal_presence_from_stems
+
+            vocals, _ = librosa.load(str(vocals_path), sr=16_000, mono=True)
+            accomp, _ = librosa.load(str(instrumental), sr=16_000, mono=True)
+            curve = vocal_presence_from_stems(vocals, accomp, 16_000, smooth_sec=0.2, hop_sec=0.01)
+            if curve is not None:
+                made = (curve[1], 0.01)
+        except Exception:
+            logger.warning("우세도 계산 실패 — 늘이기 게이트 없이 진행", exc_info=True)
+    else:
+        logger.warning("inst.wav가 없어 우세도를 못 낸다 — 늘이기 게이트 없이 진행")
+    _DOMINANCE_CACHE[key] = made
+    return made
+
+
+_HOLD_DOMINANCE = 0.30
+# 얼마나 오래 조용해야 «끊겼다»고 볼 것인가. 20ms짜리 오인식 무음에 뭉텅 잘리면 안 된다.
+_HOLD_QUIET_SEC = 0.12
+# 새 발성이 시작됐다고 보려면 그만큼은 이어져야 한다.
+_HOLD_SPEAK_SEC = 0.10
+
+
+class _ExtendGate:
+    """세그를 어디까지 늘일지 **시간 길이가 아니라 그 시간의 상태로** 정한다.
+
+    두 축을 쓴다. 둘 다 이 프로젝트에서 실측으로 살아남은 신호다.
+
+    우세도  ``rms(보컬) / (rms(보컬) + rms(반주))``. 분리 스템 위에서 간주와 가창을 가르는
+            유일한 신호였다(간주 0.199 · 가창 0.36~0.68). f0·스템 RMS·VAD는 전부 죽는다.
+    발화    정제기 방출의 ``1 - p_blank``. 「새 음소가 나오고 있는가」. 우세도만으로는 끌고
+            있는 소리와 새로 부르는 소리를 못 가르는데, 이 축이 15배로 가른다.
+
+    ┌──────────┬─────────────────────┬──────────────────────┐
+    │          │ 발화 있음           │ 발화 없음            │
+    ├──────────┼─────────────────────┼──────────────────────┤
+    │ 우세도 ↑ │ 새 발성 → 앞에서 멈춤│ 늘임음 → 상한을 푼다 │
+    │ 우세도 ↓ │ (거의 없음)         │ 간주 → 거기서 끊는다 │
+    └──────────┴─────────────────────┴──────────────────────┘
+
+    ``speak_level``은 상수가 아니라 **이 곡의** 기준값이다 — 라인 구간 안 발화의 중앙값.
+    곡마다 방출 신뢰도가 크게 달라서(numb numb 라틴 0.244 vs rookie 0.627) 고정값을 놓으면
+    한쪽에서만 동작한다.
+    """
+
+    def __init__(self, dominance, dom_hop: float, presence, frame_sec: float, speak_level: float):
+        self.dominance = dominance
+        self.dom_hop = dom_hop
+        self.presence = presence
+        self.frame_sec = frame_sec
+        self.speak_level = speak_level
+
+    def limit(self, t0: float, t1: float) -> float:
+        """[t0, t1) 안에서 늘이기를 멈춰야 할 시각. 멈출 이유가 없으면 ``t1``."""
+        stops = [t1]
+        if self.dominance is not None and t1 > t0:
+            need = max(1, int(_HOLD_QUIET_SEC / self.dom_hop))
+            lo, hi = int(t0 / self.dom_hop), min(len(self.dominance), int(t1 / self.dom_hop))
+            run = None
+            for index in range(lo, hi):
+                if self.dominance[index] < _HOLD_DOMINANCE:
+                    if run is None:
+                        run = index
+                    elif index - run + 1 >= need:
+                        stops.append(run * self.dom_hop)
+                        break
+                else:
+                    run = None
+        if self.presence is not None and t1 > t0:
+            need = max(1, int(_HOLD_SPEAK_SEC / self.frame_sec))
+            lo, hi = int(t0 / self.frame_sec), min(len(self.presence), int(t1 / self.frame_sec))
+            run = None
+            for index in range(lo, hi):
+                if self.presence[index] >= self.speak_level:
+                    if run is None:
+                        run = index
+                    elif index - run + 1 >= need:
+                        stops.append(run * self.frame_sec)
+                        break
+                else:
+                    run = None
+        return max(t0, min(stops))
+
+    def voiced_reach(self, t0: float, t1: float) -> float:
+        """``t0``부터 **발성이 이어지는 동안** 갈 수 있는 끝. 자르는 데 쓰지 않는다.
+
+        ``limit``과 달리 발화 축을 안 본다. 늘임음은 우세도가 높은 채로 발화가 없는 구간이라
+        (실측 발화율 0.013 vs 0.198), 발화를 조건에 넣으면 늘임음에서 곧바로 멈춘다.
+        """
+        if self.dominance is None or t1 <= t0:
+            return t0
+        need = max(1, int(_HOLD_QUIET_SEC / self.dom_hop))
+        lo, hi = int(t0 / self.dom_hop), min(len(self.dominance), int(t1 / self.dom_hop))
+        run = None
+        for index in range(lo, hi):
+            if self.dominance[index] < _HOLD_DOMINANCE:
+                if run is None:
+                    run = index
+                elif index - run + 1 >= need:
+                    return run * self.dom_hop
+            else:
+                run = None
+        return (run * self.dom_hop) if run is not None else t1
+
+    def held(self, t0: float, t1: float) -> bool:
+        """그 구간 내내 «부르고 있는데 새 음소는 없다» — 늘임음."""
+        if self.dominance is None or t1 <= t0:
+            return False
+        lo, hi = int(t0 / self.dom_hop), min(len(self.dominance), int(t1 / self.dom_hop))
+        if hi - lo < 2:
+            return False
+        voiced = sum(1 for index in range(lo, hi) if self.dominance[index] >= _HOLD_DOMINANCE)
+        return voiced >= 0.8 * (hi - lo)
+
+
+def _extend_segments(
+    segs: list[dict[str, Any]],
+    line_end: float,
+    hold_max: float,
+    gate: "_ExtendGate | None" = None,
+    hold_max_held: float = 3.0,
+) -> int:
     """세그 끝을 **다음 세그 시작까지** 늘린다 — 프로드 ``segmentation._extend_to_next_start``.
 
     CTC 스팬은 본래 뾰족하다. 실측 세그 길이 중앙값이 20ms인데 UST 노트는 116~219ms이고
@@ -1818,19 +2046,74 @@ def _extend_segments(segs: list[dict[str, Any]], line_end: float, hold_max: floa
     ``hold_max``는 «간주에 흩어진 음절이 화면에서 쭉 늘어나는» 반대 증상을 막는 한도다.
     UST 노트 15,503개 실측에서 99.5퍼센타일이 1.111s, 1.5s를 넘는 것은 0.29%뿐이라 —
     그보다 긴 공백은 늘임음이 아니라 쉼이다. 한도를 넘으면 거기서 끊고 어둠을 남긴다.
+
+    그런데 그 한도는 **시간 길이만** 본다. 1.5초 안쪽인데 이미 노래가 끝난 자리는 그대로
+    늘어나고, 1.5초를 넘게 끌어 부르는 자리는 잘려서 어두워진다 — 서로 반대인 두 증상이
+    한 상수에 묶여 있다. ``gate``가 있으면 그 상수는 **오디오가 반박할 수 있는** 기본값이
+    된다: 부르고 있는 것이 분명하면 ``hold_max_held``까지 늘이고, 발성이 끊겼거나 새 발성이
+    시작되면 한도 안이라도 거기서 끊는다.
     """
     stretched = 0
+
+    def reach(seg: dict[str, Any], boundary: float) -> float:
+        """이 세그를 어디까지 켜 둘 것인가."""
+        cap = seg["start"] + hold_max
+        if gate is None:
+            return min(boundary, cap)
+        # 오디오가 멈추라는 곳(발성이 끊겼거나 새 발성이 시작되는 곳)에서 멈춘다. 그 전까지
+        # 내내 부르고 있었다면 «시간이 길다»는 이유만으로 자르지 않는다 — 그것이 늘임음이다.
+        stop = gate.limit(seg["end"], boundary)
+        if gate.held(seg["end"], stop):
+            cap = seg["start"] + hold_max_held
+        return min(boundary, stop, cap)
+
     for current, following in zip(segs, segs[1:]):
-        target = min(following["start"], current["start"] + hold_max)
+        target = reach(current, following["start"])
         if target > current["end"]:
             current["end"] = round(target, 3)
             stretched += 1
     if segs:
-        target = min(line_end, segs[-1]["start"] + hold_max)
+        target = reach(segs[-1], line_end)
         if target > segs[-1]["end"]:
             segs[-1]["end"] = round(target, 3)
             stretched += 1
     return stretched
+
+
+def _extend_line_tails(lines: list[dict[str, Any]], gate: "_ExtendGate", max_extra: float) -> int:
+    """라인 **끝만** 늘린다 — 자르지 않는다.
+
+    늘이기 게이트(``_ExtendGate``를 ``_extend_segments``에 물리는 쪽)는 실측에서 졌다:
+    구간 IoU 49.71 → 49.46, 덮음 60.05 → 59.09(7곡, 2026-08-02). 원인은 전제가 틀린 것이었다 —
+    세그 4,879개 중 1.5초 상한에 닿은 것이 **10개(0.20%)**뿐이고 다음 경계까지 거리가 중앙
+    0.160초라, 상한은 애초에 구속력이 없었다. 그래서 게이트가 할 수 있는 일은 자르는 것뿐이었고
+    실제로 전 곡에서 세그를 갉았다(Kikuo 평균 0.304 → 0.269초).
+
+    자를 곳이 없다면 늘릴 곳만 남는다. 세그 사이는 다음 세그가 이미 끝을 정하므로 손댈 데가
+    없고, **라인의 마지막 세그**만 다르다 — 그 끝은 앵커가 정한 ``line["end"]``에서 멈추는데,
+    가수가 그 뒤로 계속 끌고 있으면 화면에서는 거기서 꺼진다. 「소절 끝 길게 이어 부르는 부분이
+    쭉 안 늘어져 있다」가 이것이다.
+
+    그래서 여기서는 **우세도가 이어지는 동안만** 다음 라인 시작 전까지 끝을 민다. 발화 축은
+    안 본다(늘임음은 발화가 없는 구간이다). 순수 가산이라 이 장치로 짧아지는 세그는 없다.
+    """
+    moved = 0
+    for index, line in enumerate(lines):
+        segs = line.get("segs") or []
+        if not segs:
+            continue
+        boundary = lines[index + 1]["start"] if index + 1 < len(lines) else line["end"] + max_extra
+        ceiling = min(boundary, line["end"] + max_extra)
+        if ceiling <= line["end"] + 0.05:
+            continue
+        stop = gate.voiced_reach(line["end"], ceiling)
+        if stop <= line["end"] + 0.05:
+            continue
+        line["end"] = round(stop, 3)
+        if segs[-1]["end"] < stop:
+            segs[-1]["end"] = round(stop, 3)
+            moved += 1
+    return moved
 
 
 def _shift_line(line: dict[str, Any], delta: float) -> None:

@@ -46,6 +46,7 @@ ALIGNER_HUE = {
     "2pass-owsm-mixed-hangul": 262 / 360,  # 2패스 · ★한글 표시층
     "2pass-owsm-mixed-star": 340 / 360,   # 2패스 · star 실험(추임새 흡수)
     "2pass-owsm-mixed-stargap": 66 / 360, # 2패스 · 끊긴 자리에만 star
+    "2pass-owsm-mixed-hold": 200 / 360,   # 2패스 · 늘이기 게이트(기각 — 자르기만 함)
     "2pass-owsm-prod-noref": 28 / 360,     # 2패스 · 같은 독음, 심판 끔       # 2패스
     "nemo-nfa": 25 / 360,                # 단독 · 고정(현재 뷰어 제외 — 자리는 비워 둔다)
     "2pass-en-hangul": 36 / 360,         # 2패스 · 철자 기반 음차(뷰어 제외 — 자리는 비워 둔다)
@@ -617,6 +618,8 @@ RETIRED_ALIGNERS = {
     "2pass-owsm-mixed-nolong": "장음 축 — 중립 확정",
     "2pass-owsm-mixed-en": "라틴 낱말 심판 — color 12건 오답으로 기각",
     "2pass-owsm-mixed+pp": "프로드 라인 보정층 — 병적 절단 규칙이 437줄 중 0회 발동(무효)",
+    "2pass-owsm-mixed-hold": "늘이기 오디오 게이트 — 상한에 닿는 세그가 0.20%뿐이라 «자르기»만 남아 기각(구간 IoU 49.71 → 49.46)",
+    "2pass-owsm-mixed-tail": "라인 꼬리 늘임 — 채택되어 2pass-owsm-mixed 본선에 편입(구간 IoU +0.87)",
     "2pass-asr-ipa-hangul-noref": "en 심판 채택 확정 — 정답 4/17 → 14/17",
     "2pass-asr-ipa-en-noref": "위와 같음",
     "2pass-asr-ipa-en-energy": "오디오 강도 봉우리 — 14/17 → 11~12/17로 기각",
