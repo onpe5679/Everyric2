@@ -123,6 +123,36 @@ class OwsmCTCAligner:
     def __init__(self) -> None:
         self._snapshot: Path | None = None
 
+    @staticmethod
+    def _dominance(vocals_path: Path) -> list[float] | None:
+        """보컬 우세도 곡선 — star를 넣을 자리(발성이 끊긴 곳)를 가르는 신호.
+
+        f0 유성도·스템 RMS·VAD는 전부 분리 스템 위에서 죽는다(간주 presence 0.979,
+        간주 RMS −23.4dB vs 가창 −19.8dB로 3dB 차이 — ``alignment/star_prior.py`` 실측).
+        **반주 대비** 비율만이 3배 대비로 갈랐다(간주 0.199 · 가창 0.36~0.68). 프로드의
+        측정된 구현을 그대로 부른다 — 복제하면 신호가 갈린다.
+
+        smooth 0.2s는 기본값(0.4s)보다 짧다. 기본값은 star 가격 성형용이라 경계를 뭉개도
+        되지만, 여기서는 «끊겼나»를 봐야 하므로 짧은 쉼이 뭉개지면 안 된다.
+        """
+        instrumental = vocals_path.with_name("inst.wav")
+        if not instrumental.is_file():
+            return None
+        try:
+            import librosa
+
+            from everyric2.alignment.star_prior import vocal_presence_from_stems
+
+            vocals, _ = librosa.load(str(vocals_path), sr=16_000, mono=True)
+            accomp, _ = librosa.load(str(instrumental), sr=16_000, mono=True)
+            made = vocal_presence_from_stems(vocals, accomp, 16_000, smooth_sec=0.2, hop_sec=0.01)
+        except Exception:
+            logger.warning("우세도 계산 실패 — star 자리 선별 없이 진행", exc_info=True)
+            return None
+        if made is None:
+            return None
+        return [round(float(x), 4) for x in made[1]]
+
     def align(self, vocals_path: Path, lyrics: str, language: str) -> Any:
         from scripts.bench_adapters.hf_ctc import (
             LOW_CONF_COVERAGE,
@@ -147,6 +177,13 @@ class OwsmCTCAligner:
         lang_sym = LANGUAGE_SYMBOLS.get(_base_language(language or ""), DEFAULT_LANGUAGE_SYMBOL)
         payload = {
             "star": bool(getattr(self, "star_tokens", False)),
+            "star_mode": getattr(self, "star_mode", "all"),
+            "presence": (
+                self._dominance(vocals_path)
+                if getattr(self, "star_mode", "all") == "gap"
+                else None
+            ),
+            "presence_hop": 0.01,
             "vocals_path": str(vocals_path),
             "lines": lines,
             "lang_sym": lang_sym,
@@ -191,6 +228,8 @@ class OwsmCTCAligner:
                 # 줄 사이 star가 실제로 얼마를 흡수했는가 — 채택 판단의 핵심 수치다.
                 "star_tokens": result.get("star_tokens"),
                 "star_frames": result.get("star_frames"),
+                "star_mode": result.get("star_mode"),
+                "star_slots": result.get("star_slots"),
                 "quality": quality_meta,
                 "worker_python": str(OWSM_PYTHON),
             },
@@ -333,6 +372,10 @@ VRAM_VARIANTS: tuple[dict[str, Any], ...] = (
     {"suffix": "20s", "buffer_sec": 20.0},
     # ★줄 사이 star — 추임새·애드립·반복 후렴 흡수. 채택 스택(bf16)에 얹은 실험 변형이다.
     {"suffix": "bf16-star", "dtype": "bfloat16", "star_tokens": True},
+    # ★끊긴 자리에만 star — 「명백히 계속 부르는」 줄 사이에는 안 넣는다(사용자 제안 2026-08-02).
+    # 이건 기각된 ``star_prior``와 **구조가 다르다**: 그쪽은 star를 어디에나 두고 프레임별
+    # 가격만 매겨 blank로 동점이 우회했지만, 여기서는 토큰 자체를 안 넣으므로 우회할 대상이 없다.
+    {"suffix": "bf16-stargap", "dtype": "bfloat16", "star_tokens": True, "star_mode": "gap"},
 )
 
 
@@ -344,6 +387,7 @@ def _variant_class(spec: dict[str, Any]) -> type[OwsmCTCAligner]:
         expandable_segments = spec.get("expandable_segments", False)
         batch_size = spec.get("batch_size", 1)
         star_tokens = spec.get("star_tokens", False)
+        star_mode = spec.get("star_mode", "all")
 
     VariantOwsmCTCAligner.__name__ = "OwsmCTC_" + spec["suffix"].replace("-", "_")
     VariantOwsmCTCAligner.__qualname__ = VariantOwsmCTCAligner.__name__
@@ -408,6 +452,13 @@ def _expected_audio_frames(n_samples: int, hop_length: int = 160) -> int:
     for _ in range(3):
         frames = (frames - 3) // 2 + 1
     return frames
+
+
+# 「끊김」 판정. 우세도가 ``_STAR_GAP_LEVEL`` 아래인 프레임이 ``_STAR_GAP_MIN_FRAMES``(10ms
+# 격자) 이상 이어져야 star를 놓는다. 실측 근거(``star_prior``): 간주 우세도 0.199 · 가창
+# 0.36~0.68이라 0.3이 그 사이다. 100ms는 숨 쉬는 시간 — 그보다 짧은 골은 무성 자음이다.
+_STAR_GAP_LEVEL = 0.30
+_STAR_GAP_MIN_FRAMES = 10
 
 
 def _worker_main(request_path: Path, response_path: Path) -> int:
@@ -513,27 +564,20 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
 
     # ── 줄 사이 와일드카드 star ──
     # 가사에 없는 가창(추임새·애드립·반복 후렴)을 흡수시켜 이웃 라인이 그 위로 늘어나는 것을
-    # 막는다. 프로드가 하는 일이고(``star_tokens`` 기본 켬) 하네스에는 없었다 — ja 7곡에서
-    # ``ほら ほら ほら``(9.30s·6음절)·``Boo boo booing``(6.65s·8음절)처럼 라인이 반복 가창
-    # 위로 늘어난 자리가 남아 있었고, VAD 기반 클램프는 거기에 실제로 노래가 있어 못 잡는다.
+    # 막는다. 프로드가 하는 일이고(``star_tokens`` 기본 켬) 하네스에는 없었다.
     #
-    # 성형(``star_prior``)은 하지 않는다. 프로드가 3곡 A/B로 기각했고 이유가 구조적이다 —
-    # 실제 방출에서 blank가 거의 무료 필러라(사전확률 ~0.8) star에만 가격을 매기면 배치
-    # 동점이 blank로 우회할 뿐이다. 프로드도 성형 없이 켜 둔 상태다.
+    # ``star_mode``:
+    #   "all" — 모든 줄 사이. 실측에서 양날이었다 — 인트로 애드립은 옳게 흡수했지만
+    #           (ルーキー 0:07 6.65s → 2.73s) 끊김 없이 이어지는 반복 가창에서는 한 사이클을
+    #           통째로 먹었다(熱異常 2:07 `黒い星が` 0.47초 건너뜀).
+    #   "gap"  — **발성이 끊긴 줄 사이에만** 넣는다. star가 log(1)=0이라 어디서든 실제 토큰보다
+    #           싼 것이 원인이므로, 애초에 놓을 자리를 고른다. 성형(``star_prior``)이 실패한
+    #           이유(blank가 무료라 동점이 우회)가 여기엔 적용되지 않는다 — 토큰이 없으면
+    #           우회할 대상도 없다.
     use_star = bool(payload.get("star"))
+    star_mode = payload.get("star_mode") or "all"
+    presence = payload.get("presence")
     star_id = len(compact_tokens)
-    if use_star:
-        starred_targets: list[int] = []
-        starred_owners: list[Any] = []
-        previous_line: int | None = None
-        for token, owner in zip(compact_targets, token_owners):
-            if previous_line is not None and owner[0] != previous_line:
-                starred_targets.append(star_id)
-                starred_owners.append(None)  # star는 어느 라인의 몫도 아니다
-            starred_targets.append(token)
-            starred_owners.append(owner)
-            previous_line = owner[0]
-        compact_targets, token_owners = starred_targets, starred_owners
 
     text_prev = torch.tensor([[model.na]], dtype=torch.long, device=device)
     text_prev_lengths = text_prev.new_full([1], dtype=torch.long, fill_value=1)
@@ -613,17 +657,66 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
 
     import torchaudio.functional as functional
 
-    if use_star:
-        # star는 log(1.0)=0 — 어느 프레임에서든 실제 토큰보다 싸다. ``forced_align``이
-        # 정규화된 log_probs를 기대하므로 이 트릭은 log_softmax **이후에만** 성립한다.
-        emission = torch.cat(
-            [emission, torch.zeros((emission.shape[0], emission.shape[1], 1), dtype=emission.dtype)],
-            dim=-1,
-        ).contiguous()
+    def _align(target_list: list[int], with_star: bool):
+        source = emission
+        if with_star:
+            # star는 log(1.0)=0 — ``forced_align``이 정규화된 log_probs를 기대하므로 이 트릭은
+            # log_softmax **이후에만** 성립한다.
+            source = torch.cat(
+                [
+                    emission,
+                    torch.zeros(
+                        (emission.shape[0], emission.shape[1], 1), dtype=emission.dtype
+                    ),
+                ],
+                dim=-1,
+            ).contiguous()
+        tensor = torch.tensor([target_list], dtype=torch.int32)
+        tokens, scores = functional.forced_align(source, tensor, blank=0)
+        return functional.merge_tokens(tokens[0], scores[0], blank=0)
 
-    targets = torch.tensor([compact_targets], dtype=torch.int32)
-    aligned_tokens, alignment_scores = functional.forced_align(emission, targets, blank=0)
-    token_spans = functional.merge_tokens(aligned_tokens[0], alignment_scores[0], blank=0)
+    def _insert_stars(slots: set[int]) -> tuple[list[int], list[Any]]:
+        """``slots``에 든 라인 번호 **앞에** star를 꽂은 (타깃, 소유자)."""
+        out_targets: list[int] = []
+        out_owners: list[Any] = []
+        previous_line: int | None = None
+        for token, owner in zip(compact_targets, token_owners):
+            if previous_line is not None and owner[0] != previous_line and owner[0] in slots:
+                out_targets.append(star_id)
+                out_owners.append(None)  # star는 어느 라인의 몫도 아니다
+            out_targets.append(token)
+            out_owners.append(owner)
+            previous_line = owner[0]
+        return out_targets, out_owners
+
+    star_slots: set[int] = set()
+    if use_star:
+        if star_mode == "gap" and presence:
+            # ① star 없이 한 번 정렬해 라인 경계를 얻는다. 인코더는 이미 돌았으므로 DP만 든다.
+            base_spans = _align(compact_targets, False)
+            bounds: dict[int, list[int]] = {}
+            for span, owner in zip(base_spans, token_owners):
+                edge = bounds.setdefault(owner[0], [int(span.start), int(span.end)])
+                edge[0] = min(edge[0], int(span.start))
+                edge[1] = max(edge[1], int(span.end))
+            # ② 인접 라인 사이가 «끊겼는가» — 우세도가 바닥을 친 프레임이 충분히 이어지는가.
+            frame_sec = n_samples / int(emission.shape[1]) / 16_000
+            hop = float(payload.get("presence_hop") or 0.01)
+            ordered = sorted(bounds)
+            for previous_line, next_line in zip(ordered, ordered[1:]):
+                lo = int(bounds[previous_line][1] * frame_sec / hop)
+                hi = int(bounds[next_line][0] * frame_sec / hop)
+                if hi - lo < _STAR_GAP_MIN_FRAMES:
+                    continue
+                quiet = sum(1 for value in presence[lo:hi] if value < _STAR_GAP_LEVEL)
+                if quiet >= _STAR_GAP_MIN_FRAMES:
+                    star_slots.add(next_line)
+        else:
+            star_slots = {owner[0] for owner in token_owners}
+        if star_slots:
+            compact_targets, token_owners = _insert_stars(star_slots)
+
+    token_spans = _align(compact_targets, bool(use_star and star_slots))
     if len(token_spans) != len(compact_targets):
         raise RuntimeError(
             f"OWSM produced {len(token_spans)} spans for {len(compact_targets)} target tokens"
@@ -675,6 +768,8 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
         "compact_vocab_size": len(compact_tokens),
         "target_tokens": len(compact_targets),
         "star_tokens": sum(1 for owner in token_owners if owner is None),
+        "star_mode": star_mode if use_star else None,
+        "star_slots": len(star_slots),
         "star_frames": star_frames,
         "lines": out_lines,
     }

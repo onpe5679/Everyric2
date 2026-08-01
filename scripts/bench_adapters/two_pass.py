@@ -72,6 +72,10 @@ class TwoPassConfig:
     # 다시 재기 위한 스위치다 — 켜면 ``our`` auer(2음절) vs aur(1음절)처럼 **음절 수가 진짜로
     # 다른** 후보가 심판에 올라온다.
     allow_length_change: bool = False
+    # 한 시각에 뭉친 세그를 발성 구간에 펴 줄 것인가(``_spread_piled_segments``).
+    spread_piles: bool = True
+    # 반복 훅에서 렌디션을 건너뛴 자리를 되돌릴 것인가(``_respace_repeated_lines``).
+    respace_repeats: bool = True
     # 세그 끝을 다음 세그 시작까지 늘릴 것인가(노래방 표시 규약). 프로드가 이미 하는 일이고
     # 하네스만 빠져 있었다 — ``_extend_segments`` 참조.
     extend_segments: bool = True
@@ -321,6 +325,15 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         refiner_script="ja-mixed",
         referee=True,
         note="혼합 표기 + 줄 사이 star 앵커(추임새 흡수 실험)",
+    ),
+    # ★끊긴 자리에만 star — 「명백히 계속 부르는」 줄 사이에는 안 넣는다. 보컬 우세도로 가른다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-stargap",
+        anchor="owsm-ctc-v4-1b-bf16-stargap",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        note="혼합 표기 + 끊긴 줄 사이에만 star(우세도 판정)",
     ),
     # ★한글 표시층 — **위와 정렬이 완전히 같고 표시만** 한글이다(``ja-mixed-hangul``).
     # 한국어 사용자가 일본어 곡을 읽는 층이고 프로드의 실제 기능이다. 한글을 정렬 타깃으로
@@ -1296,6 +1309,17 @@ class TwoPassAligner(AlignerAdapter):
 
         refined = 0
         stretched = 0
+        spread = 0
+        # 뭉침을 펼 때 쓸 프레임별 «지금 소리가 나고 있을 확률» — 방출에서 바로 얻는다.
+        # VAD를 따로 돌릴 필요가 없고, 정렬이 본 것과 **같은 신호**라 판단이 어긋나지 않는다.
+        presence = None
+        if self.config.spread_piles:
+            try:
+                presence = (
+                    (1 - emission.emission[0][:, emission.blank_id].exp()).float().cpu().numpy()
+                )
+            except Exception:
+                logger.warning("%s: presence 계산 실패, 뭉침 펴기 생략", self.name, exc_info=True)
         converted = 0
         # 경량 모델이 자기 타깃을 얼마나 확신하는지. 라인 confidence는 **앵커** 값이라
         # 표기를 바꿔도 안 움직인다 — 표기 적합도(가나 vs 한글 vs IPA)를 비교하려면
@@ -1627,7 +1651,30 @@ class TwoPassAligner(AlignerAdapter):
             refined += 1
 
         stats = _refine_stats(refined, converted, len(lines), fallbacks)
+        if self.config.respace_repeats:
+            stats["repeats_respaced"] = _respace_repeated_lines(lines, source_lines)
         stats["boundary_fixes"] = _enforce_monotonic(lines)
+        # 뭉침 펴기는 **단조 보정 뒤에** 돈다. 뭉침을 만드는 것이 그 보정 자신이기 때문이다 —
+        # 라인 창이 심하게 겹치면 «완전 역전» 처리가 앞뒤 세그를 같은 시각으로 눌러 버린다
+        # (熱異常 boundary_fixes 104건 = 뭉친 세그 102개로 일치). 앞에서 돌리면 볼 것이 없다.
+        if self.config.spread_piles and presence is not None:
+            for line in lines:
+                line_segs = line.get("segs") or []
+                moved = _spread_piled_segments(line_segs, presence, frame_sec)
+                spread += moved
+                if moved and self.config.extend_segments:
+                    _extend_segments(line_segs, line["end"], self.seg_hold_max_sec)
+        # 뭉침 펴기는 **단조 보정 뒤에** 돈다. 뭉침을 만드는 것이 그 보정이기 때문이다 —
+        # 라인 창이 심하게 겹치면 «완전 역전» 처리가 앞뒤 세그를 같은 시각으로 눌러 버린다
+        # (熱異常 boundary_fixes 104건 = 뭉친 세그 102개). 앞에서 돌리면 볼 것이 없다.
+        if self.config.spread_piles and presence is not None:
+            for line in lines:
+                line_segs = line.get("segs") or []
+                spread += _spread_piled_segments(line_segs, presence, frame_sec)
+                if self.config.extend_segments and spread:
+                    _extend_segments(line_segs, line["end"], self.seg_hold_max_sec)
+        if self.config.spread_piles:
+            stats["segments_spread"] = spread
         if self.config.extend_segments:
             stats["segments_stretched"] = stretched
             stats["seg_hold_max_sec"] = self.seg_hold_max_sec
@@ -1698,6 +1745,64 @@ def _window_score(frame_scores: Any) -> float | None:
     return float(frame_scores.sum()) / len(frame_scores)
 
 
+def _spread_piled_segments(segs: list[dict[str, Any]], presence, frame_sec: float) -> int:
+    """한 시각에 **뭉친** 세그를 그 앞 발성 구간에 펴 준다.
+
+    CTC가 같은 가사를 여러 렌디션에 걸쳐 흘릴 때, 앞쪽 글자들이 스팬 길이 0으로 무너져
+    한 프레임에 쌓인다 — 熱異常에서 세그의 **8.7%**가 앞 세그와 시작 시각이 같았다.
+    화면에서는 그 음절들이 존재하지 않는 것처럼 스쳐 지나가고, 다음 실제 세그까지의
+    구간은 통째로 비어 있다.
+
+    ``UST`` 실측(熱異常 3:16 `編んだ名誉で`):
+
+        정답      あ196.95 ん197.15 だ197.28 め197.60
+        뭉친 상태  あ196.79 ん196.79 だ196.79 め196.79
+
+    뭉친 덩이를 «앞 세그 시작 ~ 다음 실제 세그 시작» 사이에 **방출의 비-blank 확률로
+    가중해** 편다. 균등 분배가 아니라 가중인 이유: 그 구간에 쉼이 섞여 있으면 균등
+    분배는 음절을 무음 위에 놓는다. 가중하면 소리가 난 자리로 모인다.
+
+    시작 시각만 고친다 — 끝은 ``_extend_segments``가 다시 잡는다.
+    """
+    import numpy as np
+
+    fixed = 0
+    index = 0
+    while index < len(segs) - 1:
+        if abs(segs[index + 1]["start"] - segs[index]["start"]) > 1e-6:
+            index += 1
+            continue
+        # 같은 시각에 쌓인 덩이 [index .. stop)
+        stop = index + 1
+        while stop < len(segs) and abs(segs[stop]["start"] - segs[index]["start"]) <= 1e-6:
+            stop += 1
+        origin = segs[index]["start"]
+        limit = segs[stop]["start"] if stop < len(segs) else segs[-1].get("end", origin)
+        span = limit - origin
+        count = stop - index
+        if span > 1e-3 and count > 1:
+            lo = max(int(origin / frame_sec), 0)
+            hi = min(int(limit / frame_sec) + 1, len(presence))
+            weights = presence[lo:hi] if hi > lo else None
+            if weights is not None and len(weights) >= count and float(weights.sum()) > 0:
+                cumulative = np.cumsum(weights) / float(weights.sum())
+                # k번째 음절은 누적 발성량의 k/count 지점에서 시작한다.
+                for offset in range(1, count):
+                    position = int(np.searchsorted(cumulative, offset / count))
+                    segs[index + offset]["start"] = round((lo + position) * frame_sec, 3)
+            else:
+                step = span / count
+                for offset in range(1, count):
+                    segs[index + offset]["start"] = round(origin + offset * step, 3)
+            for offset in range(count):
+                segs[index + offset]["end"] = max(
+                    segs[index + offset]["end"], segs[index + offset]["start"]
+                )
+            fixed += count - 1
+        index = stop
+    return fixed
+
+
 def _extend_segments(segs: list[dict[str, Any]], line_end: float, hold_max: float) -> int:
     """세그 끝을 **다음 세그 시작까지** 늘린다 — 프로드 ``segmentation._extend_to_next_start``.
 
@@ -1726,6 +1831,64 @@ def _extend_segments(segs: list[dict[str, Any]], line_end: float, hold_max: floa
             segs[-1]["end"] = round(target, 3)
             stretched += 1
     return stretched
+
+
+def _shift_line(line: dict[str, Any], delta: float) -> None:
+    """라인과 그 안의 세그를 **통째로** 옮긴다(강체 이동)."""
+    line["start"] = round(line["start"] + delta, 3)
+    line["end"] = round(line["end"] + delta, 3)
+    for seg in line.get("segs") or []:
+        seg["start"] = round(seg["start"] + delta, 3)
+        seg["end"] = round(seg["end"] + delta, 3)
+
+
+def _respace_repeated_lines(
+    lines: list[dict[str, Any]], sources: list[str], min_run: int = 3, factor: float = 1.5
+) -> int:
+    """같은 가사가 연속 반복될 때 **한 렌디션을 건너뛴 자리**를 되돌린다.
+
+    반복 훅은 박자 위에 있어 시작 간격이 거의 일정하다 — 熱異常 ``黒い星が`` 16회의 UST
+    정답 간격은 **0.49초로 완전히 균일**했다. 그런데 정렬은 렌디션을 하나 놓치는 일이 있고,
+    그러면 그 자리 간격만 두 배가 되고 **뒤쪽 형제가 통째로 한 박자 밀린다**:
+
+        정답   0.49 0.49 0.49 0.49 0.49 0.49 0.49
+        실측   0.56 0.48 0.40 0.48 **1.12** 0.40 0.48   ← 라인 90~92가 +0.5초씩 밀림
+
+    간격 중앙값의 ``factor``배를 넘는 자리를 찾아 **초과분만큼 뒤쪽을 당긴다**. 등간격으로
+    전부 재배치하지 않는 이유: 앞쪽 형제들은 이미 맞아 있어(오차 0.03~0.07초) 건드리면
+    손해다. 틀어진 곳만 고친다.
+
+    세그는 라인과 함께 **강체 이동**한다. 라인 추정치에 맞춰 세그를 리스케일하면 CTC 실측이
+    손상된다는 것은 이미 겪었지만(음절 88.8 → 43.5%), 여기서는 스팬 구조를 그대로 두고
+    통째로 옮기는 것이고, 반복 훅은 렌디션끼리 음향이 같아 옮긴 자리도 같은 소리 위다.
+
+    ``_clamp_repeated_outliers``(프로드)와 다른 규칙이다 — 그쪽은 형제 중앙값의 2.5배를 넘는
+    **길이**를 자르는데, 여기서 틀린 것은 길이가 아니라 **위치**다(라인 90 길이 0.40초로 형제와
+    같고 시작만 0.59초 늦다). 그래서 그 규칙은 이 자리에 발동하지 않는다.
+    """
+    fixed = 0
+    index = 0
+    while index < len(lines):
+        text = sources[index].strip() if index < len(sources) else ""
+        stop = index + 1
+        while stop < len(lines) and text and sources[stop].strip() == text:
+            stop += 1
+        if text and stop - index >= min_run:
+            for _ in range(stop - index):  # 한 구간에 건너뛴 자리가 여럿일 수 있다
+                starts = [lines[k]["start"] for k in range(index, stop)]
+                gaps = [b - a for a, b in zip(starts, starts[1:])]
+                median = statistics.median(gaps) if gaps else 0.0
+                if median <= 0.05:
+                    break
+                worst = max(range(len(gaps)), key=lambda k: gaps[k])
+                excess = gaps[worst] - median
+                if gaps[worst] <= median * factor or excess <= 0.10:
+                    break
+                for k in range(index + worst + 1, stop):
+                    _shift_line(lines[k], -excess)
+                fixed += 1
+        index = max(stop, index + 1)
+    return fixed
 
 
 def _enforce_monotonic(lines: list[dict[str, Any]]) -> int:
