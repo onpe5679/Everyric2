@@ -72,6 +72,15 @@ class TwoPassConfig:
     # 다시 재기 위한 스위치다 — 켜면 ``our`` auer(2음절) vs aur(1음절)처럼 **음절 수가 진짜로
     # 다른** 후보가 심판에 올라온다.
     allow_length_change: bool = False
+    # 세그 끝을 다음 세그 시작까지 늘릴 것인가(노래방 표시 규약). 프로드가 이미 하는 일이고
+    # 하네스만 빠져 있었다 — ``_extend_segments`` 참조.
+    extend_segments: bool = True
+    # 혼합 경로에서 **라틴 낱말**도 심판에 올릴 것인가. 기본은 끔 — numb numb에서 ``color``를
+    # 12번 전부 ``코러``로 바꿨는데 사용자 청취는 ``커러``였다(2026-08-02). 타이밍에는 영향이
+    # 없고(두 후보가 같은 음절 구조라 세그가 동일) **발음 표기만** 갈리므로 지금 지표로는
+    # 아예 안 잡힌다. 그 곡의 라틴 구간은 방출 신뢰도가 0.244로 무너져 있었다(가나 0.447,
+    # rookie 라틴 0.627) — 국소 신뢰도 게이트가 답으로 보이나 오답 1건으로 문턱을 정할 수는 없다.
+    latin_referee: bool = False
 
 
 CONFIGS: tuple[TwoPassConfig, ...] = (
@@ -286,6 +295,52 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         refiner="omniasr-ctc",
         refiner_script="ja-prod",
         note="같은 독음, 심판만 끔 — 이 둘의 차이가 곧 심판의 값이다",
+    ),
+    # ★혼합 표기 — 위와 같은 ja 독음에 **라틴 낱말 음절화 + 장음 펴기**만 얹는다. ja·mixed
+    # 45곡에서 라틴이 타깃의 12.4%이고 5%를 넘는 곡이 16곡이라(numb numb 53.7%), 그 곡들은
+    # 지금 가사 절반이 `n|u|m|b`처럼 글자 단위로 쪼개져 나온다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        note="프로드 독음 + 라틴 음절화 + 장음 펴기 + 오디오 심판",
+    ),
+    # ★한글 표시층 — **위와 정렬이 완전히 같고 표시만** 한글이다(``ja-mixed-hangul``).
+    # 한국어 사용자가 일본어 곡을 읽는 층이고 프로드의 실제 기능이다. 한글을 정렬 타깃으로
+    # 쓰면 omniASR이 한글 자모를 거의 못 내 무너지지만(실측 자모 0/24), 표시로만 쓰면
+    # 정렬은 가나가 하고 화면에는 읽을 수 있는 글자가 나간다 — 타깃/표시 분리의 요점이다.
+    # 부수 효과로 분절이 **더 옳아진다**: 가나 레인은 ``しゅ``를 し|ゅ 두 칸으로 쪼개는데
+    # 한글은 ``슈`` 한 칸이고, ``ん``·``っ``도 받침으로 앞 칸에 흡수된다(しんかい → 신카이).
+    TwoPassConfig(
+        name="2pass-owsm-mixed-hangul",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed-hangul",
+        referee=True,
+        note="위와 같은 정렬, 표시는 한글 음절(신카이 쇼조)",
+    ),
+    # 위와 **장음 축만** 다른 대조군. 라틴 라우팅과 장음 펴기를 같이 켜면 어느 쪽이 이득을
+    # 냈는지 못 읽는다 — 첫 측정에서 라틴 없는 곡까지 떨어져 원인을 착각했다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-nolong",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed-nolong",
+        referee=True,
+        note="라틴 음절화만 — 장음 펴기 없음(축 분리 대조군)",
+    ),
+    # 라틴 낱말까지 심판에 올린 대조군. 타이밍은 안 바뀌고 **발음 표기**만 갈린다 —
+    # ``color`` 커러/코러. 현 지표(UST 음절 타이밍)로는 원리적으로 못 재고 청취로만 판정된다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-en",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        latin_referee=True,
+        note="혼합 표기 + 라틴 낱말까지 심판 — 실측에서 color 12건 오답",
     ),
 )
 
@@ -644,6 +699,9 @@ _SCRIPTS = {
     # ★프로드 독음 — 서버가 실제로 쓰는 후보 생성기의 기본값([0])이다. phonetic=True + 루비
     # 채택이라 조사·장음까지 반영된다. 심판 켬/끔이 **이 타깃 위에서** 갈려야 비교가 된다.
     "ja-prod": _ja_prod_units,
+    # ★혼합 표기 — 위와 같은 ja 독음에 **라틴 낱말 음절화**와 **장음 펴기**를 얹는다.
+    # 정의는 아래(``_mixed_units``)에 있고 여기서는 이름만 건다 — 등록 시점에 이미 정의돼
+    # 있어야 하므로 실제 배선은 모듈 끝에서 한다.
 }
 
 # 오디오 심판이 붙는 스크립트 → 표시 종류. 심판은 낱말마다 사전의 대체 발음으로 바꿔 보고
@@ -735,17 +793,249 @@ def _syllables_in(owners: list[str], span: tuple[int, int] | None) -> int | None
     return sum(1 for index in range(lo, min(hi, len(owners))) if owners[index])
 
 
+# ── 혼합 표기 라우팅 ──
+#
+# ja 경로는 한자·가나만 다루고 **라틴을 글자 단위로 흘려보낸다**. ``numb``이 1음절인데
+# ``n|u|m|b`` 네 세그로 나온다 — 카라오케 표시로는 깨진 것이다. ja·mixed 45곡에서 라틴이
+# 타깃의 12.4%이고, **5% 넘는 곡이 16곡**이다(numb numb 53.7%, グラス 50.3%,
+# DAYBREAK FRONTLINE 80.0%). 절반이 영어인 곡이 여럿이므로 그 곡들은 가사 절반이 깨진다.
+#
+# 부품은 이미 다 있다 — 라틴은 en 경로의 ``_ipa_display_full``이 CMU 음절로 묶어 준다.
+# 여기서는 **문자 계열별로 나눠 각자에게 넘기기만** 한다. 한글은 손대지 않는다: 한글이 음절
+# 문자라 글자 하나가 곧 음절이고, omniASR 어휘에도 음절이 그대로 있다(아·스·라·이·해 확인).
+_LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z']*")
+
+# 장음 ``ー``가 이어받는 모음. omniASR 어휘에 ``ー``가 없어 그대로 두면 그 모라가 정렬
+# 타깃에서 통째로 빠진다(ja 커버리지 95.6% → 92.3% 실측). 앞 가나의 모음으로 편다.
+_KANA_VOWEL: dict[str, str] = {}
+for _vowel, _row in (
+    ("あ", "あかさたなはまやらわがざだばぱゃゎ"),
+    ("い", "いきしちにひみりぎじぢびぴ"),
+    ("う", "うくすつぬふむゆるぐずづぶぷゅ"),
+    ("え", "えけせてねへめれげぜでべぺ"),
+    ("お", "おこそとのほもよろをごぞどぼぽょ"),
+):
+    for _kana in _row:
+        _KANA_VOWEL[_kana] = _vowel
+        _KANA_VOWEL[chr(ord(_kana) + 0x60)] = chr(ord(_vowel) + 0x60)  # 가타카나도 같이
+
+
+def _expand_choonpu(text: str, owners: list[str]) -> tuple[str, list[str]]:
+    """``ー``를 앞 가나의 모음으로 펴되 **표시 소유자는 비운다**.
+
+    정렬과 표시가 원하는 것이 다르다. CTC는 그 구간에 모음이 이어지는 걸 들으므로 타깃에
+    모음이 있어야 맞고(``ー``는 omniASR 어휘에 없어 그 모라가 통째로 빠졌다 — ja 커버리지
+    95.6% → 92.3%), 노래방 표시에서 ``しゅう``는 **한 칸**이지 두 칸이 아니다.
+
+    소유자를 비우면 ``_refine``이 앞 세그의 끝을 여기까지 늘린다 — 세그 하나가 늘어난 모라
+    전체를 덮는다. 처음엔 표시도 모음으로 채웠는데 세그가 늘면서 정확도가 떨어졌다
+    (深海少女 97.85 → 96.55, 熱異常 23.94 → 21.46, 2026-08-02).
+    """
+    if "ー" not in text and "ｰ" not in text:
+        return text, owners
+    chars: list[str] = []
+    out: list[str] = []
+    for index, char in enumerate(text):
+        owner = owners[index] if index < len(owners) else ""
+        if char in ("ー", "ｰ"):
+            vowel = _KANA_VOWEL.get(chars[-1]) if chars else None
+            if vowel is None:
+                continue  # 앞이 가나가 아니면 버린다 — 어차피 어휘 밖이라 정렬에서 빠진다
+            chars.append(vowel)
+            out.append("")
+            continue
+        chars.append(char)
+        out.append(owner)
+    return "".join(chars), out
+
+
+def _route_latin(
+    text: str, owners: list[str], display: str, choices: dict[int, int] | None = None
+) -> tuple[str, list[str]]:
+    """타깃 안의 **라틴 낱말**을 en 경로(ASCII 음소 + 음절 표시)로 갈아 끼운다.
+
+    ``choices``는 «라틴 낱말 순번 → CMU 발음 번호»다. 라틴 낱말 심판이 이긴 발음을 여기로
+    넘겨 조합 타깃을 만든다 — ja 독음 축과 라틴 축이 서로 다른 시간 구간이라 독립으로 반영된다.
+    """
+    chars: list[str] = []
+    out: list[str] = []
+    pos = 0
+    for ordinal, match in enumerate(_LATIN_WORD_RE.finditer(text)):
+        chars.append(text[pos : match.start()])
+        out.extend(owners[pos : match.start()])
+        word = match.group(0)
+        entry = (choices or {}).get(ordinal, 0)
+        word_text, word_owners, _ = _ipa_display_full(word, display, {0: entry} if entry else None)
+        if word_text and len(word_owners) == len(word_text):
+            chars.append(word_text)
+            out.extend(word_owners)
+        else:  # CMU에 없는 낱말 — 원문 철자를 그대로 둔다(en 경로와 같은 처리)
+            chars.append(word)
+            out.extend(owners[match.start() : match.end()])
+        pos = match.end()
+    chars.append(text[pos:])
+    out.extend(owners[pos:])
+    return "".join(chars), out
+
+
+_KANA_RE = re.compile(r"[぀-ゟ゠-ヿ]+")
+
+
+def _hangul_owners_for_kana(run: str) -> list[str]:
+    """가나 한 덩이 → **글자별 한글 소유자**. 받침으로 흡수되는 글자는 빈 소유자다.
+
+    ``kana_to_hangul``을 그대로 재사용한다 — 받침(ん·っ)과 장음 규칙이 이미 거기 있고, 표시가
+    프로드와 갈리면 안 되기 때문이다. 글자를 하나씩 늘려 가며 «한글이 몇 글자가 됐는가»를
+    보고, 안 늘어난 글자는 앞 글자에 먹힌 것이므로 소유자를 비운다(``しんかい`` = し·ん·か·い
+    → 신··카·이). 빈 소유자는 ``_refine``이 앞 세그의 끝을 늘리는 데 쓴다.
+    """
+    from everyric2.text.kana_hangul import kana_to_hangul
+
+    starts = []
+    buffer = ""
+    for char in run:
+        starts.append(len(kana_to_hangul(buffer)))
+        buffer += char
+    final = kana_to_hangul(buffer)
+    owners = []
+    for index, start in enumerate(starts):
+        stop = starts[index + 1] if index + 1 < len(starts) else len(final)
+        owners.append(final[start:stop] if stop > start else "")
+    return owners
+
+
+def _route_hangul(text: str, owners: list[str]) -> tuple[str, list[str]]:
+    """가나 구간의 **표시만** 한글로 바꾼다 — 정렬 타깃(``text``)은 건드리지 않는다.
+
+    타깃과 표시를 가르는 것이 이 경로의 요점이다. 한글을 타깃으로 쓰면 omniASR이 한글 자모를
+    거의 못 내서(실측 0/24) 정렬이 무너지지만, 표시로만 쓰면 정렬은 가나가 하고 화면에는
+    한국어 사용자가 읽을 수 있는 글자가 나간다.
+    """
+    out = list(owners)
+    for match in _KANA_RE.finditer(text):
+        lo, hi = match.span()
+        replaced = _hangul_owners_for_kana(text[lo:hi])
+        # 원래 소유자가 비어 있던 자리(장음 등)는 그대로 비워 둔다 — 앞 세그의 몫이다.
+        for offset, owner in enumerate(replaced):
+            out[lo + offset] = owner if owners[lo + offset] else ""
+    return text, out
+
+
+def _mixed_stage1(
+    source: str, parse: list[Any] | None, expand_long: bool
+) -> tuple[str, list[str]]:
+    """라틴 라우팅 **직전** 상태 — ja 독음 + 장음 펴기. 라틴 낱말은 아직 원문 철자다."""
+    text, owners = (
+        _ja_prod_units(source) if parse is None else _ja_reading_units(source, parse)
+    )
+    return _expand_choonpu(text, owners) if expand_long else (text, owners)
+
+
+def _mixed_units(
+    source: str,
+    parse: list[Any] | None = None,
+    display: str = "en",
+    expand_long: bool = True,
+    en_choices: dict[int, int] | None = None,
+) -> tuple[str, list[str]]:
+    """혼합 가사 한 줄 → (정렬 타깃, 표시 소유자). ja 독음 → 장음 펴기 → 라틴 라우팅.
+
+    ``expand_long``은 **축 분리용**이다. 라틴 라우팅과 장음 펴기를 같이 켜면 어느 쪽이 이득을
+    냈는지 못 읽는다 — 실제로 처음 측정에서 라틴 없는 곡까지 점수가 떨어져 원인을 착각했다.
+    """
+    text, owners = _mixed_stage1(source, parse, expand_long)
+    if display == "hangul":
+        text, owners = _route_hangul(text, owners)
+    return _route_latin(text, owners, display, en_choices)
+
+
+def _mixed_variants(
+    source: str, expand_long: bool = True, latin: bool = False, display: str = "en"
+) -> tuple[_Candidate, list[_Candidate]]:
+    """혼합 경로의 심판 후보 — **두 축**을 함께 낸다.
+
+    * ja 독음 축: 라인 전체 파스 후보(``word_index`` 없음). 파스마다 토큰 경계가 달라 조합이
+      안 되므로 이긴 것 하나만 고른다.
+    * 라틴 낱말 축: 낱말 하나씩 CMU 대체 발음(``word_index`` = 라틴 낱말 순번). 낱말끼리는
+      서로 다른 시간 구간이라 독립 판정 후 한꺼번에 반영한다.
+
+    두 축은 서로 다른 구간을 차지하므로 ``_refine``이 «이긴 파스 + 이긴 낱말들»로 조합
+    타깃을 다시 만든다. 라틴 후보는 **기본 파스 위에서** 만든다 — 파스가 바뀌어도 라틴
+    구간의 글자는 그대로라 판정이 그대로 옮겨진다.
+    """
+    from scripts.bench_adapters.en_g2p import pronunciations
+
+    token_sets = _ja_prod_tokens(source)
+    parses: list[Any] = list(token_sets) if token_sets else [None]
+    base_parse = parses[0]
+    base_text, base_owners = _mixed_units(source, base_parse, display, expand_long=expand_long)
+    base = _Candidate("", base_text, base_owners, parse=base_parse)
+    out: list[_Candidate] = []
+    seen = {base_text}
+
+    for rank, tokens in enumerate(parses[1:], start=1):
+        alt_text, alt_owners = _mixed_units(source, tokens, display, expand_long=expand_long)
+        if not alt_text or alt_text in seen:
+            continue
+        seen.add(alt_text)
+        out.append(_Candidate(f"cand#{rank}", alt_text, alt_owners, parse=tokens))
+
+    if not latin:
+        return base, out
+    stage1, _ = _mixed_stage1(source, base_parse, expand_long)
+    for ordinal, word in enumerate(_LATIN_WORD_RE.findall(stage1)):
+        if word.lower() in _CONTEXT_DETERMINED:
+            continue  # 문맥이 이미 정한 낱말 — 오디오에 물을 것이 없다
+        total = len(pronunciations(word))
+        for entry in range(1, min(total, _MAX_ALTERNATES + 1)):
+            alt_text, alt_owners = _mixed_units(
+                source, base_parse, display, expand_long=expand_long,
+                en_choices={ordinal: entry},
+            )
+            if not alt_text or alt_text in seen:
+                continue
+            seen.add(alt_text)
+            out.append(
+                _Candidate(
+                    label=f"{word}#{entry}",
+                    text=alt_text,
+                    owners=alt_owners,
+                    word_index=ordinal,
+                    entry=entry,
+                    parse=base_parse,
+                )
+            )
+    return base, out
+
+
 # ja 후보를 내는 스크립트. **두 곳에서 봐야 한다** — 후보 생성기(``_referee_variants``)와
 # 심판을 켜는 게이트(``_refine``의 ``referee_on``). 한쪽에만 넣으면 심판이 조용히 안 돈다.
-_JA_REFEREE_SCRIPTS = frozenset({"ja-reading", "ja-prod"})
+_JA_REFEREE_SCRIPTS = frozenset(
+    {"ja-reading", "ja-prod", "ja-mixed", "ja-mixed-nolong", "ja-mixed-hangul"}
+)
+
+# ``_SCRIPTS``는 위에서 만들어 두고 배선만 여기서 한다 — ``_mixed_units``가 그 아래에 있어서다.
+_SCRIPTS["ja-mixed"] = _mixed_units
+_SCRIPTS["ja-mixed-nolong"] = lambda s, parse=None: _mixed_units(s, parse, expand_long=False)
+# ★한글 표시 — **정렬은 같고 표시만** 한글이다. 한국어 사용자가 일본어 곡을 읽는 층이다.
+_SCRIPTS["ja-mixed-hangul"] = lambda s, parse=None: _mixed_units(s, parse, "hangul")
 
 
-def _referee_variants(script: str, source: str, allow_length_change: bool = False):
+def _referee_variants(
+    script: str, source: str, allow_length_change: bool = False, latin_referee: bool = False
+):
     """스크립트별 후보 생성. 심판을 지원하지 않는 스크립트면 None.
 
     en(CMU)은 **낱말 하나씩** 바꾼 후보를 내고, ja(MeCab)는 **라인 전체** 파스를 낸다 —
     사전의 단위가 다르기 때문이다(``_ja_reading_variants`` 참조).
     """
+    if script.startswith("ja-mixed"):
+        return _mixed_variants(
+            source,
+            expand_long=not script.endswith("-nolong"),
+            latin=latin_referee,
+            display="hangul" if script.endswith("-hangul") else "en",
+        )
     if script in _JA_REFEREE_SCRIPTS:
         return _ja_reading_variants(source)
     display = _REFEREE_DISPLAY.get(script)
@@ -795,6 +1085,9 @@ class _Candidate:
     char_span: tuple[int, int] | None = None
     # 기본 후보에서 같은 낱말의 구간. 음절 수가 바뀌면 길이도 달라지므로 양쪽이 다 필요하다.
     base_span: tuple[int, int] | None = None
+    # 혼합 경로에서 이 후보가 쓴 **ja 파스**. 라틴 낱말 심판과 조합할 때 필요하다 — 조합
+    # 타깃을 다시 만들려면 «어느 독음 위에서» 낱말을 바꿨는지 알아야 한다.
+    parse: Any = None
     # ``_refine``이 나중에 채워 넣는다 — 타깃 토큰 열과 «표시 글자 → 토큰 범위» 대응.
     tokens: list[int] = field(default_factory=list)
     ranges: list[Any] = field(default_factory=list)
@@ -862,6 +1155,9 @@ class TwoPassAligner(AlignerAdapter):
     # 음절 골로 인정할 최소 강도 낙차(dB). 청취 22건에서 2dB가 «되던 것 파괴» 1건으로 가장
     # 얌전했고, 1dB는 gain 오답 4건을 전부 고치는 대신 3건을 깼다(2026-08-02).
     energy_dip_db: float = 2.0
+    # 세그를 늘일 수 있는 최대 길이(초). UST 노트 15,503개에서 99.5퍼센타일 1.111s이고
+    # 1.5s 초과는 0.29%뿐이라, 그보다 긴 공백은 늘임음이 아니라 쉼으로 본다.
+    seg_hold_max_sec: float = 1.5
 
     def __init__(self, config: TwoPassConfig | None = None) -> None:
         if config is None:
@@ -984,6 +1280,7 @@ class TwoPassAligner(AlignerAdapter):
         device = emission.emission.device
 
         refined = 0
+        stretched = 0
         converted = 0
         # 경량 모델이 자기 타깃을 얼마나 확신하는지. 라인 confidence는 **앵커** 값이라
         # 표기를 바꿔도 안 움직인다 — 표기 적합도(가나 vs 한글 vs IPA)를 비교하려면
@@ -995,8 +1292,11 @@ class TwoPassAligner(AlignerAdapter):
         # 길이가 어긋난 사고에 가까우므로 기존대로 버린다 — 기존 실측값을 건드리지 않는다.
         # ja-reading도 같은 구조다 — 한자 한 글자가 가나 여럿을 덮으므로 뒤따르는 가나는
         # 소유자가 비고, 그 시간은 앞 글자(한자)의 몫이다.
+        # ja-mixed도 같다 — 라틴 낱말은 첫 글자가 음절 전체를 소유하고(``numb`` = n·u·m 세
+        # 토큰에 표시 하나), 늘어난 장음도 소유자가 빈다. 안 걸면 세그가 첫 음소 길이로 잘린다.
         merge_orphans = (
             self.config.refiner_script.startswith("latin-ipa-")
+            or self.config.refiner_script.startswith("ja-mixed")
             or self.config.refiner_script == "ja-reading"
         )
 
@@ -1042,7 +1342,12 @@ class TwoPassAligner(AlignerAdapter):
 
         for line, source in zip(lines, source_lines):
             made = (
-                _referee_variants(script, source, self.config.allow_length_change)
+                _referee_variants(
+                    script,
+                    source,
+                    self.config.allow_length_change,
+                    self.config.latin_referee,
+                )
                 if referee_on
                 else None
             )
@@ -1240,7 +1545,27 @@ class TwoPassAligner(AlignerAdapter):
                     continue
                 winners[candidate.word_index] = candidate.entry
                 referee_picks[candidate.label] = referee_picks.get(candidate.label, 0) + 1
-            if line_best is not None:
+            if script.startswith("ja-mixed") and (line_best is not None or winners):
+                # 혼합 경로는 **두 축이 함께** 이길 수 있다 — ja 독음(라인 전체)과 라틴 낱말.
+                # 서로 다른 시간 구간이므로 이긴 파스 위에 이긴 낱말들을 얹어 다시 만든다.
+                chosen_parse = line_best[1].parse if line_best is not None else base.parse
+                text, merged_owners = _mixed_units(
+                    source,
+                    chosen_parse,
+                    expand_long=(script == "ja-mixed"),
+                    en_choices=winners or None,
+                )
+                combined = _Candidate("", text, merged_owners)
+                if compile_candidate(combined) and all(t in column_of for t in combined.tokens):
+                    aligned_combined = align(combined)
+                    if aligned_combined is not None:
+                        spans, _ = aligned_combined
+                        owners, ranges = combined.owners, combined.ranges
+                        referee_stats["switched"] += 1
+                        if line_best is not None:
+                            label = line_best[1].label
+                            referee_picks[label] = referee_picks.get(label, 0) + 1
+            elif line_best is not None:
                 _, chosen, spans = line_best
                 owners, ranges = chosen.owners, chosen.ranges
                 referee_picks[chosen.label] = referee_picks.get(chosen.label, 0) + 1
@@ -1280,12 +1605,17 @@ class TwoPassAligner(AlignerAdapter):
             if not segs:
                 skip("no_segments_produced")
                 continue
+            if self.config.extend_segments:
+                stretched += _extend_segments(segs, line["end"], self.seg_hold_max_sec)
             line["segs"] = segs
             line.setdefault("meta", {})["refined_by"] = self.config.refiner
             refined += 1
 
         stats = _refine_stats(refined, converted, len(lines), fallbacks)
         stats["boundary_fixes"] = _enforce_monotonic(lines)
+        if self.config.extend_segments:
+            stats["segments_stretched"] = stretched
+            stats["seg_hold_max_sec"] = self.seg_hold_max_sec
         stats["compact_vocab_size"] = len(columns)
         stats["full_vocab_size"] = vocab_width
         if span_scores:
@@ -1351,6 +1681,36 @@ def _window_score(frame_scores: Any) -> float | None:
     if frame_scores is None or len(frame_scores) == 0:
         return None
     return float(frame_scores.sum()) / len(frame_scores)
+
+
+def _extend_segments(segs: list[dict[str, Any]], line_end: float, hold_max: float) -> int:
+    """세그 끝을 **다음 세그 시작까지** 늘린다 — 프로드 ``segmentation._extend_to_next_start``.
+
+    CTC 스팬은 본래 뾰족하다. 실측 세그 길이 중앙값이 20ms인데 UST 노트는 116~219ms이고
+    사이가 100~200ms씩 비어 있다(2026-08-02). 그대로 노래방에 쓰면 이어 부르는 구간에서도
+    음절마다 20ms만 켜졌다 꺼진다 — 「쭉 이어 부르는데 발음이 끊겨 보인다」는 지적이 이것이다.
+    프로드는 문자 모드에서 이 늘이기를 이미 하는데(``segmentation.py``) 하네스만 빠져 있었다.
+
+    **시작은 손대지 않는다.** 시작은 CTC 실측이고, 늘이는 것은 «언제까지 켜 둘 것인가»라는
+    표시 규약이다. 추정치에 맞춰 실측을 옮기면 정보가 순손실이라는 것은 프로드 VAD 층 이식
+    때 이미 겪었다(세그 리스케일로 음절 정확도 88.8% → 43.5%).
+
+    ``hold_max``는 «간주에 흩어진 음절이 화면에서 쭉 늘어나는» 반대 증상을 막는 한도다.
+    UST 노트 15,503개 실측에서 99.5퍼센타일이 1.111s, 1.5s를 넘는 것은 0.29%뿐이라 —
+    그보다 긴 공백은 늘임음이 아니라 쉼이다. 한도를 넘으면 거기서 끊고 어둠을 남긴다.
+    """
+    stretched = 0
+    for current, following in zip(segs, segs[1:]):
+        target = min(following["start"], current["start"] + hold_max)
+        if target > current["end"]:
+            current["end"] = round(target, 3)
+            stretched += 1
+    if segs:
+        target = min(line_end, segs[-1]["start"] + hold_max)
+        if target > segs[-1]["end"]:
+            segs[-1]["end"] = round(target, 3)
+            stretched += 1
+    return stretched
 
 
 def _enforce_monotonic(lines: list[dict[str, Any]]) -> int:

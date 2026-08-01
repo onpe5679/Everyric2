@@ -39,7 +39,9 @@ ALIGNER_HUE = {
     "2pass-owsm-reading-joshi": 96 / 360,  # 2패스 · 조사만 발음형
     "2pass-owsm-reading-phon": 108 / 360,  # 2패스 · 전체 발음형
     # ★심판 비교 쌍 — 짝끼리 붙여 둔다
-    "2pass-owsm-prod": 16 / 360,           # 2패스 · ★프로드 독음 + 심판
+    "2pass-owsm-prod": 16 / 360,
+    "2pass-owsm-mixed": 120 / 360,         # 2패스 · ★혼합 표기(ja+라틴+한글)
+    "2pass-owsm-mixed-hangul": 156 / 360,  # 2패스 · ★한글 표시층           # 2패스 · ★프로드 독음 + 심판
     "2pass-owsm-prod-noref": 28 / 360,     # 2패스 · 같은 독음, 심판 끔       # 2패스
     "nemo-nfa": 25 / 360,                # 단독 · 고정(현재 뷰어 제외 — 자리는 비워 둔다)
     "2pass-en-hangul": 36 / 360,         # 2패스 · 철자 기반 음차(뷰어 제외 — 자리는 비워 둔다)
@@ -576,67 +578,45 @@ def _lane_label(aligner: str, run: dict) -> str:
 # 뷰어 레인은 베이스라인 + 현역 후보만 — 탈락 후보(qwen3, 구 hf 계열, owsm 실험 변형)는
 # 런 캐시는 남기되 표시에서 뺀다. 기준은 combo 디렉터리명의 base 정렬기(@suffix 제거).
 VIEWER_ALIGNERS = {
-    "mms-baseline",
+    # ── 기준선 ──────────────────────────────────────────────────────────────
     "omniasr-ctc",
-    "owsm-ctc-v4-1b",
     "owsm-ctc-v4-1b-bf16",
-    # ── 하차한 정렬기(런 캐시는 보존, 표시만 뺀다) ────────────────────────────
-    # nemo-nfa      — ko 체크포인트가 Riva EULA 위반 정황이라 채택 불가(사용자 지시 2026-08-01).
-    #                 성능 최상위였으나 권원이 없어 비교 대상에서도 뺀다.
-    # hf-kkonjeong  — 극한곡에서 omniasr 대비 +8.8pp였고 그 우위의 **원인이 아직 설명되지
-    #                 않았다**(≤0.3s 80%로 1위, 2위 69%). 채택 스택에는 안 들어가므로 레인은
-    #                 빼되, 극한곡을 다시 파고들면 이 기록이 출발점이다.
-    # hf-reazon-hubert-base — ja 네이티브, 재평가에서 UST 73.3%로 생존했으나 2pass-owsm-omniasr
-    #                 (음절 86.7%)에 밀렸다. 같은 자리를 노리는 대체재라 남길 이유가 없다.
-    # hf-slplab-phone-mfa — vocab 축소 가설 검증용이었고 그 가설은 IPA 실험이 대신 답했다.
-    # 2pass-owsm-{reazon,kkonjeong} — 위 두 모델을 경량 몫으로 쓰던 2패스. 모델이 빠지면 같이 빠진다.
-    # 2pass-en-{kana,hangul,cmu} — 음차 세대. 셋이 span score 1나트 안쪽이라 서로 안 갈리고,
-    #                 IPA에 7점 차로 졌다(−15.5 vs −7.8). 「왜 IPA로 갔는가」는 문서가 든다.
-    # omniasr-ctc-ipa-{hangul,kana} — 창 없는 대조군. 창 있는 쪽이 낫다고 청취 판정(2026-08-01).
-    #
-    # 남은 것은 **채택 스택(omniASR·OWSM·polar 분리) 조합**과 그 기준선(mms·PROD·UST)뿐이다.
-    # 2패스 조합 — owsm이 라인 창을 잡고 경량 모델이 그 안에서 음절만 다시 잡는다.
-    "2pass-owsm-omniasr",  # ja 17곡 음절 86.7%로 최고 · 다국어 단일 경로
-    # ★ja 독음 경로 — 원문(한자) 대신 MeCab 가나 독음을 타깃으로. 한자의 99.1%가 vocab에
-    # 있어 지금은 **중국어 음가로** 정렬에 참여하고 있다(가사 문자의 20~30%).
-    # 독음이 갈리는 자리는 N-best 후보를 오디오 심판이 고른다.
-    "2pass-owsm-reading",
-    "2pass-owsm-reading-noref",
-    # 독음 표기 축 — 조사만(は→わ) vs 전체 발음형(장음 ー 포함, vocab 밖이라 커버리지 손실)
-    "2pass-owsm-reading-joshi",
-    "2pass-owsm-reading-phon",
-    # ★프로드가 서버에서 쓰는 독음·후보 위에서 심판만 갈린 쌍
-    "2pass-owsm-prod",
-    "2pass-owsm-prod-noref",
-    "routed-2mode-safe",
-    "2pass-en-ipa",
-    # ★IPA로 정렬하고 사람이 읽는 글자로 표시하는 경로. 정렬 결과는 2pass-en-ipa와 **완전히
-    # 같고**(span score 소수점까지 일치) 세그 텍스트·묶음만 다르다(음소 단위 → 음절 단위).
-    # 표시가 갈리므로 청취 판정은 «글자가 소리와 맞게 넘어가는가»로 한다.
-    "2pass-en-ipa-hangul",
-    # ★en 최종 채택 — asr 자기앵커 창 + IPA 음절. owsm 없이 창을 얻는다.
-    "2pass-asr-ipa-hangul",
-    # 타깃 자신을 표시 — 표기 변환을 안 거치므로 정렬기가 무엇을 맞추는지 그대로 보인다.
-    # 가나 음차 레인(2pass-*-ipa-kana)은 결과가 한글과 사실상 같아 이 자리로 교체했다
-    # (사용자 판정 2026-08-01).
-    "2pass-asr-ipa-phonetic",
-    # ★원문 영어 층 — 위와 같은 정렬을 **원문 철자 음절**로 묶는다(beau-ti-ful). 영어 악보가
-    # 음표마다 음절을 배치하는 그 단위이고, 낱말로 묶으면 한 낱말 안의 음높이·박자 변화를
-    # 버린다. 음절 수는 CMU가 주고 철자 경계는 모음 글자로 맞춘다(실제 가사 97.46%).
-    "2pass-asr-ipa-en",
-    # 심판을 끈 대조군 — 위 셋은 오디오 심판이 **기본으로 켜져** 있다(사전 첫 발음 고정은
-    # 음절 수까지 사전이 정해 버리는데, 후보가 있던 라인의 76.3%에서 그 발음이 뒤집혔다).
-    "2pass-asr-ipa-hangul-noref",
-    "2pass-asr-ipa-en-noref",
-    # 음절 수를 오디오 강도 봉우리에 맡긴 대조군 — 실측에서 손해라 기본은 꺼져 있다.
-    # 봉우리가 무엇을 바꿨는지는 ``2pass-asr-ipa-en``과 **이 레인**을 견줘야 읽힌다
-    # (``-noref``는 심판 자체가 없어 다른 물음이다).
-    "2pass-asr-ipa-en-energy",
-    # ★최종 아키텍처 — 무분리 omniASR 기본, 붕괴 의심 시에만 polar+owsm 2패스.
+    # ── ja 채택 스택 ────────────────────────────────────────────────────────
+    "2pass-owsm-omniasr",   # 다국어 단일 경로(ja 17곡 음절 86.7%)
+    "2pass-owsm-mixed",     # ★프로드 독음 + 라틴 음절화 + 장음 + 심판
+    "2pass-owsm-mixed-hangul",
+    # 라인 클램프층(간주 좌초 스냅 제외) — 병적 라인 절단 + 소절 끝 늘임음 연장.
+    "2pass-owsm-mixed+pp",  # ★위와 정렬이 같고 표시만 한글 — 한국어 사용자층
+    # ── en 채택 스택 ────────────────────────────────────────────────────────
+    # 같은 정렬(ASCII 음소 타깃 + asr 자기 라인 창 + 심판)을 세 해상도로 본다.
+    "2pass-asr-ipa-en",         # 원문 음절
+    "2pass-asr-ipa-hangul",     # 한글 발음
+    "2pass-asr-ipa-phonetic",   # 음소 전사 자체
+    # ── 라우팅(진행 중) ─────────────────────────────────────────────────────
     "routed-2mode",
     "routed-2mode+pp",
-    # ★언어 배선판 — 위에 en 강제 구원을 얹었다(신호가 en에서 작동하지 않는다).
+    "routed-2mode-safe",
     "routed-2mode-lang",
+}
+
+# 판정이 끝나 뷰어에서 내린 레인 — 이름과 이유만 남긴다. 위 집합으로 옮기면 즉시 돌아온다.
+RETIRED_ALIGNERS = {
+    "mms-baseline": "하차 확정",
+    "owsm-ctc-v4-1b": "bf16이 대체(품질 동일·VRAM 절반)",
+    "2pass-owsm-reading": "조사/발음형 축 — 차이 없음으로 기각(71.91/71.80/72.41)",
+    "2pass-owsm-reading-noref": "위와 같은 축",
+    "2pass-owsm-reading-joshi": "위와 같은 축",
+    "2pass-owsm-reading-phon": "위와 같은 축",
+    "2pass-owsm-prod": "2pass-owsm-mixed가 대체(라틴 음절화 추가)",
+    "2pass-owsm-prod-noref": "ja 심판 채택 확정 — 청취 6/6",
+    "2pass-owsm-mixed-nolong": "장음 축 — 중립 확정",
+    "2pass-owsm-mixed-en": "라틴 낱말 심판 — color 12건 오답으로 기각",
+    "2pass-owsm-mixed+pp": "프로드 라인 보정층 — 병적 절단 규칙이 437줄 중 0회 발동(무효)",
+    "2pass-asr-ipa-hangul-noref": "en 심판 채택 확정 — 정답 4/17 → 14/17",
+    "2pass-asr-ipa-en-noref": "위와 같음",
+    "2pass-asr-ipa-en-energy": "오디오 강도 봉우리 — 14/17 → 11~12/17로 기각",
+    "2pass-en-ipa": "owsm 앵커 en 2패스 — asr 자기앵커가 대체(정렬 22배·MAE 절반)",
+    "2pass-en-ipa-hangul": "위와 같음",
 }
 
 # 표기까지 포함한 레인 단위 제외 — **모국어가 아닌 표기를 강요한 레인**을 뺀다.
@@ -892,16 +872,42 @@ def hangul_to_roman(text: str) -> str:
     return "".join(out)
 
 
+def _segs_by_line(track: dict) -> list[list[dict]]:
+    """트랙의 세그를 라인별로 묶는다. 라인 배열은 입력 가사와 1:1이라 인덱스가 곧 라인 번호다."""
+    groups: list[list[dict]] = []
+    segs = track.get("segs") or []
+    cursor = 0
+    for line in track.get("lines") or []:
+        group: list[dict] = []
+        while cursor < len(segs) and segs[cursor]["start"] < line["end"] + 1e-6:
+            if segs[cursor]["start"] >= line["start"] - 0.5:
+                group.append(segs[cursor])
+            cursor += 1
+        groups.append(group)
+    return groups
+
+
 def _ust_truth_anchors(video_id: str, tracks: list[dict]) -> dict | None:
     """UST 레인 → 라인별 정답 시각(텍스트 앵커, ust_line_judge v3와 동일 방법) — 레인 채점용.
 
     비-harm UST 노트와 PROD 라인 텍스트를 로마자 정규화해 전역 단조 정렬, 라인 문자 40%+
     매칭 시 앵커. 앵커 커버리지 40% 미만(en↔가나 등)이면 채점 무의미라 None.
+
+    **세그 매칭은 라인 안에서만 한다.** 예전에는 곡 전체를 한 줄로 이어 붙여 difflib을
+    돌렸는데, 후렴이 반복되는 곡에서 정답이 통째로 다른 후렴으로 미끄러졌다 — 심판이 독음을
+    `すきずき`→`すきすき`로 고쳐 문자열이 더 자기유사해지자 0:36 세그의 정답이 **2:01(85초
+    밖)** 에 붙었고, 옳은 쪽이 0/13·틀린 쪽이 13/13으로 나왔다(2026-08-02). 라인 앵커는
+    라인 텍스트가 길고 구별되므로 전역으로 잡아도 안전하고, 세그 매칭만 그 라인의 노트
+    범위로 가두면 미끄러짐이 원천 차단된다.
+
+    세그마다 시작(``truth``)과 **끝**(``truth_end``)을 함께 붙인다. 시작만 보는 지표는
+    「세그가 음소 하나 길이로 잘린」 결함을 통과시킨다 — 라틴 세그가 19ms로 잘려 하이라이트가
+    음절 중간에 꺼지는데도 시작이 맞아 +3.75pp가 나왔다(2026-08-02).
     """
     notes = []
     for track in tracks:
         if track.get("ust") and "harm" not in track["name"].lower():
-            notes += [(seg["start"], seg["t"]) for seg in track["segs"]]
+            notes += [(seg["start"], seg.get("end"), seg["t"]) for seg in track["segs"]]
     if not notes:
         return None
     prod = next((t for t in tracks if t["name"] == "PROD"), None)
@@ -924,11 +930,14 @@ def _ust_truth_anchors(video_id: str, tracks: list[dict]) -> dict | None:
     notes.sort()
     for lo, hi in UST_TRUTH_EXCLUDE.get(video_id, []):
         notes = [n for n in notes if not (lo <= n[0] <= hi)]
-    n_chars, n_time = [], []
-    for start, txt in notes:
+    n_chars, n_time, n_end, n_note, n_offset = [], [], [], [], [0]
+    for index, (start, end, txt) in enumerate(notes):
         r = norm(txt)
         n_chars.append(r)
         n_time += [start] * len(r)
+        n_end += [end if end is not None else start] * len(r)
+        n_note += [index] * len(r)
+        n_offset.append(n_offset[-1] + len(r))
     l_ranges, l_parts, pos = [], [], 0
     for line in prod["lines"]:
         r = norm(line["text"])
@@ -941,34 +950,65 @@ def _ust_truth_anchors(video_id: str, tracks: list[dict]) -> dict | None:
         for k in range(blk.size):
             char_map[blk.a + k] = blk.b + k
     anchors = {}
+    first_note: dict[int, int] = {}
     for i, (a0, a1) in enumerate(l_ranges):
         hits = [char_map[c] for c in range(a0, a1) if c in char_map]
         if len(hits) >= max(2, (a1 - a0) * 0.4):
             anchors[str(i)] = round(n_time[hits[0]], 3)
+            first_note[i] = n_note[hits[0]]
     if len(anchors) / max(len(prod["lines"]), 1) < 0.4:
         return None
 
-    # 음절 축 — 후보 세그마다 대응 UST 노트 시각을 붙인다. 라인 시작만 보는 지표는 BPE 보간
-    # 손실(owsm)을 못 잡는다: 라인 시작은 항상 토큰 경계라 오차가 안 나타난다.
+    # 라인이 덮는 **노트 범위**는 «이 라인의 첫 노트 ~ 다음 라인의 첫 노트»로 자른다.
+    # 한때 그 라인에 걸린 hits의 min/max로 잡았는데, 후렴이 반복되는 곡에서 한 라인의 hits가
+    # 곡 전체에 흩어져 범위가 수백 노트로 부풀었다(numb numb 정답 1,094 — 실제는 그 1/3).
+    # 앵커가 연속으로 잡힌 구간에서만 범위를 준다 — 사이에 앵커 없는 라인이 있으면 그 라인의
+    # 노트가 앞 라인 몫으로 섞이므로 아예 채점에서 뺀다.
+    ordered = sorted(first_note)
+    line_notes: dict[int, tuple[int, int]] = {}
+    for position, line_index in enumerate(ordered):
+        nxt = ordered[position + 1] if position + 1 < len(ordered) else None
+        if nxt is None:
+            line_notes[line_index] = (first_note[line_index], len(notes))
+        elif nxt == line_index + 1:
+            line_notes[line_index] = (first_note[line_index], first_note[nxt])
+
+    # 음절 축 — 후보 세그마다 대응 UST 노트의 시작·끝을 붙인다. 라인 시작만 보는 지표는 BPE
+    # 보간 손실(owsm)을 못 잡는다: 라인 시작은 항상 토큰 경계라 오차가 안 나타난다.
+    joined = "".join(n_chars)
     for track in tracks:
         if track.get("ust") or track.get("line_reference") or not track.get("segs"):
             continue
-        s_ranges, s_parts, pos = [], [], 0
-        for seg in track["segs"]:
-            r = norm(seg.get("t", ""))
-            s_ranges.append((pos, pos + len(r)))
-            s_parts.append(r)
-            pos += len(r)
-        smap = {}
-        matcher = difflib.SequenceMatcher(None, "".join(s_parts), "".join(n_chars), autojunk=False)
-        for blk in matcher.get_matching_blocks():
-            for k in range(blk.size):
-                smap[blk.a + k] = blk.b + k
-        for seg, (a0, a1) in zip(track["segs"], s_ranges):
-            hits = [smap[c] for c in range(a0, a1) if c in smap]
-            if hits:
-                seg["truth"] = round(n_time[hits[0]], 3)
-    return {"anchors": anchors, "lines": len(prod["lines"])}
+        for line_index, group in enumerate(_segs_by_line(track)):
+            span = line_notes.get(line_index)
+            if not span or not group:
+                continue
+            c0, c1 = n_offset[span[0]], n_offset[span[1]]
+            local = joined[c0:c1]
+            if not local:
+                continue
+            s_ranges, s_parts, pos = [], [], 0
+            for seg in group:
+                r = norm(seg.get("t", ""))
+                s_ranges.append((pos, pos + len(r)))
+                s_parts.append(r)
+                pos += len(r)
+            smap = {}
+            matcher = difflib.SequenceMatcher(None, "".join(s_parts), local, autojunk=False)
+            for blk in matcher.get_matching_blocks():
+                for k in range(blk.size):
+                    smap[blk.a + k] = c0 + blk.b + k
+            for seg, (a0, a1) in zip(group, s_ranges):
+                hits = [smap[c] for c in range(a0, a1) if c in smap]
+                if hits:
+                    seg["truth"] = round(n_time[min(hits)], 3)
+                    seg["truth_end"] = round(n_end[max(hits)], 3)
+    # 라인별 **정답 칸 수**. 「몇 개로 나눴나」가 이 작업의 본체인데 시작 시각 지표는 그걸
+    # 약하게만 잡는다 — ``numb``을 ``n|u|m|b`` 넷으로 쪼개도 넷 중 하나는 시작이 맞는다.
+    # 세그 길이로는 못 잰다: CTC 스팬은 본래 뾰족해서 프로드를 포함한 **모든** 경로가 20ms이고
+    # (UST 노트는 219ms) 그건 규약 차이지 결함이 아니다(2026-08-02 실측).
+    note_counts = {str(i): span[1] - span[0] for i, span in line_notes.items()}
+    return {"anchors": anchors, "lines": len(prod["lines"]), "note_counts": note_counts}
 
 
 def _json_for_script(data: object) -> str:
@@ -1036,7 +1076,10 @@ function render(){if(!DATA)return;const L=layout(),rows=L.rows,width=Math.max(1,
 function ustScoreVal(track){if(!DATA||!DATA.ust_truth||track.ust||track.line_reference||!track.lines)return null;const anch=DATA.ust_truth.anchors;let adj=0;for(let i=0;i<DATA.tracks.length;i++){const u=DATA.tracks[i];if(u.ust&&!/harm/i.test(u.name)){adj=OFFS[i]||0;break}}let n=0,hit=0;for(const k in anch){const line=track.lines[+k];if(!line)continue;n++;if(Math.abs(line.start-(anch[k]+adj))<=0.15)hit++}return n?hit/n:null}
 function ustScore(track){const v=ustScoreVal(track);return v==null?'':` · 라인 ${Math.round(100*v)}%`+syllScore(track)}
 // 음절 축 — 세그에 박아둔 대응 UST 노트 시각과 비교. 라인 채점이 못 보는 BPE 보간 손실이 여기 보인다.
-function syllScore(track){if(!DATA||!DATA.ust_truth||!track.segs||!track.segs.length)return'';let adj=0;for(let i=0;i<DATA.tracks.length;i++){const u=DATA.tracks[i];if(u.ust&&!/harm/i.test(u.name)){adj=OFFS[i]||0;break}}let n=0,hit=0;for(const s of track.segs){if(s.truth==null)continue;n++;if(Math.abs(s.start-(s.truth+adj))<=0.10)hit++}return n?` · 음절 ${Math.round(100*hit/n)}%`:''}
+// 음절% = 세그 시작이 정답 노트 시작과 0.10s 안. 분절% = **라인의 칸 수**가 정답
+// 노트 수와 같은 라인의 비율. 「몇 개로 나눴나」는 시작 시각으로는 약하게만 잡힌다 —
+// numb을 n|u|m|b 넷으로 쪼개도 넷 중 하나는 시작이 맞는다(2026-08-02).
+function syllScore(track){if(!DATA||!DATA.ust_truth||!track.segs||!track.segs.length)return'';let adj=0;for(let i=0;i<DATA.tracks.length;i++){const u=DATA.tracks[i];if(u.ust&&!/harm/i.test(u.name)){adj=OFFS[i]||0;break}}let n=0,hit=0;for(const s of track.segs){if(s.truth==null)continue;n++;if(Math.abs(s.start-(s.truth+adj))<=0.10)hit++}if(!n)return'';let out=` · 음절 ${Math.round(100*hit/n)}%`;const counts=DATA.ust_truth.note_counts;if(counts&&track.lines){let lines=0,same=0,k=0;for(let i=0;i<track.lines.length;i++){const ln=track.lines[i];let c=0;while(k<track.segs.length&&track.segs[k].start<ln.end+1e-6){if(track.segs[k].start>=ln.start-0.5)c++;k++}const want=counts[String(i)];if(want==null||!c)continue;lines++;if(c===want)same++}if(lines)out+=` · 분절 ${Math.round(100*same/lines)}%`}return out}
 // 채점은 세그 전량을 훑으므로 매 프레임 계산하면 렌더가 죽는다. 곡 로드·드래그 종료 때만 갱신한다.
 function refreshScores(){if(DATA)DATA.tracks.forEach(t=>{t._score=ustScore(t)})}
 // UST 준정답이 있는 곡은 레인을 채점 순으로 — 정답(UST)·참조 레인을 위에, 후보는 적중률 내림차순
