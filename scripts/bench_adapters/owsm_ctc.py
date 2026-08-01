@@ -180,7 +180,7 @@ class OwsmCTCAligner:
             "star_mode": getattr(self, "star_mode", "all"),
             "presence": (
                 self._dominance(vocals_path)
-                if getattr(self, "star_mode", "all") == "gap"
+                if getattr(self, "star_mode", "all") in ("gap", "adlib")
                 else None
             ),
             "presence_hop": 0.01,
@@ -377,6 +377,7 @@ VRAM_VARIANTS: tuple[dict[str, Any], ...] = (
     # 이건 기각된 ``star_prior``와 **구조가 다르다**: 그쪽은 star를 어디에나 두고 프레임별
     # 가격만 매겨 blank로 동점이 우회했지만, 여기서는 토큰 자체를 안 넣으므로 우회할 대상이 없다.
     {"suffix": "bf16-stargap", "dtype": "bfloat16", "star_tokens": True, "star_mode": "gap"},
+    {"suffix": "bf16-staradlib", "dtype": "bfloat16", "star_tokens": True, "star_mode": "adlib"},
 )
 
 
@@ -460,6 +461,11 @@ def _expected_audio_frames(n_samples: int, hop_length: int = 160) -> int:
 # 0.36~0.68이라 0.3이 그 사이다. 100ms는 숨 쉬는 시간 — 그보다 짧은 골은 무성 자음이다.
 _STAR_GAP_LEVEL = 0.30
 _STAR_GAP_MIN_FRAMES = 10
+# 「가사 없이 부르고 있다」 판정. 우세도가 이 위로 40프레임(0.4초) 이상이면 그 줄 사이에는
+# 가사에 없는 가창이 있다 — UST 대조로 확인한 추임새의 실제 모습이다. 문턱 0.35는 간주
+# 0.199와 가창 0.36~0.68 사이이고, 0.4초는 검출된 추임새 구간의 최소 길이다.
+_STAR_SING_LEVEL = 0.35
+_STAR_ADLIB_MIN_FRAMES = 40
 
 
 def _worker_main(request_path: Path, response_path: Path) -> int:
@@ -704,7 +710,7 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
 
     star_slots: set[int] = set()
     if use_star:
-        if star_mode == "gap" and presence:
+        if star_mode in ("gap", "adlib") and presence:
             # ① star 없이 한 번 정렬해 라인 경계를 얻는다. 인코더는 이미 돌았으므로 DP만 든다.
             base_spans = _align(compact_targets, False)
             bounds: dict[int, list[int]] = {}
@@ -712,17 +718,29 @@ def _worker_main(request_path: Path, response_path: Path) -> int:
                 edge = bounds.setdefault(owner[0], [int(span.start), int(span.end)])
                 edge[0] = min(edge[0], int(span.start))
                 edge[1] = max(edge[1], int(span.end))
-            # ② 인접 라인 사이가 «끊겼는가» — 우세도가 바닥을 친 프레임이 충분히 이어지는가.
+            # ② 줄 사이를 무엇으로 판정할 것인가.
+            #
+            #   "gap"   — «끊겼는가». 우세도가 바닥을 친 프레임이 충분히 이어지는가.
+            #   "adlib" — «가사 없이 부르고 있는가». 우세도가 **높은** 채로 이어지는가.
+            #
+            # 후자가 추임새의 정의다. UST 대조로 확인했다(2026-08-02): 주장 안 된 우세 구간의
+            # 노트 가사는 거의 전부 홑모음이었다(熱異常 ううう · numb numb うううわわわあああ
+            # · rookie わ · 토스트 ああああ). gap 판정이 도움이 됐던 것은 추임새 앞뒤에 대개
+            # 짧은 쉼이 끼기 때문이지, 쉼 자체가 표적이어서가 아니다 — 표적을 직접 겨눈다.
             frame_sec = n_samples / int(emission.shape[1]) / 16_000
             hop = float(payload.get("presence_hop") or 0.01)
+            need = _STAR_ADLIB_MIN_FRAMES if star_mode == "adlib" else _STAR_GAP_MIN_FRAMES
             ordered = sorted(bounds)
             for previous_line, next_line in zip(ordered, ordered[1:]):
                 lo = int(bounds[previous_line][1] * frame_sec / hop)
                 hi = int(bounds[next_line][0] * frame_sec / hop)
-                if hi - lo < _STAR_GAP_MIN_FRAMES:
+                if hi - lo < need:
                     continue
-                quiet = sum(1 for value in presence[lo:hi] if value < _STAR_GAP_LEVEL)
-                if quiet >= _STAR_GAP_MIN_FRAMES:
+                if star_mode == "adlib":
+                    hits = sum(1 for value in presence[lo:hi] if value >= _STAR_SING_LEVEL)
+                else:
+                    hits = sum(1 for value in presence[lo:hi] if value < _STAR_GAP_LEVEL)
+                if hits >= need:
                     star_slots.add(next_line)
         else:
             star_slots = {owner[0] for owner in token_owners}

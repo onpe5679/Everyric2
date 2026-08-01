@@ -323,6 +323,29 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         referee=True,
         note="프로드 독음 + 라틴 음절화 + 장음 펴기 + 오디오 심판",
     ),
+    # ★꼬리 축 대조군 — 라인 꼬리 늘이기만 끈다. 채택 시점에 «추임새를 덮는가»를 안 쟀는데,
+    # 추임새는 우세도가 높은 구간이라 꼬리가 정확히 그리로 늘어날 수 있다. 그 축을 분리해 잰다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-notail",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        extend_line_tails=False,
+        note="위와 같은 정렬, 라인 꼬리 늘이기만 끔(축 분리 대조군)",
+    ),
+    # ★꼬리 상한·끊김 판정을 푼 대조군. 청취에서 남은 오검출 5개가 전부 «늘임음»이었고 원인이
+    # 두 가지로 갈렸다(2026-08-02 사용자 판정): 深海少女 2:06·3:24는 앞 간격이 1.98·1.81초로
+    # **2초 상한에 딱 붙어** 꼬리가 상한에서 잘린 자리이고, 1:48·3:09은 앞 간격이 −0.01초로
+    # **늘임음 한가운데의 짧은 흔들림**에서 끊긴 자리다. 상한과 끊김 판정을 각각 푼다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-longtail",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        note="위와 같은 정렬, 꼬리 상한 4초 · 끊김 판정 0.25초",
+    ),
     # ★늘이기 게이트 — 위와 **늘이기 축만** 다른 대조군. 세그를 어디까지 켜 둘지 시간 길이가
     # 아니라 «그 시간의 상태»(우세도 × 발화)로 정한다. 지금은 1.5초 상한 하나가 서로 반대인
     # 두 증상을 함께 쥐고 있다 — 노래가 끝났는데 1.5초 안이면 늘어나고, 계속 끄는데 1.5초를
@@ -356,6 +379,19 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         refiner_script="ja-mixed",
         referee=True,
         note="혼합 표기 + 끊긴 줄 사이에만 star(우세도 판정)",
+    ),
+    # ★추임새 자리에만 star — 「끊긴 곳」이 아니라 「가사 없이 부르는 곳」을 겨눈다.
+    # UST 대조로 표적을 확인했다(2026-08-02): 주장 안 된 우세 구간의 노트 가사는 거의 전부
+    # 홑모음이었다(ううう · わわわ · あああ). 그리고 그 위에 가사 세그가 얹힌 노트가 채택
+    # 레인에서 284개 중 151개(53.2%)였고 star가 93개(32.7%)로 줄였다 — star는 UST 음절
+    # 지표로 기각됐지만 그 지표는 이 결함을 아예 못 잰다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-staradlib",
+        anchor="owsm-ctc-v4-1b-bf16-staradlib",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        note="혼합 표기 + 설명 안 된 가창이 있는 줄 사이에만 star",
     ),
     # ★한글 표시층 — **위와 정렬이 완전히 같고 표시만** 한글이다(``ja-mixed-hangul``).
     # 한국어 사용자가 일본어 곡을 읽는 층이고 프로드의 실제 기능이다. 한글을 정렬 타깃으로
@@ -1214,10 +1250,21 @@ class TwoPassAligner(AlignerAdapter):
     # 라인 꼬리를 최대 얼마나 밀 것인가(초). UST 노트 99.5퍼센타일이 1.111초라 2초면 실제
     # 늘임음은 다 담고, 그보다 길게 가는 것은 우세도가 먼저 끊어 준다.
     line_tail_max_sec: float = 2.0
+    # 꼬리를 멈출 「끊김」의 최소 길이(초). 짧으면 늘임음 속 비브라토에서 끊긴다.
+    # (``_HOLD_QUIET_SEC``와 같은 값 — 그 상수는 이 클래스보다 아래에 있어 직접 못 쓴다)
+    line_tail_quiet_sec: float = 0.12
+    # 짧아도 깊은 골에서 꼬리를 멈출 것인가(``_HOLD_DEEP_LEVEL``).
+    # **채택**(2026-08-02): 길이만 보는 조건이 0.08초짜리 깊은 골을 통과시켜 꼬리가 추임새 위로
+    # 2초씩 늘어났다(numb numb 「で」 34.55~36.55·「く」 40.53~42.56). 켜니 그 세 자리가 되살아났고
+    # UST 축은 중립이었다(구간 IoU 49.93 → 49.90 · 음절 불변).
+    line_tail_deep: bool = True
 
     def __init__(self, config: TwoPassConfig | None = None) -> None:
         if config is None:
             config = self.config
+        if config.name.endswith("-longtail"):
+            self.line_tail_max_sec = 4.0
+            self.line_tail_quiet_sec = 0.25
         self.config = config
         self.name = config.name
         self._anchor: Any | None = None
@@ -1384,6 +1431,8 @@ class TwoPassAligner(AlignerAdapter):
                     presence,
                     frame_sec,
                     speak_level,
+                    self.line_tail_quiet_sec,
+                    self.line_tail_deep,
                 )
         # 세그 사이 게이트는 «자르는» 쪽이라 기각됐다 — 라인 꼬리만 늘릴 때는 물리지 않는다.
         seg_gate = gate if self.config.extend_gate else None
@@ -1931,6 +1980,13 @@ _HOLD_DOMINANCE = 0.30
 _HOLD_QUIET_SEC = 0.12
 # 새 발성이 시작됐다고 보려면 그만큼은 이어져야 한다.
 _HOLD_SPEAK_SEC = 0.10
+# 「짧아도 깊으면 끊긴 것」. 위 두 상수는 **길이만** 보므로 0.08초짜리 깊은 골을 통과시킨다.
+# numb numb에서 그 통과가 꼬리를 추임새 위로 2초 늘렸다(「で」 34.55~36.55에 우세도 0.100 골이
+# 35.36~35.42, 「く」 40.53~42.56에 0.055 골이 41.36~41.42 — 둘 다 0.08초라 무시됐다).
+# 사용자 청취 21건에서 추임새 직전 우세도 최저는 0.000~0.208, 늘임음은 0.854~0.973으로
+# 겹치지 않았다(2026-08-02). 0.25가 그 빈 구간이다.
+_HOLD_DEEP_LEVEL = 0.25
+_HOLD_DEEP_SEC = 0.04
 
 
 class _ExtendGate:
@@ -1955,12 +2011,27 @@ class _ExtendGate:
     한쪽에서만 동작한다.
     """
 
-    def __init__(self, dominance, dom_hop: float, presence, frame_sec: float, speak_level: float):
+    def __init__(
+        self,
+        dominance,
+        dom_hop: float,
+        presence,
+        frame_sec: float,
+        speak_level: float,
+        quiet_sec: float = 0.12,
+        deep: bool = False,
+    ):
         self.dominance = dominance
         self.dom_hop = dom_hop
         self.presence = presence
         self.frame_sec = frame_sec
         self.speak_level = speak_level
+        # 「끊겼다」로 볼 최소 길이. 늘임음 한가운데의 비브라토·숨에서 우세도가 잠깐 내려가면
+        # 꼬리가 거기서 멈추고, 남은 지속음이 「설명 안 된 가창」으로 다시 올라온다(深海少女
+        # 1:48·3:09은 앞 세그와 간격이 −0.01초 — 세그가 끝나자마자 다시 시작한다).
+        self.quiet_sec = quiet_sec
+        # 깊이 축을 볼 것인가. 길이 축만으로는 짧고 깊은 재-어택 경계를 놓친다.
+        self.deep = deep
 
     def limit(self, t0: float, t1: float) -> float:
         """[t0, t1) 안에서 늘이기를 멈춰야 할 시각. 멈출 이유가 없으면 ``t1``."""
@@ -2001,11 +2072,20 @@ class _ExtendGate:
         """
         if self.dominance is None or t1 <= t0:
             return t0
-        need = max(1, int(_HOLD_QUIET_SEC / self.dom_hop))
+        need = max(1, int(self.quiet_sec / self.dom_hop))
+        deep_need = max(1, int(_HOLD_DEEP_SEC / self.dom_hop))
         lo, hi = int(t0 / self.dom_hop), min(len(self.dominance), int(t1 / self.dom_hop))
-        run = None
+        run = deep_run = None
         for index in range(lo, hi):
-            if self.dominance[index] < _HOLD_DOMINANCE:
+            value = self.dominance[index]
+            if self.deep and value < _HOLD_DEEP_LEVEL:
+                if deep_run is None:
+                    deep_run = index
+                elif index - deep_run + 1 >= deep_need:
+                    return deep_run * self.dom_hop
+            else:
+                deep_run = None
+            if value < _HOLD_DOMINANCE:
                 if run is None:
                     run = index
                 elif index - run + 1 >= need:

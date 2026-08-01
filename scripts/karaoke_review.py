@@ -46,6 +46,9 @@ ALIGNER_HUE = {
     "2pass-owsm-mixed-hangul": 262 / 360,  # 2패스 · ★한글 표시층
     "2pass-owsm-mixed-star": 340 / 360,   # 2패스 · star 실험(추임새 흡수)
     "2pass-owsm-mixed-stargap": 66 / 360, # 2패스 · 끊긴 자리에만 star
+    "2pass-owsm-mixed-staradlib": 300 / 360, # 2패스 · ★추임새 자리에만 star
+    "2pass-owsm-mixed-notail": 285 / 360,  # 2패스 · 꼬리 늘이기 끔(대조군)
+    "2pass-owsm-mixed-longtail": 220 / 360, # 2패스 · 꼬리 상한 4초·끊김 0.25초
     "2pass-owsm-mixed-hold": 200 / 360,   # 2패스 · 늘이기 게이트(기각 — 자르기만 함)
     "2pass-owsm-prod-noref": 28 / 360,     # 2패스 · 같은 독음, 심판 끔       # 2패스
     "nemo-nfa": 25 / 360,                # 단독 · 고정(현재 뷰어 제외 — 자리는 비워 둔다)
@@ -590,8 +593,6 @@ VIEWER_ALIGNERS = {
     "2pass-owsm-omniasr",   # 다국어 단일 경로(ja 17곡 음절 86.7%)
     "2pass-owsm-mixed",     # ★프로드 독음 + 라틴 음절화 + 장음 + 심판
     "2pass-owsm-mixed-hangul",
-    "2pass-owsm-mixed-star",      # 모든 줄 사이 star
-    "2pass-owsm-mixed-stargap",   # 끊긴 줄 사이에만 star(우세도 판정)
     # 라인 클램프층(간주 좌초 스냅 제외) — 병적 라인 절단 + 소절 끝 늘임음 연장.
     # ── en 채택 스택 ────────────────────────────────────────────────────────
     # 같은 정렬(ASCII 음소 타깃 + asr 자기 라인 창 + 심판)을 세 해상도로 본다.
@@ -618,6 +619,12 @@ RETIRED_ALIGNERS = {
     "2pass-owsm-mixed-nolong": "장음 축 — 중립 확정",
     "2pass-owsm-mixed-en": "라틴 낱말 심판 — color 12건 오답으로 기각",
     "2pass-owsm-mixed+pp": "프로드 라인 보정층 — 병적 절단 규칙이 437줄 중 0회 발동(무효)",
+    "2pass-owsm-mixed-dip": "꼬리를 깊은 골에서 멈춤 — 채택되어 2pass-owsm-mixed 본선에 편입",
+    "2pass-owsm-mixed-longtail": "꼬리 상한 4초·끊김 0.25초 — 늘임음 오검출은 지우지만 확인된 추임새까지 삼켜 기각(numb numb 4 → 0)",
+    "2pass-owsm-mixed-notail": "꼬리 축 분리 대조군 — 채택 근거를 남긴 뒤 역할 종료",
+    "2pass-owsm-mixed-star": "줄 사이 star — 추임새 겹침 이득으로 보였던 것이 UST 홑모음 노트 라벨 오류였다(910/1021이 늘임 연장)",
+    "2pass-owsm-mixed-stargap": "위와 같음",
+    "2pass-owsm-mixed-staradlib": "추임새 자리 star — 같은 라벨 오류 위에서 만들어 검증 못 함",
     "2pass-owsm-mixed-hold": "늘이기 오디오 게이트 — 상한에 닿는 세그가 0.20%뿐이라 «자르기»만 남아 기각(구간 IoU 49.71 → 49.46)",
     "2pass-owsm-mixed-tail": "라인 꼬리 늘임 — 채택되어 2pass-owsm-mixed 본선에 편입(구간 IoU +0.87)",
     "2pass-asr-ipa-hangul-noref": "en 심판 채택 확정 — 정답 4/17 → 14/17",
@@ -725,6 +732,163 @@ def dominance_curve(video_id: str) -> dict | None:
             pass
         return out
     return None
+
+
+# ── 추임새 후보 ──
+# 「가사가 주장하지 않았는데 부르고 있는 시간」. 두 신호만 쓰고 둘 다 런타임에 있다 —
+# 정렬 세그(주장한 시간)와 보컬 우세도(부르고 있는가). UST는 안 쓴다.
+#
+# 문턱: 우세도 0.35는 간주 0.199와 가창 0.36~0.68 사이이고, 0.40초는 검출된 구간의 최소 길이다.
+# 이 규칙으로 ja 7곡에서 37구간 41초가 나온다(2026-08-02).
+#
+# **이것은 후보이지 판정이 아니다.** 추임새인지 누락된 가사인지 늘임음인지는 UST 텍스트로
+# 못 가른다 — 팬 UST의 홑모음 노트는 늘임 연장·VCV 연결음·멜리스마가 뒤섞여 있고(1,021개 중
+# 910개가 앞 노트에 붙은 연장) 이를 구분하는 필드가 없다. 그래서 화면에 띄워 귀로 판정한다.
+# 띠를 그릴 기준 레인 — 채택 스택.
+ADLIB_LANE = "2pass-owsm-mixed"
+ADLIB_LEVEL = 0.35
+ADLIB_MIN_SEC = 0.40
+# 뒤 세그와 이만큼은 떨어져 있어야 한다. 붙어 있으면 그것은 **다음 라인의 실제 가사 온셋**을
+# 정렬이 늦게 잡은 것이지 추임새가 아니다(사용자 청취: rookie 2:21 「루-」). 실측에서 오검출은
+# 0.02초, 정검출은 전부 0.12초 이상으로 갈렸다.
+ADLIB_MIN_TAIL_GAP = 0.10
+# 추임새 직전에는 우세도가 **바닥까지 꺼졌다 올라온다** — 재-어택의 흔적이다. 늘임음은 매끄럽게
+# 이어진다. 사용자 청취 21건에서 직전 0.4초 최저가 추임새 0.000~0.208 · 늘임음 0.854~0.973으로
+# **겹치지 않았다**(2026-08-02). 0.25가 그 빈 구간이다.
+#
+# 처음에는 «앞 세그와의 간격»으로 걸렀는데, 그러면 꼬리가 이미 삼켜 버린 추임새를 같이 버린다
+# (numb numb 0:42는 앞 간격 −0.02초라 탈락했지만 실제로는 추임새의 뒷부분이었다).
+#
+# 꼬리 상한·끊김 판정을 푸는 쪽(`2pass-owsm-mixed-longtail`, 상한 4초·끊김 0.25초)으로도 늘임음
+# 오검출은 사라지지만 **확인된 추임새까지 삼킨다**(numb numb 4 → 0, 熱異常 9 → 8) — 꼬리가
+# 길어지면 추임새 위로 가사가 덮여 표시가 나빠진다. UST 축도 중립이었다(구간 IoU −0.25). 기각.
+ADLIB_DIP_LEVEL = 0.25
+ADLIB_DIP_WINDOW = 0.40
+# 앞 음절의 **온셋**까지 이만큼은 떨어져 있어야 한다. 실제 가사 음절이 코앞에 있으면 그것은
+# 그 음절의 끝자락이지 추임새가 아니다(深海少女 0:07은 「ぼく」의 끝, Kikuo 0:27·1:17은
+# 가사 한가운데). 사용자 청취 30건에서 추임새는 앞 온셋까지 0.70초 이상, 실가사 끝자락은
+# 0.06~0.09초로 **그 사이가 통째로 비어 있었다**(2026-08-02).
+#
+# 세그의 «끝»이 아니라 «시작»으로 잰다. 끝은 꼬리 늘이기가 움직이는 표시 규약이고 시작은
+# CTC 실측이라 안 움직인다 — ``_extend_segments``가 시작을 안 건드리는 것과 같은 이유다.
+ADLIB_MIN_ONSET_GAP = 0.35
+# 보컬의 **절대** 크기 하한(dBFS). 우세도는 비율이라 절대 크기를 안 본다 — numb numb 2:45는
+# 보컬 −94dB·반주 −91dB로 완전한 디지털 무음인데 0/0의 비율이 잡음으로 튀어 후보가 됐고,
+# 深海少女 2:32는 −36dB로 가창(−18dB)보다 18dB 아래인 분리 잔향이었다. 정검출은 −14.7~−24.2에
+# 몰려 있어 −30dB가 둘 사이의 빈 구간이다.
+ADLIB_MIN_DB = -30.0
+
+
+def _vocal_db_curve(video_id: str, hop: float) -> list[float] | None:
+    """보컬 절대 크기(dBFS) 곡선 — 우세도가 못 보는 축. 스템 옆에 캐시한다."""
+    for separator in DOMINANCE_STEMS:
+        vocals = BENCH / "stems" / separator / video_id / "vocals.wav"
+        if not vocals.is_file():
+            continue
+        cache = vocals.with_name(f"vocal_db_{hop:.2f}.json")
+        if cache.is_file():
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        try:
+            import librosa
+            import numpy as np
+
+            wave, _ = librosa.load(str(vocals), sr=16_000, mono=True)
+            step = max(1, int(hop * 16_000))
+            usable = (len(wave) // step) * step
+            frames = wave[:usable].reshape(-1, step)
+            out = (
+                20 * np.log10(np.maximum(np.sqrt((frames**2).mean(axis=1)), 1e-9))
+            ).round(1).tolist()
+        except Exception:
+            return None
+        try:
+            cache.write_text(json.dumps(out), encoding="utf-8")
+        except Exception:
+            pass
+        return out
+    return None
+
+
+def adlib_candidates(
+    tracks: list[dict], dominance: dict | None, video_id: str | None = None
+) -> list[list[float]] | None:
+    """설명 안 된 가창 구간 [[시작, 끝], ...]."""
+    if not dominance:
+        return None
+    # 부분 문자열로 고르면 ``-longtail``·``-notail`` 같은 **대조군 변형**을 집는다(실제로 집었다).
+    # 레인 이름은 "분리 · 정렬기[→스크립트][ [앵커+리파이너]]" 꼴이라 정렬기 이름만 떼어 비교한다.
+    def lane_base(name: str) -> str:
+        part = name.split(" · ", 1)[1] if " · " in name else name
+        return part.split("→")[0].split(" ")[0]
+
+    lane = next(
+        (
+            t
+            for t in tracks
+            if not t.get("ust") and t.get("segs") and lane_base(t.get("name", "")) == ADLIB_LANE
+        ),
+        None,
+    )
+    if lane is None:
+        return None
+    merged: list[list[float]] = []
+    for seg in sorted(lane["segs"], key=lambda s: s["start"]):
+        start, end = float(seg["start"]), float(max(seg["end"], seg["start"]))
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    values, hop = dominance["v"], dominance["hop"]
+    free: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in merged:
+        if start > cursor:
+            free.append((cursor, start))
+        cursor = max(cursor, end)
+    free.append((cursor, len(values) * hop))
+
+    starts = sorted(float(s["start"]) for s in lane["segs"])
+    levels = _vocal_db_curve(video_id, hop) if video_id else None
+
+    def keep(t0: float, t1: float) -> bool:
+        # ① 다음 세그에 붙어 있으면 그 세그의 온셋이지 추임새가 아니다
+        following = next((x for x in starts if x >= t1 - 0.01), None)
+        if following is not None and following - t1 < ADLIB_MIN_TAIL_GAP:
+            return False
+        # ② 앞 음절 온셋이 코앞이면 그 음절의 끝자락이다
+        preceding = max((x for x in starts if x <= t0 + 0.01), default=None)
+        if preceding is not None and t0 - preceding < ADLIB_MIN_ONSET_GAP:
+            return False
+        # ③ 직전에 우세도가 꺼졌다 올라왔는가 — 늘임음이면 매끄럽게 이어진다
+        low = max(0, int((t0 - ADLIB_DIP_WINDOW) / hop))
+        high = min(len(values), int(t0 / hop) + 2)
+        if high > low and min(values[low:high]) > ADLIB_DIP_LEVEL:
+            return False
+        # ④ 소리가 실제로 나는가 — 우세도는 비율이라 이걸 못 본다
+        if levels:
+            lo, hi = int(t0 / hop), min(len(levels), max(int(t0 / hop) + 1, int(t1 / hop)))
+            if hi > lo and max(levels[lo:hi]) < ADLIB_MIN_DB:
+                return False
+        return True
+
+    out: list[list[float]] = []
+    for start, end in free:
+        lo, hi = int(start / hop), min(len(values), int(end / hop))
+        run = None
+        for index in range(lo, hi + 1):
+            if index < hi and values[index] >= ADLIB_LEVEL:
+                if run is None:
+                    run = index
+            elif run is not None:
+                t0, t1 = round(run * hop, 3), round(index * hop, 3)
+                if t1 - t0 >= ADLIB_MIN_SEC and keep(t0, t1):
+                    out.append([t0, t1])
+                run = None
+    return out or None
 
 
 def allin1_sections(song: dict) -> dict | None:
@@ -1088,7 +1252,7 @@ SINGLE_PAGE_HTML = r'''<!doctype html>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#14161a;color:#dde1e7;font:13px system-ui,"Malgun Gothic",sans-serif;display:flex;flex-direction:column}#top{background:#1d2026;border-bottom:1px solid #343942;padding:9px 12px;z-index:4}h1{font-size:15px;margin:0 0 7px}#song-controls,#controls,#tracks-toggle{display:flex;gap:8px;align-items:center;flex-wrap:wrap}#tracks-toggle{margin-top:7px;font-size:11px}input,select,button{background:#2b3039;color:#e5e9ef;border:1px solid #4b5360;border-radius:4px;padding:4px 7px}#song-filter{min-width:190px}#song-select{min-width:min(620px,70vw);max-width:70vw}button{cursor:pointer}button:hover{background:#3c434e}audio{height:27px;max-width:330px}label{display:flex;align-items:center;gap:4px;cursor:pointer}.swatch{width:10px;height:10px;border-radius:2px;display:inline-block}.tag{color:#9ca8b8}.warn{color:#ffd166}.error{color:#ff8791}#wrap{position:relative;flex:1;overflow:auto;min-height:280px;background:#14161a}#timeline{position:relative;min-height:100%}#cv{position:sticky;left:0;top:0;display:block;z-index:1;cursor:crosshair}#tip{display:none;position:fixed;z-index:10;max-width:310px;padding:7px 9px;border:1px solid #667084;border-radius:5px;background:#11151bcc;color:#f2f5f8;font-size:12px;line-height:1.45;pointer-events:none;white-space:pre-line;box-shadow:0 4px 16px #0008}.hint{color:#9ca8b8;font-size:11px}kbd{padding:1px 4px;border:1px solid #515966;border-radius:3px;background:#292e36;font:11px monospace}
 </style></head><body>
-<div id="top"><h1 id="page-title">Karaoke alignment review</h1><div id="song-controls"><input id="song-filter" type="search" placeholder="Filter stratum, title, quality, ID"><label title="보컬 우세도 — star를 놓을 자리(발성이 끊긴 곳)를 가르는 신호"><input id="showdom" type="checkbox" checked> 우세도</label>
+<div id="top"><h1 id="page-title">Karaoke alignment review</h1><div id="song-controls"><input id="song-filter" type="search" placeholder="Filter stratum, title, quality, ID"><label title="보컬 우세도 — star를 놓을 자리(발성이 끊긴 곳)를 가르는 신호"><input id="showdom" type="checkbox" checked> 우세도</label><label title="설명 안 된 가창 — 가사가 주장하지 않았는데 우세도가 높은 구간(추임새·누락 가사 후보)"><input id="showadlib" type="checkbox" checked> 추임새 후보</label>
 <label title="UST 준정답 레인이 있는 곡만"><input id="ust-only" type="checkbox">UST만</label><select id="song-select" aria-label="Song selector"></select><span id="song-status" class="tag"></span></div><div id="controls"><audio id="au" controls preload="metadata"></audio><select id="audiosrc" title="오디오 소스"></select><button id="zi">Zoom +</button><button id="zo">Zoom −</button><select id="viewmode" title="표시 모드"><option value="both">음절+라인</option><option value="segs">음절만</option><option value="lines">라인만</option></select><select id="followmode" title="화면 따라가기"><option value="page">따라가기: 페이지 넘김</option><option value="pin">따라가기: 헤드 고정</option><option value="off">따라가기: 끄기</option></select><span id="pos" class="tag"></span><span class="hint"><kbd>Space</kbd> play/pause · <kbd>←</kbd>/<kbd>→</kbd> seek 2s · click timeline to seek · 휠 zoom</span></div><div id="tracks-toggle"></div></div>
 <div id="wrap"><div id="timeline"><canvas id="cv"></canvas></div></div><div id="tip"></div>
 <script src="data/index.js"></script><script>
@@ -1143,7 +1307,15 @@ ctx.fillStyle='#14161ad0';ctx.fillRect(lx-2,14,w+4,11);ctx.fillStyle='#7bd88f';c
 // 행 안의 좌표는 전부 행 높이 비례(k)로 잡는다 — 고정 픽셀을 쓰면 절반 높이 행에서 바가 행
 // 밖으로 삐져나간다. 라벨은 비례로 안 되는 축이라(글자는 반으로 줄면 못 읽는다) compact 행에서만
 // 세 줄 중 이름만 남긴다. 부제·현재 글자를 잃어도 «어느 레인이 여기 있다»는 읽혀야 하기 때문.
-function render(){if(!DATA)return;const L=layout(),rows=L.rows,width=Math.max(1,wrap.clientWidth),height=Math.max(1,wrap.clientHeight),dpr=devicePixelRatio||1;if(cv.width!==Math.ceil(width*dpr)||cv.height!==Math.ceil(height*dpr)){cv.width=Math.ceil(width*dpr);cv.height=Math.ceil(height*dpr);cv.style.width=width+'px';cv.style.height=height+'px'}const contentWidth=Math.max(width,LABEL_W+Math.ceil(dur*pps)),contentHeight=Math.max(height,L.total);timeline.style.width=contentWidth+'px';timeline.style.height=contentHeight+'px';ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);ctx.fillStyle='#14161a';ctx.fillRect(0,0,width,height);const followMode=$('#followmode').value,span=Math.max(1,width-LABEL_W);let timeScroll;if(!au.paused&&followMode==='pin'){timeScroll=Math.max(0,au.currentTime*pps-span*.38)}else if(!au.paused&&followMode==='page'){const headX=au.currentTime*pps;if(headX<PAGE_TS||headX>PAGE_TS+span*.85)PAGE_TS=Math.max(0,headX-span*.15);timeScroll=PAGE_TS}else{timeScroll=Math.max(0,wrap.scrollLeft-LABEL_W)}RENDER_TS=timeScroll;const viewStart=timeScroll/pps,viewEnd=(timeScroll+Math.max(0,width-LABEL_W))/pps,yScroll=wrap.scrollTop;ctx.fillStyle='#1d2026';ctx.fillRect(0,0,LABEL_W,height);ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(LABEL_W-.5,0);ctx.lineTo(LABEL_W-.5,height);ctx.stroke();ctx.font='10px system-ui';ctx.fillStyle='#788392';ctx.strokeStyle='#292e36';for(let sec=Math.floor(viewStart/10)*10;sec<=viewEnd+10;sec+=10){const x=LABEL_W+sec*pps-timeScroll;ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,height);ctx.stroke();ctx.fillText(stamp(sec),x+3,11)}drawSections(0,viewStart,viewEnd,timeScroll,width,height);drawDominance(0,viewStart,viewEnd,timeScroll,width,height);rows.forEach((trackIndex,row)=>{const track=DATA.tracks[trackIndex],rh=L.hs[row],top=L.tops[row]-yScroll,bottom=top+rh,k=rh/ROW_H;if(bottom<0||top>height)return;ctx.save();ctx.beginPath();ctx.rect(0,top,LABEL_W-4,rh);ctx.clip();if(track.band){ctx.fillStyle=track.band;ctx.fillRect(0,top+1,4,rh-2)}ctx.fillStyle=track.color;const nowT=au.currentTime-(track.ust?OFFS[trackIndex]||0:0);let liveTxt='';if(track.segs.length){const s=track.segs[lowerBound(track.segs,nowT)-1];if(s)liveTxt=s.t}else if(track.lines.length){const l=track.lines[lowerBound(track.lines,nowT)-1];if(l&&nowT<=l.end+1)liveTxt=l.label}if(track.compact){ctx.font='9px system-ui';ctx.fillText(track.name,8,top+10);if(track._score){const nameW=ctx.measureText(track.name).width;ctx.fillStyle='#788392';ctx.fillText(track._score,11+nameW,top+10)}if(liveTxt){const conv=toReadable(liveTxt);ctx.fillStyle='#f2f5f8';ctx.font='bold 11px system-ui';ctx.fillText(conv,8,top+22)}}else{ctx.font='12px system-ui';ctx.fillText(track.name,8,top+14);ctx.fillStyle='#788392';ctx.font='9px system-ui';ctx.fillText(track.line_reference?'caption mapping':track.no_segs?'no measured syllables'+(track._score||''):track.ust?`Shift=레인 Ctrl=범위선택 Alt=이동 · δadj ${((OFFS[trackIndex]||0)>=0?'+':'')+(OFFS[trackIndex]||0).toFixed(2)}s${Object.keys(LOFFS[trackIndex]||{}).length?` (+소절 ${Object.keys(LOFFS[trackIndex]).length})`:''} · dblclick reset · E=복사`:(track._score?`${track._score.slice(3)} · ${track.segs.length}조각`:`${track.segs.length} syllable spans`),8,top+26);if(liveTxt){const conv=toReadable(liveTxt),subst=conv!==liveTxt;ctx.font='bold 15px system-ui';const convW=ctx.measureText(conv).width;ctx.fillStyle=subst?'#a9b6c9':'#f2f5f8';ctx.fillText(conv,8,top+45);if(subst){ctx.font='10px system-ui';ctx.fillStyle='#5a6472';ctx.fillText(liveTxt,14+convW,top+45)}}}ctx.restore();ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(0,bottom-.5);ctx.lineTo(width,bottom-.5);ctx.stroke();const toff=track.ust?OFFS[trackIndex]||0:0;const noSegTrack=track.line_reference||track.no_segs,drawLines=MODE!=='segs'||noSegTrack,drawSegs=MODE!=='lines'&&!noSegTrack;if(drawLines){const big=!drawSegs;const lineStart=track.ust?0:Math.max(0,lowerBound(track.lines,viewStart-toff)-1);for(let i=lineStart;i<track.lines.length&&(track.ust||track.lines[i].start+toff<=viewEnd);i++){const line=track.lines[i],leff=track.ust?toff+lineOff(trackIndex,i):toff;if(track.ust&&(line.end+leff<viewStart||line.start+leff>viewEnd))continue;const x=LABEL_W+(line.start+leff)*pps-timeScroll,w=Math.max(1,(line.end-line.start)*pps),ly=top+(big?10:5)*k,lh=(big?30:9)*k;ctx.fillStyle=track.color+(big?'55':'22');ctx.fillRect(x,ly,w,lh);ctx.strokeStyle=track.color+'88';ctx.strokeRect(x+.5,ly+.5,Math.max(1,w-1),lh-1);if(w>=24){ctx.save();ctx.beginPath();ctx.rect(x+1,ly,w-2,lh);ctx.clip();ctx.fillStyle=big?'#eef2f7':'#c7cede';ctx.font=`${Math.max(8,Math.round((big?11:9)*k))}px system-ui`;ctx.fillText(line.label,x+3,ly+(big?19:8)*k);ctx.restore()}}}if(drawSegs){const st=top+(MODE==='both'?17:13)*k,sh=(MODE==='both'?23:25)*k;const segStart=track.ust?0:Math.max(0,lowerBound(track.segs,viewStart-toff)-1),shape=track.shape||'';ctx.fillStyle=track.color;for(let i=segStart;i<track.segs.length&&(track.ust||track.segs[i].start+toff<=viewEnd);i++){const seg=track.segs[i],seff=track.ust?segEff(track,trackIndex,i):toff;if(track.ust&&(seg.end+seff<viewStart||seg.start+seff>viewEnd))continue;const x=LABEL_W+(seg.start+seff)*pps-timeScroll,w=Math.max(2,(seg.end-seg.start)*pps);ctx.fillRect(x,st,w,sh);if(shape==='twopass'){ctx.fillStyle='#ffffff99';ctx.fillRect(x,st,w,2);ctx.fillStyle=track.color}else if(shape==='routed'){ctx.fillStyle='#0b0e12';ctx.fillRect(x,st,w,1);ctx.fillRect(x,st+sh-1,w,1);if(w>=6){ctx.fillRect(x,st,1,sh);ctx.fillRect(x+w-1,st,1,sh)}ctx.fillStyle=track.color}if(track.ust&&SEL&&SEL.ti===trackIndex&&track._segLine&&SEL.set.has(track._segLine[i])){ctx.strokeStyle='#ffffff';ctx.strokeRect(x+.5,st+.5,Math.max(1,w-1),sh-1)}if(w>=11){ctx.fillStyle='#101318';ctx.font=`${Math.max(8,Math.round(11*k))}px system-ui`;ctx.fillText(seg.t,x+2,st+sh-7*k);ctx.fillStyle=track.color}}}});drawSections(1,viewStart,viewEnd,timeScroll,width,height);drawDominance(1,viewStart,viewEnd,timeScroll,width,height);if(MARQ){const rowIdx=rows.indexOf(MARQ.ti);if(rowIdx>=0){const lo=Math.min(MARQ.t0,MARQ.t1),hi=Math.max(MARQ.t0,MARQ.t1),mx=LABEL_W+lo*pps-timeScroll,mw=Math.max(1,(hi-lo)*pps),my=L.tops[rowIdx]-yScroll,mh=L.hs[rowIdx];ctx.fillStyle='#8ab4ff22';ctx.fillRect(mx,my,mw,mh);ctx.strokeStyle='#8ab4ff';ctx.strokeRect(mx+.5,my+.5,mw-1,mh-1)}}const playX=LABEL_W+au.currentTime*pps-timeScroll;if(playX>=LABEL_W&&playX<=width){ctx.strokeStyle='#ff5c67';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(playX+.5,0);ctx.lineTo(playX+.5,height);ctx.stroke();ctx.lineWidth=1}}
+
+// 추임새 후보 — 가사가 주장 안 한 시간 ∩ 우세도 높음. 우세도 띠(연녹, 조용한 구간)와 **반대**
+// 조건이므로 색을 확실히 갈라 둔다. pass 0은 세그 아래(띠), pass 1은 위(가장자리 선+라벨).
+function drawAdlib(pass,viewStart,viewEnd,timeScroll,width,height){const A=DATA.adlib;if(!A)return;const box=$('#showadlib');if(box&&!box.checked)return;
+for(let i=0;i<A.length;i++){const t0=A[i][0],t1=A[i][1];if(t1<viewStart||t0>viewEnd)continue;const x=LABEL_W+t0*pps-timeScroll,w=Math.max(2,(t1-t0)*pps);const cx=Math.max(x,LABEL_W),cw=w-Math.max(0,LABEL_W-x);if(cw<=0)continue;
+if(!pass){ctx.fillStyle='#f0a03026';ctx.fillRect(cx,0,cw,height);continue}
+ctx.strokeStyle='#f0a030cc';ctx.beginPath();ctx.moveTo(cx+.5,0);ctx.lineTo(cx+.5,height);ctx.moveTo(cx+cw-.5,0);ctx.lineTo(cx+cw-.5,height);ctx.stroke();
+if(cw>=34){ctx.fillStyle='#f0a030';ctx.font='9px system-ui';ctx.fillText(`추임새? ${(t1-t0).toFixed(1)}s`,cx+3,height-6)}}}
+function render(){if(!DATA)return;const L=layout(),rows=L.rows,width=Math.max(1,wrap.clientWidth),height=Math.max(1,wrap.clientHeight),dpr=devicePixelRatio||1;if(cv.width!==Math.ceil(width*dpr)||cv.height!==Math.ceil(height*dpr)){cv.width=Math.ceil(width*dpr);cv.height=Math.ceil(height*dpr);cv.style.width=width+'px';cv.style.height=height+'px'}const contentWidth=Math.max(width,LABEL_W+Math.ceil(dur*pps)),contentHeight=Math.max(height,L.total);timeline.style.width=contentWidth+'px';timeline.style.height=contentHeight+'px';ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);ctx.fillStyle='#14161a';ctx.fillRect(0,0,width,height);const followMode=$('#followmode').value,span=Math.max(1,width-LABEL_W);let timeScroll;if(!au.paused&&followMode==='pin'){timeScroll=Math.max(0,au.currentTime*pps-span*.38)}else if(!au.paused&&followMode==='page'){const headX=au.currentTime*pps;if(headX<PAGE_TS||headX>PAGE_TS+span*.85)PAGE_TS=Math.max(0,headX-span*.15);timeScroll=PAGE_TS}else{timeScroll=Math.max(0,wrap.scrollLeft-LABEL_W)}RENDER_TS=timeScroll;const viewStart=timeScroll/pps,viewEnd=(timeScroll+Math.max(0,width-LABEL_W))/pps,yScroll=wrap.scrollTop;ctx.fillStyle='#1d2026';ctx.fillRect(0,0,LABEL_W,height);ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(LABEL_W-.5,0);ctx.lineTo(LABEL_W-.5,height);ctx.stroke();ctx.font='10px system-ui';ctx.fillStyle='#788392';ctx.strokeStyle='#292e36';for(let sec=Math.floor(viewStart/10)*10;sec<=viewEnd+10;sec+=10){const x=LABEL_W+sec*pps-timeScroll;ctx.beginPath();ctx.moveTo(x+.5,0);ctx.lineTo(x+.5,height);ctx.stroke();ctx.fillText(stamp(sec),x+3,11)}drawSections(0,viewStart,viewEnd,timeScroll,width,height);drawDominance(0,viewStart,viewEnd,timeScroll,width,height);drawAdlib(0,viewStart,viewEnd,timeScroll,width,height);rows.forEach((trackIndex,row)=>{const track=DATA.tracks[trackIndex],rh=L.hs[row],top=L.tops[row]-yScroll,bottom=top+rh,k=rh/ROW_H;if(bottom<0||top>height)return;ctx.save();ctx.beginPath();ctx.rect(0,top,LABEL_W-4,rh);ctx.clip();if(track.band){ctx.fillStyle=track.band;ctx.fillRect(0,top+1,4,rh-2)}ctx.fillStyle=track.color;const nowT=au.currentTime-(track.ust?OFFS[trackIndex]||0:0);let liveTxt='';if(track.segs.length){const s=track.segs[lowerBound(track.segs,nowT)-1];if(s)liveTxt=s.t}else if(track.lines.length){const l=track.lines[lowerBound(track.lines,nowT)-1];if(l&&nowT<=l.end+1)liveTxt=l.label}if(track.compact){ctx.font='9px system-ui';ctx.fillText(track.name,8,top+10);if(track._score){const nameW=ctx.measureText(track.name).width;ctx.fillStyle='#788392';ctx.fillText(track._score,11+nameW,top+10)}if(liveTxt){const conv=toReadable(liveTxt);ctx.fillStyle='#f2f5f8';ctx.font='bold 11px system-ui';ctx.fillText(conv,8,top+22)}}else{ctx.font='12px system-ui';ctx.fillText(track.name,8,top+14);ctx.fillStyle='#788392';ctx.font='9px system-ui';ctx.fillText(track.line_reference?'caption mapping':track.no_segs?'no measured syllables'+(track._score||''):track.ust?`Shift=레인 Ctrl=범위선택 Alt=이동 · δadj ${((OFFS[trackIndex]||0)>=0?'+':'')+(OFFS[trackIndex]||0).toFixed(2)}s${Object.keys(LOFFS[trackIndex]||{}).length?` (+소절 ${Object.keys(LOFFS[trackIndex]).length})`:''} · dblclick reset · E=복사`:(track._score?`${track._score.slice(3)} · ${track.segs.length}조각`:`${track.segs.length} syllable spans`),8,top+26);if(liveTxt){const conv=toReadable(liveTxt),subst=conv!==liveTxt;ctx.font='bold 15px system-ui';const convW=ctx.measureText(conv).width;ctx.fillStyle=subst?'#a9b6c9':'#f2f5f8';ctx.fillText(conv,8,top+45);if(subst){ctx.font='10px system-ui';ctx.fillStyle='#5a6472';ctx.fillText(liveTxt,14+convW,top+45)}}}ctx.restore();ctx.strokeStyle='#303640';ctx.beginPath();ctx.moveTo(0,bottom-.5);ctx.lineTo(width,bottom-.5);ctx.stroke();const toff=track.ust?OFFS[trackIndex]||0:0;const noSegTrack=track.line_reference||track.no_segs,drawLines=MODE!=='segs'||noSegTrack,drawSegs=MODE!=='lines'&&!noSegTrack;if(drawLines){const big=!drawSegs;const lineStart=track.ust?0:Math.max(0,lowerBound(track.lines,viewStart-toff)-1);for(let i=lineStart;i<track.lines.length&&(track.ust||track.lines[i].start+toff<=viewEnd);i++){const line=track.lines[i],leff=track.ust?toff+lineOff(trackIndex,i):toff;if(track.ust&&(line.end+leff<viewStart||line.start+leff>viewEnd))continue;const x=LABEL_W+(line.start+leff)*pps-timeScroll,w=Math.max(1,(line.end-line.start)*pps),ly=top+(big?10:5)*k,lh=(big?30:9)*k;ctx.fillStyle=track.color+(big?'55':'22');ctx.fillRect(x,ly,w,lh);ctx.strokeStyle=track.color+'88';ctx.strokeRect(x+.5,ly+.5,Math.max(1,w-1),lh-1);if(w>=24){ctx.save();ctx.beginPath();ctx.rect(x+1,ly,w-2,lh);ctx.clip();ctx.fillStyle=big?'#eef2f7':'#c7cede';ctx.font=`${Math.max(8,Math.round((big?11:9)*k))}px system-ui`;ctx.fillText(line.label,x+3,ly+(big?19:8)*k);ctx.restore()}}}if(drawSegs){const st=top+(MODE==='both'?17:13)*k,sh=(MODE==='both'?23:25)*k;const segStart=track.ust?0:Math.max(0,lowerBound(track.segs,viewStart-toff)-1),shape=track.shape||'';ctx.fillStyle=track.color;for(let i=segStart;i<track.segs.length&&(track.ust||track.segs[i].start+toff<=viewEnd);i++){const seg=track.segs[i],seff=track.ust?segEff(track,trackIndex,i):toff;if(track.ust&&(seg.end+seff<viewStart||seg.start+seff>viewEnd))continue;const x=LABEL_W+(seg.start+seff)*pps-timeScroll,w=Math.max(2,(seg.end-seg.start)*pps);ctx.fillRect(x,st,w,sh);if(shape==='twopass'){ctx.fillStyle='#ffffff99';ctx.fillRect(x,st,w,2);ctx.fillStyle=track.color}else if(shape==='routed'){ctx.fillStyle='#0b0e12';ctx.fillRect(x,st,w,1);ctx.fillRect(x,st+sh-1,w,1);if(w>=6){ctx.fillRect(x,st,1,sh);ctx.fillRect(x+w-1,st,1,sh)}ctx.fillStyle=track.color}if(track.ust&&SEL&&SEL.ti===trackIndex&&track._segLine&&SEL.set.has(track._segLine[i])){ctx.strokeStyle='#ffffff';ctx.strokeRect(x+.5,st+.5,Math.max(1,w-1),sh-1)}if(w>=11){ctx.fillStyle='#101318';ctx.font=`${Math.max(8,Math.round(11*k))}px system-ui`;ctx.fillText(seg.t,x+2,st+sh-7*k);ctx.fillStyle=track.color}}}});drawSections(1,viewStart,viewEnd,timeScroll,width,height);drawDominance(1,viewStart,viewEnd,timeScroll,width,height);drawAdlib(1,viewStart,viewEnd,timeScroll,width,height);if(MARQ){const rowIdx=rows.indexOf(MARQ.ti);if(rowIdx>=0){const lo=Math.min(MARQ.t0,MARQ.t1),hi=Math.max(MARQ.t0,MARQ.t1),mx=LABEL_W+lo*pps-timeScroll,mw=Math.max(1,(hi-lo)*pps),my=L.tops[rowIdx]-yScroll,mh=L.hs[rowIdx];ctx.fillStyle='#8ab4ff22';ctx.fillRect(mx,my,mw,mh);ctx.strokeStyle='#8ab4ff';ctx.strokeRect(mx+.5,my+.5,mw-1,mh-1)}}const playX=LABEL_W+au.currentTime*pps-timeScroll;if(playX>=LABEL_W&&playX<=width){ctx.strokeStyle='#ff5c67';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(playX+.5,0);ctx.lineTo(playX+.5,height);ctx.stroke();ctx.lineWidth=1}}
 function ustScoreVal(track){if(!DATA||!DATA.ust_truth||track.ust||track.line_reference||!track.lines)return null;const anch=DATA.ust_truth.anchors;let adj=0;for(let i=0;i<DATA.tracks.length;i++){const u=DATA.tracks[i];if(u.ust&&!/harm/i.test(u.name)){adj=OFFS[i]||0;break}}let n=0,hit=0;for(const k in anch){const line=track.lines[+k];if(!line)continue;n++;if(Math.abs(line.start-(anch[k]+adj))<=0.15)hit++}return n?hit/n:null}
 function ustScore(track){const v=ustScoreVal(track);return v==null?'':` · 라인 ${Math.round(100*v)}%`+syllScore(track)}
 // 음절 축 — 세그에 박아둔 대응 UST 노트 시각과 비교. 라인 채점이 못 보는 BPE 보간 손실이 여기 보인다.
@@ -1173,7 +1345,7 @@ cv.addEventListener('click',event=>{if(event.shiftKey||event.ctrlKey||event.altK
 $('#zi').onclick=()=>{pps=Math.min(pps*1.5,500);queueRender()};$('#zo').onclick=()=>{pps=Math.max(pps/1.5,5);queueRender()};$('#viewmode').onchange=event=>{MODE=event.target.value;queueRender()};$('#followmode').onchange=()=>queueRender();$('#audiosrc').onchange=function(){const time=au.currentTime,playing=!au.paused,source=SOURCES[+this.value];if(!source)return;au.setAttribute('src',dataUrl(source.path));au.load();au.addEventListener('loadedmetadata',()=>{au.currentTime=time;if(playing)au.play()},{once:true})};document.addEventListener('keydown',event=>{if(['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName))return;if(event.code==='Space'){event.preventDefault();au.paused?au.play():au.pause()}else if(event.code==='ArrowLeft')au.currentTime=Math.max(0,au.currentTime-2);else if(event.code==='ArrowRight')au.currentTime=Math.min(dur,au.currentTime+2);else if(event.code==='Escape'){SEL=null;queueRender()}else if(event.code==='KeyE'&&DATA){const parts=[];DATA.tracks.forEach((t,i)=>{if(t.ust)parts.push({track:t.name,lane_offset:+(OFFS[i]||0).toFixed(3),phrase_offsets:Object.fromEntries(Object.entries(LOFFS[i]||{}).filter(([,v])=>Math.abs(v)>1e-3).map(([k,v])=>[k,+v.toFixed(3)]))})});if(parts.length){const txt=JSON.stringify({song:activeId,ust:parts});if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(()=>{status.textContent='UST 오프셋 JSON 복사됨'})}else{console.log(txt);status.textContent='UST 오프셋 콘솔 출력'}}}});
 function dataUrl(path){return new URL(`data/${path}`,location.href).href}
 function loadSong(videoId){if(!videoId||videoId===activeId)return;const apply=()=>{const song=window.__SONG_DATA__[videoId];if(!song){status.textContent=`Could not load ${videoId}`;status.className='error';return}activeId=videoId;DATA=song;dur=Math.max(Number(song.duration)||0,...song.tracks.flatMap(track=>[...track.lines,...track.segs].map(item=>item.end)),1);SOURCES=(song.audio&&song.audio.sources)||[];const srcSel=$('#audiosrc');srcSel.replaceChildren();SOURCES.forEach((source,i)=>{const option=document.createElement('option');option.value=i;option.textContent=source.name;srcSel.append(option)});srcSel.value='0';au.pause();if(SOURCES.length)au.setAttribute('src',dataUrl(SOURCES[0].path));au.load();$('#page-title').textContent=`[${song.stratum}] ${song.title} · Karaoke alignment review`;OFFS={};LOFFS={};sortTracksByUst(song);visible=song.tracks.map(()=>true);invalidateLayout();song.tracks.forEach((t,i)=>{if(t.ust){const v=parseFloat(localStorage.getItem('ustoff:'+videoId+':'+t.name));if(Number.isFinite(v)&&v)OFFS[i]=v;try{const m=JSON.parse(localStorage.getItem('ustloff:'+videoId+':'+t.name)||'null');if(m&&typeof m==='object'&&Object.keys(m).length)LOFFS[i]=m}catch(e){}t._segLine=t.segs.map(s=>{let j=lowerBound(t.lines,s.start+1e-4)-1;return j<0?0:j})}});refreshScores();renderTrackToggles();status.textContent=song.no_segs_tracks?`${song.no_segs_tracks} track(s) without syllables`:'Syllable spans available';status.className=song.no_segs_tracks?'warn':'tag';wrap.scrollLeft=0;wrap.scrollTop=0;PAGE_TS=0;queueRender()};if(window.__SONG_DATA__[videoId]){apply();return}const script=document.createElement('script');script.src=`data/${encodeURIComponent(videoId)}.js`;script.onload=apply;script.onerror=()=>{status.textContent=`Failed to load data/${videoId}.js`;status.className='error'};document.head.append(script)}
-filter.addEventListener('input',fillSelector);$('#showdom').addEventListener('change',queueRender);$('#ust-only').addEventListener('change',()=>{try{localStorage.setItem('ustonly',$('#ust-only').checked?'1':'')}catch(e){}fillSelector()});try{$('#ust-only').checked=!!localStorage.getItem('ustonly')}catch(e){}select.addEventListener('change',()=>loadSong(select.value));au.addEventListener('loadedmetadata',()=>{if(Number.isFinite(au.duration)&&au.duration>0){dur=au.duration;queueRender()}});function tick(){pos.textContent=`${stamp(au.currentTime)} / ${stamp(dur)} · ${pps.toFixed(0)} px/s`;if(DATA&&!au.paused&&$('#followmode').value!=='off'){wrap.scrollLeft=RENDER_TS>0?RENDER_TS+LABEL_W:0}queueRender();requestAnimationFrame(tick)}fillSelector();const wanted=new URLSearchParams(location.search).get('song');if(wanted&&[...select.options].some(option=>option.value===wanted))select.value=wanted;if(select.value)loadSong(select.value);tick();
+filter.addEventListener('input',fillSelector);$('#showdom').addEventListener('change',queueRender);$('#showadlib').addEventListener('change',queueRender);$('#ust-only').addEventListener('change',()=>{try{localStorage.setItem('ustonly',$('#ust-only').checked?'1':'')}catch(e){}fillSelector()});try{$('#ust-only').checked=!!localStorage.getItem('ustonly')}catch(e){}select.addEventListener('change',()=>loadSong(select.value));au.addEventListener('loadedmetadata',()=>{if(Number.isFinite(au.duration)&&au.duration>0){dur=au.duration;queueRender()}});function tick(){pos.textContent=`${stamp(au.currentTime)} / ${stamp(dur)} · ${pps.toFixed(0)} px/s`;if(DATA&&!au.paused&&$('#followmode').value!=='off'){wrap.scrollLeft=RENDER_TS>0?RENDER_TS+LABEL_W:0}queueRender();requestAnimationFrame(tick)}fillSelector();const wanted=new URLSearchParams(location.search).get('song');if(wanted&&[...select.options].some(option=>option.value===wanted))select.value=wanted;if(select.value)loadSong(select.value);tick();
 </script></body></html>'''
 
 
@@ -1293,6 +1465,9 @@ def generate_song_data(
     dominance = dominance_curve(payload["video_id"])
     if dominance:
         payload["dominance"] = dominance
+    adlib = adlib_candidates(tracks, dominance, payload["video_id"])
+    if adlib:
+        payload["adlib"] = adlib
     output = BENCH / "results" / "data" / f"{song['video_id']}.js"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
