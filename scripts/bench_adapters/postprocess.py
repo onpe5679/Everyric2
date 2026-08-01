@@ -91,6 +91,32 @@ CONFIGS: tuple[PostProcessConfig, ...] = (
         clamp_only=True,
         note="ja 채택 스택 + 병적 라인 절단만",
     ),
+    # ★en 채택 스택 + 병적 라인 절단. ja 7곡에서 437줄 중 0회 발동이라 무효로 판정했는데,
+    # **그 판단이 ja 표본만으로 내려진 것이었다**. en에서는 명백히 발동해야 한다 — Madeon
+    # 1:30~2:32의 비가창 62초(우세도 0.033)에 우리 레인이 38.0초를 덮는 반면 PROD는 0.2초다.
+    # 원인은 라인28의 「윌」 한 세그가 32.19초를 먹은 것이고, 그 라인은 35.6초 지속에 발성
+    # 커버리지 ~4%라 「8초 초과 + 커버리지 50% 미만」 조건에 정확히 걸린다(2026-08-02).
+    PostProcessConfig(
+        name="2pass-asr-ipa-hangul+pp",
+        base="2pass-asr-ipa-hangul",
+        pron_path=False,
+        clamp_only=True,
+        note="en 채택 스택 + 병적 라인 절단만",
+    ),
+    PostProcessConfig(
+        name="2pass-asr-ipa-en+pp",
+        base="2pass-asr-ipa-en",
+        pron_path=False,
+        clamp_only=True,
+        note="en 원문 음절 + 병적 라인 절단만",
+    ),
+    PostProcessConfig(
+        name="2pass-asr-ipa-phonetic+pp",
+        base="2pass-asr-ipa-phonetic",
+        pron_path=False,
+        clamp_only=True,
+        note="en IPA 전사 + 병적 라인 절단만",
+    ),
     PostProcessConfig(
         name="omniasr-ctc+pp",
         base="omniasr-ctc",
@@ -119,6 +145,63 @@ def _vad_source(vocals_path: Path) -> tuple[Path, str]:
         if candidate.is_file():
             return candidate, separator
     return vocals_path, "as-given"
+
+
+# ── 우세도로 만든 발성 구간 ──
+# 클램프 규칙(8초 초과 + 발성 커버리지 50% 미만)이 ja 437줄에서 0회, en에서도 0회 발동했다.
+# 규칙이 필요 없어서가 아니라 **조건이 참이 될 수 없어서**다: VAD는 분리 스템 위에서 죽는다.
+# Madeon 1:30~2:32는 청취로도 우세도로도 명백한 비가창인데(우세도 평균 0.033, 0.35 이상
+# 프레임 3.9%) VAD는 그 구간을 「0:05.42~1:34.84 89초 통짜 발성」으로 읽어 라인28 커버리지가
+# 0.779가 된다. ``star_prior.py``가 이미 실측해 둔 것과 같은 현상이다 — 간주 presence 0.979,
+# 간주 RMS가 가창보다 3dB 낮을 뿐. **반주 대비 비율만이 3배 대비로 가른다.**
+_DOMINANCE_LEVEL = 0.35
+_DOMINANCE_MIN_SEC = 0.10
+
+
+class _Region:
+    __slots__ = ("start", "end")
+
+    def __init__(self, start: float, end: float) -> None:
+        self.start = start
+        self.end = end
+
+
+class _RegionSet:
+    """``vad`` 자리에 그대로 끼울 수 있는 최소 형태."""
+
+    def __init__(self, regions: list) -> None:
+        self.regions = regions
+
+
+def _dominance_activity(vocals_path: Path):
+    """보컬 우세도 ≥ 0.35가 이어지는 구간. 못 만들면 None."""
+    instrumental = vocals_path.with_name("inst.wav")
+    if not instrumental.is_file():
+        return None
+    try:
+        import librosa
+
+        from everyric2.alignment.star_prior import vocal_presence_from_stems
+
+        vocals, _ = librosa.load(str(vocals_path), sr=16_000, mono=True)
+        accomp, _ = librosa.load(str(instrumental), sr=16_000, mono=True)
+        made = vocal_presence_from_stems(vocals, accomp, 16_000, smooth_sec=0.2, hop_sec=0.01)
+    except Exception:
+        logger.warning("우세도 계산 실패 — VAD로 물러선다", exc_info=True)
+        return None
+    if made is None:
+        return None
+    values, hop = made[1], 0.01
+    regions, run = [], None
+    for index in range(len(values) + 1):
+        active = index < len(values) and float(values[index]) >= _DOMINANCE_LEVEL
+        if active and run is None:
+            run = index
+        elif not active and run is not None:
+            if (index - run) * hop >= _DOMINANCE_MIN_SEC:
+                regions.append(_Region(run * hop, index * hop))
+            run = None
+    return _RegionSet(regions) if regions else None
 
 
 def _clamp_pathological(results, vad, line_body_region) -> set[int]:
@@ -217,11 +300,15 @@ class PostProcessedAligner(AlignerAdapter):
         ]
 
         snapped: set[int] = set()
+        activity, activity_source = vad, "vad"
         if self.config.clamp_only:
             from everyric2.server.worker import _line_body_region
 
+            made = _dominance_activity(source)
+            if made is not None:
+                activity, activity_source = made, "dominance"
             corrected = results
-            clamped = _clamp_pathological(results, vad, _line_body_region)
+            clamped = _clamp_pathological(results, activity, _line_body_region)
         else:
             from everyric2.alignment.timing_postprocess import TimingPostProcessor
 
@@ -263,6 +350,8 @@ class PostProcessedAligner(AlignerAdapter):
             "applied": True,
             "vad_stem": stem_used,
             "vad_regions": len(vad.regions),
+            "activity_source": activity_source,
+            "activity_regions": len(activity.regions),
             "moved_lines": moved,
             "trimmed_segments": trimmed,
             "clamped_lines": len(clamped),

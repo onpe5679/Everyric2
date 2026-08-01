@@ -43,6 +43,8 @@ ALIGNER_HUE = {
     "2pass-owsm-mixed": 120 / 360,         # 2패스 · ★혼합 표기(ja+라틴+한글)
     # 150°(owsm 기준선)·120°(가나 표시)와 붙지 않는 빈 구간으로 뺀다 — 처음에 156°로 뒀다가
     # 셋이 전부 민트로 읽혔다(사용자 2026-08-02). 각도는 눈대중이 아니라 빈 구간으로 고른다.
+    "2pass-owsm-mixed+pp": 244 / 360,      # 2패스 · ★우세도 클램프(ja)
+    "2pass-asr-ipa-hangul+pp": 254 / 360,  # 2패스 · ★우세도 클램프(en)
     "2pass-owsm-mixed-hangul": 262 / 360,  # 2패스 · ★한글 표시층
     "2pass-owsm-mixed-star": 340 / 360,   # 2패스 · star 실험(추임새 흡수)
     "2pass-owsm-mixed-stargap": 66 / 360, # 2패스 · 끊긴 자리에만 star
@@ -591,13 +593,15 @@ VIEWER_ALIGNERS = {
     "owsm-ctc-v4-1b-bf16",
     # ── ja 채택 스택 ────────────────────────────────────────────────────────
     "2pass-owsm-omniasr",   # 다국어 단일 경로(ja 17곡 음절 86.7%)
-    "2pass-owsm-mixed",     # ★프로드 독음 + 라틴 음절화 + 장음 + 심판
+    "2pass-owsm-mixed",     # 클램프 없는 대조군
+    "2pass-owsm-mixed+pp",  # ★ja 채택 — 위 + 우세도 기반 병적 라인 절단
     "2pass-owsm-mixed-hangul",
     # 라인 클램프층(간주 좌초 스냅 제외) — 병적 라인 절단 + 소절 끝 늘임음 연장.
     # ── en 채택 스택 ────────────────────────────────────────────────────────
     # 같은 정렬(ASCII 음소 타깃 + asr 자기 라인 창 + 심판)을 세 해상도로 본다.
     "2pass-asr-ipa-en",         # 원문 음절
-    "2pass-asr-ipa-hangul",     # 한글 발음
+    "2pass-asr-ipa-hangul",     # 클램프 없는 대조군
+    "2pass-asr-ipa-hangul+pp",  # ★en 채택 — 위 + 우세도 기반 병적 라인 절단
     "2pass-asr-ipa-phonetic",   # 음소 전사 자체
     # ── 라우팅(진행 중) ─────────────────────────────────────────────────────
     "routed-2mode",
@@ -618,7 +622,6 @@ RETIRED_ALIGNERS = {
     "2pass-owsm-prod-noref": "ja 심판 채택 확정 — 청취 6/6",
     "2pass-owsm-mixed-nolong": "장음 축 — 중립 확정",
     "2pass-owsm-mixed-en": "라틴 낱말 심판 — color 12건 오답으로 기각",
-    "2pass-owsm-mixed+pp": "프로드 라인 보정층 — 병적 절단 규칙이 437줄 중 0회 발동(무효)",
     "2pass-owsm-mixed-dip": "꼬리를 깊은 골에서 멈춤 — 채택되어 2pass-owsm-mixed 본선에 편입",
     "2pass-owsm-mixed-longtail": "꼬리 상한 4초·끊김 0.25초 — 늘임음 오검출은 지우지만 확인된 추임새까지 삼켜 기각(numb numb 4 → 0)",
     "2pass-owsm-mixed-notail": "꼬리 축 분리 대조군 — 채택 근거를 남긴 뒤 역할 종료",
@@ -744,8 +747,9 @@ def dominance_curve(video_id: str) -> dict | None:
 # **이것은 후보이지 판정이 아니다.** 추임새인지 누락된 가사인지 늘임음인지는 UST 텍스트로
 # 못 가른다 — 팬 UST의 홑모음 노트는 늘임 연장·VCV 연결음·멜리스마가 뒤섞여 있고(1,021개 중
 # 910개가 앞 노트에 붙은 연장) 이를 구분하는 필드가 없다. 그래서 화면에 띄워 귀로 판정한다.
-# 띠를 그릴 기준 레인 — 채택 스택.
-ADLIB_LANE = "2pass-owsm-mixed"
+# 띠를 그릴 기준 레인 — **채택 스택**. 클램프가 비가창 구간을 놓아주므로 그만큼 후보가
+# 더 정확해진다(Madeon 라인28의 32초짜리 세그가 잘리는 것과 같은 효과).
+ADLIB_LANE = "2pass-owsm-mixed+pp"
 ADLIB_LEVEL = 0.35
 ADLIB_MIN_SEC = 0.40
 # 뒤 세그와 이만큼은 떨어져 있어야 한다. 붙어 있으면 그것은 **다음 라인의 실제 가사 온셋**을
