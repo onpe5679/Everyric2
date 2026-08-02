@@ -4059,6 +4059,9 @@ def _run_rescue_stage(
     vocals = sep_result.vocals
     accompaniment = sep_result.accompaniment
 
+    # 분리가 끝나고 실제 정렬이 시작되는 지점 — 단계명을 기존 어휘로 되돌린다(호출부의
+    # "보컬 분리" report 참고, 같은 이유).
+    report("전사 정렬")
     anchor = EngineFactory.get_engine(anchor_type, settings.alignment)
     if not anchor.is_available():
         raise RuntimeError(f"{anchor_type} rescue anchor not available")
@@ -4108,7 +4111,13 @@ def _run_rescue_stage(
 
     pron_data: dict[int, dict[str, Any]] = {}
     if settings.alignment.two_pass_enabled:
-        report("음절 재정렬")
+        # 와이어에 나가는 단계명은 기존 어휘("전사 정렬")로 통일한다 — 새 하위 단계
+        # 이름을 그대로 내보내면 (a) STAGE_WINDOWS에 없는 이름이 _stage_monitor의 기본
+        # 창(36,88)에 걸려 진행률이 88%에서 멈췄다 100으로 점프하고 (b) 웹스토어 심사
+        # 중이라 당장 못 고치는 확장 1.5.5가 한국어 단계명을 그대로 노출한다(운영자 지시,
+        # 2026-08-04). 하위 단계 구분은 debug.routing(이미 배선됨)이 진다 — 그건
+        # 디버그/감사용이지 진행 칩이 아니다.
+        report("전사 정렬")
         refiner = (
             anchor
             if anchor_type == "omniasr"
@@ -4214,7 +4223,9 @@ def _run_new_stack_alignment(
 
     score: float | None = None
     if not forced:
-        report("전사 정렬(고속)")
+        # 단계명은 기존 어휘("전사 정렬")로 통일 — 위 두 번째 report와 같은 이유
+        # (STAGE_WINDOWS 미등록·확장 1.5.5 한국어 노출, 아래 report들도 전부 동일).
+        report("전사 정렬")
         fast = _run_fast_stage(audio, lyric_lines, language, settings)
         score = _line_log_conf_median(fast.results)
         fast.routing_meta = {
@@ -4240,7 +4251,11 @@ def _run_new_stack_alignment(
             f"New-stack routing: language {lang!r} force-rescued (logConf signal unreliable)"
         )
 
-    report("전사 정렬(구원)")
+    # 구원 진입 = 실제로 분리를 태우는 시점이다(고속 단계는 분리를 아예 안 한다 —
+    # 라우팅의 비용 절감 근거 자체) — 그 실행과 단계 보고가 어긋나지 않도록 여기서만
+    # "보컬 분리"를 낸다(운영자 지시: 실제로 안 하는 작업을 표시하면 안 된다). 좌초
+    # 승급 재호출은 이미 분리된 스템(rescue.sep_result)을 재사용하므로 다시 안 낸다.
+    report("보컬 분리")
     rescue_anchor_type = "omniasr" if forced else "owsm"
     rescue = _run_rescue_stage(
         audio, sep_result, lyric_lines, language, settings, report, rescue_anchor_type
@@ -4255,7 +4270,9 @@ def _run_new_stack_alignment(
     if forced:
         stranded_before = _stranded_count(rescue)
         if stranded_before > 0:
-            report("전사 정렬(좌초 승급)")
+            # 별도 report 없음 — _run_rescue_stage가 분리 재사용 여부와 무관하게 자기
+            # 진입 시점에 "전사 정렬"을 낸다(위 정의 참고). 여기서 다시 부르면 같은
+            # 문자열을 한 틱도 안 되는 간격으로 중복 보고할 뿐이다.
             escalated = _run_rescue_stage(
                 audio, rescue.sep_result, lyric_lines, language, settings, report, "owsm"
             )
@@ -4534,7 +4551,12 @@ def _run_alignment(
         # 보컬 스템 1회 분리 — 원 설계(CLI --separate)대로 정렬 입력으로 쓰고, 아래 VAD
         # 라인 경계 보정과 멜로디 f0 추출에 재사용한다. 반주가 빠진 스템은 CTC emission이
         # 훨씬 깨끗해 고밀도 믹스/이펙트 구간에서 정렬 품질이 오른다. 미설치/실패 시 믹스 폴백.
-        report("보컬 분리")
+        # 새 스택은 여기서 report 안 한다 — 분리를 라우팅 뒤로 미뤘으므로(바로 아래) 이
+        # 시점엔 분리가 실제로 일어날지조차 모른다(고속 경로는 아예 안 한다). 실제로
+        # 분리하는 순간에만 알린다 — 구원 진입 시 _run_new_stack_alignment가, 구스택은
+        # 여기서 바로(운영자 지시: 실제로 안 하는 작업을 표시하면 안 된다).
+        if not new_stack_active:
+            report("보컬 분리")
         need_vocals = settings.melody.separate_vocals or settings.alignment.align_on_vocals
         # 새 스택은 여기서 분리하지 않는다 — 라우팅(1단계 고속)이 애초에 분리를 건너뛰는
         # 것 자체가 비용 절감의 근거다(scripts/bench_adapters/routed.py 모듈 docstring:

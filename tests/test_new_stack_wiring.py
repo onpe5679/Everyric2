@@ -768,3 +768,100 @@ class TestFinishNewStackAlignment:
         assert out["debug"]["routing"]["route"] == "fast"
         assert out["adlib"] is None
         assert "key" in out and "tempo" in out
+
+
+# ---------------------------------------------------------------------------
+# 단계 보고(report) — STAGE_WINDOWS에 등록된 이름만 쓰는지
+# ---------------------------------------------------------------------------
+
+
+class TestStageReporting:
+    """새 스택이 report()로 내보내는 단계명이 전부 STAGE_WINDOWS에 등록돼 있는지(운영자
+    지시, 2026-08-04 실곡 검증). 미등록 이름은 ``_stage_monitor``의 기본 창(36,88)에
+    걸려 진행률이 88%에서 멈췄다 100으로 점프한다 — 새 하위 단계 이름을 새로 등록하는
+    대신 기존 어휘("보컬 분리"·"전사 정렬")로 통일하는 쪽을 택했다(권고안 채택 근거는
+    worker.py의 관련 report() 호출부 주석 참고). 이 테스트는 "새 창을 등록할 필요가
+    없어졌다"는 것 자체를 못박는다 — 동시에 확장 1.5.5의 STAGE_LABEL_KEYS도 이 두 이름은
+    이미 알고 있으므로(everyric2-chrome/src/content.ts) 별도 확장 수정이 필요 없다는
+    것의 근거이기도 하다.
+    """
+
+    _REGISTERED_STAGES = frozenset(worker.STAGE_WINDOWS) | {worker.LINE_META_WAIT_STAGE}
+
+    def test_fast_route_reports_no_separation_stage(self, monkeypatch):
+        results = [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=0.9)]
+        anchor = _FakeAnchor(results)
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine",
+            lambda engine_type, config=None: anchor,
+        )
+        seen: list[str] = []
+        worker._run_new_stack_alignment(
+            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
+            _settings(), seen.append,
+        )
+        assert seen, "fast route reported nothing"
+        assert set(seen) <= self._REGISTERED_STAGES, seen
+        # 고속 경로는 분리를 아예 안 한다 — 그 단계를 표시하면 안 된다(운영자 지시).
+        assert "보컬 분리" not in seen
+        assert "전사 정렬" in seen
+
+    def test_rescue_route_reports_only_registered_stages(self, monkeypatch):
+        fast_results = [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=1e-9)]
+        fast_anchor = _FakeAnchor(fast_results)
+        rescue_anchor = _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=1.0)])
+        calls: list[str] = []
+
+        def fake_get_engine(engine_type, config=None):
+            calls.append(engine_type)
+            return fast_anchor if len(calls) == 1 else rescue_anchor
+
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
+        )
+        sep = _FakeSepResult(_silence(), _silence())
+        monkeypatch.setattr(
+            "everyric2.audio.separator.get_shared_separator",
+            lambda config=None: _FakeSeparator(True, sep),
+        )
+        seen: list[str] = []
+        worker._run_new_stack_alignment(
+            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
+            _settings(two_pass_enabled=False), seen.append,
+        )
+        # 실제 순서는 ["전사 정렬"(고속 시도) -> "보컬 분리"(구원 진입) -> "전사 정렬"
+        # (구원 앵커)]다 — 고속 시도 자체도 "정렬"이라 먼저 한 번 나오는 게 맞다. 순서
+        # 자체보다 **전부 등록된 이름인가**가 핵심이다: _stage_monitor의
+        # ``progress = max(progress, lo)``가 등록된 창 사이에서는 항상 비감소를
+        # 보장하므로(각 창의 lo가 이전 진행보다 낮아도 max가 막는다), 등록만 돼 있으면
+        # 순서와 무관하게 88% 정체 버그는 재발하지 않는다.
+        assert set(seen) <= self._REGISTERED_STAGES, seen
+        assert "보컬 분리" in seen  # 구원은 실제로 분리한다
+        assert "전사 정렬" in seen
+
+    def test_two_pass_sub_stage_reuses_registered_alignment_stage_name(self, monkeypatch):
+        # 2패스 리파인 진입("음절 재정렬"이었던 자리)도 미등록 이름을 새로 안 만들고
+        # "전사 정렬"을 재사용한다 — 같은 창(50,72) 안에서 진행률이 이어진다.
+        vocab = {"가": 1}
+        logits = torch.full((1, 4, 2), -8.0)
+        logits[0, 1, 1] = 8.0
+        emission = torch.log_softmax(logits, dim=-1)
+        fake_emission = EngineEmission(
+            emission=emission, blank_id=0, frame_sec=0.02, audio_sec=0.08, chunks=1,
+            vocab=vocab,
+        )
+        anchor = _FakeAnchor([SyncResult(text="가", start_time=0.0, end_time=0.08)])
+        anchor.emission_for = lambda audio: fake_emission  # anchor_type="omniasr" -> 자기앵커 겸 리파이너
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine",
+            lambda engine_type, config=None: anchor,
+        )
+        sep = _FakeSepResult(_silence(0.5), _silence(0.5))
+        seen: list[str] = []
+        worker._run_rescue_stage(
+            _silence(0.5), sep, [LyricLine(text="가", line_number=1)], "en",
+            _settings(two_pass_enabled=True), seen.append, "omniasr",
+        )
+        assert set(seen) <= self._REGISTERED_STAGES, seen
+        # 앵커 정렬 진입 + 2패스 진입, 둘 다 같은 등록된 이름으로 두 번 나온다.
+        assert seen.count("전사 정렬") >= 2
