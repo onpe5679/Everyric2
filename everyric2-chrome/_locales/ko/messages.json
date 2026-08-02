@@ -477,6 +477,24 @@
   "overlay_banner_captionPreSync": {
     "message": "지금은 유튜브 업로더 자막이에요 — Everyric 싱크(음정·발음 정렬)가 아직 없어요"
   },
+  "overlay_depth_upgradeTitle": {
+    "message": "구세대 싱크예요 — 새 엔진으로 업그레이드"
+  },
+  "overlay_depth_upgradeConfirm": {
+    "message": "이 곡의 싱크를 새 엔진으로 다시 만들까요? (수십 초)"
+  },
+  "overlay_depth_t1": {
+    "message": "분석 깊이 1 — 무분리 ASR. 클릭하면 깊이 2(보컬 분리+ASR)로 다시 분석해요"
+  },
+  "overlay_depth_t2": {
+    "message": "분석 깊이 2 — 보컬 분리+ASR 2패스. 클릭하면 깊이 3(분리+ASR+OWSM 앵커)으로 다시 분석해요"
+  },
+  "overlay_depth_t3": {
+    "message": "최대 분석 깊이(3)예요 — 분리+ASR+OWSM 앵커. 결과가 부정확하면 가사 입력 상태를 확인해 주세요"
+  },
+  "overlay_depth_confirm": {
+    "message": "분석 깊이를 한 단계 올려 다시 분석할까요? (수십 초)"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI 전사 생성"
   },

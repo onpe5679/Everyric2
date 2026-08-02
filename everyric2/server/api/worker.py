@@ -83,6 +83,7 @@ def _pop_stashes(job_id: str) -> None:
         _PENDING_LINE_META,
         _PENDING_LINE_META_LANG,
         _PENDING_META_WAIT,
+        _PENDING_MIN_DEPTH,
         _PENDING_TITLE,
     )
 
@@ -91,6 +92,8 @@ def _pop_stashes(job_id: str) -> None:
     _PENDING_ATTRIBUTION.pop(job_id, None)
     _PENDING_TITLE.pop(job_id, None)
     _PENDING_FORCE.discard(job_id)
+    # 깊이 하한도 claim이 peek로 실어 보낸다(재클레임 대비) — 터미널 지점에서만 비운다
+    _PENDING_MIN_DEPTH.pop(job_id, None)
     # 대기 예고는 claim이 peek로 실어 보내므로(재클레임 대비) 터미널 지점에서만 비운다
     _PENDING_META_WAIT.discard(job_id)
 
@@ -283,6 +286,9 @@ class WorkerJob(BaseModel):
     # 정렬 진입 직전에 상한을 둔 대기를 한 번 넣는다(하트비트 응답으로 받는다). line_meta가
     # 이미 실려 있으면 코어가 대기를 만들지 않으므로 함께 와도 무해하다.
     await_line_meta: bool = False
+    # 분석 깊이 하한("medium"|"heavy") — 확장의 "분석 깊이 올리기" 버튼. 새 스택이 라우팅
+    # 판정을 건너뛰고 이 깊이에서 시작한다(_PENDING_MIN_DEPTH 스태시의 원격 전달로).
+    min_depth: str | None = None
 
 
 class WorkerLinkJob(BaseModel):
@@ -392,6 +398,7 @@ async def claim_job(request: ClaimRequest, x_worker_key: str | None = Header(def
         _PENDING_ATTRIBUTION,
         _PENDING_FORCE,
         _PENDING_META_WAIT,
+        _PENDING_MIN_DEPTH,
     )
 
     max_audio_sec = get_settings().server.max_job_audio_sec
@@ -416,6 +423,9 @@ async def claim_job(request: ClaimRequest, x_worker_key: str | None = Header(def
                     line_meta=_peek_line_meta(job.id),
                     attribution=_PENDING_ATTRIBUTION.get(job.id),
                     force=job.id in _PENDING_FORCE,
+                    # peek(제거하지 않음) — line_meta와 같은 이유로 재클레임 시 다시 전달.
+                    # 소거는 result 수신부가 다른 스태시와 함께 한다.
+                    min_depth=_PENDING_MIN_DEPTH.get(job.id),
                     max_audio_sec=max_audio_sec,
                     await_line_meta=(
                         job.id in _PENDING_META_WAIT and request.supports_line_meta_heartbeat

@@ -174,6 +174,7 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
         artist: message.payload.artist,
         target_lang: message.payload.targetLang,
         line_meta_lang: message.payload.lineMetaLang,
+        min_depth: message.payload.minDepth,
       }, sink));
     }
 

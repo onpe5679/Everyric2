@@ -362,6 +362,20 @@
 .ey-btn:hover { background: var(--ey-elev-hover); color: var(--ey-text); }
 .ey-btn.active { color: var(--ey-accent); background: var(--ey-accent-soft); }
 
+/* 분석 깊이 버튼 (overlay.ts updateDepthButton) — 배지 숫자가 아이콘 우상단에 겹친다 */
+.ey-depth-btn { position: relative; }
+.ey-depth-badge {
+  position: absolute; top: -2px; right: -3px;
+  min-width: 12px; height: 12px; border-radius: 999px;
+  background: var(--ey-elev-hover); color: var(--ey-text);
+  font-size: 9px; line-height: 12px; font-weight: 700; text-align: center;
+}
+.ey-depth-badge.max { background: #c0392b; color: #fff; }
+/* 구세대 싱크 — 노란 업그레이드 버튼(재생성 버튼을 대신한다) */
+.ey-depth-btn.ey-depth-upgrade { color: var(--ey-accent); background: var(--ey-accent-soft); }
+/* 최대 깊이 — 더 올릴 수 없음(옅게, 툴팁은 유지) */
+.ey-depth-btn.ey-depth-max { opacity: 0.45; cursor: default; }
+
 .ey-icon { display: inline-flex; align-items: center; }
 .ey-icon svg { display: block; }
 

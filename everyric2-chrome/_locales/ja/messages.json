@@ -477,6 +477,24 @@
   "overlay_banner_captionPreSync": {
     "message": "現在はYouTube投稿者の字幕です — Everyricシンク（音程・発音整列）はまだありません"
   },
+  "overlay_depth_upgradeTitle": {
+    "message": "旧世代のシンクです — 新エンジンへアップグレード"
+  },
+  "overlay_depth_upgradeConfirm": {
+    "message": "この曲のシンクを新エンジンで作り直しますか？（数十秒）"
+  },
+  "overlay_depth_t1": {
+    "message": "解析深度1 — 分離なしASR。クリックで深度2（ボーカル分離+ASR）で再解析します"
+  },
+  "overlay_depth_t2": {
+    "message": "解析深度2 — 分離+ASR 2パス。クリックで深度3（分離+ASR+OWSMアンカー）で再解析します"
+  },
+  "overlay_depth_t3": {
+    "message": "最大解析深度（3）です — 分離+ASR+OWSMアンカー。結果が不正確なら歌詞入力を確認してください"
+  },
+  "overlay_depth_confirm": {
+    "message": "解析深度を一段上げて再解析しますか？（数十秒）"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI転写を実行"
   },

@@ -477,6 +477,24 @@
   "overlay_banner_captionPreSync": {
     "message": "Showing YouTube uploader captions — no Everyric sync (pitch/pronunciation alignment) yet"
   },
+  "overlay_depth_upgradeTitle": {
+    "message": "Legacy-generation sync — upgrade to the new engine"
+  },
+  "overlay_depth_upgradeConfirm": {
+    "message": "Rebuild this song's sync with the new engine? (takes tens of seconds)"
+  },
+  "overlay_depth_t1": {
+    "message": "Analysis depth 1 — ASR without separation. Click to re-analyze at depth 2 (vocal separation + ASR)"
+  },
+  "overlay_depth_t2": {
+    "message": "Analysis depth 2 — separation + ASR two-pass. Click to re-analyze at depth 3 (separation + ASR + OWSM anchor)"
+  },
+  "overlay_depth_t3": {
+    "message": "Maximum analysis depth (3) — separation + ASR + OWSM anchor. If results look wrong, check the lyrics input"
+  },
+  "overlay_depth_confirm": {
+    "message": "Re-analyze one depth deeper? (takes tens of seconds)"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "Run AI transcription"
   },

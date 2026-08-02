@@ -1336,6 +1336,7 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
             line_meta=job.get("line_meta"),
             attribution=job.get("attribution"),
             force=bool(job.get("force")),
+            min_depth=job.get("min_depth"),
             max_audio_sec=int(job.get("max_audio_sec") or 0),
             audio_url=f"{base}{audio_rel}" if audio_rel else None,
             audio_url_headers=(

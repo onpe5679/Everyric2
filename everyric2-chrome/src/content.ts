@@ -557,6 +557,7 @@ function ensureOverlay(): LyricsOverlay {
     },
     onSettingsChange: patch => void handleSettingsChange(patch),
     onRegenerate: () => void handleRegenerate(),
+    onDepthUpgrade: minDepth => void handleRegenerate(minDepth),
     onPipToggle: () => void handlePipToggle(),
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),
@@ -2316,6 +2317,10 @@ function applyLyricsData(data: LyricsData | null): void {
     : undefined;
 
   if (data.synced) {
+    // 깊이 버튼·디버그 패널의 재료 — PiP 여부와 무관하게 패널에 싣는다. 예전엔 PiP 분기
+    // 안에만 있어 non-PiP 흐름에서 패널 debugMeta가 이전 곡 값으로 남았다(깊이 버튼이
+    // 생기면서 이 메타가 항상 필요해졌다).
+    panel.setDebugMeta(data.debugMeta ?? null);
     if (pip.isOpen()) {
       // 검색을 시작할 때 띄운 패널(pip.showPanelLoading)을 반드시 접는다 — 레인 표시
       // 조건에 !panelActive가 들어 있어, 안 접으면 싱크가 도착해도 가라오케가 닫힌
@@ -2324,7 +2329,6 @@ function applyLyricsData(data: LyricsData | null): void {
       pip.setTempo(data.tempo ?? null);
       pip.setKey(data.key ?? null);
       pip.setDebugMeta(data.debugMeta ?? null);
-      panel.setDebugMeta(data.debugMeta ?? null);
       pip.setShowF0(settings.pitchF0Curve);
       pip.setLines(data.lines);
       // 노트·템포는 위에서 이미 이 곡 값으로 맞췄다 (분기마다 갱신하던 것을 한곳으로 모았다)
@@ -2703,7 +2707,7 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
 }
 
 /** 재생성: 현재 everyric 싱크의 가사·발음·출처 그대로 서버 캐시를 무시하고 다시 정렬 */
-async function handleRegenerate(): Promise<void> {
+async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
   const videoId = currentVideoId;
   const data = currentData;
   if (!videoId || !data?.synced || data.source !== 'everyric') return;
@@ -2773,6 +2777,8 @@ async function handleRegenerate(): Promise<void> {
         artist: currentSong?.artist ?? undefined,
         targetLang: settings.translationLanguage,
         lineMetaLang,
+        // 분석 깊이 올리기(헤더 깊이 버튼) — 서버가 라우팅을 건너뛰고 이 깊이에서 시작한다
+        minDepth,
       },
     });
     if (res.error || !res.data) {

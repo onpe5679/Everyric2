@@ -159,7 +159,8 @@ def _mock_alignment(monkeypatch, tmp_path, captured: dict):
     audio_file = _mock_audio(monkeypatch, tmp_path)
 
     def fake(
-        audio_path, lyrics, language, line_meta=None, on_stage=None, resolver=None, video_id=None
+        audio_path, lyrics, language, line_meta=None, on_stage=None, resolver=None,
+        video_id=None, min_depth=None,
     ):
         try:
             if on_stage is not None:

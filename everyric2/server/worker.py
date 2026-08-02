@@ -161,6 +161,17 @@ def stash_force(job_id: str) -> None:
     _PENDING_FORCE.add(job_id)
 
 
+# 분석 깊이 하한 요청 잡 — 라우팅 판정을 건너뛰고 요청 깊이(medium/heavy)에서 시작한다
+# (확장의 "분석 깊이 올리기" 버튼, 2026-08-03). 다른 스태시와 같은 인메모리 관례.
+_PENDING_MIN_DEPTH: dict[str, str] = {}
+
+
+def stash_min_depth(job_id: str, depth: str | None) -> None:
+    # fast는 하한으로서 무의미(기본 라우팅이 이미 fast에서 시작) — medium/heavy만 새긴다
+    if depth in ("medium", "heavy"):
+        _PENDING_MIN_DEPTH[job_id] = depth
+
+
 # 잡별 영상 제목/아티스트 — 완성된 싱크에 함께 저장돼 커버 링크 후보 탐색의 단서가 된다.
 # Job 테이블에 컬럼을 더하지 않고 라인 메타·출처와 같은 인메모리 스태시 관례를 따른다
 # (인프로세스·원격 워커 두 경로 모두 저장은 서버 프로세스에서 일어난다).
@@ -1292,6 +1303,9 @@ class JobInput:
     # 진입 직전에 인메모리 스태시를 다시 확인하고 상한을 둔 대기를 한 번 넣는다.
     # 스태시는 서버 프로세스에만 있으므로 원격 워커 경로는 항상 False다 (기존 동작).
     await_line_meta: bool = False
+    # 분석 깊이 하한("medium"|"heavy") — 있으면 새 스택이 라우팅 판정을 건너뛰고 이
+    # 깊이에서 시작한다. 인프로세스는 스태시, 원격은 claim 응답(WorkerJob.min_depth)로 온다.
+    min_depth: str | None = None
 
 
 @dataclass
@@ -1423,6 +1437,7 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
             resolver,
             # 자막 앵커 조달용 — 가사 출처와 무관하게 «이 영상»의 사람 자막 시각을 본다
             job.video_id,
+            job.min_depth,
         )
     except JobCancelled:
         # line_meta 대기 중 취소 — 오디오는 _run_alignment의 finally가 이미 지웠다.
@@ -1471,6 +1486,8 @@ async def _process_job_inner(job_id: str, job) -> None:
     # 코어 입력으로 캡처했으니 여기서 discard한다.
     force = job_id in _PENDING_FORCE
     _PENDING_FORCE.discard(job_id)
+    # 깊이 하한도 캡처 후 즉시 비운다 (_PENDING_FORCE와 같은 관례 — 남아 새는 항목 없음)
+    min_depth = _PENDING_MIN_DEPTH.pop(job_id, None)
     # line_meta 지연 도착 예고도 같은 관례로 캡처 후 즉시 비운다
     await_meta = job_id in _PENDING_META_WAIT
     _PENDING_META_WAIT.discard(job_id)
@@ -1502,6 +1519,7 @@ async def _process_job_inner(job_id: str, job) -> None:
         max_audio_sec=max_audio_sec,
         audio_path=cache_path,
         await_line_meta=await_meta,
+        min_depth=min_depth,
     )
     try:
         result = await run_pipeline(job_input, InProcessHooks(job_id, job))
@@ -4276,6 +4294,7 @@ def _run_new_stack_alignment(
     language: str | None,
     settings: Any,
     report: Any,
+    min_depth: str | None = None,
 ) -> "_NewStackResult":
     """새 정렬 스택 본체 — 3단계 라우팅(``scripts/bench_adapters/routed.py``의
     routed-2mode-lang 구성 재현, 코디네이터 확정 2026-08-03/04 정정). 어휘는 **깊이**
@@ -4318,6 +4337,27 @@ def _run_new_stack_alignment(
             f"New-stack routing: job language label is empty -> resolved {lang!r} "
             "from lyrics script census"
         )
+
+    if min_depth in (_DEPTH_MEDIUM, _DEPTH_HEAVY):
+        # 분석 깊이 하한 요청(확장의 "분석 깊이 올리기" 버튼, 2026-08-03) — 라우팅
+        # 판정을 건너뛰고 요청 깊이에서 바로 시작한다. en 좌초 heavy 자동 승급은 안
+        # 태운다: 요청 깊이 그대로가 예측 가능하고(버튼의 배지 숫자와 결과 깊이가
+        # 일치해야 한다), 더 필요하면 사용자가 한 단계 더 올리면 된다.
+        logger.info(f"New-stack routing: min_depth={min_depth!r} requested -> skipping router")
+        report("보컬 분리")
+        deep = _run_deep_stage(
+            audio, sep_result, lyric_lines, lang, settings, report, min_depth
+        )
+        deep.routing_meta = {
+            "route": min_depth,
+            "language": lang,
+            "language_source": lang_source,
+            "line_log_conf_median": None,
+            "threshold": _ROUTE_THRESHOLD,
+            "requested_min_depth": min_depth,
+        }
+        return deep
+
     starts_at_medium = any(lang.startswith(prefix) for prefix in _FORCE_MEDIUM_LANGUAGES)
 
     score: float | None = None
@@ -4418,6 +4458,7 @@ def _finish_new_stack_alignment(
     melody_extractor: Any,
     f0_future: Any,
     f0_executor: Any,
+    min_depth: str | None = None,
 ) -> dict[str, Any]:
     """새 스택 정렬을 실행하고 ``_run_alignment``과 같은 모양의 응답 dict를 조립한다.
 
@@ -4434,7 +4475,9 @@ def _finish_new_stack_alignment(
     (``_run_new_stack_alignment`` docstring 참고) debug_meta에 그 키들이 아예 없다 —
     레거시 응답의 "기능이 꺼져 있어 없음"과 달리 "이 스택엔 그 개념이 없음"이다.
     """
-    stack = _run_new_stack_alignment(audio, sep_result, lyric_lines, language, settings, report)
+    stack = _run_new_stack_alignment(
+        audio, sep_result, lyric_lines, language, settings, report, min_depth=min_depth
+    )
     results = stack.results
     pron_data = stack.pron_data
     fixes = stack.fixes
@@ -4587,6 +4630,7 @@ def _run_alignment(
     on_stage: Any | None = None,
     line_meta_resolver: Any | None = None,
     video_id: str | None = None,
+    min_depth: str | None = None,
 ) -> dict:
     """정렬 본체. line_meta_resolver를 주면 **보컬 분리·f0 착수 뒤, CTC 진입 직전에** 한 번
     불러 line_meta를 늦게 받아온다 (번역·독음을 클라이언트가 병렬로 만드는 경로).
@@ -4795,6 +4839,7 @@ def _run_alignment(
                 melody_extractor,
                 f0_future,
                 f0_executor,
+                min_depth=min_depth,
             )
         # 독음(ko) 정렬 경로: 커버리지가 충분하면 한국어 발음 텍스트+kor adapter로 정렬하고
         # 원문 라인에 역매핑한다. 미달/실패 시 원문 정렬로 폴백 (회귀 0).

@@ -926,6 +926,63 @@ class TestRoutingLanguageResolution:
         assert stack.routing_meta["language_source"] == "label"
 
 
+class TestMinDepthOverride:
+    """분석 깊이 하한(확장 "분석 깊이 올리기" 버튼) — 라우터를 건너뛰고 요청 깊이 그대로."""
+
+    def _mock_engines(self, monkeypatch):
+        calls: list[str] = []
+
+        def fake_get_engine(engine_type, config=None):
+            calls.append(engine_type)
+            return _FakeAnchor(
+                [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=0.9)]
+            )
+
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
+        )
+        sep = _FakeSepResult(_silence(), _silence())
+        monkeypatch.setattr(
+            "everyric2.audio.separator.get_shared_separator",
+            lambda config=None: _FakeSeparator(True, sep),
+        )
+        return calls
+
+    def test_min_depth_heavy_skips_router_even_for_confident_ja(self, monkeypatch):
+        # 고신뢰라 fast로 끝났을 곡도 min_depth=heavy면 라우터 없이 heavy로 바로 간다 —
+        # 버튼의 배지 숫자와 결과 깊이가 일치해야 한다(예측 가능성).
+        calls = self._mock_engines(monkeypatch)
+        stack = worker._run_new_stack_alignment(
+            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
+            _settings(two_pass_enabled=False), lambda s: None, min_depth="heavy",
+        )
+        assert calls == ["owsm"]  # fast 단계(omniasr) 자체가 안 돌았다
+        assert stack.alignment_text == "heavy"
+        assert stack.routing_meta["route"] == "heavy"
+        assert stack.routing_meta["requested_min_depth"] == "heavy"
+
+    def test_min_depth_medium_runs_medium_even_for_ja(self, monkeypatch):
+        # ja의 기본 사다리는 fast→heavy로 medium을 건너뛰지만, 명시 요청은 그대로 존중한다
+        calls = self._mock_engines(monkeypatch)
+        stack = worker._run_new_stack_alignment(
+            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
+            _settings(two_pass_enabled=False), lambda s: None, min_depth="medium",
+        )
+        assert calls == ["omniasr"]
+        assert stack.alignment_text == "medium"
+        assert stack.routing_meta["requested_min_depth"] == "medium"
+
+    def test_no_min_depth_keeps_router(self, monkeypatch):
+        calls = self._mock_engines(monkeypatch)
+        stack = worker._run_new_stack_alignment(
+            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
+            _settings(), lambda s: None,
+        )
+        assert calls == ["omniasr"]
+        assert stack.alignment_text == "fast"
+        assert "requested_min_depth" not in stack.routing_meta
+
+
 class TestFinishNewStackLanguageFallback:
     def test_payload_language_falls_back_to_census_when_label_missing(self, monkeypatch):
         # 새 앵커(owsm/omniasr)는 _current_language를 노출하지 않아 기존 폴백이 구조적으로

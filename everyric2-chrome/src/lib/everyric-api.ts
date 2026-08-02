@@ -297,6 +297,8 @@ export function regenerateSync(
     video_id: string; lyrics: string; line_meta?: LineMeta[];
     attribution?: SourceAttribution; title?: string; artist?: string;
     target_lang?: string; line_meta_lang?: string;
+    /** 분석 깊이 하한 — 서버가 라우팅을 건너뛰고 이 깊이에서 시작한다 (깊이 버튼) */
+    min_depth?: 'medium' | 'heavy';
   },
   sink?: FailureSink,
 ): Promise<GenerateResponse | null> {

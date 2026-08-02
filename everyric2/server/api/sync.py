@@ -421,6 +421,10 @@ class RegenerateRequest(BaseModel):
     lyrics: str
     language: str | None = None
     force: bool = False
+    # 분석 깊이 하한("medium"|"heavy") — 확장의 "분석 깊이 올리기" 버튼. 새 스택이
+    # 라우팅 판정을 건너뛰고 이 깊이에서 시작한다(worker._PENDING_MIN_DEPTH 스태시로
+    # 전달). 안 싣는 구버전/일반 재생성은 None = 기존 자동 라우팅 그대로.
+    min_depth: str | None = Field(default=None, pattern="^(medium|heavy)$")
     line_meta: list[LineMeta] | None = None
     attribution: Attribution | None = None
     title: str | None = Field(default=None, max_length=256)
@@ -2265,7 +2269,10 @@ async def regenerate_sync(
         if request.force:
             # 강제 재생성은 GPU 수십 초를 태우는 파괴적 행위 — 공개 배포에선 일일 한도 적용
             await _check_destructive_limit(session, "regenerate", request.video_id, x_api_key)
-        if not request.force:
+        if not request.force and not request.min_depth:
+            # min_depth(깊이 하한) 요청은 같은 가사의 기존 싱크가 **있어야** 성립하는
+            # 재분석이다 — 이 조기 반환에 걸리면 아무 일도 안 일어나므로 건너뛴다.
+            # (한도는 아래 비force 경로의 generate 한도가 그대로 센다.)
             existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
             if existing:
                 if request.line_meta or request.attribution:
@@ -2306,12 +2313,19 @@ async def regenerate_sync(
         stash_attribution,
         stash_force,
         stash_line_meta,
+        stash_min_depth,
         stash_title,
     )
 
     if request.force:
         # 워커의 (audio_hash, lyrics_hash) 재사용 검사까지 건너뛰어야 진짜 재생성이 된다
         stash_force(job_id)
+    if request.min_depth:
+        # 깊이 하한 요청은 같은 (audio_hash, lyrics_hash)의 캐시 재사용에 막히면 아무
+        # 일도 안 일어난다 — force와 같은 우회가 함께 필요하다. force가 이미 켜져
+        # 있으면(위) 중복 무해.
+        stash_force(job_id)
+        stash_min_depth(job_id, request.min_depth)
     if request.line_meta:
         stash_line_meta(
             job_id, [m.model_dump() for m in request.line_meta], request.line_meta_lang

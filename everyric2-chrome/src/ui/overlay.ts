@@ -21,6 +21,18 @@ import {
   type PanelContext,
 } from './panels';
 
+/**
+ * 분석 깊이 아이콘 — 위로 올라가는 화살표의 샤프트를 가로 나눔선 count개가 가로지른다
+ * (깊이 1~3 시각화, 운영자 지시 도안). count=0은 나눔선 없는 순수 화살표(구세대 업그레이드).
+ */
+function depthArrowIcon(count: number): string {
+  const ys = [17, 13, 9].slice(0, count);
+  const bars = ys.map(y => `<line x1="8" y1="${y}" x2="16" y2="${y}"/>`).join('');
+  return '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" '
+    + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    + `<path d="M12 21V5"/><polyline points="6 11 12 5 18 11"/>${bars}</svg>`;
+}
+
 export interface OverlayCallbacks {
   onSeek: (time: number) => void;
   /** attribution은 붙여넣기 경로에서 사용자가 적어 넣은 출처(선택) */
@@ -46,6 +58,8 @@ export interface OverlayCallbacks {
   onRequestSyncList: () => void;
   /** 이 영상 싱크의 직전 세대 조회 — 디버그 패널 A/B 고스트 비교용. 이력 없으면 found=false */
   onLoadPreviousSync: () => Promise<SyncPreviousVersion | null>;
+  /** 분석 깊이 올리기/구세대 업그레이드 — minDepth 없으면 일반 재생성(=신 스택 자동 라우팅) */
+  onDepthUpgrade: (minDepth?: 'medium' | 'heavy') => void;
   /** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사에서 새로 시작 */
   onResetSync: () => void;
   /** 검색 시트에서 원래 보던 가사 화면으로 복귀 (실수로 검색을 연 경우 탈출구) */
@@ -122,6 +136,9 @@ export class LyricsOverlay {
   private serverBar: HTMLDivElement;
   private pipBtn: HTMLButtonElement;
   private regenBtn: HTMLButtonElement;
+  private depthBtn: HTMLButtonElement;
+  /** depthBtn 클릭 시 동작 — 상태(깊이/구세대/최대)에 따라 updateDepthButton이 바꾼다 */
+  private depthAction: (() => void) | null = null;
   private collapseBtn: HTMLButtonElement;
   private settingsSheet: HTMLDivElement | null = null;
   private settingsDot: HTMLSpanElement | null = null;
@@ -236,6 +253,13 @@ export class LyricsOverlay {
       }
     });
     this.regenBtn.style.display = 'none';
+    // 분석 깊이 버튼 — 내용(아이콘·배지·툴팁·동작)은 updateDepthButton이 상태에 따라 채운다
+    this.depthBtn = h('button', {
+      className: 'ey-btn ey-depth-btn',
+      attrs: { type: 'button' },
+      on: { click: () => this.depthAction?.() },
+    });
+    this.depthBtn.style.display = 'none';
     const searchBtn = this.headerButton(ICONS.search, t('overlay.header.search'), () => this.openSearch());
     const gearBtn = this.headerButton(ICONS.gear, t('overlay.header.settings'), () => this.toggleSettings());
     this.collapseBtn = this.headerButton(ICONS.collapse, t('overlay.header.collapse'), () => this.setCollapsed(!this.geometry.collapsed));
@@ -246,7 +270,7 @@ export class LyricsOverlay {
         icon(ICONS.note),
         h('div', { className: 'ey-song' }, this.songTitleEl, this.songArtistEl),
       ),
-      h('div', { className: 'ey-actions' }, this.pipBtn, this.regenBtn, searchBtn, gearBtn, this.collapseBtn, closeBtn),
+      h('div', { className: 'ey-actions' }, this.pipBtn, this.depthBtn, this.regenBtn, searchBtn, gearBtn, this.collapseBtn, closeBtn),
     );
 
     // 제목바 언어 칩 — 이 곡에 어떤 언어가 준비돼 있는지 한눈에 보여주고 클릭 한 번으로
@@ -505,6 +529,8 @@ export class LyricsOverlay {
     this.pipBtn.style.display = this.pipEnabled ? '' : 'none';
     // 재생성은 서버(everyric) 싱크에서만 의미가 있다
     this.regenBtn.style.display = source === 'everyric' ? '' : 'none';
+    // 깊이 버튼도 여기서 갱신 — 구세대 싱크면 재생성 버튼을 업그레이드 버튼이 대신한다
+    this.updateDepthButton();
   }
 
   showPlainLyrics(lines: LyricLine[], source: LyricsSource, plainText: string): void {
@@ -1195,6 +1221,7 @@ export class LyricsOverlay {
   setDebugMeta(meta: SyncDebugMeta | null): void {
     this.debugMeta = meta;
     if (this.debugPanelOpen) this.renderDebugPanel(); // 열려 있으면 요약줄도 즉시 갱신
+    this.updateDepthButton(); // 깊이·세대 정보의 출처가 이 메타다
   }
 
   private toggleDebugPanel(): void {
@@ -1248,6 +1275,65 @@ export class LyricsOverlay {
     return h('button', { className: 'ey-btn', title, on: { click: onClick } }, icon(svg));
   }
 
+  /**
+   * 분석 깊이 버튼 — 헤더에서 현재 싱크의 분석 깊이(1=무분리 ASR, 2=분리+ASR,
+   * 3=분리+ASR+OWSM 앵커)를 화살표 나눔선·배지 숫자로 보여주고, 클릭하면 한 단계
+   * 깊은 재분석(regenerate min_depth)을 요청한다. 최대 깊이(3)는 빨간 배지 + 비활성 +
+   * "가사 입력 상태를 확인하세요" 툴팁. 구세대 싱크(engine_version 스탬프 없음/구서버)는
+   * 노란 업그레이드 버튼이 되고 **재생성 버튼을 대신한다**(운영자 지시 — 그 경우 일반
+   * 재생성 자체가 곧 새 엔진 업그레이드다).
+   */
+  private updateDepthButton(): void {
+    const meta = this.debugMeta;
+    const isEveryric = this.badgeSource === 'everyric' && this.badgeSynced;
+    this.depthBtn.classList.remove('ey-depth-upgrade', 'ey-depth-max');
+    if (!isEveryric || !meta) {
+      this.depthBtn.style.display = 'none';
+      this.depthAction = null;
+      return;
+    }
+    // null=스탬프 도입 전 세대, undefined=engine_version을 모르는 구서버 응답 — 둘 다
+    // 구세대로 취급한다(신 스택 서버는 항상 스탬프를 내려준다).
+    if (meta.engine_version == null) {
+      this.depthBtn.replaceChildren(icon(depthArrowIcon(0)));
+      this.depthBtn.classList.add('ey-depth-upgrade');
+      this.depthBtn.title = t('overlay.depth.upgradeTitle');
+      this.depthBtn.disabled = false;
+      this.depthAction = () => {
+        if (window.confirm(t('overlay.depth.upgradeConfirm'))) this.callbacks.onDepthUpgrade();
+      };
+      this.depthBtn.style.display = '';
+      this.regenBtn.style.display = 'none'; // 업그레이드 버튼이 재생성 버튼을 대신한다
+      return;
+    }
+    const route = meta.routing?.route;
+    const depth = route === 'fast' ? 1 : route === 'medium' ? 2 : route === 'heavy' ? 3 : null;
+    if (depth === null) {
+      // 신세대인데 라우팅 메타가 없다 — 깊이를 모르니 버튼을 띄우지 않는다
+      this.depthBtn.style.display = 'none';
+      this.depthAction = null;
+      return;
+    }
+    const badge = h('span', {
+      className: `ey-depth-badge${depth === 3 ? ' max' : ''}`, text: String(depth),
+    });
+    this.depthBtn.replaceChildren(icon(depthArrowIcon(depth)), badge);
+    if (depth === 3) {
+      this.depthBtn.classList.add('ey-depth-max');
+      this.depthBtn.title = t('overlay.depth.t3');
+      this.depthBtn.disabled = true;
+      this.depthAction = null;
+    } else {
+      this.depthBtn.title = depth === 1 ? t('overlay.depth.t1') : t('overlay.depth.t2');
+      this.depthBtn.disabled = false;
+      const next = depth === 1 ? ('medium' as const) : ('heavy' as const);
+      this.depthAction = () => {
+        if (window.confirm(t('overlay.depth.confirm'))) this.callbacks.onDepthUpgrade(next);
+      };
+    }
+    this.depthBtn.style.display = '';
+  }
+
   private footerButton(text: string, title: string, onClick: () => void): HTMLButtonElement {
     return h('button', { className: 'ey-offset-btn', text, title, on: { click: onClick } });
   }
@@ -1265,6 +1351,8 @@ export class LyricsOverlay {
     this.resumeChip.style.display = 'none';
     this.pipBtn.style.display = 'none';
     this.regenBtn.style.display = 'none';
+    this.depthBtn.style.display = 'none';
+    this.depthAction = null;
     // 번역 출처 병기(U2)·번역 대기 표시(U3-b)는 곡 단위 상태다 — 이전 곡 것이 새 곡
     // 화면에 남으면 안 된다. content가 setLangPending(null)/setAvailableLangs를 곡
     // 전환마다 다시 부르긴 하지만, 여기서도 방어적으로 지운다(resetBody는 모든 show*
