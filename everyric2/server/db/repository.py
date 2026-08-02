@@ -296,6 +296,7 @@ class SyncResultVersionRepository:
         기존 스냅샷이 있으면 이번 것으로 교체 — replaced_at은 onupdate로 자동 갱신)."""
         existing = await self.get(previous.video_id)
         if existing:
+            existing.lyrics_hash = previous.lyrics_hash
             existing.timestamps = previous.timestamps
             existing.language = previous.language
             existing.engine = previous.engine
@@ -305,6 +306,7 @@ class SyncResultVersionRepository:
             self.session.add(
                 SyncResultVersion(
                     video_id=previous.video_id,
+                    lyrics_hash=previous.lyrics_hash,
                     timestamps=previous.timestamps,
                     language=previous.language,
                     engine=previous.engine,

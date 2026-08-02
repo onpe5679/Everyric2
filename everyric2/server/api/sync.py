@@ -268,6 +268,11 @@ class SyncPreviousVersionResponse(BaseModel):
     created_at: str | None = None
     # 이 스냅샷이 찍힌(=재처리가 그 세대를 덮어쓴) 시각
     replaced_at: str | None = None
+    # 스냅샷된 행의 lyrics_hash — 지금 화면의 싱크(현재 sync_results 행)와 대조해 "가사가
+    # 같은 재정렬"(재생성 버튼 — A/B 스택 비교가 성립)인지 "가사 자체가 다른 새 생성"
+    # (붙여넣기/검색 생성 — 줄이 대응하지 않아 비교가 무의미)인지 **확장이** 가리는 재료다.
+    # 서버는 판정하지 않는다 — additive 필드라 구버전 확장은 무시하면 그만이다.
+    lyrics_hash: str | None = None
 
 
 class LineMeta(BaseModel):
@@ -1486,6 +1491,7 @@ async def get_previous_sync_version(video_id: str):
             quality_score=version.quality_score,
             created_at=version.created_at.isoformat() if version.created_at else None,
             replaced_at=version.replaced_at.isoformat() if version.replaced_at else None,
+            lyrics_hash=version.lyrics_hash,
         )
 
 

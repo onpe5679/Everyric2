@@ -15,6 +15,11 @@
      그 video_id의 sync_result_versions 스냅샷도 같은 트랜잭션에서 지운다 — 안 그러면
      사용자가 "완전히 새로 시작"을 눌러도 previous 조회가 지우라고 한 옛 내용을 계속
      돌려주는 고아 스냅샷이 남는다. 반환값(삭제된 sync_results 행 수)의 의미는 그대로다.
+  ⑥ 스냅샷은 교체당한 옛 행의 lyrics_hash를 그대로 옮긴다 — 재생성 버튼(가사 동일 →
+     같은 lyrics_hash, A/B 스택 비교가 성립)과 붙여넣기/검색 생성(가사 자체가 다름 →
+     다른 lyrics_hash, 줄이 대응하지 않아 비교가 무의미)을 확장이 스스로 가릴 수 있게
+     하는 재료다. 서버는 두 경로를 구분하지 않고 항상 옛 행의 해시를 그대로 옮긴다 —
+     판정은 확장의 몫이다.
 """
 
 import asyncio
@@ -213,6 +218,7 @@ def test_previous_endpoint_returns_found_false_without_a_snapshot():
             assert resp.timestamps is None
             assert resp.created_at is None
             assert resp.replaced_at is None
+            assert resp.lyrics_hash is None
 
     asyncio.run(body())
 
@@ -240,6 +246,7 @@ def test_previous_endpoint_shape_after_a_replacement():
             assert resp.found is True
             assert resp.timestamps == SEGMENTS_V1  # 직전(v1) 세대의 세그먼트
             assert resp.quality_score == 0.42
+            assert resp.lyrics_hash == "h1"  # 교체당한 옛 행(v1)의 lyrics_hash
             assert resp.created_at is not None  # 원래 생성 시각(ISO 문자열)
             assert resp.replaced_at is not None  # 교체(스냅샷)된 시각(ISO 문자열)
             # 두 시각은 서로 다른 의미의 필드다(원래 생성 vs 교체) — 형식만 검증
@@ -324,5 +331,47 @@ def test_delete_by_video_does_not_touch_other_videos_snapshot():
 
             assert await _get_version(sm, VIDEO) is None
             assert await _get_version(sm, other) is not None  # 건드리지 않았다
+
+    asyncio.run(body())
+
+
+# ── ⑥ 스냅샷은 교체당한 옛 행의 lyrics_hash를 그대로 옮긴다 ──────────
+
+
+def test_regenerate_style_replacement_snapshots_the_same_lyrics_hash():
+    """재생성 버튼(handleRegenerate) — 화면의 가사를 그대로 다시 보내 재정렬만 다르다.
+    lyrics_hash가 v1·v2 사이에서 동일하다 — 스냅샷도 그 값을 그대로 옮겨야, 확장이
+    "지금 싱크와 같은 가사 → A/B 스택 비교가 성립"을 스스로 판정할 수 있다."""
+
+    async def body():
+        async with _env() as sm:
+            await _create(sm, lyrics_hash="same-hash", segments=SEGMENTS_V1)
+            await _create(sm, lyrics_hash="same-hash", segments=SEGMENTS_V2)
+
+            snap = await _get_version(sm)
+            assert snap.lyrics_hash == "same-hash"  # 교체당한 옛 행(v1)의 값
+
+            resp = await get_previous_sync_version(VIDEO)
+            assert resp.lyrics_hash == "same-hash"
+
+    asyncio.run(body())
+
+
+def test_paste_style_replacement_snapshots_the_old_rows_distinct_lyrics_hash():
+    """붙여넣기/검색 생성(handleGenerate) — 사용자가 다른 가사 텍스트를 넣어 새로 생성한다.
+    v1·v2의 lyrics_hash가 다르다 — 스냅샷은 **새로 만든 v2가 아니라 교체당한 v1**의
+    해시를 담아야, 확장이 "가사 자체가 달라졌다 → 비교 무의미"를 판정할 수 있다."""
+
+    async def body():
+        async with _env() as sm:
+            await _create(sm, lyrics_hash="old-wrong-lyrics-hash", segments=SEGMENTS_V1)
+            await _create(sm, lyrics_hash="new-correct-lyrics-hash", segments=SEGMENTS_V2)
+
+            snap = await _get_version(sm)
+            assert snap.lyrics_hash == "old-wrong-lyrics-hash"  # v1(옛 행)의 값
+            assert snap.lyrics_hash != "new-correct-lyrics-hash"  # v2(새 행)의 값이 아니다
+
+            resp = await get_previous_sync_version(VIDEO)
+            assert resp.lyrics_hash == "old-wrong-lyrics-hash"
 
     asyncio.run(body())
