@@ -993,6 +993,9 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "パネルとPiPに次に再生される動画のタイトルを表示します（再生リスト・自動再生共通）"
   },
+  "content_notice_extensionReloaded": {
+    "message": "拡張機能が更新されました — このタブで使い続けるにはページを再読み込みしてください"
+  },
   "overlay_nextUp_prefix": {
     "message": "次 ▸ $P1$"
   },

@@ -993,6 +993,9 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "가사창·PIP에 다음 재생될 영상 제목을 표시해요 (재생목록·자동재생 공통)"
   },
+  "content_notice_extensionReloaded": {
+    "message": "확장 프로그램이 업데이트됐어요 — 이 탭에서 다시 쓰려면 페이지를 새로고침해 주세요"
+  },
   "overlay_nextUp_prefix": {
     "message": "다음 ▸ $P1$"
   },

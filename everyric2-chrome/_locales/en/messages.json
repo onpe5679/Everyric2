@@ -993,6 +993,9 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "Shows the upcoming video's title in the panel and PiP (playlist and autoplay)"
   },
+  "content_notice_extensionReloaded": {
+    "message": "The extension was updated — refresh this page to keep using it in this tab"
+  },
   "overlay_nextUp_prefix": {
     "message": "Next ▸ $P1$"
   },

@@ -3443,10 +3443,27 @@ function failureNote(failure: ApiFailure | undefined): string | undefined {
   return detail ? `${statusLine(status)} — ${detail}` : statusLine(status);
 }
 
+/** 확장 리로드/업데이트 뒤 orphan 탭 안내를 한 번만 띄우기 위한 표식 — 무반응 조사 가설5:
+ *  리로드 후 기존 탭에서는 chrome.runtime이 무효화돼 모든 요청이 조용히 실패하는데,
+ *  감지 코드가 없어 사용자에겐 "눌러도 반응 없음"으로만 보였다(2026-08-03). */
+let contextInvalidatedNoticeShown = false;
+
+function noticeExtensionReloaded(): void {
+  if (contextInvalidatedNoticeShown) return;
+  contextInvalidatedNoticeShown = true;
+  // autoHideMs 생략 = 영구 표시 — 이 탭은 새로고침 전까지 복구되지 않으므로 계속 보여야 한다
+  showNotice(t('content.notice.extensionReloaded'));
+}
+
 async function sendToBackground<T>(message: BgRequest): Promise<MessageResponse<T>> {
   try {
+    if (!chrome.runtime?.id) {
+      noticeExtensionReloaded();
+      return { error: 'extension context invalidated' };
+    }
     return await chrome.runtime.sendMessage(message) as MessageResponse<T>;
   } catch (error) {
+    if (String(error).includes('Extension context invalidated')) noticeExtensionReloaded();
     return { error: error instanceof Error ? error.message : String(error) };
   }
 }
