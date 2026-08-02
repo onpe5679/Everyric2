@@ -403,6 +403,20 @@ let deferCount = 0;
  */
 const MAX_FOLLOW_DEFERS = 4;
 
+/**
+ * 영상 전환 직후 남는 "이전 영상의 흔적" — docTitle은 전환 직전까지 추종하던 페이지
+ * 제목, songTitle은 직전에 채택했던 곡 제목. waitForSongInfo가 이 흔적과 같은 후보를
+ * 재시도 한도 안에서 받지 않는다.
+ *
+ * 패널이 열려 있으면 추종 판정은 미루지 않는데(checkCurrentPage 주석 — shouldFollow가
+ * DOM을 안 보므로), 그것이 **검색까지 이전 DOM으로 해도 된다**는 뜻은 아니었다:
+ * detectSong은 mediaSession·문서 제목을 읽으므로 전환 직후에는 이전 곡을 돌려주고,
+ * 자동재생·연속 시청에서 곡을 넘길 때마다 이전 곡으로 검색되는 실사용 불만이 됐다
+ * (2026-08-03). 한도가 소진되면 그대로 받는다: 제목이 정말 같은 영상(재업로드)이면
+ * 그 값이 새 영상의 값이기도 하므로 판정이 옳다(MAX_FOLLOW_DEFERS와 같은 근거).
+ */
+let staleTraces: { docTitle: string; songTitle: string | null } | null = null;
+
 /** 이 영상을 추종하기 시작한다 — 판정 기준이 되는 제목도 이 시점 값으로 함께 새긴다 */
 function beginFollowing(videoId: string): void {
   currentVideoId = videoId;
@@ -417,6 +431,11 @@ function checkCurrentPage(): void {
     return;
   }
   if (videoId === currentVideoId) return;
+  if (currentVideoId !== null) {
+    // 전환을 감지한 첫 tick에만 흔적을 새긴다 — 보류 중 cleanupForPage가 currentSong을
+    // 비운 뒤 다시 덮으면 songTitle 흔적을 잃는다(docTitle은 cleanup이 안 건드린다).
+    staleTraces = { docTitle: followedPageTitle, songTitle: currentSong?.title ?? null };
+  }
   // SPA 이동 직후에는 **주소만 새 영상이고 DOM은 아직 이전 영상의 것**이다 — document.title과
   // 채널명이 이전 값으로 남는 것이 실측됐다(새 videoId + 이전 제목인 표본: 한 번은 750ms까지,
   // 다른 런에서는 2초까지). 그 창에서 판정하면 이전 곡의 음악성이 새 영상에 상속된다:
@@ -1859,6 +1878,11 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
   }
   if (seq !== searchSeq || videoId !== currentVideoId) return;
 
+  // 곡 정보가 확정된 시점의 제목으로 추종 기준을 다시 새긴다 — beginFollowing 시점에는
+  // DOM이 아직 이전 영상의 것일 수 있어(staleTraces 주석), 그 낡은 값이 기준으로 남으면
+  // **다음** 전환의 신선도 판정이 어긋난다.
+  followedPageTitle = document.title;
+
   // 곡 인식 시점엔 video 메타데이터가 아직 없을 수 있음 — duration 없이 LRCLIB에
   // 조회하면 길이가 다른 버전이 매칭될 수 있으므로 한 번 더 읽는다
   if (song && song.duration === 0) {
@@ -2444,10 +2468,23 @@ async function waitForSongInfo(seq: number, maxRetries = 6, delayMs = 700): Prom
   for (let i = 0; i < maxRetries; i++) {
     if (seq !== searchSeq) return null; // 새 검색이 시작됨 — 즉시 중단
     const info = detectSong();
-    if (info?.title) return info;
+    if (info?.title && !isStaleSongInfo(info)) {
+      staleTraces = null;
+      return info;
+    }
     await sleep(delayMs);
   }
+  // 한도 소진 — 이 시점 값을 그대로 받는다(제목이 정말 같은 재업로드라면 이 값이 곧
+  // 새 영상의 값이기도 하다). 흔적은 지워 다음 검색을 방해하지 않는다.
+  staleTraces = null;
   return detectSong();
+}
+
+/** 전환 직후 의심 구간에서 이전 영상의 흔적과 같은 후보인가 — staleTraces 주석 참조 */
+function isStaleSongInfo(info: SongInfo): boolean {
+  if (!staleTraces) return false;
+  if (staleTraces.docTitle !== '' && document.title === staleTraces.docTitle) return true;
+  return staleTraces.songTitle !== null && info.title === staleTraces.songTitle;
 }
 
 // ── 싱크 생성 ───────────────────────────────────────────────────
