@@ -201,7 +201,20 @@ def _dominance_activity(vocals_path: Path):
             if (index - run) * hop >= _DOMINANCE_MIN_SEC:
                 regions.append(_Region(run * hop, index * hop))
             run = None
-    return _RegionSet(regions) if regions else None
+    if not regions:
+        return None
+    made_set = _RegionSet(regions)
+    # 원곡선도 실어 둔다 — 머리 스냅(``_snap_silent_heads``)은 region(≥0.35·최소길이)보다
+    # 고운 판정이 필요하다: 발성 바닥(0.12)과 절대 크기(dBFS)는 region으로는 못 본다.
+    import numpy as np
+
+    made_set.values = values
+    made_set.hop = hop
+    step = max(1, int(hop * 16_000))
+    usable = (len(vocals) // step) * step
+    frames = vocals[:usable].reshape(-1, step)
+    made_set.db = 20 * np.log10(np.maximum(np.sqrt((frames**2).mean(axis=1)), 1e-9))
+    return made_set
 
 
 def _clamp_pathological(results, vad, line_body_region) -> set[int]:
@@ -362,6 +375,116 @@ def _pull_disconnected_tails(lines: list[dict[str, Any]], regions: list) -> int:
     return pulled
 
 
+def _pull_stranded_into_gap(lines: list[dict[str, Any]], regions: list) -> int:
+    """통째로 무음 위에 앉은 라인을 직전 갭의 **미설명 발성** 위로 되당긴다.
+
+    butcher(en) 라인50 「EUCHARIST」가 원형이다. UST 2:01.4·PROD 2:01.54가 진실인데 en
+    앵커(polarformer×omniasr)가 2:09.12(브레이크 무음 한가운데, 커버 0.00)에 0.41초로
+    구겨 앉혔다. 직전 라인 끝(2:02.84)과의 6.3초 갭 안에는 **어느 라인도 설명하지 않는
+    발성 1.8초**가 남아 있다 — 그 발성이 바로 이 라인(과 후속 블록)의 진짜 자리다.
+
+    판정(14곡 스캔 1건 — 정확히 이 자리, 오검출 0, 2026-08-02): 직전 갭 ≥ 3초 ·
+    갭 안 발성 ≥ 1.5초 · 라인 커버리지 < 0.2. 라인을 갭의 첫 발성 온셋으로 강체 이동한다
+    (지속·세그 리듬 유지). 후속 라인 51~53도 4~9초 지각이지만 **다음 절의 발성 위에**
+    앉아 있어 우세도 단독으로는 못 가른다 — owsm 앵커는 전 분리기에서 이 블록을 맞추므로
+    (레인 전수 스캔, 9차) 교차 판정이 원리적 경로이나 발동 표본 1곡이라 보류.
+    """
+    moved = 0
+    for index in range(1, len(lines)):
+        prev, line = lines[index - 1], lines[index]
+        gap0, gap1 = float(prev["end"]), float(line["start"])
+        if gap1 - gap0 < 3.0:
+            continue
+        start, end = float(line["start"]), float(line["end"])
+        if _coverage(regions, start, end) >= 0.2:
+            continue
+        inside = [
+            reg for reg in regions if reg.end > gap0 + 0.05 and reg.start < gap1 - 0.05
+        ]
+        voiced = sum(min(reg.end, gap1) - max(reg.start, gap0) for reg in inside)
+        if voiced < 1.5:
+            continue
+        onset = max(gap0 + 0.05, min(max(reg.start, gap0) for reg in inside))
+        shift = round(onset - start, 3)
+        line["start"] = round(start + shift, 3)
+        line["end"] = round(min(end + shift, gap1 - 0.05), 3)
+        for seg in line.get("segs") or []:
+            seg["start"] = round(float(seg["start"]) + shift, 3)
+            seg["end"] = round(min(float(seg["end"]) + shift, float(line["end"])), 3)
+        line.setdefault("meta", {})["postprocessed"] = True
+        moved += 1
+    return moved
+
+
+def _snap_silent_heads(lines: list[dict[str, Any]], activity) -> int:
+    """«명백한 무음» 위에 앉은 라인 머리를 첫 가창 온셋으로 되민다.
+
+    rookie 라인0이 원형이다. 「Boo」가 0:00.00(우세도 0.00 · −180dBFS 디지털 무음)에서
+    켜지는데 실제 소리는 1.22초 뒤에 난다. Black Wood 라인102 「Sleep.」(5:51.54, 앞 무음
+    3.34초)도 같은 꼴 — 8차에서 «정렬기 레벨이라 표시층으로 못 잡는다»고 적었던 자리가
+    사실은 이 조건으로 잡힌다.
+
+    조건(14곡 스캔에서 3건 전부 실결함·오검출 0, 2026-08-02):
+      · 시작 우세도 < 0.12(발성 바닥) · 시작부터 가창(≥0.35) 온셋까지 무음 런 ≥ 0.5초
+      · 온셋이 라인 안에 있고 온셋 이후 커버리지 ≥ 0.4 — 통째로 무음에 앉은 좌초 라인
+        (butcher 라인50이 그렇다)은 대상이 아니다. 그건 접기/블록 계열의 문제다.
+      · 시작~온셋의 절대 크기 최대 < −30dBFS — **이 가드가 결정적이다.** 빼면 우세도만
+        낮은 소프트 어택 6곳(토스트 1:31 등)이 걸려 진짜 온셋을 잘라먹는다.
+    온셋은 «우세도 ≥ 0.35 **이면서 들리는(≥ −30dBFS)** 첫 프레임»이다 — 우세도는 비율이라
+    디지털 무음에서 0/0 잡음으로 튄다(ロキ 인트로 0:00.31~0:02.04가 우세도 ≥0.35인데
+    dB −90.6, 진짜 온셋은 0:17.66·−13.3dB — PROD 17.60과 일치). dB 축 없이 우세도만
+    보면 가짜 구간에 걸려 멈춘다.
+    시작을 옮기는 드문 자리다: 여기의 시작은 CTC 실측이 아니라 무음 위 잔해라는 것을
+    우세도·절대 크기 두 축으로 확인한 경우만 옮긴다(``_pull_disconnected_tails``와 같은 원칙).
+    """
+    values = getattr(activity, "values", None)
+    db = getattr(activity, "db", None)
+    hop = getattr(activity, "hop", 0.01)
+    if values is None or db is None:
+        return 0
+    snapped = 0
+    total = len(values)
+    audible_total = min(total, len(db))
+    for line in lines:
+        start, end = float(line["start"]), float(line["end"])
+        k = int(start / hop)
+        if k >= total or float(values[k]) >= 0.12:
+            continue
+        onset = k
+        while onset < audible_total and (
+            float(values[onset]) < _DOMINANCE_LEVEL or float(db[onset]) < -30.0
+        ):
+            onset += 1
+        if onset >= audible_total or (onset - k) * hop < 0.5:
+            continue
+        onset_t = onset * hop
+        if onset_t >= end:
+            continue
+        hi = min(total, int(end / hop))
+        covered = sum(1 for x in values[onset:hi] if float(x) >= _DOMINANCE_LEVEL)
+        if hi <= onset or covered / (hi - onset) < 0.4:
+            continue
+        if float(max(db[k : min(onset, len(db))], default=-999.0) if isinstance(db, list)
+                 else db[k : min(onset, len(db))].max()) >= -30.0:
+            continue
+        new_start = round(max(start, onset_t - 0.05), 3)
+        shift = new_start - start
+        untouched = next(
+            (float(s["start"]) for s in line.get("segs") or [] if float(s["start"]) >= new_start),
+            end,
+        )
+        for seg in line.get("segs") or []:
+            if float(seg["start"]) >= new_start:
+                continue
+            duration = max(0.0, float(seg["end"]) - float(seg["start"]))
+            seg["start"] = round(min(float(seg["start"]) + shift, untouched), 3)
+            seg["end"] = round(min(end, float(seg["start"]) + duration), 3)
+        line["start"] = new_start
+        line.setdefault("meta", {})["postprocessed"] = True
+        snapped += 1
+    return snapped
+
+
 class PostProcessedAligner(AlignerAdapter):
     """기반 정렬기 출력에 프로드 보정층을 적용한다."""
 
@@ -467,10 +590,12 @@ class PostProcessedAligner(AlignerAdapter):
         # 좌초 보정 두 장치 — 둘 다 우세도 위에서만 판정한다(분리 스템에서 VAD가 죽는 것이
         # 이 층의 교훈이었다). 접기를 먼저 돌린다: 좌초 라인이 제자리로 가면 그 안의 끊긴
         # 꼬리는 함께 사라지므로, 순서를 바꾸면 접힐 라인의 꼬리를 먼저 뭉개 버린다.
-        folded = pulled = 0
+        folded = pulled = snapped_heads = gap_pulled = 0
         if self.config.clamp_only and activity_source == "dominance":
             folded = _fold_stranded_repeats(lines, activity.regions)
             pulled = _pull_disconnected_tails(lines, activity.regions)
+            snapped_heads = _snap_silent_heads(lines, activity)
+            gap_pulled = _pull_stranded_into_gap(lines, activity.regions)
 
         return {
             "applied": True,
@@ -484,6 +609,8 @@ class PostProcessedAligner(AlignerAdapter):
             "snapped_lines": len(snapped),
             "folded_lines": folded,
             "pulled_tails": pulled,
+            "snapped_heads": snapped_heads,
+            "gap_pulled": gap_pulled,
             "total_lines": len(lines),
             "elapsed_sec": round(time.perf_counter() - started, 3),
         }
