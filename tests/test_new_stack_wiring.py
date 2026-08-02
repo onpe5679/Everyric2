@@ -519,6 +519,89 @@ class TestRunRescueStage:
 
 
 # ---------------------------------------------------------------------------
+# _run_deep_stage — 라인별 2패스 fallback_reason이 조용히 버려지지 않는지
+#
+# refine_window.refine_lines는 라인 단위 실패를 예외가 아니라 RefinedLine.fallback_reason
+# 으로 신호한다(그 모듈의 "앵커·리파이너 계약" — 호출부가 이 신호를 보고 앵커 세그로
+# 폴백하라는 뜻이다). 신호 자체가 나오는지는 test_refine_window.py가 이미 못박고 있다 —
+# 여기서는 그 신호를 worker.py가 실제로 읽어 로그로 남기는지만 본다(감사 발견,
+# 2026-08-04: 신호가 나와도 아무도 안 읽으면 "왜 이 줄만 근사 발음인지" 아무 데도 안 남는다).
+# ---------------------------------------------------------------------------
+
+
+class TestRunDeepStageLineFallbackVisibility:
+    def test_line_fallback_reason_is_logged_not_silently_dropped(self, monkeypatch, caplog):
+        from everyric2.alignment.refine_window import RefinedLine
+
+        anchor_results = [
+            SyncResult(text="가", start_time=0.0, end_time=0.5),
+            SyncResult(text="나", start_time=0.5, end_time=1.0),
+        ]
+        anchor = _FakeAnchor(anchor_results)
+        refiner_engine = _RecordingEngine(object())
+
+        def fake_get_engine(engine_type, config=None):
+            return anchor if engine_type == "owsm" else refiner_engine
+
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
+        )
+
+        # 라인0은 정상 리파인, 라인1은 fallback_reason만 걸리고 pron/pron_segs가 비어 있다
+        # (실제 refine_lines가 "window_shorter_than_targets" 등에서 만드는 모양 그대로).
+        refined = [
+            RefinedLine(start=0.0, end=0.5, pron={"hangul": "가"}, refined=True),
+            RefinedLine(start=0.5, end=1.0, fallback_reason="window_shorter_than_targets"),
+        ]
+        monkeypatch.setattr(
+            "everyric2.alignment.refine_window.refine_lines", lambda *a, **kw: refined
+        )
+        sep = _FakeSepResult(_silence(0.5), _silence(0.5))
+        lyric_lines = [
+            LyricLine(text="가", line_number=1),
+            LyricLine(text="나", line_number=2),
+        ]
+        with caplog.at_level("WARNING"):
+            stack = worker._run_deep_stage(
+                _silence(0.5), sep, lyric_lines, "ja",
+                _settings(two_pass_enabled=True), lambda s: None, worker._DEPTH_HEAVY,
+            )
+
+        # 정상 리파인 라인만 pron_data에 실린다 — fallback 라인은 조용히 빠지되(그 자체는
+        # 설계된 동작, attach_pron_variants가 나중에 근사 발음을 채운다) ...
+        assert 0 in stack.pron_data
+        assert 1 not in stack.pron_data
+        # ... 그 사실이 최소한 로그에는 남아야 한다 — 조용히 사라지면 안 된다.
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("window_shorter_than_targets" in m for m in messages)
+
+    def test_no_warning_when_every_line_refines_cleanly(self, monkeypatch, caplog):
+        from everyric2.alignment.refine_window import RefinedLine
+
+        anchor = _FakeAnchor([SyncResult(text="가", start_time=0.0, end_time=0.5)])
+        refiner_engine = _RecordingEngine(object())
+
+        def fake_get_engine(engine_type, config=None):
+            return anchor if engine_type == "owsm" else refiner_engine
+
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
+        )
+        refined = [RefinedLine(start=0.0, end=0.5, pron={"hangul": "가"}, refined=True)]
+        monkeypatch.setattr(
+            "everyric2.alignment.refine_window.refine_lines", lambda *a, **kw: refined
+        )
+        sep = _FakeSepResult(_silence(0.5), _silence(0.5))
+        with caplog.at_level("WARNING"):
+            worker._run_deep_stage(
+                _silence(0.5), sep, [LyricLine(text="가", line_number=1)], "ja",
+                _settings(two_pass_enabled=True), lambda s: None, worker._DEPTH_HEAVY,
+            )
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("fell back to anchor-only" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
 # _run_new_stack_alignment — 3단계 라우팅 분기
 # ---------------------------------------------------------------------------
 
@@ -688,9 +771,13 @@ class TestRoutingDecision:
             "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
         )
         sep = _FakeSepResult(_silence(), _silence())
+        # 매 get_shared_separator 호출마다 새 인스턴스를 만들지 않는다 — medium->heavy
+        # 승급이 분리를 재사용하는지 확인하려면 separate_calls 카운터가 호출 전체에
+        # 걸쳐 하나로 이어져야 한다.
+        fake_separator = _FakeSeparator(True, sep)
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
-            lambda config=None: _FakeSeparator(True, sep),
+            lambda config=None: fake_separator,
         )
 
         counts = iter([3, 1])  # 첫 구원(omniasr)=3 잔존 -> 승급 -> owsm=1 잔존(개선)
@@ -705,6 +792,10 @@ class TestRoutingDecision:
         assert stack.routing_meta["route"] == "escalated"
         assert stack.routing_meta["stranded_before"] == 3
         assert stack.routing_meta["stranded_after"] == 1
+        # medium->heavy 승급은 이미 분리된 스템(rescue.sep_result)을 그대로 넘겨 받아야
+        # 한다(운영자 지시, 2026-08-04) — 물리적으로 owsm 앵커만 추가로 돌면 된다. 분리를
+        # 두 번 했다면 이 카운터가 2가 된다.
+        assert fake_separator.separate_calls == 1
 
     def test_en_stranded_escalation_rejected_when_it_does_not_improve(self, monkeypatch):
         rescue_calls: list[str] = []

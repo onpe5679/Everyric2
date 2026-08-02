@@ -3844,11 +3844,26 @@ def _warn_ignored_legacy_settings(settings: Any) -> None:
 
 # ── 난이도 라우팅 상수 (scripts/bench_adapters/routed.py 이식, 전곡 74곡 감사로 확정 —
 #    바꾸지 마라) ──
+#
+# 라우팅 어휘는 **깊이**(fast/medium/heavy)로 통일한다(운영자 지시, 2026-08-04 정정) —
+# "구원(rescue)"은 기전의 이름이고 fast/medium/heavy는 사용자에게 보이는 개념(분석
+# 깊이)의 이름이다. 확장이 나중에 "분석 깊이 올리기" 버튼을 붙일 때 그 버튼이 하는 일이
+# 정확히 이 사다리를 한 칸 올리는 것이므로, 서버 내부 이름과 그 UI 개념이 같은 어휘를
+# 쓰면 배선이 자명해진다. 세 깊이의 구성:
+#   fast   — 무분리 omniASR 단독(_run_fast_stage)
+#   medium — polar 분리 + omniASR **자기앵커** + 2패스(en 강제 진입점)
+#   heavy  — polar 분리 + **owsm 앵커** + 2패스(ja 구원 진입점 / en 좌초 승급 도착점)
+# 앵커 모델은 깊이 하나로 완전히 결정되므로(_DEPTH_ANCHOR) 별도 필드로 안 들고 다닌다 —
+# 예전엔 route+rescue_anchor 두 필드였는데, 한 축(깊이)으로 접었다.
 _ROUTE_THRESHOLD = -11.0
+_DEPTH_FAST = "fast"
+_DEPTH_MEDIUM = "medium"
+_DEPTH_HEAVY = "heavy"
+_DEPTH_ANCHOR: dict[str, str] = {_DEPTH_MEDIUM: "omniasr", _DEPTH_HEAVY: "owsm"}
 # en은 라틴 posterior가 구조적으로 높아 붕괴해도 확신에 차 있어(Madeon logConf −6.38 vs
-# 임계 −11.0) logConf 신호로 원리상 못 잡는다 — 신호를 묻지 않고 언어로 곧장 구원한다
-# (routed.py EN_FORCED_NOTE).
-_FORCE_RESCUE_LANGUAGES = ("en",)
+# 임계 −11.0) logConf 신호로 원리상 못 잡는다 — 신호를 묻지 않고 곧장 medium 깊이로
+# 진입한다(routed.py EN_FORCED_NOTE).
+_FORCE_MEDIUM_LANGUAGES = ("en",)
 _ROUTE_LOG_FLOOR = math.log(1e-6)
 
 
@@ -3868,15 +3883,16 @@ def _line_log_conf_median(results: list[Any]) -> float | None:
 
 
 def _separate_stems_required(audio: Any, settings: Any) -> Any:
-    """구원 단계 전용 분리 호출 — 새 스택의 필수 구성요소라 조용히 물러서지 않는다.
+    """medium/heavy 깊이 전용 분리 호출 — 새 스택의 필수 구성요소라 조용히 물러서지 않는다.
 
     ``worker._separate_stems``(레거시·멜로디 공용 유틸)는 어떤 실패든 삼켜 ``None``을
     돌려준다 — "분리가 있으면 좋고 없어도 그만"인 레거시 VAD 보정에는 맞는 관용이지만,
-    구원 단계는 이 분리가 **결과 라벨(alignment_text=*-rescue*, ENGINE_VERSION)의 근거
-    자체**다. 조용히 없어지면 저장되는 결과가 실제로는 무분리인데 새 스택 라벨을 달게
-    되어 A/B 판정이 거짓이 된다(운영자 지시). ``is_available()``이 False면 여기서 바로
-    사람이 읽을 수 있는 예외를 던지고, ``separate()`` 자체의 예외(``SeparatorBackend
-    UnavailableError``/``SeparationError``)도 삼키지 않고 그대로 전파한다.
+    medium/heavy 깊이는 이 분리가 **결과 라벨(alignment_text=medium/heavy*, ENGINE_
+    VERSION)의 근거 자체**다. 조용히 없어지면 저장되는 결과가 실제로는 무분리인데 새
+    스택 라벨을 달게 되어 A/B 판정이 거짓이 된다(운영자 지시). ``is_available()``이
+    False면 여기서 바로 사람이 읽을 수 있는 예외를 던지고, ``separate()`` 자체의 예외
+    (``SeparatorBackendUnavailableError``/``SeparationError``)도 삼키지 않고 그대로
+    전파한다.
     """
     import torch
 
@@ -3885,7 +3901,7 @@ def _separate_stems_required(audio: Any, settings: Any) -> Any:
     separator = get_shared_separator(settings.audio)
     if not separator.is_available():
         raise RuntimeError(
-            f"rescue stage requires audio.separator_backend="
+            f"medium/heavy depth requires audio.separator_backend="
             f"{settings.audio.separator_backend!r} but it is not available (missing model "
             "assets or CUDA — see everyric2/audio/polarformer_separator.py require_available "
             "for specifics). Provision the assets, or select a legacy engine explicitly "
@@ -3980,8 +3996,8 @@ def _run_fast_stage(
 
     ``scripts/bench_adapters/routed.py``의 ``RouteConfig.fast_aligner="omniasr-ctc"`` 재현.
     omniASR vocab은 서브워드가 아니라 전부 단일 글자라(omniasr_engine.py 모듈 docstring)
-    이 결과의 ``word_segments`` 자체가 이미 실측 음절 스팬이다 — 구원 경로의 2패스처럼
-    별도 리파이너로 다시 잡을 필요가 없다.
+    이 결과의 ``word_segments`` 자체가 이미 실측 음절 스팬이다 — medium/heavy 깊이의
+    2패스처럼 별도 리파이너로 다시 잡을 필요가 없다.
 
     표기 다중 산출(pron/pron_segs)은 이 단계에서 내지 않는다 — 정상곡의 절대다수가 이
     경로로 끝나는데(라우팅이 곡당 평균 시간을 지키는 근거 자체) 여기서까지 2패스를
@@ -4005,7 +4021,7 @@ def _run_fast_stage(
     results = anchor.align(audio, lyric_lines, language=language)
     return _NewStackResult(
         results=results,
-        alignment_text="omniasr-fast",
+        alignment_text=_DEPTH_FAST,
         pron_data={},
         fixes={},
         raw_spans=[(r.start_time, r.end_time) for r in results],
@@ -4016,23 +4032,26 @@ def _run_fast_stage(
     )
 
 
-def _run_rescue_stage(
+def _run_deep_stage(
     audio: Any,
     sep_result: Any,
     lyric_lines: list[Any],
     language: str | None,
     settings: Any,
     report: Any,
-    anchor_type: str,
+    depth: str,
 ) -> "_NewStackResult":
-    """2단계(구원) — 분리 필수. ``scripts/bench_adapters/routed.py``의 ``rescue_aligner``
-    (비-en: ``2pass-owsm-omniasr``) / ``rescue_by_language["en"]``(``2pass-asr-ipa-hangul``,
-    omniasr 자기앵커)를 서버 계약으로 재현한다.
+    """medium/heavy 깊이 — 분리 필수. ``scripts/bench_adapters/routed.py``의
+    ``rescue_aligner``(비-en: ``2pass-owsm-omniasr``, 여기의 heavy) /
+    ``rescue_by_language["en"]``(``2pass-asr-ipa-hangul``, omniasr 자기앵커, 여기의
+    medium)를 서버 계약으로 재현한다. 앵커 모델은 ``depth`` 하나로 정해진다
+    (``_DEPTH_ANCHOR`` — medium=omniasr 자기앵커, heavy=owsm).
 
-    **분리는 이 단계의 필수 구성요소다** — 없거나 실패하면 조용히 무분리로 물러서지
+    **분리는 이 함수의 필수 구성요소다** — 없거나 실패하면 조용히 무분리로 물러서지
     않고 ``_separate_stems_required``가 명시적으로 실패시킨다(운영자 지시). 벤치가 이
     조합(bs-polarformer-fp16 분리 + owsm/omniasr 앵커)으로만 +26.7pp를 실측했다 — 분리가
-    빠진 채로 이 라벨(``alignment_text="*-rescue*"``)이 저장되면 A/B 판정이 거짓이 된다.
+    빠진 채로 이 라벨(``alignment_text="medium*"/"heavy*"``)이 저장되면 A/B 판정이
+    거짓이 된다.
 
     실행 순서(각 단계 이유는 인라인 주석): 앵커 정렬 → ``display_fixes._clamp_pathological``
     (그 모듈이 "worker.py 배선 시 더 이른 단계에서 별도로 호출하라"고 지시한 자리) →
@@ -4053,6 +4072,8 @@ def _run_rescue_stage(
     from everyric2.audio.loader import AudioLoader
     from everyric2.audio.vad import VocalActivityDetector
 
+    anchor_type = _DEPTH_ANCHOR[depth]
+
     if sep_result is None:
         sep_result = _separate_stems_required(audio, settings)
 
@@ -4064,7 +4085,7 @@ def _run_rescue_stage(
     report("전사 정렬")
     anchor = EngineFactory.get_engine(anchor_type, settings.alignment)
     if not anchor.is_available():
-        raise RuntimeError(f"{anchor_type} rescue anchor not available")
+        raise RuntimeError(f"{depth} depth anchor ({anchor_type}) not available")
 
     results = anchor.align(vocals, lyric_lines, language=language)
     raw_spans = [(r.start_time, r.end_time) for r in results]
@@ -4100,7 +4121,7 @@ def _run_rescue_stage(
         # VAD는 "새 스택 구성요소"가 아니라 재사용한 레거시 보정 유틸이다(분리기·앵커·
         # 리파이너와 달리 이 스택의 정체성/정확도 근거가 아니다) — 실패해도 앵커 결과
         # (분리 스템 위에서 이미 실측)는 유효하므로 로그만 남기고 계속한다.
-        logger.exception("Rescue-stage VAD timing post-process failed; keeping anchor timing")
+        logger.exception("Deep-stage VAD timing post-process failed; keeping anchor timing")
 
     if activity is not None:
         before_stranded = [(r.start_time, r.end_time) for r in results]
@@ -4126,7 +4147,7 @@ def _run_rescue_stage(
         if not refiner.is_available():
             raise RuntimeError(
                 "omniasr refiner not available — two_pass_enabled=True requires it for the "
-                "rescue stage; not silently dropping to anchor-only segments under the "
+                f"{depth} depth; not silently dropping to anchor-only segments under the "
                 "2pass-labelled result."
             )
         stems_dir: Path | None = None
@@ -4147,6 +4168,15 @@ def _run_rescue_stage(
         finally:
             if stems_dir is not None:
                 shutil.rmtree(stems_dir, ignore_errors=True)
+        # refine_lines는 라인별 실패를 예외가 아니라 RefinedLine.fallback_reason으로
+        # 신호한다(refine_window.py의 "앵커·리파이너 계약" — 호출부가 이 신호를 보고
+        # 앵커 세그로 폴백하라는 뜻이다). 여기서 fallback_reason을 안 읽으면, 그 라인은
+        # entry가 비어 pron_data에서 통째로 빠지고, 아래 attach_pron_variants가 원문에서
+        # algorithmic 근사 발음을 채워 넣는다 — 결과 자체는 안전(표시가 비지 않는다)하지만
+        # "이 줄은 실측 2패스가 아니라 근사였다"는 사실이 로그·응답 어디에도 안 남는다.
+        # 판정 불가를 조용히 넘기지 않고 집계해 로그로 남긴다(운영자 지시 — 무엇이
+        # 없어서/왜 실패했는지 담을 것).
+        line_fallbacks: dict[str, int] = {}
         for i, rl in enumerate(refined):
             entry: dict[str, Any] = {}
             if rl.pron.get("hangul"):
@@ -4161,10 +4191,21 @@ def _run_rescue_stage(
                 }
             if entry:
                 pron_data[i] = entry
+            elif rl.fallback_reason:
+                line_fallbacks[rl.fallback_reason] = line_fallbacks.get(rl.fallback_reason, 0) + 1
+        if line_fallbacks:
+            logger.warning(
+                "Two-pass refiner fell back to anchor-only segments for %d/%d line(s) "
+                "(measured syllable timing unavailable for these — algorithmic pron "
+                "approximation used instead): %s",
+                sum(line_fallbacks.values()),
+                len(refined),
+                ", ".join(f"{reason}={count}" for reason, count in sorted(line_fallbacks.items())),
+            )
 
     return _NewStackResult(
         results=results,
-        alignment_text=f"{anchor_type}-rescue-2pass" if pron_data else f"{anchor_type}-rescue",
+        alignment_text=f"{depth}-2pass" if pron_data else depth,
         pron_data=pron_data,
         fixes=fixes,
         raw_spans=raw_spans,
@@ -4197,17 +4238,30 @@ def _run_new_stack_alignment(
     report: Any,
 ) -> "_NewStackResult":
     """새 정렬 스택 본체 — 3단계 라우팅(``scripts/bench_adapters/routed.py``의
-    routed-2mode-lang 구성 재현, 코디네이터 확정 2026-08-03 정정):
+    routed-2mode-lang 구성 재현, 코디네이터 확정 2026-08-03/04 정정). 어휘는 **깊이**
+    (fast/medium/heavy, ``_DEPTH_*`` 상수) — "기전"이 아니라 "사용자에게 보이는 개념"
+    (확장이 나중에 붙일 "분석 깊이 올리기" 버튼과 같은 어휘, 위 상수 블록 주석 참고):
 
-      1) **고속**(무분리 omniASR, ``_run_fast_stage``) — 대부분의 곡이 여기서 끝난다
+      1) **fast**(무분리 omniASR, ``_run_fast_stage``) — 대부분의 곡이 여기서 끝난다
          (전곡 평균 시간을 지키는 근거). 언어가 en이면 신호가 원리상 무력해 이 단계를
-         건너뛰고 곧장 2)로 간다(``_FORCE_RESCUE_LANGUAGES``).
-      2) **구원**(분리 + 앵커 2패스, ``_run_rescue_stage``) — 1)의 라인 logConf 중앙값이
-         ``_ROUTE_THRESHOLD`` 미만이면 승급. en 외 언어는 owsm 앵커, en은 omniasr
-         자기앵커(2패스 리파이너가 이미 음절 단위라 owsm이 잡을 이유가 없다).
-      3) **en 전용 사후 좌초 승급** — 2)의 en 결과에 ``display_fixes._stranded_sites``
-         시그니처가 남으면 owsm 앵커로 다시 구원하고, 시그니처가 **줄어드는 경우에만**
-         채택한다(악화 방향으로는 못 간다). butcher가 그 표본, 14곡 스캔 오검출 0.
+         건너뛰고 곧장 medium으로 진입한다(``_FORCE_MEDIUM_LANGUAGES``).
+      2) **medium/heavy**(분리 + 앵커 2패스, ``_run_deep_stage``) — fast의 라인 logConf
+         중앙값이 ``_ROUTE_THRESHOLD`` 미만이면 승급한다. en 외 언어는 fast에서 곧장
+         heavy로(medium을 건너뛴다 — owsm 앵커), en은 medium에서 시작한다(omniasr
+         자기앵커 — 2패스 리파이너가 이미 음절 단위라 owsm이 잡을 이유가 없다).
+      3) **en 전용 사후 heavy 승급** — medium 결과에 ``display_fixes._stranded_sites``
+         시그니처가 남으면 heavy(owsm 앵커)로 다시 돌리고, 시그니처가 **줄어드는
+         경우에만** 채택한다(악화 방향으로는 못 간다). butcher가 그 표본, 14곡 스캔
+         오검출 0. medium이 이미 분리해 둔 스템을 그대로 넘긴다(운영자 지시,
+         2026-08-04: 한 요청 안의 승급은 분리를 재사용해야 한다 — 물리적으로 owsm
+         앵커만 추가로 돈다) — ``_run_deep_stage``의 ``sep_result is None`` 가드가
+         재분리를 자동으로 건너뛴다.
+
+    ja는 fast→heavy, en은 medium→heavy로 **진입 지점만 다르고 같은 사다리**를 오른다 —
+    그래서 최종 ``routing_meta["route"]``는 "어떻게 왔는지"가 아니라 "지금 어느
+    깊이인지"만 남긴다(예전엔 route="forced"/"rescue"/"escalated" + 별도
+    rescue_anchor 필드 두 개로 표현했는데, 깊이 하나로 접었다 — 앵커 모델은 깊이가
+    이미 결정한다).
 
     레거시 ko/ja 이중정렬·star 토큰·pron_data DP 근사·caption 앵커/스캐폴드는 이 경로에
     배선하지 않는다 — 전부 구스택 CTC 엔진의 특정 실패 모드에 맞춰진 장치라 새 앵커에는
@@ -4219,84 +4273,88 @@ def _run_new_stack_alignment(
     (운영자 지시, 2026-08-03 정정).
     """
     lang = (language or "").strip().lower()
-    forced = any(lang.startswith(prefix) for prefix in _FORCE_RESCUE_LANGUAGES)
+    starts_at_medium = any(lang.startswith(prefix) for prefix in _FORCE_MEDIUM_LANGUAGES)
 
     score: float | None = None
-    if not forced:
+    if not starts_at_medium:
         # 단계명은 기존 어휘("전사 정렬")로 통일 — 위 두 번째 report와 같은 이유
         # (STAGE_WINDOWS 미등록·확장 1.5.5 한국어 노출, 아래 report들도 전부 동일).
         report("전사 정렬")
         fast = _run_fast_stage(audio, lyric_lines, language, settings)
         score = _line_log_conf_median(fast.results)
         fast.routing_meta = {
-            "route": "fast",
+            "route": _DEPTH_FAST,
             "line_log_conf_median": None if score is None else round(score, 3),
             "threshold": _ROUTE_THRESHOLD,
         }
-        # score가 None(라인 confidence를 하나도 못 구함)이면 **구원으로** 떨어진다 —
-        # 벤치 원본(scripts/bench_adapters/routed.py:228 `if score is not None and
-        # score >= threshold: return fast`)과 같은 방향이다. 판정 불가를 "확신 있는
-        # 정상곡"으로 조용히 넘기면 안 된다 — 극한곡을 놓치는 비용(붕괴 방치)이 정상곡을
-        # 구원으로 잘못 보내는 비용(몇 초 낭비)보다 훨씬 크다(routed.py 모듈 docstring).
+        # score가 None(라인 confidence를 하나도 못 구함)이면 **승급한다** — 벤치
+        # 원본(scripts/bench_adapters/routed.py:228 `if score is not None and score >=
+        # threshold: return fast`)과 같은 방향이다. 판정 불가를 "확신 있는 정상곡"으로
+        # 조용히 넘기면 안 된다 — 극한곡을 놓치는 비용(붕괴 방치)이 정상곡을 잘못
+        # 올리는 비용(몇 초 낭비)보다 훨씬 크다(routed.py 모듈 docstring).
         if score is not None and score >= _ROUTE_THRESHOLD:
             return fast
         logger.info(
             "New-stack routing: line_log_conf_median=%s (threshold=%s) -> escalating to "
-            "rescue stage",
+            "heavy depth",
             "unavailable" if score is None else f"{score:.3f}",
             _ROUTE_THRESHOLD,
         )
     else:
         logger.info(
-            f"New-stack routing: language {lang!r} force-rescued (logConf signal unreliable)"
+            f"New-stack routing: language {lang!r} starts at medium depth "
+            "(logConf signal unreliable for it)"
         )
 
-    # 구원 진입 = 실제로 분리를 태우는 시점이다(고속 단계는 분리를 아예 안 한다 —
+    # medium/heavy 진입 = 실제로 분리를 태우는 시점이다(fast는 분리를 아예 안 한다 —
     # 라우팅의 비용 절감 근거 자체) — 그 실행과 단계 보고가 어긋나지 않도록 여기서만
-    # "보컬 분리"를 낸다(운영자 지시: 실제로 안 하는 작업을 표시하면 안 된다). 좌초
-    # 승급 재호출은 이미 분리된 스템(rescue.sep_result)을 재사용하므로 다시 안 낸다.
+    # "보컬 분리"를 낸다(운영자 지시: 실제로 안 하는 작업을 표시하면 안 된다). heavy
+    # 승급 재호출은 이미 분리된 스템(deep.sep_result)을 재사용하므로 다시 안 낸다.
     report("보컬 분리")
-    rescue_anchor_type = "omniasr" if forced else "owsm"
-    rescue = _run_rescue_stage(
-        audio, sep_result, lyric_lines, language, settings, report, rescue_anchor_type
+    initial_depth = _DEPTH_MEDIUM if starts_at_medium else _DEPTH_HEAVY
+    deep = _run_deep_stage(
+        audio, sep_result, lyric_lines, language, settings, report, initial_depth
     )
-    rescue.routing_meta = {
-        "route": "forced" if forced else "rescue",
+    deep.routing_meta = {
+        "route": initial_depth,
         "line_log_conf_median": None if score is None else round(score, 3),
         "threshold": _ROUTE_THRESHOLD,
-        "rescue_anchor": rescue_anchor_type,
     }
 
-    if forced:
-        stranded_before = _stranded_count(rescue)
+    if starts_at_medium:
+        stranded_before = _stranded_count(deep)
         if stranded_before > 0:
-            # 별도 report 없음 — _run_rescue_stage가 분리 재사용 여부와 무관하게 자기
+            # 별도 report 없음 — _run_deep_stage가 분리 재사용 여부와 무관하게 자기
             # 진입 시점에 "전사 정렬"을 낸다(위 정의 참고). 여기서 다시 부르면 같은
             # 문자열을 한 틱도 안 되는 간격으로 중복 보고할 뿐이다.
-            escalated = _run_rescue_stage(
-                audio, rescue.sep_result, lyric_lines, language, settings, report, "owsm"
+            # deep.sep_result를 그대로 넘긴다 — 이미 medium이 분리해 둔 스템을 재사용
+            # 한다(운영자 지시, 2026-08-04: 한 요청 안의 승급은 재분리하지 않는다).
+            # _run_deep_stage의 sep_result is None 가드가 재분리를 자동으로 건너뛴다.
+            escalated = _run_deep_stage(
+                audio, deep.sep_result, lyric_lines, language, settings, report, _DEPTH_HEAVY
             )
             stranded_after = _stranded_count(escalated)
             if stranded_after < stranded_before:
                 logger.info(
-                    f"Stranded-site escalation adopted: {stranded_before} -> {stranded_after}"
+                    f"Heavy-depth escalation adopted: {stranded_before} -> {stranded_after} "
+                    "stranded sites"
                 )
                 escalated.alignment_text += "-escalated"
                 escalated.routing_meta = {
-                    **rescue.routing_meta,
-                    "route": "escalated",
+                    **deep.routing_meta,
+                    "route": _DEPTH_HEAVY,
                     "stranded_before": stranded_before,
                     "stranded_after": stranded_after,
                 }
                 return escalated
             logger.info(
-                f"Stranded-site escalation rejected (no improvement: {stranded_before} -> "
-                f"{stranded_after})"
+                f"Heavy-depth escalation rejected (no improvement: {stranded_before} -> "
+                f"{stranded_after} stranded sites) — staying at medium"
             )
-            rescue.routing_meta["stranded_before"] = stranded_before
-            rescue.routing_meta["stranded_after"] = stranded_after
+            deep.routing_meta["stranded_before"] = stranded_before
+            deep.routing_meta["stranded_after"] = stranded_after
 
-    return rescue
+    return deep
 
 
 def _finish_new_stack_alignment(
@@ -4444,9 +4502,10 @@ def _finish_new_stack_alignment(
         "quality_adapter": quality_adapter,
         "quality_norm": None if quality_norm is None else round(quality_norm, 6),
         "align_coverage": coverage_meta,
-        # 라우팅 판정 근거 — 어느 단계(fast/rescue/forced/escalated)가 실제로 채택됐는지,
-        # logConf 중앙값·문턱값. 사후 감사용(캡션 앵커의 debug.caption_anchors와 같은 결,
-        # 이 스택엔 캡션 앵커가 없으니 그 자리를 대신한다). additive 새 필드.
+        # 라우팅 판정 근거 — 어느 깊이(fast/medium/heavy)가 실제로 채택됐는지, logConf
+        # 중앙값·문턱값(+승급 시도가 있었으면 stranded_before/after). 사후 감사용(캡션
+        # 앵커의 debug.caption_anchors와 같은 결, 이 스택엔 캡션 앵커가 없으니 그 자리를
+        # 대신한다). additive 새 필드.
         "routing": stack.routing_meta or {},
     }
 
@@ -4558,10 +4617,10 @@ def _run_alignment(
         if not new_stack_active:
             report("보컬 분리")
         need_vocals = settings.melody.separate_vocals or settings.alignment.align_on_vocals
-        # 새 스택은 여기서 분리하지 않는다 — 라우팅(1단계 고속)이 애초에 분리를 건너뛰는
+        # 새 스택은 여기서 분리하지 않는다 — 라우팅(fast 깊이)이 애초에 분리를 건너뛰는
         # 것 자체가 비용 절감의 근거다(scripts/bench_adapters/routed.py 모듈 docstring:
-        # "정상곡에 분리기를 돌리는 14초는 순수 낭비"). 분리가 실제로 필요한지는 구원
-        # 단계 진입 여부로만 정해지므로 _run_rescue_stage가 그때 가서 분리한다
+        # "정상곡에 분리기를 돌리는 14초는 순수 낭비"). 분리가 실제로 필요한지는 medium/
+        # heavy 깊이 진입 여부로만 정해지므로 _run_deep_stage가 그때 가서 분리한다
         # (_separate_stems_required) — 여기서 미리 돌리면 그 절감이 통째로 사라진다.
         sep_result = _separate_stems(audio) if (need_vocals and not new_stack_active) else None
         vocals = sep_result.vocals if sep_result is not None else None
