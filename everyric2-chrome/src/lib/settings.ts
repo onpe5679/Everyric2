@@ -38,6 +38,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pitchLineOpacity: 1,
   pitchF0Opacity: 1,
   vocalGlow: true,
+  pipChromaKey: 'off',
   pitchPronPosition: 'note',
   lowConfWarning: true,
   notifyOnComplete: true,

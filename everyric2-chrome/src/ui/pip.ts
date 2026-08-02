@@ -59,10 +59,12 @@ export interface PipOptions {
   pitchLineOpacity: number;
   /** f0 곡선(음정 보는 선) 밝기 배율 0.2~1.5 — 노트 바와 별개 페이더 (운영자 요청) */
   pitchF0Opacity: number;
+  /** 크로마키 스트리밍 모드 — 'off'가 아니면 PIP 문서 배경을 단색 키 컬러로 (OBS 키잉용) */
+  pipChromaKey: 'off' | 'green' | 'blue' | 'magenta';
   /** 디버그: 글자별 CTC 신뢰도를 색으로 표시 */
   showConfidence: boolean;
   /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
-  pitchPronPosition: 'note' | 'bottom';
+  pitchPronPosition: 'note' | 'bottom' | 'both';
   /** 레인 높이 드래그 조절 완료 시 */
   onPitchHeightChange: (px: number) => void;
   /** 가사 라인 클릭 — 가사 타임라인(초) 기준 */
@@ -400,8 +402,10 @@ export class PipController {
   private pitchLineOpacity = 1;
   /** f0 곡선(음정 보는 선) 밝기 배율 — 노트 바와 별개 (renderF0Curve 전용) */
   private f0Opacity = 1;
+  /** 크로마키 스트리밍 모드 — applyChroma가 문서 루트 클래스·CSS 변수로 반영 */
+  private chromaKey: 'off' | 'green' | 'blue' | 'magenta' = 'off';
   private pitchCountdown = true;
-  private pitchPronPosition: 'note' | 'bottom' = 'note';
+  private pitchPronPosition: 'note' | 'bottom' | 'both' = 'note';
   /** 발음 표기 방식 — setLines가 만드는 pitch.notes의 발음 부착(collectPitchData)도
    *  이 값을 따르므로, setPronScript는 pitch를 다시 계산한다 */
   private pronScript: PronScript = 'hangul';
@@ -507,6 +511,7 @@ export class PipController {
     this.solfegeNotation = opts.solfegeNotation;
     this.pitchLineOpacity = opts.pitchLineOpacity;
     this.f0Opacity = opts.pitchF0Opacity;
+    this.chromaKey = opts.pipChromaKey;
     this.pitchPronPosition = opts.pitchPronPosition;
     this.pronScript = opts.pronScript;
     this.showConfidence = opts.showConfidence;
@@ -524,6 +529,7 @@ export class PipController {
     // 라이트 테마는 :root에 걸어야 한다 — 레인 캔버스 색을 readPitchColors가
     // documentElement의 계산된 CSS 변수에서 읽기 때문이다 (body에만 걸면 캔버스가 다크로 남는다)
     this.applyTheme();
+    this.applyChroma();
     // 글자 크기 배율 — 레인(캔버스)뿐 아니라 스테이지 가사/발음/번역(CSS)에도 적용
     doc.body.style.setProperty('--ey-pip-fs', String(this.pitchFontScale));
 
@@ -968,6 +974,30 @@ export class PipController {
     this.renderPitch(this.lastTime);
   }
 
+  /** 크로마키 스트리밍 모드 즉시 반영 — 창이 열려 있으면 배경이 바로 바뀐다 */
+  setChromaKey(mode: 'off' | 'green' | 'blue' | 'magenta'): void {
+    this.chromaKey = mode;
+    this.applyChroma();
+  }
+
+  /**
+   * 크로마키 배경 적용 — PIP 문서 루트에 클래스·키 컬러 CSS 변수를 건다(overlay.css의
+   * :root.ey-chroma 규칙이 배경을 단색으로 통일한다). PIP는 반투명을 지원하지 않아
+   * 방송(OBS 등)에서 창을 겹칠 수 없다 — 대신 배경을 표준 키 컬러(green #00b140 등)로
+   * 바꿔 스트리머가 크로마키 필터로 배경만 떼어낼 수 있게 한다(운영자 요청, 2026-08-03).
+   */
+  private applyChroma(): void {
+    const doc = this.win?.document;
+    if (!doc) return;
+    const CHROMA_COLORS: Record<string, string> = {
+      green: '#00b140', blue: '#0047bb', magenta: '#ff00ff',
+    };
+    const color = CHROMA_COLORS[this.chromaKey] ?? '';
+    doc.documentElement.classList.toggle('ey-chroma', Boolean(color));
+    if (color) doc.documentElement.style.setProperty('--ey-chroma-bg', color);
+    else doc.documentElement.style.removeProperty('--ey-chroma-bg');
+  }
+
   /** 창 안 레인 조절 버튼(마디 ±·진행 방식)의 라벨을 현재 값에 맞춘다 */
   private updateWindowControls(): void {
     if (this.windowLabelBtn) {
@@ -1025,7 +1055,7 @@ export class PipController {
   }
 
   /** 발음 표기 위치(노트 위/화면 하단) 즉시 반영 — 다음 tick의 renderPitch에서 바로 적용됨 */
-  setPitchPronPosition(position: 'note' | 'bottom'): void {
+  setPitchPronPosition(position: 'note' | 'bottom' | 'both'): void {
     this.pitchPronPosition = position;
   }
 
@@ -1719,12 +1749,14 @@ export class PipController {
     const { pages, notes, words, lo, hi } = this.pitch;
 
     // ── 세로 레이아웃: 오선 영역 + 가사 줄 + (발음 폴백 줄) + 번역 줄
-    // pitchPronPosition === 'bottom'이면 음절 타이밍이 있어도 노트 부착을 쓰지 않고
-    // 항상 하단 폴백 줄(진행률 그라데이션)로 표시한다 — 줄 높이 확보 판정도 이를 따른다
-    const noteAttach = this.pitchPronPosition === 'note';
+    // pitchPronPosition: 'note'=노트 부착(음절 타이밍이 없을 때만 하단 폴백),
+    // 'bottom'=항상 하단 줄(진행률 그라데이션), 'both'=노트 부착 + 하단 줄 동시
+    // (운영자 요청 2026-08-03: "노트 말고도 밑에도").
+    const noteAttach = this.pitchPronPosition !== 'bottom';
     const hasSegs = noteAttach
       && pages.some(p => (resolvedPronSegments(p.line, this.pronScript)?.length ?? 0) > 0);
-    const hasPronRow = !hasSegs && pages.some(p => resolvedPronunciation(p.line, this.pronScript));
+    const hasPronRow = (this.pitchPronPosition !== 'note' || !hasSegs)
+      && pages.some(p => resolvedPronunciation(p.line, this.pronScript));
     const hasTr = pages.some(p => p.line.translation);
     const fs = this.pitchFontScale;
     // 배율은 반드시 클램프 **이후에** 곱한다 — 예전엔 상한(34px 등) 안에서 곱해서,

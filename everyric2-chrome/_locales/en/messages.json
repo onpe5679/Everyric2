@@ -957,6 +957,27 @@
   "overlay_settings_row_vocalGlow": {
     "message": "Vocal glow"
   },
+  "overlay_settings_pronPosition_both": {
+    "message": "On notes + bottom"
+  },
+  "overlay_settings_row_pipChromaKey": {
+    "message": "PiP chroma key (streaming)"
+  },
+  "overlay_settings_row_pipChromaKeyTitle": {
+    "message": "Turns the PiP window background into a solid key color — key it out in OBS to overlay lyrics on your stream"
+  },
+  "overlay_settings_chroma_off": {
+    "message": "Off"
+  },
+  "overlay_settings_chroma_green": {
+    "message": "Green (standard)"
+  },
+  "overlay_settings_chroma_blue": {
+    "message": "Blue"
+  },
+  "overlay_settings_chroma_magenta": {
+    "message": "Magenta"
+  },
   "overlay_settings_row_vocalGlowTitle": {
     "message": "The panel softly glows while vocals are present (only for syncs with server vocal analysis)"
   },

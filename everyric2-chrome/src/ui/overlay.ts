@@ -1766,9 +1766,25 @@ export class LyricsOverlay {
     );
 
     const pitchPronPosition = this.buildSelect(
-      [['note', t('overlay.settings.pronPosition.note')], ['bottom', t('overlay.settings.pronPosition.bottom')]],
+      [
+        ['note', t('overlay.settings.pronPosition.note')],
+        ['bottom', t('overlay.settings.pronPosition.bottom')],
+        ['both', t('overlay.settings.pronPosition.both')],
+      ],
       this.settings.pitchPronPosition,
       v => this.callbacks.onSettingsChange({ pitchPronPosition: v as Settings['pitchPronPosition'] }),
+    );
+
+    // 크로마키 스트리밍 모드 — PIP 문서 배경을 단색 키 컬러로 (OBS 등에서 키잉, 방송용)
+    const pipChromaKey = this.buildSelect(
+      [
+        ['off', t('overlay.settings.chroma.off')],
+        ['green', t('overlay.settings.chroma.green')],
+        ['blue', t('overlay.settings.chroma.blue')],
+        ['magenta', t('overlay.settings.chroma.magenta')],
+      ],
+      this.settings.pipChromaKey,
+      v => this.callbacks.onSettingsChange({ pipChromaKey: v as Settings['pipChromaKey'] }),
     );
 
     const melodyPlayback = h('input', { attrs: { type: 'checkbox' } });
@@ -1906,6 +1922,7 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchLineOpacity'), attrs: { title: t('overlay.settings.row.pitchLineOpacityTitle') } }), pitchLineOpacity),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchF0Opacity'), attrs: { title: t('overlay.settings.row.pitchF0OpacityTitle') } }), pitchF0Opacity),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pronPosition'), attrs: { title: t('overlay.settings.row.pronPositionTitle') } }), pitchPronPosition),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pipChromaKey'), attrs: { title: t('overlay.settings.row.pipChromaKeyTitle') } }), pipChromaKey),
       h('div', { className: 'ey-settings-row' },
         h('label', { text: t('overlay.settings.row.melodyPlayback'), attrs: { title: t('overlay.settings.row.melodyPlaybackTitle') } }),
         h('span', { className: 'ey-settings-inline' }, melodyVolume, melodyPlayback)),

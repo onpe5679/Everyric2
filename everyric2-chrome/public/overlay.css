@@ -838,6 +838,16 @@
   50% { box-shadow: 0 0 30px rgba(255, 176, 46, 0.22); }
 }
 
+/* 크로마키 스트리밍 모드 (pip.ts applyChroma) — PIP 문서 배경을 단색 키 컬러로 통일.
+   글자·노트는 남기고 배경 계열만 키 컬러로 — OBS 크로마키 필터가 배경만 떼어낸다.
+   video 미러는 배경이 아니므로 그대로 둔다(스트리머가 접어 숨길 수 있다). */
+:root.ey-chroma body.ey-pip { background: var(--ey-chroma-bg) !important; }
+:root.ey-chroma body.ey-pip *:not(video) {
+  background: transparent !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+
 /* 출처 링크가 있는 배지 (보카로 위키 등) */
 .ey-source.link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .ey-source.link:hover { color: var(--ey-text); }

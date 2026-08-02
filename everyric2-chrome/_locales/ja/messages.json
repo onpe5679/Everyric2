@@ -957,6 +957,27 @@
   "overlay_settings_row_vocalGlow": {
     "message": "ボーカル区間グロー"
   },
+  "overlay_settings_pronPosition_both": {
+    "message": "ノート付着＋下部同時"
+  },
+  "overlay_settings_row_pipChromaKey": {
+    "message": "PiPクロマキー（配信用）"
+  },
+  "overlay_settings_row_pipChromaKeyTitle": {
+    "message": "PiPウィンドウの背景を単色キーカラーにします — OBSなどでクロマキー合成し、配信画面に歌詞を重ねられます"
+  },
+  "overlay_settings_chroma_off": {
+    "message": "オフ"
+  },
+  "overlay_settings_chroma_green": {
+    "message": "グリーン（標準）"
+  },
+  "overlay_settings_chroma_blue": {
+    "message": "ブルー"
+  },
+  "overlay_settings_chroma_magenta": {
+    "message": "マゼンタ"
+  },
   "overlay_settings_row_vocalGlowTitle": {
     "message": "ボーカルが聞こえる区間で歌詞パネルがほのかに明るくなります（サーバーの発声分析があるシンクのみ）"
   },

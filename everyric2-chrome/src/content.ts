@@ -903,6 +903,9 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
   if (patch.pitchF0Opacity !== undefined) {
     pip.setPitchF0Opacity(patch.pitchF0Opacity);
   }
+  if (patch.pipChromaKey !== undefined) {
+    pip.setChromaKey(patch.pipChromaKey);
+  }
 
   // 가라오케 음정 바 토글 즉시 반영
   if (patch.pitchGuide !== undefined) {
@@ -3151,6 +3154,7 @@ async function handlePipToggle(): Promise<void> {
     solfegeNotation: settings.solfegeNotation,
     pitchLineOpacity: settings.pitchLineOpacity,
     pitchF0Opacity: settings.pitchF0Opacity,
+    pipChromaKey: settings.pipChromaKey,
     pitchPronPosition: settings.pitchPronPosition,
     showConfidence: settings.debugInfo,
     onPitchHeightChange: px => {

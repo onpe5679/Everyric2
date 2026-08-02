@@ -957,6 +957,27 @@
   "overlay_settings_row_vocalGlow": {
     "message": "보컬 구간 글로우"
   },
+  "overlay_settings_pronPosition_both": {
+    "message": "노트 부착 + 하단 동시"
+  },
+  "overlay_settings_row_pipChromaKey": {
+    "message": "PIP 크로마키 (방송용)"
+  },
+  "overlay_settings_row_pipChromaKeyTitle": {
+    "message": "PIP 창 배경을 단색 키 컬러로 바꿔요 — OBS 등에서 크로마키 필터로 배경만 떼어내 방송 화면에 가사를 얹을 수 있어요"
+  },
+  "overlay_settings_chroma_off": {
+    "message": "끔"
+  },
+  "overlay_settings_chroma_green": {
+    "message": "초록 (표준)"
+  },
+  "overlay_settings_chroma_blue": {
+    "message": "파랑"
+  },
+  "overlay_settings_chroma_magenta": {
+    "message": "마젠타"
+  },
   "overlay_settings_row_vocalGlowTitle": {
     "message": "보컬이 들리는 구간에서 가사창 테두리가 은은하게 밝아져요 (서버 발성 분석이 있는 싱크에서만)"
   },

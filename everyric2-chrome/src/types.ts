@@ -499,8 +499,10 @@ export interface Settings {
   pitchF0Opacity: number;
   /** 보컬 발성 구간에서 가사창 패널이 은은하게 밝아지는 글로우 효과 */
   vocalGlow: boolean;
+  /** PIP 크로마키 스트리밍 모드 — 'off'가 아니면 PIP 배경을 단색 키 컬러로 (OBS 키잉용) */
+  pipChromaKey: 'off' | 'green' | 'blue' | 'magenta';
   /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
-  pitchPronPosition: 'note' | 'bottom';
+  pitchPronPosition: 'note' | 'bottom' | 'both';
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */
   pitchGuide: boolean;
   /** 가라오케 창에서 노트를 신디사이즈로 재생 */
