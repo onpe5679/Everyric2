@@ -809,28 +809,6 @@ def _attach_ko_pron_variants(seg: dict[str, Any], text: str) -> None:
         seg.setdefault("pron_segs", {})["romaji"] = romaja_segments
 
 
-def _join_display_units(owners: list[str], word_end: list[bool]) -> str:
-    """``LineUnits.owners[key]``(``align_target``의 문자 단위 소유자 배열) → 표시
-    문자열. ``word_end``가 걸린 자리 뒤에 공백 하나를 넣는다 — 라틴 낱말 사이 공백이
-    소유자 배열 자체엔 없으므로(``align_target`` 모듈 docstring) 이 플래그로 복원한다.
-    ``refine_window._join_pron``과 같은 규칙이지만 시간 축(세그) 없이 문자열만
-    조립한다 — 이 경로(``_attach_latin_pron_variants``)는 실측 정렬이 아니라 결정론
-    근사라 세그를 안 낸다.
-
-    ``shown.strip()``으로 공백뿐인 소유자를 건너뛴다 — ``derive_en_display_units``는
-    낱말 사이 원문 공백도 owners에 그 글자 그대로(=" ") 얹으므로(``align_target`` 모듈의
-    "낱말 사이 공백·구두점" 패스스루), 그걸 그대로 이으면 word_end가 넣는 공백과 겹쳐
-    낱말 사이가 두 칸으로 벌어진다. ``refine_window._build_segments``가 같은 자리를
-    ``if not owner.strip(): continue``로 건너뛰는 것과 같은 규칙이다."""
-    parts: list[str] = []
-    for shown, is_word_end in zip(owners, word_end):
-        if shown.strip():
-            parts.append(shown)
-        if is_word_end:
-            parts.append(" ")
-    return "".join(parts).strip()
-
-
 def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
     """라틴(영어) 곡 세그: 표기 4종(hangul/kana/romaji/en)을 전부 표시로 붙인다.
 
@@ -847,7 +825,7 @@ def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
     표기 문자열 자체는 갈리지 않는다.
     """
     try:
-        from everyric2.text.align_target import derive_en_display_units
+        from everyric2.text.align_target import derive_en_display_units, join_display
 
         units = derive_en_display_units(text)
     except Exception:
@@ -857,7 +835,7 @@ def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
     pron = {
         key: joined
         for key, owners in units.owners.items()
-        if (joined := _join_display_units(owners, units.word_end))
+        if (joined := join_display(owners, units.word_end))
     }
     if not pron:
         return
@@ -4266,6 +4244,31 @@ def _stranded_count(stack: "_NewStackResult") -> int:
     return _stranded_sites(stack.results, stack.activity.regions)
 
 
+def _resolve_stack_language(language: str | None, lyric_lines: list[Any]) -> tuple[str, str]:
+    """새 스택이 쓸 언어와 그 출처(``"label"`` | ``"script_census"``).
+
+    jobs.language는 실측상 자주 비어 있다(사용자 생성 잡 4/4가 None, 2026-08-03 실측) —
+    이 라벨 하나가 비면 세 layer가 동시에 갈라진다: ① en 강제 medium 진입이 무산돼
+    en 곡이 전부 fast로 새고(``_FORCE_MEDIUM_LANGUAGES`` 판정), ② 2패스 리파이너의
+    ``language or "en"``이 ja 곡을 en으로 리파인하고, ③ 응답의 ``language`` 필드가
+    None으로 남아 표기 파생·재생성의 분기 재료가 사라진다. 그래서 라벨이 없으면 가사
+    문자 계열로 한 번 판정해 **같은 값**을 세 곳에 흘린다 — 표기와 라우팅이 서로
+    다른 판정을 하면 안 된다.
+
+    판정기는 ``ctc_engine.detect_language_from_text`` — 스크립트가 섞이면 "많은 쪽"이
+    아니라 어댑터 vocab이 "덮는 쪽"을 고르는 우세 판정(``_pick_by_coverage``)이라,
+    라틴 53.7%의 ja 곡(numb numb)을 en으로 오진하지 않는다. 라벨이 있으면 정규화만
+    해서 그대로 쓴다 — 라벨은 조달 경로가 명시한 값이므로 추정이 덮지 않는다.
+    """
+    lang = (language or "").strip().lower()
+    if lang:
+        return lang, "label"
+    from everyric2.alignment.ctc_engine import detect_language_from_text
+
+    detected, _ = detect_language_from_text("\n".join(ln.text for ln in lyric_lines))
+    return detected, "script_census"
+
+
 def _run_new_stack_alignment(
     audio: Any,
     sep_result: Any,
@@ -4309,7 +4312,12 @@ def _run_new_stack_alignment(
     (two_pass_enabled=True일 때의) 리파이너가 없거나 실패하면 예외가 그대로 올라간다
     (운영자 지시, 2026-08-03 정정).
     """
-    lang = (language or "").strip().lower()
+    lang, lang_source = _resolve_stack_language(language, lyric_lines)
+    if lang_source == "script_census":
+        logger.info(
+            f"New-stack routing: job language label is empty -> resolved {lang!r} "
+            "from lyrics script census"
+        )
     starts_at_medium = any(lang.startswith(prefix) for prefix in _FORCE_MEDIUM_LANGUAGES)
 
     score: float | None = None
@@ -4317,10 +4325,12 @@ def _run_new_stack_alignment(
         # 단계명은 기존 어휘("전사 정렬")로 통일 — 위 두 번째 report와 같은 이유
         # (STAGE_WINDOWS 미등록·확장 1.5.5 한국어 노출, 아래 report들도 전부 동일).
         report("전사 정렬")
-        fast = _run_fast_stage(audio, lyric_lines, language, settings)
+        fast = _run_fast_stage(audio, lyric_lines, lang, settings)
         score = _line_log_conf_median(fast.results)
         fast.routing_meta = {
             "route": _DEPTH_FAST,
+            "language": lang,
+            "language_source": lang_source,
             "line_log_conf_median": None if score is None else round(score, 3),
             "threshold": _ROUTE_THRESHOLD,
         }
@@ -4350,10 +4360,12 @@ def _run_new_stack_alignment(
     report("보컬 분리")
     initial_depth = _DEPTH_MEDIUM if starts_at_medium else _DEPTH_HEAVY
     deep = _run_deep_stage(
-        audio, sep_result, lyric_lines, language, settings, report, initial_depth
+        audio, sep_result, lyric_lines, lang, settings, report, initial_depth
     )
     deep.routing_meta = {
         "route": initial_depth,
+        "language": lang,
+        "language_source": lang_source,
         "line_log_conf_median": None if score is None else round(score, 3),
         "threshold": _ROUTE_THRESHOLD,
     }
@@ -4368,7 +4380,7 @@ def _run_new_stack_alignment(
             # 한다(운영자 지시, 2026-08-04: 한 요청 안의 승급은 재분리하지 않는다).
             # _run_deep_stage의 sep_result is None 가드가 재분리를 자동으로 건너뛴다.
             escalated = _run_deep_stage(
-                audio, deep.sep_result, lyric_lines, language, settings, report, _DEPTH_HEAVY
+                audio, deep.sep_result, lyric_lines, lang, settings, report, _DEPTH_HEAVY
             )
             stranded_after = _stranded_count(escalated)
             if stranded_after < stranded_before:
@@ -4528,6 +4540,12 @@ def _finish_new_stack_alignment(
     engine_variant = getattr(engine, "_current_engine_variant", None)
     if hasattr(engine, "_current_language"):
         detected_lang = engine._current_language
+    if not detected_lang:
+        # 새 앵커(owsm/omniasr)는 _current_language를 노출하지 않으므로 위 폴백이
+        # 구조적으로 죽어 있다 — 라벨이 비면 라우팅이 이미 판정해 둔 문자 계열
+        # 언어(_resolve_stack_language)를 그대로 쓴다. 라우팅·리파이너·응답이 같은
+        # 값을 봐야 표기와 재생성 분기가 어긋나지 않는다.
+        detected_lang = (stack.routing_meta or {}).get("language")
 
     quality_adapter = getattr(engine, "_current_adapter", None)
     quality_norm = _scale_free_quality(avg_confidence, quality_adapter)

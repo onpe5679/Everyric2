@@ -832,6 +832,136 @@ class TestRoutingDecision:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_stack_language — 라벨이 비면 문자 계열 우세 판정 (weathergirl 결함, 2026-08-03)
+#
+# jobs.language는 실측상 자주 None이다(사용자 생성 잡 4/4). 라벨 하나가 비면 ① en 강제
+# medium 진입 무산(전부 fast로 샘), ② 2패스 리파이너 language or "en" 오분기, ③ 응답
+# language=None까지 세 layer가 동시에 갈라졌다 — 한 번 판정한 값이 세 곳에 같이 흘러야
+# 한다.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveStackLanguage:
+    def test_label_passes_through_normalized(self):
+        assert worker._resolve_stack_language(" JA ", []) == ("ja", "label")
+
+    def test_empty_label_pure_latin_resolves_en(self):
+        lines = [LyricLine(text="the weathergirl says sunshine again", line_number=1)]
+        assert worker._resolve_stack_language(None, lines) == ("en", "script_census")
+
+    def test_empty_label_latin_majority_with_kana_resolves_ja(self):
+        # numb numb 실측: 라틴 53.7%인데 ja 곡 — "많은 쪽"이 아니라 vocab이 "덮는 쪽"
+        # 판정이어야 en 오진이 없다(ctc_engine._pick_by_coverage).
+        lines = [LyricLine(text="ナムナム baby yeah we go party tonight", line_number=1)]
+        assert worker._resolve_stack_language(None, lines) == ("ja", "script_census")
+
+    def test_empty_label_hangul_resolves_ko(self):
+        lines = [LyricLine(text="보랏빛 기척", line_number=1)]
+        assert worker._resolve_stack_language(None, lines) == ("ko", "script_census")
+
+
+class TestRoutingLanguageResolution:
+    def test_none_language_with_latin_lyrics_starts_at_medium(self, monkeypatch):
+        # weathergirl(M7VSEZOQIlg) 실측 결함: language=None이면 "".startswith("en")=False로
+        # 강제 medium 진입이 무산돼 en 곡이 전부 fast로 샜다.
+        deep_anchor = _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=1.0)])
+        calls: list[str] = []
+
+        def fake_get_engine(engine_type, config=None):
+            calls.append(engine_type)
+            return deep_anchor
+
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
+        )
+        sep = _FakeSepResult(_silence(), _silence())
+        monkeypatch.setattr(
+            "everyric2.audio.separator.get_shared_separator",
+            lambda config=None: _FakeSeparator(True, sep),
+        )
+        stack = worker._run_new_stack_alignment(
+            _silence(), None,
+            [LyricLine(text="the weathergirl says sunshine again", line_number=1)],
+            None, _settings(two_pass_enabled=False), lambda s: None,
+        )
+        assert calls == ["omniasr"]  # medium 자기앵커 한 번뿐 — fast 단계가 아예 안 돌았다
+        assert stack.alignment_text == "medium"
+        assert stack.routing_meta["route"] == "medium"
+        assert stack.routing_meta["language"] == "en"
+        assert stack.routing_meta["language_source"] == "script_census"
+
+    def test_none_language_with_kana_mixed_lyrics_enters_fast_as_ja(self, monkeypatch):
+        results = [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=0.9)]
+        anchor = _FakeAnchor(results)
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine",
+            lambda engine_type, config=None: anchor,
+        )
+        stack = worker._run_new_stack_alignment(
+            _silence(), None,
+            [LyricLine(text="ナムナム baby yeah we go party tonight", line_number=1)],
+            None, _settings(), lambda s: None,
+        )
+        assert stack.alignment_text == "fast"
+        assert stack.routing_meta["language"] == "ja"
+        # 판정된 언어가 앵커까지 흘러야 한다 — 리파이너 분기(language or "en")와 owsm
+        # 언어 심볼 선택의 재료이기도 하다.
+        assert anchor.align_calls[0]["language"] == "ja"
+
+    def test_label_wins_over_census(self, monkeypatch):
+        # 라벨이 있으면 가사가 라틴이어도 추정이 덮지 않는다.
+        results = [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=0.9)]
+        anchor = _FakeAnchor(results)
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine",
+            lambda engine_type, config=None: anchor,
+        )
+        stack = worker._run_new_stack_alignment(
+            _silence(), None,
+            [LyricLine(text="pure latin lyrics only here", line_number=1)],
+            "ja", _settings(), lambda s: None,
+        )
+        assert stack.alignment_text == "fast"
+        assert stack.routing_meta["language"] == "ja"
+        assert stack.routing_meta["language_source"] == "label"
+
+
+class TestFinishNewStackLanguageFallback:
+    def test_payload_language_falls_back_to_census_when_label_missing(self, monkeypatch):
+        # 새 앵커(owsm/omniasr)는 _current_language를 노출하지 않아 기존 폴백이 구조적으로
+        # 죽어 있었다 — language=None 잡의 응답 language가 None으로 남았다(실측: 사용자
+        # 생성 잡 4/4). 라우팅이 판정한 언어가 응답까지 흘러야 한다.
+        result = SyncResult(text="こんにちは", start_time=0.0, end_time=1.0, confidence=0.9)
+        anchor = _FakeAnchor([result])
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine",
+            lambda engine_type, config=None: anchor,
+        )
+        out = worker._finish_new_stack_alignment(
+            _silence(0.5), None, None,
+            [LyricLine(text="こんにちは", line_number=1)],
+            None, _settings(), lambda s: None,
+            gloss_folded=None, melody_extractor=None, f0_future=None, f0_executor=None,
+        )
+        assert out["language"] == "ja"
+        assert out["debug"]["routing"]["language_source"] == "script_census"
+
+    def test_payload_language_keeps_label_when_present(self, monkeypatch):
+        result = SyncResult(text="hi", start_time=0.0, end_time=1.0, confidence=0.9)
+        anchor = _FakeAnchor([result])
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine",
+            lambda engine_type, config=None: anchor,
+        )
+        out = worker._finish_new_stack_alignment(
+            _silence(0.5), None, None, [LyricLine(text="hi", line_number=1)],
+            "ja", _settings(), lambda s: None,
+            gloss_folded=None, melody_extractor=None, f0_future=None, f0_executor=None,
+        )
+        assert out["language"] == "ja"
+
+
+# ---------------------------------------------------------------------------
 # _finish_new_stack_alignment — 응답 dict 조립(멜로디/품질 없이)
 # ---------------------------------------------------------------------------
 
