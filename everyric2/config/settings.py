@@ -132,8 +132,10 @@ class AudioSettings(BaseSettings):
 class AlignmentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_ALIGNMENT_")
 
-    engine: Literal["ctc", "nemo", "gpu-hybrid", "sofa"] = Field(
-        default="ctc", description="Alignment engine to use"
+    engine: Literal["ctc", "nemo", "gpu-hybrid", "sofa", "owsm", "omniasr"] = Field(
+        default="ctc",
+        description="Alignment engine to use. 기본값은 ctc로 유지한다 — owsm/omniasr는 "
+        "벤치에서 채택된 앵커 모델의 엔진 이식일 뿐, 기본 배선 전환은 별도 작업이다.",
     )
     language: Literal["auto", "en", "ja", "ko"] = Field(
         default="auto", description="Language for transcription/alignment"
@@ -142,6 +144,20 @@ class AlignmentSettings(BaseSettings):
     nemo_model_en: str = Field(
         default="nvidia/stt_en_conformer_ctc_large",
         description="NeMo model for English",
+    )
+
+    owsm_python_path: str | None = Field(
+        default=None,
+        description="OwsmEngine이 서브프로세스로 부를 격리 venv 인터프리터 경로. None이면 "
+        "<repo_root>/.venv-owsm/{Scripts/python.exe|bin/python3}(플랫폼별)를 기본으로 "
+        "탐색한다. ESPnet이 메인 .venv(torch>=2.0, transformers>=4.40)와 충돌하는 의존성을 "
+        "고정하므로 owsm_engine.py 모듈 docstring 참고 — 인프로세스로 못 돌린다.",
+    )
+    owsm_dtype: Literal["float32", "bfloat16"] = Field(
+        default="bfloat16",
+        description="OWSM 워커의 인코더 dtype. bfloat16이 벤치 채택 구성(owsm-ctc-v4-1b-bf16, "
+        "fp32 대비 VRAM 절반, 정확도 손실 미측정)과 같다. float16은 이 인코더에서 오버플로해 "
+        "forced_align이 비유한(non-finite) emission을 받는다(벤치 실측) — 선택지에서 제외.",
     )
 
     alignment_sample_rate: int = Field(
