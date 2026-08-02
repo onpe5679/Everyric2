@@ -192,7 +192,12 @@
     "message": "表示する行がありません"
   },
   "debugPanel_engine": {
-    "message": "エンジン $P1$"
+    "message": "エンジン $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "debugPanel_engineLegacy": {
     "message": "旧世代（バージョン刻印なし）"
@@ -207,7 +212,18 @@
     "message": "前世代なし（再処理履歴なし）"
   },
   "debugPanel_comparePrevLoaded": {
-    "message": "前世代: $P1$ · 対応 $P2$/$P3$行 (Δ = 現在 − 以前)"
+    "message": "前世代: $P1$ · 対応 $P2$/$P3$行 (Δ = 現在 − 以前)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      }
+    }
   },
   "debugPanel_heardPrefix": {
     "message": "認識: $P1$",
@@ -993,14 +1009,33 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "パネルとPiPに次に再生される動画のタイトルを表示します（再生リスト・自動再生共通）"
   },
+  "overlay_settings_row_modMainLane": {
+    "message": "[モジュール] カラオケレーン"
+  },
+  "overlay_settings_row_modMainLaneTitle": {
+    "message": "PiPウィンドウだけにあった音程レーン（ピアノロール）を歌詞パネルの下にも表示します。音程ノートがある同期でのみ表示され、小節幅や文字サイズなどの設定はPiPと同じ値を使います"
+  },
+  "overlay_mainLane_seekTitle": {
+    "message": "クリックした位置に移動します（ノートの上ならその音の開始位置へ）"
+  },
   "content_notice_extensionReloaded": {
     "message": "拡張機能が更新されました — このタブで使い続けるにはページを再読み込みしてください"
   },
   "overlay_nextUp_prefix": {
-    "message": "次 ▸ $P1$"
+    "message": "次 ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "pip_nextUp": {
-    "message": "次 ▸ $P1$"
+    "message": "次 ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "音程カーブの明るさ"

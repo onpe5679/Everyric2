@@ -192,7 +192,12 @@
     "message": "No lines to show"
   },
   "debugPanel_engine": {
-    "message": "Engine $P1$"
+    "message": "Engine $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "debugPanel_engineLegacy": {
     "message": "legacy (no version stamp)"
@@ -207,7 +212,18 @@
     "message": "No previous generation (never reprocessed)"
   },
   "debugPanel_comparePrevLoaded": {
-    "message": "Previous: $P1$ · $P2$/$P3$ lines matched (Δ = current − previous)"
+    "message": "Previous: $P1$ · $P2$/$P3$ lines matched (Δ = current − previous)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      }
+    }
   },
   "debugPanel_heardPrefix": {
     "message": "Heard: $P1$",
@@ -993,14 +1009,33 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "Shows the upcoming video's title in the panel and PiP (playlist and autoplay)"
   },
+  "overlay_settings_row_modMainLane": {
+    "message": "[Module] Karaoke lane"
+  },
+  "overlay_settings_row_modMainLaneTitle": {
+    "message": "Shows the pitch lane (piano roll) — until now PiP-only — below the lyrics panel too. Appears only on syncs that have pitch notes, and follows the same settings as PiP (bar window, text size, and so on)"
+  },
+  "overlay_mainLane_seekTitle": {
+    "message": "Click to jump to that point (on a note, jumps to where the note starts)"
+  },
   "content_notice_extensionReloaded": {
     "message": "The extension was updated — refresh this page to keep using it in this tab"
   },
   "overlay_nextUp_prefix": {
-    "message": "Next ▸ $P1$"
+    "message": "Next ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "pip_nextUp": {
-    "message": "Next ▸ $P1$"
+    "message": "Next ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "Pitch curve brightness"

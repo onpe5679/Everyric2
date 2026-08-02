@@ -192,7 +192,12 @@
     "message": "표시할 라인이 없어요"
   },
   "debugPanel_engine": {
-    "message": "엔진 $P1$"
+    "message": "엔진 $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "debugPanel_engineLegacy": {
     "message": "구세대(버전 스탬프 없음)"
@@ -207,7 +212,18 @@
     "message": "이전 세대 없음(재처리 이력 없음)"
   },
   "debugPanel_comparePrevLoaded": {
-    "message": "이전 세대: $P1$ · 대응 $P2$/$P3$줄 (Δ = 현재 − 이전)"
+    "message": "이전 세대: $P1$ · 대응 $P2$/$P3$줄 (Δ = 현재 − 이전)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      }
+    }
   },
   "debugPanel_heardPrefix": {
     "message": "들림: $P1$",
@@ -993,14 +1009,33 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "가사창·PIP에 다음 재생될 영상 제목을 표시해요 (재생목록·자동재생 공통)"
   },
+  "overlay_settings_row_modMainLane": {
+    "message": "[모듈] 가라오케 레인"
+  },
+  "overlay_settings_row_modMainLaneTitle": {
+    "message": "PIP 창에만 있던 음정 레인(피아노롤)을 가사창 아래에도 띄워요. 음정 노트가 있는 싱크에서만 보이고, 마디 창·글자 크기 같은 설정은 PIP와 같은 값을 써요"
+  },
+  "overlay_mainLane_seekTitle": {
+    "message": "클릭한 위치로 이동해요 (노트 위를 누르면 그 음 시작으로)"
+  },
   "content_notice_extensionReloaded": {
     "message": "확장 프로그램이 업데이트됐어요 — 이 탭에서 다시 쓰려면 페이지를 새로고침해 주세요"
   },
   "overlay_nextUp_prefix": {
-    "message": "다음 ▸ $P1$"
+    "message": "다음 ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "pip_nextUp": {
-    "message": "다음 ▸ $P1$"
+    "message": "다음 ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
   },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "음정 곡선 밝기"

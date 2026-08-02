@@ -16,13 +16,21 @@
 import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
-import { mkdtempSync } from 'fs';
+import { cpSync, mkdtempSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const distDir = resolve(__dirname, '../dist');
+// dist를 직접 로드하지 않고 **스냅샷 사본**을 로드한다 — 다른 세션/에이전트가 같은
+// dist에 `npm run build`를 돌리는 순간과 겹치면 manifest.json이 갈리는 중이라 크롬이
+// "매니페스트 없음" 모달을 띄우고, 그 모달이 Playwright 연결을 영영 막는다
+// (실측 2026-08-03: launchPersistentContext 180s 타임아웃 2회). 스냅샷 뒤 manifest를
+// 파싱해 온전한 빌드인지 확인하고 시작한다.
+const liveDist = resolve(__dirname, '../dist');
+const distDir = mkdtempSync(join(tmpdir(), 'everyric-dist-snap-'));
+cpSync(liveDist, distDir, { recursive: true });
+JSON.parse(readFileSync(join(distDir, 'manifest.json'), 'utf8')); // 깨진 스냅샷이면 여기서 즉사
 const videoId = process.argv[2];
 const expectedLang = process.argv[3] ?? '(미지정)';
 const LOCAL_SERVER_URL = 'http://127.0.0.1:8000';
