@@ -456,6 +456,9 @@
   "overlay_banner_aiKaraoke": {
     "message": "AI転写でカラオケ(音程・発音)を作成できます"
   },
+  "overlay_banner_captionPreSync": {
+    "message": "現在はYouTube投稿者の字幕です — Everyricシンク（音程・発音整列）はまだありません"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI転写を実行"
   },

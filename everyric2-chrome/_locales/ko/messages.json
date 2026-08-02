@@ -456,6 +456,9 @@
   "overlay_banner_aiKaraoke": {
     "message": "AI 전사로 가라오케(음정·발음)를 만들 수 있어요"
   },
+  "overlay_banner_captionPreSync": {
+    "message": "지금은 유튜브 업로더 자막이에요 — Everyric 싱크(음정·발음 정렬)가 아직 없어요"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI 전사 생성"
   },

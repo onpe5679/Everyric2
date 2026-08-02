@@ -791,6 +791,9 @@
 
 .ey-source.everyric { background: var(--ey-accent-soft); color: var(--ey-accent); }
 
+/* 유튜브 자막 표시 상태 — Everyric 싱크가 아님을 색으로 구분 (overlay.ts captionPreSync 배너와 짝) */
+.ey-source.caption { background: rgba(62, 166, 255, 0.14); color: var(--ey-primary); }
+
 /* 출처 링크가 있는 배지 (보카로 위키 등) */
 .ey-source.link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .ey-source.link:hover { color: var(--ey-text); }

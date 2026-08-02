@@ -456,6 +456,9 @@
   "overlay_banner_aiKaraoke": {
     "message": "AI transcription can add karaoke (pitch & pronunciation)"
   },
+  "overlay_banner_captionPreSync": {
+    "message": "Showing YouTube uploader captions — no Everyric sync (pitch/pronunciation alignment) yet"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "Run AI transcription"
   },

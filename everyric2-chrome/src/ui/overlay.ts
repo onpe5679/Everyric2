@@ -447,7 +447,13 @@ export class LyricsOverlay {
       const text = plainText ?? lines.map(l => l.text).join('\n');
       if (generateBlocked) this.showBanner(generateBlocked);
       else {
-        this.showBanner(t('overlay.banner.aiKaraoke'),
+        // 유튜브 자막 표시 상태는 문구를 따로 쓴다 — "지금 보는 건 업로더 자막이지
+        // Everyric 싱크가 아니다"를 명시(운영자 지시, 2026-08-03: 자막 타이밍 오차를
+        // 확장의 싱크 품질로 오해하는 사용자 보고). 배지(.ey-source.caption)와 함께
+        // 이 상태를 한눈에 구분되게 한다.
+        const bannerText = source === 'caption'
+          ? t('overlay.banner.captionPreSync') : t('overlay.banner.aiKaraoke');
+        this.showBanner(bannerText,
           this.makeGenerateButton(t('overlay.banner.aiTranscribe'), () => this.callbacks.onGenerate(text)));
       }
     }
@@ -1326,6 +1332,8 @@ export class LyricsOverlay {
     this.sourceBadge.title = this.sourceUrl ? `${kind} · ${t('overlay.source.openPage')}\n${this.sourceUrl}` : kind;
     if (this.linkedInfo) this.sourceBadge.title += `\n${this.describeLink(this.linkedInfo)}`;
     this.sourceBadge.classList.toggle('everyric', source === 'everyric');
+    // 유튜브 자막 표시 상태를 색으로도 구분 — showSyncedLyrics의 captionPreSync 배너와 짝
+    this.sourceBadge.classList.toggle('caption', source === 'caption');
   }
 
   /**
