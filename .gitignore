@@ -113,3 +113,10 @@ everyric2-ae/artifacts/
 everyric2-ae/node_modules/
 *.db-shm
 *.db-wal
+
+# 모델 교체 벤치 (2026-07-30) — 가사·오디오·스템·정렬 결과는 절대 커밋 금지.
+# `benchmark/`가 아니라 `benchmark/*`인 이유: 디렉터리 자체를 무시하면 git이 그 안으로
+# 내려가지 않아 아래 예외가 죽는다. 스펙 문서와 집계 리포트만 남긴다.
+benchmark/*
+!benchmark/HARNESS_SPEC.md
+!benchmark/REPORT.md
