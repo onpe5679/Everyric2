@@ -642,3 +642,40 @@ def test_no_language_keeps_existing_ja_behavior_for_pure_han():
     ungated = _seg("月亮代表我的心", "", words=False)
     attach_pron_variants(ungated)
     assert ungated.get("pron") != gated.get("pron")
+
+
+# ---------------------------------------------------------------------------
+# 구세대 kana 단독 근사 보완 — 멱등 가드는 동결이 아니라 보존이다 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_kana_only_latin_pron_is_augmented_not_frozen():
+    # 구세대 라틴 곡은 옛 경로가 kana 1형만 저장했다 — 표시값 E2E 실측(weathergirl):
+    # 이 모양이 완결로 취급돼 한국어 사용자가 hangul 표기를 영영 못 받았다.
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {"kana": "テイクイットイージー"}
+    attach_pron_variants(seg)
+    # 기존 키는 덮지 않는다 (저장된 값이 이긴다)
+    assert seg["pron"]["kana"] == "テイクイットイージー"
+    # 빠진 표기가 전부 보완된다
+    for key in ("hangul", "romaji", "en", "ipa"):
+        assert seg["pron"].get(key), key
+
+
+def test_complete_pron_dict_is_still_frozen():
+    # 멱등 가드의 본래 목적(직렬화·심판 판정 반영값 보존)은 그대로다 — kana 단독이
+    # 아닌 pron은 어떤 키도 추가·변경되지 않는다.
+    seg = _seg(NEKURA, NEKURA_HANGUL)
+    custom = {"hangul": "커스텀", "kana": "カスタム", "romaji": "custom"}
+    seg["pron"] = dict(custom)
+    attach_pron_variants(seg)
+    assert seg["pron"] == custom
+
+
+def test_ja_text_with_kana_only_pron_is_not_latin_augmented():
+    # kana 단독이라도 원문이 일본어면 옛 라틴 근사가 아니다 — 라틴 파생을 덧대면
+    # 엉뚱한 표기가 생기므로 그대로 둔다.
+    seg = _seg(NEKURA, "", words=False)
+    seg["pron"] = {"kana": "アルバイトハネクラモード"}
+    attach_pron_variants(seg)
+    assert seg["pron"] == {"kana": "アルバイトハネクラモード"}

@@ -1053,8 +1053,17 @@ async def _lazy_attach_pron_variants(
     from everyric2.text.ja_reading import reading_source
 
     segments = resp.timestamps or []
-    if not any(not seg.get("pron") for seg in segments):
-        return  # 전부 이미 표기가 있다 — 할 일 없음
+
+    def _needs_attach(seg: dict) -> bool:
+        pron = seg.get("pron")
+        if not pron:
+            return True
+        # 구세대 라틴 곡의 kana 단독 근사 — attach_pron_variants의 불완전 가드가
+        # 빠진 표기(hangul/romaji/en/ipa)를 보완한다(표시값 E2E 실측 2026-08-03)
+        return set(pron) == {"kana"}
+
+    if not any(_needs_attach(seg) for seg in segments):
+        return  # 전부 이미 완결 표기다 — 할 일 없음
 
     def _attach_all() -> bool:
         # **여기가 스레드인 것이 이 함수의 존재 이유다.** reading_source()의 첫 호출은

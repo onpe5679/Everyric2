@@ -877,7 +877,9 @@ def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
     }
     if not pron:
         return
-    seg["pron"] = pron
+    # 기존 키는 절대 덮지 않는다 — 구세대 kana 단독 근사를 보완하는 경로(아래
+    # attach_pron_variants의 불완전 가드)로 들어와도 저장된 값이 이긴다.
+    seg["pron"] = {**pron, **(seg.get("pron") or {})}
 
 
 def attach_pron_variants(
@@ -910,9 +912,19 @@ def attach_pron_variants(
     멱등 — 이미 ``pron``이 있으면 아무것도 하지 않는다. 캐시 재사용·늦은 메타 병합이
     직렬화 때 만든(심판 판정을 반영한) 값을 덮지 않게 하는 가드다.
     """
-    if seg.get("pron"):
-        return
     text = seg.get("text") or ""
+    existing = seg.get("pron")
+    if existing:
+        # 멱등 가드의 목적은 직렬화가 만든(심판 판정을 반영한) 값을 덮지 않는 것이지,
+        # **불완전한 표기를 영구 동결하는 것이 아니다.** 구세대 라틴 곡은 옛
+        # _attach_latin_pron_variants가 kana 1형만 저장했는데, 이 가드가 그것을 완결로
+        # 취급해 lazy attach가 보완을 영영 못 했다(표시값 E2E 실측 2026-08-03:
+        # weathergirl 57줄 전부 hangul/romaji 부재 → 표기 전환 0줄). kana 단독 모양은
+        # 옛 라틴 경로에서만 나오므로 그 경우에 한해 빠진 키를 더한다 — 기존 kana
+        # 값은 _attach_latin_pron_variants의 merge가 보존한다.
+        if set(existing) == {"kana"} and text and not _JA_CHAR_RE.search(text):
+            _attach_latin_pron_variants(seg, text)
+        return
     if not text:
         return
 
