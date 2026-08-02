@@ -1069,13 +1069,17 @@ def _worker_submit_result(base: str, key: str, worker_id: str, job_id: str, resu
     r.raise_for_status()
 
 
-def _worker_fail(base: str, key: str, worker_id: str, job_id: str, error: str) -> None:
+def _worker_fail(
+    base: str, key: str, worker_id: str, job_id: str, error: str, failure_kind: str | None = None
+) -> None:
+    """failure_kind는 jobs.failure_kind로 저장된다(MoRef 감사 #3) — 호출부가
+    classify_job_failure로 계산해 넘긴다. 구버전 서버는 이 필드를 무시하므로 안전하다."""
     import requests
 
     try:
         r = requests.post(
             f"{base}/api/worker/jobs/{job_id}/fail",
-            json={"error": error},
+            json={"error": error, "failure_kind": failure_kind},
             headers={"X-Worker-Key": key, "X-Worker-Id": worker_id},
             timeout=30,
         )
@@ -1098,13 +1102,17 @@ def _worker_link_result(
     r.raise_for_status()
 
 
-def _worker_link_fail(base: str, key: str, worker_id: str, link_id: str, error: str) -> None:
+def _worker_link_fail(
+    base: str, key: str, worker_id: str, link_id: str, error: str, declined: bool = False
+) -> None:
+    """declined=True는 link_jobs.status="declined"로 저장된다(MoRef 감사 #4) — 오류가 아니라
+    무다운로드 원칙에 따른 정책적 종결이라는 신호다(LinkAudioCacheMissError 호출부 참고)."""
     import requests
 
     try:
         r = requests.post(
             f"{base}/api/worker/link-jobs/{link_id}/fail",
-            json={"error": error},
+            json={"error": error, "declined": declined},
             headers={"X-Worker-Key": key, "X-Worker-Id": worker_id},
             timeout=30,
         )
@@ -1224,7 +1232,13 @@ async def _process_link_job(base: str, key: str, worker_id: str, link_job: dict)
         # 재제출이 억제되고, 확장은 실패 잡을 링크 없음으로 조용히 처리한다.
         console.print(f"[yellow]링크 판정 포기(캐시 미스, 다운로드 안 함):[/yellow] {e}")
         await asyncio.to_thread(
-            _worker_link_fail, base, key, worker_id, link_id, f"cache_miss_no_download:{e}"
+            _worker_link_fail,
+            base,
+            key,
+            worker_id,
+            link_id,
+            f"cache_miss_no_download:{e}",
+            True,  # declined — 오류가 아니라 무다운로드 원칙의 정상 종결 (MoRef 감사 #4)
         )
         return
     except Exception as e:
@@ -1261,7 +1275,12 @@ def _clear_job_state(job_id: str) -> None:
 
 async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: bool) -> None:
     from everyric2.gpu_mem import reclaim_after_job
-    from everyric2.server.worker import JobInput, PipelineError, run_pipeline
+    from everyric2.server.worker import (
+        JobInput,
+        PipelineError,
+        classify_job_failure,
+        run_pipeline,
+    )
 
     backoff = 1.0
     while True:
@@ -1326,12 +1345,16 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
         try:
             result = await run_pipeline(job_input, hooks)
         except PipelineError as e:
-            # 사용자 노출 실패(과길이 등) — 친절한 문구를 그대로 서버에 올린다
+            # 사용자 노출 실패(과길이 등) — 친절한 문구를 그대로 서버에 올린다. failure_kind는
+            # 안 넘긴다: downloader 분류도 시스템 결함도 아닌 정책 거절이라 NULL로 남는 게
+            # 맞다(억지 분류 금지, MoRef 감사 #3).
             console.print(f"[yellow]사용자 노출 실패:[/yellow] {e}")
             await asyncio.to_thread(_worker_fail, base, key, worker_id, job_id, str(e))
         except Exception as e:
             console.print(f"[red]잡 처리 오류:[/red] {e}")
-            await asyncio.to_thread(_worker_fail, base, key, worker_id, job_id, str(e))
+            await asyncio.to_thread(
+                _worker_fail, base, key, worker_id, job_id, str(e), classify_job_failure(e)
+            )
         else:
             if result is None:
                 # 취소 또는 캐시 완결 — 제출 없음 (서버가 이미 상태 확정)

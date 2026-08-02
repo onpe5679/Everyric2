@@ -357,7 +357,31 @@ def test_fail_marks_job_failed():
                 j = await JobRepository(s).get_by_id(job_id)
                 assert j.status == "failed"
                 assert j.error == "영상을 못 받아왔어요 (403)"
+                # failure_kind를 안 보낸 구버전 워커 신호와 동등 — 분류 없음(NULL)으로 남는다
+                assert j.failure_kind is None
             assert job_id not in worker_api._LEASES
+
+    asyncio.run(body())
+
+
+def test_fail_stores_failure_kind_reported_by_worker():
+    """원격 워커(cli.py)가 classify_job_failure로 계산해 실어 보낸 failure_kind가 그대로
+    jobs.failure_kind에 저장된다 (MoRef 감사 #3 — 프로덕션은 이 원격 워커 경로로 생성된다)."""
+
+    async def body():
+        async with _env() as sm:
+            job_id = await _seed_queued_job(sm)
+            await claim_job(ClaimRequest(worker_id=WID, version=__version__), x_worker_key=WKEY)
+            resp = await submit_fail(
+                job_id,
+                FailRequest(error="유튜브가 로그인 확인을 요구했어요.", failure_kind="external"),
+                x_worker_key=WKEY, x_worker_id=WID,
+            )
+            assert resp.accepted is True
+            async with sm() as s:
+                j = await JobRepository(s).get_by_id(job_id)
+                assert j.status == "failed"
+                assert j.failure_kind == "external"
 
     asyncio.run(body())
 

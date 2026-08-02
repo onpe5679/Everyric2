@@ -194,7 +194,9 @@ async def _consume_cancel(job_id: str) -> bool:
     from everyric2.server.db.repository import JobRepository
 
     async with get_session() as session:
-        await JobRepository(session).update_status(job_id, "failed", error="요청으로 취소했어요")
+        await JobRepository(session).update_status(
+            job_id, "failed", error="요청으로 취소했어요", failure_kind="cancelled"
+        )
     logger.info(f"Job {job_id} cancelled at a stage boundary")
     return True
 
@@ -1214,6 +1216,32 @@ def over_length_message(duration_sec: float, max_audio_sec: int) -> str:
     )
 
 
+def classify_job_failure(exc: BaseException) -> str | None:
+    """예외 → jobs.failure_kind (MoRef 감사 #3). 취소는 다루지 않는다 — cancel API와
+    _consume_cancel이 그 경로를 이미 각자 "cancelled"로 못 박는다.
+
+    audio/downloader.py가 이미 분류해 놓은 실패(로그인요구·나이제한·봉쇄·영상불가·
+    스로틀·네트워크 — DownloadError 계열이고 code가 "unknown"이 아님)는 우리 시스템 바깥
+    요인이라 "external". ffmpeg·JS 런타임 미설치(DependencyError, 또는 code=="js_runtime")는
+    DownloadError를 경유해도 **서버 구성 문제**라 "system"으로 남긴다 — downloader.py 자신의
+    분류 (d)와 같은 성격이다. DownloadError이지만 패턴이 하나도 안 걸려 code="unknown"으로
+    영문 원문이 그대로 노출된 실패는 외부 요인인지 우리 쪽 결함인지 이 함수가 판단할 근거가
+    없어 None(억지 분류 금지). 그 외 전부(CTC/demucs 크래시 등 downloader와 무관한 예외)는
+    "system" — 진짜 시스템 오류가 여기 모인다."""
+    from everyric2.audio.downloader import DependencyError, DownloadError
+
+    if isinstance(exc, DependencyError):
+        return "system"
+    if isinstance(exc, DownloadError):
+        code = getattr(exc, "code", "unknown")
+        if code == "unknown":
+            return None
+        if code == "js_runtime":
+            return "system"
+        return "external"
+    return "system"
+
+
 @dataclass
 class JobInput:
     """run_pipeline 입력 — 인프로세스는 스태시를 peek해, 원격은 claim 응답으로 채운다.
@@ -1524,7 +1552,9 @@ async def _process_job_inner(job_id: str, job) -> None:
         _PENDING_FORCE.discard(job_id)
         async with get_session() as session:
             job_repo = JobRepository(session)
-            await job_repo.update_status(job_id, "failed", error=str(e))
+            await job_repo.update_status(
+                job_id, "failed", error=str(e), failure_kind=classify_job_failure(e)
+            )
 
     finally:
         # 잡 경계 VRAM 위생 (인프로세스 워커 경로) — 앨로케이터가 사재기한 활성 스파이크

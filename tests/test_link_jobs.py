@@ -293,6 +293,29 @@ def test_link_fail_marks_failed():
     asyncio.run(body())
 
 
+def test_link_fail_declined_marks_declined_not_failed():
+    """무다운로드 원칙에 따른 정책적 종결(cache_miss_no_download 등)은 declined=True로 오면
+    failed가 아니라 declined로 남아야 한다 (MoRef 감사 #4 — 오류와 정책 거절을 가른다)."""
+
+    async def body():
+        async with _env():
+            r = await create_link_job(LinkJobRequest(video_id=COVER, source_video_id=SOURCE))
+            await claim_job(ClaimRequest(worker_id=WID, version=__version__), x_worker_key=WKEY)
+            resp = await submit_link_fail(
+                r.id,
+                FailRequest(error="cache_miss_no_download:COVERvideo1", declined=True),
+                x_worker_key=WKEY, x_worker_id=WID,
+            )
+            assert resp.accepted is True
+            status = await get_link_job(r.id)
+            assert status.status == "declined"
+            assert status.error == "cache_miss_no_download:COVERvideo1"
+            # 리스는 실패와 동일하게 해제된다
+            assert f"link:{r.id}" not in worker_api._LEASES
+
+    asyncio.run(body())
+
+
 # ── WS1-D: 워커 오디오 전달 인가 ──────────────────────────────────
 
 

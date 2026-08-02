@@ -35,6 +35,8 @@ async def init_db():
                 await conn.execute(
                     text("ALTER TABLE jobs ADD COLUMN target_lang VARCHAR(8) DEFAULT 'ko'")
                 )
+            if "failure_kind" not in cols:
+                await conn.execute(text("ALTER TABLE jobs ADD COLUMN failure_kind VARCHAR(16)"))
             link_cols = {
                 row[1] for row in await conn.execute(text("PRAGMA table_info(sync_links)"))
             }
@@ -69,9 +71,11 @@ async def init_db():
         # 생성 요청이 죽은 잡에 합류해 영구 "전사 중"에 갇힌다
         from sqlalchemy import text as _text
 
+        # failure_kind='system' — 서버 프로세스 자체가 죽어 중단된 것이지 사용자 취소도
+        # 다운로드의 외부 요인도 아니다(MoRef 감사 #3).
         result = await conn.execute(
             _text(
-                "UPDATE jobs SET status='failed', "
+                "UPDATE jobs SET status='failed', failure_kind='system', "
                 "error='서버 재시작으로 중단된 작업이에요. 다시 생성해 주세요.' "
                 "WHERE status IN ('pending', 'processing', 'queued')"
             )

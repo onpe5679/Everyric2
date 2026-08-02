@@ -155,6 +155,11 @@ class TestCancel:
                 assert await worker._consume_cancel(job.id) is False  # 멱등
                 status = await get_job_status(job.id)
                 assert status.status == "failed"
+                # failure_kind가 "cancelled"로 구조화 저장된다 (MoRef 감사 #3 — status="failed"
+                # 하나로 사용자 취소·외부 요인·시스템 오류가 뭉뚱그려지던 결함의 수정)
+                async with sm() as s:
+                    row = await JobRepository(s).get_by_id(job.id)
+                    assert row.failure_kind == "cancelled"
 
         asyncio.run(body())
 

@@ -370,7 +370,7 @@ def test_candidates_merges_into_active_job():
     asyncio.run(body())
 
 
-@pytest.mark.parametrize("finished_status", ["done", "failed"])
+@pytest.mark.parametrize("finished_status", ["done", "failed", "declined"])
 def test_candidates_respect_cooldown_after_finished_attempt(finished_status):
     async def body():
         async with _env(link_retry_cooldown_days=14) as sm:

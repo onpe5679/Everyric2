@@ -421,6 +421,76 @@ class TestDownloadErrorClassification:
         assert err.cause_text == "HTTP Error 403: Forbidden"
 
 
+class TestJobFailureClassification:
+    """jobs.failure_kind 분류 (MoRef 감사 #3) — status="failed" 하나로 사용자 취소·다운로드의
+    외부 요인·진짜 시스템 오류가 뭉뚱그려지던 결함의 수정. classify_job_failure는 취소를
+    다루지 않는다(그 경로는 cancel API·_consume_cancel이 별도로 "cancelled"를 못 박는다)."""
+
+    def test_downloader_classified_failure_is_external(self):
+        """downloader.py가 이미 분류한 실패(로그인요구 등)는 우리 시스템 바깥 요인이다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("Sign in to confirm you're not a bot"),
+            "https://y/watch?v=abc",
+            "Download failed",
+        )
+        assert classify_job_failure(err) == "external"
+
+    def test_video_unavailable_is_external(self):
+        """VideoUnavailableError도 DownloadError 계열이라 external이다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("Video unavailable"), "https://y/watch?v=abc", "Download failed"
+        )
+        assert classify_job_failure(err) == "external"
+
+    def test_dependency_error_is_system_not_external(self):
+        """ffmpeg 미설치는 DownloadError 계열이 아니지만, 다운로드 예외 계층에 있다고 해서
+        외부 요인은 아니다 — 우리 서버 구성 문제이므로 system."""
+        from everyric2.audio.downloader import DependencyError
+        from everyric2.server.worker import classify_job_failure
+
+        assert classify_job_failure(DependencyError("ffmpeg 미설치")) == "system"
+
+    def test_js_runtime_code_is_system_despite_download_error_type(self):
+        """js_runtime도 downloader.py 자신이 (d) "서버 구성 문제"로 분류한 케이스다 — 형은
+        DownloadError지만 login_required 등과 달리 우리 쪽 결함이라 system으로 남긴다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("No supported JavaScript runtime could be found"),
+            "https://y/watch?v=abc",
+            "Download failed",
+        )
+        assert err.code == "js_runtime"
+        assert classify_job_failure(err) == "system"
+
+    def test_unclassified_download_error_is_none_not_forced(self):
+        """downloader가 패턴을 못 찾아 code="unknown"으로 영문 원문만 노출한 실패는 외부
+        요인인지 우리 쪽 결함인지 판단할 근거가 없다 — 억지로 external/system에 넣지 않는다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("some brand new failure mode nobody has seen"),
+            "https://y/watch?v=abc",
+            "Download failed",
+        )
+        assert err.code == "unknown"
+        assert classify_job_failure(err) is None
+
+    def test_non_download_exception_is_system(self):
+        """CTC/demucs 크래시 등 downloader와 무관한 예외는 전부 진짜 시스템 오류다."""
+        from everyric2.server.worker import classify_job_failure
+
+        assert classify_job_failure(RuntimeError("CUDA out of memory")) == "system"
+
+
 # ── 다운로드 egress 순회 ────────────────────────────────────────────
 #
 # 운영자가 공인 IP를 격리해 워커 env에 출구가 하나 박혀 있고, 예전 구현은 폴백이 없어 그 출구가

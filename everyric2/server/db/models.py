@@ -58,6 +58,13 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     result_id: Mapped[str | None] = mapped_column(String(36))
     error: Mapped[str | None] = mapped_column(Text)
+    # status="failed"가 뭉뚱그리던 사건 구분 (MoRef 감사 #3) — "cancelled"(사용자 취소) /
+    # "external"(다운로드가 이미 분류한 외부 요인: 로그인요구·봉쇄·영상불가 등,
+    # audio/downloader.py의 DownloadError 계열) / "system"(그 외 예외 — 진짜 시스템 오류).
+    # error 자유텍스트는 그대로 두고 이 컬럼은 집계·모니터링용 구조화 값만 더한다.
+    # NULL은 "아직 실패하지 않음"과 "실패했지만 분류가 애매해 억지로 넣지 않음"(예: 영상
+    # 과길이 정책 거절 — downloader 분류도 시스템 결함도 아니다) 둘 다를 뜻한다.
+    failure_kind: Mapped[str | None] = mapped_column(String(16))
     progress: Mapped[int] = mapped_column(default=0)
     # 현재 진행 단계명 (다운로드/전사 정렬/보컬 분리/…) — 확장 진행 칩 표시용
     stage: Mapped[str | None] = mapped_column(String(24))
@@ -164,6 +171,12 @@ class LinkJob(Base):
 
     created_at은 server_default라 SQLite에 초 단위 문자열로 저장된다 — 카운트/순번 비교 시
     마이크로초 바인딩 off-by-one 교훈(JobRepository.count_queued_before) 주의.
+
+    status: "queued" → "processing" → "done"(match 유무 무관, 정상 판정 완료) 또는
+    "failed"(진짜 오류) 또는 "declined"(MoRef 감사 #4 — cli.py가 무다운로드 원칙에 따라
+    캐시 미스로 판정 자체를 포기한 정책적 종결. cache_miss_no_download류가 여기 해당하며,
+    이건 오류가 아니므로 failed와 갈라 집계한다). 세 상태 모두 "끝난 잡"으로 취급되어
+    재제출 쿨다운(LinkJobRepository.get_recent_attempt) 대상이다.
     """
 
     __tablename__ = "link_jobs"
