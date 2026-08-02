@@ -89,10 +89,30 @@ def match(title: str) -> SongEntry | None:
         return None
 
     for q in queries:
+        hits: list[SongEntry] = []
         for entry in entries:
             for field in (entry.ja, entry.ko):
                 if field and _normalize_title(field) == q:
-                    return entry
+                    hits.append(entry)
+                    break
+        if not hits:
+            continue
+        if len(hits) == 1:
+            return hits[0]
+        # 동명이곡(2026-08-03 실측: シンデレラ가 ZIG판/DECO*27판 둘) — 제목만으로는 못
+        # 가르므로 풀 쿼리의 **다른** 후보 토큰(아티스트 등)이 항목의 ko/ja/슬러그에
+        # 나타나는 수로 가른다. 전부 0이면 기존처럼 인덱스 순서 첫 항목(결정론 유지).
+        def _artist_bonus(entry: SongEntry) -> int:
+            hay = _normalize_title(
+                " ".join(x for x in (entry.ko or "", entry.ja or "", entry.slug.replace("-", " ")))
+            )
+            return sum(
+                1
+                for other in queries
+                if other != q and len(other) >= 3 and other in hay
+            )
+
+        return max(hits, key=_artist_bonus)
 
     # 포함 매칭의 아티스트 토큰 가드 재료 — 풀 쿼리 정규화본. q ⊂ n 방향에서 n의
     # 나머지(제목부)가 풀 쿼리 어디에도 없으면, 겹친 것은 아티스트 이름뿐이라는 뜻이다.

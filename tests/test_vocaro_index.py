@@ -176,3 +176,25 @@ def test_entry_title_covering_most_of_a_segment_still_matches():
     result = vi.match("DECO*27 - シンデレラ MV")
     assert result is not None
     assert result.slug == "cinderella-deco-27"
+
+
+def test_same_title_different_artist_is_disambiguated_by_query_artist_token():
+    # 동명이곡(실측: シンデレラ ZIG판 vs DECO*27판) — 정확 일치가 여럿이면 쿼리의
+    # 아티스트 토큰이 항목 ko/슬러그에 나타나는 쪽을 고른다.
+    _set_entries([
+        SongEntry(slug="cinderella-zig", ko="신데렐라/ZIG", ja="シンデレラ"),
+        SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ"),
+    ])
+    result = vi.match("DECO*27 - シンデレラ feat. 初音ミク")
+    assert result is not None
+    assert result.slug == "cinderella-deco-27"
+
+
+def test_same_title_without_artist_hint_keeps_deterministic_first_entry():
+    _set_entries([
+        SongEntry(slug="cinderella-zig", ko="신데렐라/ZIG", ja="シンデレラ"),
+        SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ"),
+    ])
+    result = vi.match("シンデレラ")
+    assert result is not None
+    assert result.slug == "cinderella-zig"  # 힌트 없으면 기존 순서 유지(결정론)
