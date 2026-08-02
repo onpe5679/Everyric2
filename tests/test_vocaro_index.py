@@ -135,3 +135,29 @@ def test_parse_title_cell_returns_none_when_missing():
 
 def test_normalize_title_strips_spaces_and_symbols_case_insensitively():
     assert vi._normalize_title("Roki ロキ!") == "rokiロキ"
+
+
+# ── 아티스트 토큰 오매핑 가드 (2026-08-03 실측: ダミーロマンス → cinderella-deco-27) ──
+
+def test_artist_token_does_not_match_a_different_song_by_the_same_artist():
+    # 위키에 없는 신곡의 풀 제목 — 아티스트 후보 "DECO*27"이 같은 아티스트의 다른 곡
+    # 항목(ko 필드에 아티스트가 붙는 표기)에 포함 매칭돼 엉뚱한 가사가 붙었다.
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
+
+
+def test_full_title_of_the_actual_song_still_matches():
+    # 같은 인덱스 항목이라도 진짜 그 곡의 풀 제목은 여전히 붙는다(ja 정확 일치 경로)
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    result = vi.match("DECO*27 - シンデレラ feat. 初音ミク")
+    assert result is not None
+    assert result.slug == "cinderella-deco-27"
+
+
+def test_whole_query_as_partial_title_is_still_a_legitimate_match():
+    # 가드는 부분 후보(q != 풀 쿼리)에만 적용된다 — 쿼리 전체가 위키 제목의 부분
+    # 문자열인 기존 정당 케이스는 그대로 살아 있어야 한다.
+    _set_entries([SongEntry(slug="song", ko="긴 제목의 노래 입니다", ja=None)])
+    result = vi.match("노래 입니다")
+    assert result is not None
+    assert result.slug == "song"

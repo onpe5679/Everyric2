@@ -94,6 +94,10 @@ def match(title: str) -> SongEntry | None:
                 if field and _normalize_title(field) == q:
                     return entry
 
+    # 포함 매칭의 아티스트 토큰 가드 재료 — 풀 쿼리 정규화본. q ⊂ n 방향에서 n의
+    # 나머지(제목부)가 풀 쿼리 어디에도 없으면, 겹친 것은 아티스트 이름뿐이라는 뜻이다.
+    full_norm = _normalize_title(title)
+
     for q in queries:
         best: tuple[int, SongEntry] | None = None
         for entry in entries:
@@ -104,6 +108,18 @@ def match(title: str) -> SongEntry | None:
                 if len(n) < 2:
                     continue
                 if (q in n or n in q) and min(len(q), len(n)) / max(len(q), len(n)) >= 0.5:
+                    if q in n and n != q and q != full_norm:
+                        # 실측 오매핑(2026-08-03): 쿼리 "DECO*27 - ダミーロマンス feat…"의
+                        # 아티스트 후보 "deco27"이 인덱스 ko 필드 "신데렐라/DECO*27"에
+                        # 포함돼 **다른 곡**에 붙었다. q가 다구획 쿼리의 부분 후보일 때
+                        # (q != full_norm — 사용자가 친 문자열 전체가 아닐 때), 포함
+                        # 매칭이 정당하려면 n에서 q를 뺀 나머지(그 항목의 실제 제목부)가
+                        # 풀 쿼리 안에도 있어야 한다 — 없다면 겹친 건 공유 토큰(아티스트)
+                        # 뿐이므로 기각한다. 쿼리 전체가 위키 제목의 부분 문자열인 경우
+                        # (q == full_norm)는 기존처럼 정당한 부분 제목 검색이다.
+                        rest = n.replace(q, "", 1)
+                        if len(rest) >= 2 and rest not in full_norm:
+                            continue
                     if best is None or len(n) > best[0]:
                         best = (len(n), entry)
         if best:
