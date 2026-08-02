@@ -3773,40 +3773,90 @@ def _anchor_kwargs(forbidden_spans, line_starts=None) -> dict[str, Any]:
     return kwargs
 
 
-# ── 새 정렬 스택 배선 (owsm/omniasr 앵커 + 2패스 리파이너) ──────────────────────
+# ── 새 정렬 스택 배선 (라우팅 + owsm/omniasr 앵커 + 2패스 리파이너) ─────────────
 #
 # 이식된 부품(everyric2/alignment/{owsm_engine,omniasr_engine,refine_window}.py,
-# everyric2/alignment/display_fixes.py, everyric2/text/align_target.py)을 _run_alignment에
+# everyric2/alignment/display_fixes.py, everyric2/text/align_target.py)과 벤치가 확정한
+# 3단계 라우팅(scripts/bench_adapters/routed.py의 routed-2mode-lang 구성)을 _run_alignment에
 # 배선한다. 레거시 ko/ja 이중정렬·star 토큰·pron_data DP 근사 경로(_align_with_pronunciation
 # 이하)는 완전히 별개로 남겨 둔다 — 섞지 않는다. 새 스택은 앵커·리파이너가 이미 다표기
 # 음절을 **실측**하므로, "DP 근사를 사후에 바로잡는" 레거시 후반 단계(ko/ja 융합·뭉침
 # 세분화·붕괴 재합성)를 다시 태우면 오히려 실측값을 헤친다 — new_stack_active 가드로
 # 그 넷을 건너뛴다(_run_alignment 본문 참고).
+#
+# **조용한 구스택 폴백 금지**(운영자 지시, 2026-08-03 정정). 구스택 코드 자체는 설정으로
+# 선택 가능한 경로로 남아 있다(engine="ctc" 등, 롤백·비교용 — 이건 허용). 하지만 새 스택이
+# *선택된* 상태에서 그 구성요소(분리기 자산·앵커 모델·(two_pass_enabled=True일 때의)
+# 리파이너)가 없거나 실패하면, 조용히 구스택으로 새거나 더 가벼운 결과로 대체하지 않고
+# 예외를 그대로 올려 잡을 failure_kind='system'으로 떨어뜨린다. 이미 이식된 분리기·앵커도
+# 같은 원칙으로 만들어졌다(PolarFormerUnavailableError·EngineNotAvailableError는 절대
+# 조용히 삼켜지지 않는다) — 그 원칙을 배선 층까지 관철한다. VAD 기반 타이밍 보정(레거시
+# 유틸 재사용)처럼 "새 스택 고유 구성요소가 아닌" 보조 장치의 실패만 예외적으로 로그하고
+# 넘어간다 — 해당 지점에 그 이유를 주석으로 달아 뒀다.
 
 
 def _new_stack_enabled(settings) -> bool:
     """``settings.alignment.engine``이 새 앵커 스택(owsm/omniasr) 중 하나를 가리키면 True.
 
-    둘 다 "새 스택 켜짐"의 동의어다 — 실제로 어느 모델이 도는지는 곡 언어별로
-    ``_new_stack_anchor_type``이 정한다(예: engine="owsm"이어도 en 곡은 omniasr로 정렬된다
-    — 아래 함수 docstring 참고). engine이 기존 값("ctc" 등)으로 남아 있는 한 이 함수는
-    False이고 _run_alignment는 구스택(get_shared_ctc_engine)으로 그대로 정렬한다(폴백).
+    둘 다 "새 스택 켜짐"의 동의어다 — 실제로 어느 모델이 도는지는 요청마다 라우팅이
+    정한다(``_run_new_stack_alignment`` docstring). engine이 기존 값("ctc" 등)으로 남아
+    있는 한 이 함수는 False이고 _run_alignment는 구스택(get_shared_ctc_engine)으로
+    정렬한다 — 이건 명시적으로 고른 대안 경로이지 실패 시 새는 폴백이 아니다.
     """
     return settings.alignment.engine in ("owsm", "omniasr")
 
 
-def _new_stack_anchor_type(language: str | None) -> str:
-    """언어 → 새 스택 앵커 엔진 타입.
+# ── 난이도 라우팅 상수 (scripts/bench_adapters/routed.py 이식, 전곡 74곡 감사로 확정 —
+#    바꾸지 마라) ──
+_ROUTE_THRESHOLD = -11.0
+# en은 라틴 posterior가 구조적으로 높아 붕괴해도 확신에 차 있어(Madeon logConf −6.38 vs
+# 임계 −11.0) logConf 신호로 원리상 못 잡는다 — 신호를 묻지 않고 언어로 곧장 구원한다
+# (routed.py EN_FORCED_NOTE).
+_FORCE_RESCUE_LANGUAGES = ("en",)
+_ROUTE_LOG_FLOOR = math.log(1e-6)
 
-    코디네이터 확정 라우팅(2026-08-03, 모델 교체 이니셔티브): ja는 OWSM-CTC v4 1B(붕괴
-    방어 실측 — owsm_engine.py 모듈 docstring), 그 밖은 전부 omniASR-CTC-300M(1,600+ 언어
-    체크포인트라 언어 게이트가 없다 — omniasr_engine.py 모듈 docstring)로 떨어진다. ko도
-    포함된다: omniASR이 이미 다국어 단일 모델이고, 2패스 리파이너가 어차피 omniasr을
-    상주시키므로(``_run_new_stack_alignment``) 같은 모델을 앵커로 겸용하면 모델 로드가
-    1회로 끝난다. «무분리 asr 빠른 경로 → 붕괴 의심 시 owsm 3단계 구원» 같은 성능
-    라우팅(scripts/bench_adapters/routed.py)은 이 표의 범위 밖이다 — 별도 후속 작업.
+
+def _line_log_conf_median(results: list[Any]) -> float | None:
+    """곡 단위 라우팅 점수 — ``scripts/bench_adapters/routed.py::line_log_conf_median`` 이식
+    (입력을 dict 목록 대신 ``SyncResult`` 목록으로 받는 것만 다르다, 계산은 동일).
+
+    평균이 아니라 중앙값인 이유는 곡 앞뒤 몇 줄(인트로 애드립·페이드아웃)이 통째로 바닥을
+    찍는 일이 흔해서다 — 그 줄들이 평균을 끌어내리면 멀쩡한 곡이 구원으로 샌다.
     """
-    return "owsm" if (language or "").strip().lower() == "ja" else "omniasr"
+    values = [
+        math.log(r.confidence) if r.confidence > 0 else _ROUTE_LOG_FLOOR
+        for r in results
+        if r.confidence is not None
+    ]
+    return statistics.median(values) if values else None
+
+
+def _separate_stems_required(audio: Any, settings: Any) -> Any:
+    """구원 단계 전용 분리 호출 — 새 스택의 필수 구성요소라 조용히 물러서지 않는다.
+
+    ``worker._separate_stems``(레거시·멜로디 공용 유틸)는 어떤 실패든 삼켜 ``None``을
+    돌려준다 — "분리가 있으면 좋고 없어도 그만"인 레거시 VAD 보정에는 맞는 관용이지만,
+    구원 단계는 이 분리가 **결과 라벨(alignment_text=*-rescue*, ENGINE_VERSION)의 근거
+    자체**다. 조용히 없어지면 저장되는 결과가 실제로는 무분리인데 새 스택 라벨을 달게
+    되어 A/B 판정이 거짓이 된다(운영자 지시). ``is_available()``이 False면 여기서 바로
+    사람이 읽을 수 있는 예외를 던지고, ``separate()`` 자체의 예외(``SeparatorBackend
+    UnavailableError``/``SeparationError``)도 삼키지 않고 그대로 전파한다.
+    """
+    import torch
+
+    from everyric2.audio.separator import get_shared_separator
+
+    separator = get_shared_separator(settings.audio)
+    if not separator.is_available():
+        raise RuntimeError(
+            f"rescue stage requires audio.separator_backend="
+            f"{settings.audio.separator_backend!r} but it is not available (missing model "
+            "assets or CUDA — see everyric2/audio/polarformer_separator.py require_available "
+            "for specifics). Provision the assets, or select a legacy engine explicitly "
+            "(EVERYRIC_ALIGNMENT_ENGINE=ctc) instead of silently degrading to an unseparated "
+            "mix under the new-stack label."
+        )
+    return separator.separate(audio, use_gpu=torch.cuda.is_available())
 
 
 class _PathBridgedRefiner:
@@ -3878,33 +3928,87 @@ class _NewStackResult:
     clamped_lines: set[int]
     engine: Any
     adlib: list[tuple[float, float]] | None
+    # 이번 요청에서 실제로 분리했다면 그 결과(고속 단계로 끝났으면 None — 분리를 안
+    # 했다는 뜻 그 자체가 라우팅 이득이다). 구원 단계가 채운다 — 멜로디 f0 재사용·좌초
+    # 승급 비교용.
+    sep_result: Any = None
+    activity: Any = None
+    # 사후 감사용 라우팅 판정 근거 — debug.routing으로 그대로 나간다.
+    routing_meta: dict[str, Any] | None = None
 
 
-def _run_new_stack_alignment(
+def _run_fast_stage(
+    audio: Any, lyric_lines: list[Any], language: str | None, settings: Any
+) -> "_NewStackResult":
+    """1단계(고속) — 분리 없이 원곡 믹스 위에서 omniASR-CTC 하나로 정렬한다.
+
+    ``scripts/bench_adapters/routed.py``의 ``RouteConfig.fast_aligner="omniasr-ctc"`` 재현.
+    omniASR vocab은 서브워드가 아니라 전부 단일 글자라(omniasr_engine.py 모듈 docstring)
+    이 결과의 ``word_segments`` 자체가 이미 실측 음절 스팬이다 — 구원 경로의 2패스처럼
+    별도 리파이너로 다시 잡을 필요가 없다.
+
+    표기 다중 산출(pron/pron_segs)은 이 단계에서 내지 않는다 — 정상곡의 절대다수가 이
+    경로로 끝나는데(라우팅이 곡당 평균 시간을 지키는 근거 자체) 여기서까지 2패스를
+    태우면 라우팅의 존재 이유(분리·리파인 비용 회피)가 사라진다. 대신 하위 호환
+    algorithmic 파생(``attach_pron_variants``, 이 모듈의 기존 함수)이 원문에서 표기를
+    만든다 — 실측이 아니라 근사이지만 화면이 비지는 않는다.
+
+    앵커 모델이 없거나 못 쓰면(=새 스택의 필수 구성요소 부재) 예외를 그대로 올린다 —
+    구스택으로 조용히 새지 않는다(운영자 지시).
+    """
+    from everyric2.alignment.factory import EngineFactory
+
+    anchor = EngineFactory.get_engine("omniasr", settings.alignment)
+    if not anchor.is_available():
+        raise RuntimeError(
+            "omniasr fast-path anchor not available — this is the mandatory first stage for "
+            "every new-stack request (scripts/bench_adapters/routed.py fast_aligner); "
+            "provision the model, or select a legacy engine explicitly "
+            "(EVERYRIC_ALIGNMENT_ENGINE=ctc) instead of silently degrading."
+        )
+    results = anchor.align(audio, lyric_lines, language=language)
+    return _NewStackResult(
+        results=results,
+        alignment_text="omniasr-fast",
+        pron_data={},
+        fixes={},
+        raw_spans=[(r.start_time, r.end_time) for r in results],
+        vad_regions=None,
+        clamped_lines=set(),
+        engine=anchor,
+        adlib=None,
+    )
+
+
+def _run_rescue_stage(
     audio: Any,
-    align_audio: Any,
     sep_result: Any,
     lyric_lines: list[Any],
     language: str | None,
     settings: Any,
     report: Any,
+    anchor_type: str,
 ) -> "_NewStackResult":
-    """새 정렬 스택(owsm/omniasr 앵커 + 2패스 리파이너) 본체.
+    """2단계(구원) — 분리 필수. ``scripts/bench_adapters/routed.py``의 ``rescue_aligner``
+    (비-en: ``2pass-owsm-omniasr``) / ``rescue_by_language["en"]``(``2pass-asr-ipa-hangul``,
+    omniasr 자기앵커)를 서버 계약으로 재현한다.
 
-    실행 순서(각 단계 이유는 인라인 주석):
-      1. 앵커 정렬(라인 경계 확정) → 2. 우세도 기반 병적 길이 절단(``_clamp_pathological``,
-      display_fixes.py 모듈 docstring이 "worker.py 배선 시 더 이른 단계에서 별도로
-      호출하라"고 지시한 자리) → 3. 기존 VAD 기반 보정(``TimingPostProcessor``·
-      ``_clamp_stretched_lines`` — 구스택과 같은 함수를 재사용, 회귀 표면을 늘리지
-      않는다) → 4. 우세도 기반 좌초 보정(``display_fixes.apply_stranded_corrections``) →
-      5. 추임새 후보 계산 → 6. 2패스 음절 재정렬(``refine_window.refine_lines`` — 위에서
-      **최종 확정된** 라인 경계 위에서만 돈다, refine_lines의 "라인 경계는 앵커가 정한다"
-      불변식과 맞물린다: 경계가 이 시점 이후 다시 안 움직여야 그 위의 음절 스팬이
-      어긋나지 않는다).
+    **분리는 이 단계의 필수 구성요소다** — 없거나 실패하면 조용히 무분리로 물러서지
+    않고 ``_separate_stems_required``가 명시적으로 실패시킨다(운영자 지시). 벤치가 이
+    조합(bs-polarformer-fp16 분리 + owsm/omniasr 앵커)으로만 +26.7pp를 실측했다 — 분리가
+    빠진 채로 이 라벨(``alignment_text="*-rescue*"``)이 저장되면 A/B 판정이 거짓이 된다.
 
-    캡션 앵커(caption_anchors/caption_scaffold)·star 토큰·ko/ja 이중정렬 안전망은 이
-    경로에 배선하지 않는다 — 전부 레거시 CTC 엔진의 특정 실패 모드(균일 posterior 등)에
-    맞춰진 장치라 새 앵커에는 전제가 성립하지 않는다(범위 밖, 후속 작업으로 남긴다).
+    실행 순서(각 단계 이유는 인라인 주석): 앵커 정렬 → ``display_fixes._clamp_pathological``
+    (그 모듈이 "worker.py 배선 시 더 이른 단계에서 별도로 호출하라"고 지시한 자리) →
+    기존 VAD 보정(``TimingPostProcessor``·``_clamp_stretched_lines`` 재사용, 구스택과 같은
+    함수라 회귀 표면을 늘리지 않는다) → ``display_fixes.apply_stranded_corrections`` →
+    ``adlib_candidates`` → 2패스 ``refine_lines``(최종 확정된 라인 경계 위에서만 — 그
+    모듈의 "라인 경계는 앵커가 정한다" 불변식과 맞물린다: 경계가 이 시점 이후 다시 안
+    움직여야 그 위의 음절 스팬이 어긋나지 않는다).
+
+    ``two_pass_enabled``이 설정으로 꺼져 있으면(명시적 선택, 실패가 아니다) 리파인 없이
+    앵커 결과만 낸다. 켜져 있는데 리파이너가 없거나 ``refine_lines`` 자체가 실패하면
+    예외를 그대로 올린다(운영자 지시 — 리파이너도 "새 스택 구성요소" 목록에 있다).
     """
     from everyric2.alignment import display_fixes as df
     from everyric2.alignment.factory import EngineFactory
@@ -3913,28 +4017,29 @@ def _run_new_stack_alignment(
     from everyric2.audio.loader import AudioLoader
     from everyric2.audio.vad import VocalActivityDetector
 
-    anchor_type = _new_stack_anchor_type(language)
+    if sep_result is None:
+        sep_result = _separate_stems_required(audio, settings)
+
+    vocals = sep_result.vocals
+    accompaniment = sep_result.accompaniment
+
     anchor = EngineFactory.get_engine(anchor_type, settings.alignment)
     if not anchor.is_available():
-        raise RuntimeError(f"{anchor_type} anchor engine not available")
+        raise RuntimeError(f"{anchor_type} rescue anchor not available")
 
-    results = anchor.align(align_audio, lyric_lines, language=language)
+    results = anchor.align(vocals, lyric_lines, language=language)
     raw_spans = [(r.start_time, r.end_time) for r in results]
     fixes: dict[int, list[str]] = {}
 
-    vocals = sep_result.vocals if sep_result is not None else None
-    accompaniment = sep_result.accompaniment if sep_result is not None else None
-
-    # 우세도(dominance) — display_fixes의 장치 전부와 늘이기 게이트가 공유하는 신호.
-    # VAD는 분리 스템의 간주 블리드에 죽으므로(display_fixes.py 모듈 docstring) 따로
-    # 만든다. 스템이 없으면(분리 실패/미설치) 이 신호에 기대는 장치는 전부 조용히
-    # 건너뛴다 — display_fixes.py 모듈 docstring의 계약("우세도가 없으면 전부 조용히
-    # 건너뛴다") 그대로.
-    activity = None
-    if vocals is not None and accompaniment is not None:
-        activity = df.dominance_activity_from_waveforms(
-            vocals.waveform, accompaniment.waveform, vocals.sample_rate
-        )
+    # 우세도(dominance) — display_fixes의 장치 전부와 늘이기 게이트가 공유하는 신호. VAD는
+    # 분리 스템의 간주 블리드에 죽으므로(display_fixes.py 모듈 docstring) 따로 만든다.
+    # None이면(신호 자체가 못 만들어짐 — 예: 진짜 무음곡) display_fixes 모듈 **자신의**
+    # 계약대로 그 장치들만 조용히 건너뛴다 — 분리 자체는 이미 성공했으니 "새 스택
+    # 구성요소 부재"가 아니라 이 곡 특유의 신호 열화다(운영자 지시가 겨냥한 것과 다른
+    # 종류의 상황).
+    activity = df.dominance_activity_from_waveforms(
+        vocals.waveform, accompaniment.waveform, vocals.sample_rate
+    )
 
     if activity is not None:
         df._clamp_pathological(results, activity.regions)
@@ -3943,49 +4048,49 @@ def _run_new_stack_alignment(
 
     vad_regions: list[tuple[float, float]] | None = None
     clamped_lines: set[int] = set()
-    if vocals is not None:
-        try:
-            vad_result = VocalActivityDetector().detect(vocals)
-            pp = TimingPostProcessor(settings.segmentation, extend_to_vocal=False).process(
-                results, vad_result, "line"
-            )
-            _diff_fixes(fixes, "pp", raw_spans, pp.results, tol=0.2)
-            results = pp.results
-            results, clamped_lines = _clamp_stretched_lines(results, vad_result, fixes=fixes)
-            vad_regions = [(round(reg.start, 2), round(reg.end, 2)) for reg in vad_result.regions]
-        except Exception:
-            logger.exception("New-stack VAD timing post-process failed; keeping anchor timing")
+    try:
+        vad_result = VocalActivityDetector().detect(vocals)
+        pp = TimingPostProcessor(settings.segmentation, extend_to_vocal=False).process(
+            results, vad_result, "line"
+        )
+        _diff_fixes(fixes, "pp", raw_spans, pp.results, tol=0.2)
+        results = pp.results
+        results, clamped_lines = _clamp_stretched_lines(results, vad_result, fixes=fixes)
+        vad_regions = [(round(reg.start, 2), round(reg.end, 2)) for reg in vad_result.regions]
+    except Exception:
+        # VAD는 "새 스택 구성요소"가 아니라 재사용한 레거시 보정 유틸이다(분리기·앵커·
+        # 리파이너와 달리 이 스택의 정체성/정확도 근거가 아니다) — 실패해도 앵커 결과
+        # (분리 스템 위에서 이미 실측)는 유효하므로 로그만 남기고 계속한다.
+        logger.exception("Rescue-stage VAD timing post-process failed; keeping anchor timing")
 
-    # 우세도 기반 좌초 보정은 VAD 보정 **뒤에** 건다 — VAD가 분리 스템의 간주 블리드로
-    # 못 잡는 좌초를 우세도가 잡고(display_fixes.py 모듈 docstring), 이 둘로 최종
-    # 확정된 경계 위에서만 아래 2패스가 음절을 다시 잡아야 그 스팬이 나중에 어긋나지
-    # 않는다("실행 순서" 문단의 doctring 참고).
     if activity is not None:
         before_stranded = [(r.start_time, r.end_time) for r in results]
         df.apply_stranded_corrections(results, activity)
         _diff_fixes(fixes, "stranded", before_stranded, results)
 
-    adlib: list[tuple[float, float]] | None = None
-    if activity is not None:
-        adlib = df.adlib_candidates(results, activity)
+    adlib = df.adlib_candidates(results, activity) if activity is not None else None
 
     pron_data: dict[int, dict[str, Any]] = {}
-    if not settings.alignment.two_pass_enabled:
-        logger.info("Two-pass refiner disabled (two_pass_enabled=False); anchor-only segments")
-    elif sep_result is None:
-        logger.info("Two-pass refiner needs separated vocals; skipping (no separation result)")
-    else:
+    if settings.alignment.two_pass_enabled:
         report("음절 재정렬")
         refiner = (
             anchor
             if anchor_type == "omniasr"
             else EngineFactory.get_engine("omniasr", settings.alignment)
         )
+        if not refiner.is_available():
+            raise RuntimeError(
+                "omniasr refiner not available — two_pass_enabled=True requires it for the "
+                "rescue stage; not silently dropping to anchor-only segments under the "
+                "2pass-labelled result."
+            )
         stems_dir: Path | None = None
         try:
             stems_dir, vocals_path = _write_stems_for_two_pass(sep_result)
             bridged = _PathBridgedRefiner(refiner, AudioLoader())
             lines_text = [ln.text for ln in lyric_lines]
+            # refine_lines 자체의 실패는 여기서 삼키지 않는다 — 그대로 전파해 잡을
+            # failure_kind='system'으로 명시적으로 떨어뜨린다(운영자 지시).
             refined = refine_lines(
                 results,
                 lines_text,
@@ -3994,31 +4099,27 @@ def _run_new_stack_alignment(
                 language=language or "en",
                 config=TwoPassRefineConfig(),
             )
-            for i, rl in enumerate(refined):
-                entry: dict[str, Any] = {}
-                if rl.pron.get("hangul"):
-                    entry["pronunciation"] = rl.pron["hangul"]
-                if rl.pron_segs.get("hangul"):
-                    entry["pron_segments"] = [_pron_seg_to_wire(s) for s in rl.pron_segs["hangul"]]
-                if rl.pron:
-                    entry["pron"] = dict(rl.pron)
-                if rl.pron_segs:
-                    entry["pron_segs"] = {
-                        key: [_pron_seg_to_wire(s) for s in segs] for key, segs in rl.pron_segs.items()
-                    }
-                if entry:
-                    pron_data[i] = entry
-        except Exception:
-            logger.exception("Two-pass refine failed; falling back to anchor-only segments")
         finally:
             if stems_dir is not None:
                 shutil.rmtree(stems_dir, ignore_errors=True)
-
-    alignment_text = f"{anchor_type}-2pass" if pron_data else anchor_type
+        for i, rl in enumerate(refined):
+            entry: dict[str, Any] = {}
+            if rl.pron.get("hangul"):
+                entry["pronunciation"] = rl.pron["hangul"]
+            if rl.pron_segs.get("hangul"):
+                entry["pron_segments"] = [_pron_seg_to_wire(s) for s in rl.pron_segs["hangul"]]
+            if rl.pron:
+                entry["pron"] = dict(rl.pron)
+            if rl.pron_segs:
+                entry["pron_segs"] = {
+                    key: [_pron_seg_to_wire(s) for s in segs] for key, segs in rl.pron_segs.items()
+                }
+            if entry:
+                pron_data[i] = entry
 
     return _NewStackResult(
         results=results,
-        alignment_text=alignment_text,
+        alignment_text=f"{anchor_type}-rescue-2pass" if pron_data else f"{anchor_type}-rescue",
         pron_data=pron_data,
         fixes=fixes,
         raw_spans=raw_spans,
@@ -4026,12 +4127,120 @@ def _run_new_stack_alignment(
         clamped_lines=clamped_lines,
         engine=anchor,
         adlib=adlib,
+        sep_result=sep_result,
+        activity=activity,
     )
+
+
+def _stranded_count(stack: "_NewStackResult") -> int:
+    """좌초 시그니처 개수 — ``display_fixes._stranded_sites``. activity가 없으면(신호
+    열화) 비교 자체가 무의미하므로 0(=악화로 안 본다, 승급 판단은 이 함수의 호출부가
+    "개선 여부"만 보므로 0은 안전한 기본값)."""
+    if stack.activity is None:
+        return 0
+    from everyric2.alignment.display_fixes import _stranded_sites
+
+    return _stranded_sites(stack.results, stack.activity.regions)
+
+
+def _run_new_stack_alignment(
+    audio: Any,
+    sep_result: Any,
+    lyric_lines: list[Any],
+    language: str | None,
+    settings: Any,
+    report: Any,
+) -> "_NewStackResult":
+    """새 정렬 스택 본체 — 3단계 라우팅(``scripts/bench_adapters/routed.py``의
+    routed-2mode-lang 구성 재현, 코디네이터 확정 2026-08-03 정정):
+
+      1) **고속**(무분리 omniASR, ``_run_fast_stage``) — 대부분의 곡이 여기서 끝난다
+         (전곡 평균 시간을 지키는 근거). 언어가 en이면 신호가 원리상 무력해 이 단계를
+         건너뛰고 곧장 2)로 간다(``_FORCE_RESCUE_LANGUAGES``).
+      2) **구원**(분리 + 앵커 2패스, ``_run_rescue_stage``) — 1)의 라인 logConf 중앙값이
+         ``_ROUTE_THRESHOLD`` 미만이면 승급. en 외 언어는 owsm 앵커, en은 omniasr
+         자기앵커(2패스 리파이너가 이미 음절 단위라 owsm이 잡을 이유가 없다).
+      3) **en 전용 사후 좌초 승급** — 2)의 en 결과에 ``display_fixes._stranded_sites``
+         시그니처가 남으면 owsm 앵커로 다시 구원하고, 시그니처가 **줄어드는 경우에만**
+         채택한다(악화 방향으로는 못 간다). butcher가 그 표본, 14곡 스캔 오검출 0.
+
+    레거시 ko/ja 이중정렬·star 토큰·pron_data DP 근사·caption 앵커/스캐폴드는 이 경로에
+    배선하지 않는다 — 전부 구스택 CTC 엔진의 특정 실패 모드에 맞춰진 장치라 새 앵커에는
+    전제가 안 맞는다(범위 밖).
+
+    **조용한 폴백 금지**: 이 함수와 그 하위 단계 어디에서도 실패를 삼켜 구스택으로
+    넘어가거나 더 가벼운 구성으로 조용히 대체하지 않는다 — 분리기 자산·앵커 모델·
+    (two_pass_enabled=True일 때의) 리파이너가 없거나 실패하면 예외가 그대로 올라간다
+    (운영자 지시, 2026-08-03 정정).
+    """
+    lang = (language or "").strip().lower()
+    forced = any(lang.startswith(prefix) for prefix in _FORCE_RESCUE_LANGUAGES)
+
+    score: float | None = None
+    if not forced:
+        report("전사 정렬(고속)")
+        fast = _run_fast_stage(audio, lyric_lines, language, settings)
+        score = _line_log_conf_median(fast.results)
+        fast.routing_meta = {
+            "route": "fast",
+            "line_log_conf_median": None if score is None else round(score, 3),
+            "threshold": _ROUTE_THRESHOLD,
+        }
+        if score is None or score >= _ROUTE_THRESHOLD:
+            return fast
+        logger.info(
+            f"New-stack routing: line_log_conf_median={score:.3f} < {_ROUTE_THRESHOLD} "
+            "-> escalating to rescue stage"
+        )
+    else:
+        logger.info(
+            f"New-stack routing: language {lang!r} force-rescued (logConf signal unreliable)"
+        )
+
+    report("전사 정렬(구원)")
+    rescue_anchor_type = "omniasr" if forced else "owsm"
+    rescue = _run_rescue_stage(
+        audio, sep_result, lyric_lines, language, settings, report, rescue_anchor_type
+    )
+    rescue.routing_meta = {
+        "route": "forced" if forced else "rescue",
+        "line_log_conf_median": None if score is None else round(score, 3),
+        "threshold": _ROUTE_THRESHOLD,
+        "rescue_anchor": rescue_anchor_type,
+    }
+
+    if forced:
+        stranded_before = _stranded_count(rescue)
+        if stranded_before > 0:
+            report("전사 정렬(좌초 승급)")
+            escalated = _run_rescue_stage(
+                audio, rescue.sep_result, lyric_lines, language, settings, report, "owsm"
+            )
+            stranded_after = _stranded_count(escalated)
+            if stranded_after < stranded_before:
+                logger.info(
+                    f"Stranded-site escalation adopted: {stranded_before} -> {stranded_after}"
+                )
+                escalated.alignment_text += "-escalated"
+                escalated.routing_meta = {
+                    **rescue.routing_meta,
+                    "route": "escalated",
+                    "stranded_before": stranded_before,
+                    "stranded_after": stranded_after,
+                }
+                return escalated
+            logger.info(
+                f"Stranded-site escalation rejected (no improvement: {stranded_before} -> "
+                f"{stranded_after})"
+            )
+            rescue.routing_meta["stranded_before"] = stranded_before
+            rescue.routing_meta["stranded_after"] = stranded_after
+
+    return rescue
 
 
 def _finish_new_stack_alignment(
     audio: Any,
-    align_audio: Any,
     sep_result: Any,
     vocals: Any,
     lyric_lines: list[Any],
@@ -4058,9 +4267,7 @@ def _finish_new_stack_alignment(
     (``_run_new_stack_alignment`` docstring 참고) debug_meta에 그 키들이 아예 없다 —
     레거시 응답의 "기능이 꺼져 있어 없음"과 달리 "이 스택엔 그 개념이 없음"이다.
     """
-    stack = _run_new_stack_alignment(
-        audio, align_audio, sep_result, lyric_lines, language, settings, report
-    )
+    stack = _run_new_stack_alignment(audio, sep_result, lyric_lines, language, settings, report)
     results = stack.results
     pron_data = stack.pron_data
     fixes = stack.fixes
@@ -4069,6 +4276,10 @@ def _finish_new_stack_alignment(
     clamped_lines = stack.clamped_lines
     engine = stack.engine
     alignment_text = stack.alignment_text
+    # 구원 단계가 이미 분리해 둔 스템을 멜로디 f0/노트 부착에 재사용한다 — 고속 단계로
+    # 끝난 곡은 분리를 아예 안 했으므로(라우팅의 존재 이유) 호출부가 넘긴 vocals(보통
+    # None — 새 스택엔 _run_alignment가 분리를 미리 안 돌린다)를 그대로 쓴다.
+    effective_vocals = stack.sep_result.vocals if stack.sep_result is not None else vocals
 
     timestamps: list[dict[str, Any]] = []
     pron_referee_tokens: list[Any] = []
@@ -4131,7 +4342,7 @@ def _finish_new_stack_alignment(
         try:
             precomputed_f0 = f0_future.result() if f0_future is not None else None
             annotated = melody_extractor.annotate_timestamps(
-                audio, timestamps, vocals=vocals, precomputed_f0=precomputed_f0
+                audio, timestamps, vocals=effective_vocals, precomputed_f0=precomputed_f0
             )
             f0_curve = melody_extractor.last_f0_curve
             song_key = melody_extractor.last_key
@@ -4173,6 +4384,10 @@ def _finish_new_stack_alignment(
         "quality_adapter": quality_adapter,
         "quality_norm": None if quality_norm is None else round(quality_norm, 6),
         "align_coverage": coverage_meta,
+        # 라우팅 판정 근거 — 어느 단계(fast/rescue/forced/escalated)가 실제로 채택됐는지,
+        # logConf 중앙값·문턱값. 사후 감사용(캡션 앵커의 debug.caption_anchors와 같은 결,
+        # 이 스택엔 캡션 앵커가 없으니 그 자리를 대신한다). additive 새 필드.
+        "routing": stack.routing_meta or {},
     }
 
     return {
@@ -4276,7 +4491,12 @@ def _run_alignment(
         # 훨씬 깨끗해 고밀도 믹스/이펙트 구간에서 정렬 품질이 오른다. 미설치/실패 시 믹스 폴백.
         report("보컬 분리")
         need_vocals = settings.melody.separate_vocals or settings.alignment.align_on_vocals
-        sep_result = _separate_stems(audio) if need_vocals else None
+        # 새 스택은 여기서 분리하지 않는다 — 라우팅(1단계 고속)이 애초에 분리를 건너뛰는
+        # 것 자체가 비용 절감의 근거다(scripts/bench_adapters/routed.py 모듈 docstring:
+        # "정상곡에 분리기를 돌리는 14초는 순수 낭비"). 분리가 실제로 필요한지는 구원
+        # 단계 진입 여부로만 정해지므로 _run_rescue_stage가 그때 가서 분리한다
+        # (_separate_stems_required) — 여기서 미리 돌리면 그 절감이 통째로 사라진다.
+        sep_result = _separate_stems(audio) if (need_vocals and not new_stack_active) else None
         vocals = sep_result.vocals if sep_result is not None else None
         align_audio = (
             vocals if (vocals is not None and settings.alignment.align_on_vocals) else audio
@@ -4378,9 +4598,12 @@ def _run_alignment(
             # 새 스택은 여기서 조기 반환한다 — 아래 ko/ja 이중정렬·star 토큰·pron_data DP
             # 근사 블록(레거시 전용, 수백 줄)은 건드리지 않고 그대로 폴백 경로로 남긴다.
             # try/finally(f0_executor·anchor_executor 정리)는 조기 return에도 그대로 돈다.
+            # align_audio는 안 넘긴다 — 새 스택은 라우팅 단계별로 정렬 입력을 스스로
+            # 정한다(고속=무분리 원곡, 구원=그때 분리한 스템). sep_result/vocals는 위에서
+            # 새 스택이면 항상 None이다(분리를 미리 안 돌렸으므로) — 그래도 시그니처는
+            # 유지한다(구원 단계가 분리하면 그 결과가 멜로디 f0에 재사용된다).
             return _finish_new_stack_alignment(
                 audio,
-                align_audio,
                 sep_result,
                 vocals,
                 lyric_lines,

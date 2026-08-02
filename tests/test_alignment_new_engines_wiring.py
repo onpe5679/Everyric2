@@ -27,8 +27,8 @@ def _audio() -> AudioData:
 
 def test_default_engine_is_now_owsm():
     # 배선 전환(2026-08-03) 이후 기본값 — "owsm" 리터럴 자체는 새 스택 스위치일 뿐이고
-    # 실제 앵커는 언어별로 갈린다(worker._new_stack_anchor_type). 구스택은 여전히 명시적
-    # 선택으로 그대로 나온다(아래 테스트).
+    # 실제 앵커는 요청마다 3단계 라우팅이 정한다(worker._run_new_stack_alignment). 구스택은
+    # 여전히 명시적 선택으로 그대로 나온다(아래 테스트).
     assert AlignmentSettings().engine == "owsm"
     assert get_settings().alignment.engine == "owsm"
 

@@ -19,13 +19,18 @@ class Base(AsyncAttrs, DeclarativeBase):
 # 모델 교체 이니셔티브(bench/model-replacement-owsm, docs/research/2026-07-30-*)가 스택을
 # 갈아끼우면 이 문자열을 그 스택 식별자로 바꿔라 — 배포 시점의 git 커밋이 실제 버전 경계다.
 #
-# 2026-08-03: worker.py 배선 전환(_run_new_stack_alignment/_finish_new_stack_alignment)과
-# 함께 settings 기본값(alignment.engine=owsm, audio.separator_backend=bs-polarformer-fp16,
-# alignment.two_pass_enabled=True)이 새 스택으로 넘어가면서 이 상수도 함께 올린다 — 구스택
-# 결과에 새 라벨이 붙으면 A/B 판정이 통째로 거짓이 된다는 지시(코디네이터)에 따라, 실제
-# 배선이 기본이 된 시점에 딱 맞춰 올렸다. 이 배선은 GPU 없이 계약 수준으로만 검증됐다
-# (tests/test_new_stack_wiring.py) — 실곡 대조는 아직 없었다(별도 검증 작업).
-ENGINE_VERSION = "polar-owsm-2pass-1"
+# 2026-08-03: worker.py 배선 전환(_run_new_stack_alignment의 3단계 라우팅 — 고속 omniASR
+# → 문턱 미만/en이면 분리+앵커 2패스 구원 → en 좌초 승급, scripts/bench_adapters/routed.py의
+# routed-2mode-lang 재현)과 함께 settings 기본값(alignment.engine=owsm, audio.
+# separator_backend=bs-polarformer-fp16, alignment.two_pass_enabled=True)이 새 스택으로
+# 넘어가면서 이 상수도 함께 올린다 — 구스택 결과에 새 라벨이 붙으면 A/B 판정이 통째로
+# 거짓이 된다는 지시(코디네이터)에 따라, 실제 배선이 기본이 된 시점에 딱 맞춰 올렸다.
+# 이름은 벤치가 "사용자 확정 구성"으로 채택한 config 이름(routed-2mode-lang)을 그대로
+# 땄다 — 실제로 도는 앵커가 고속(omniasr)/구원(owsm)/en 자기앵커(omniasr)로 요청마다
+# 갈리므로 단일 모델 이름으로는 이 스택을 정확히 못 부른다. 이 배선은 GPU 없이 계약
+# 수준으로만 검증됐다(tests/test_new_stack_wiring.py) — 실곡 대조는 아직 없었다(별도
+# 검증 작업).
+ENGINE_VERSION = "routed-2mode-lang-1"
 
 
 class SyncResult(Base):
