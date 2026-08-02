@@ -238,6 +238,24 @@ def _confidence(log_score: float) -> float:
     return round(math.exp(min(0.0, log_score)), 6)
 
 
+def _line_confidence(word_confidences: list[float | None]) -> float | None:
+    """줄 전체 신뢰도 — 글자별(``WordSegment``) confidence의 기하평균.
+
+    ``scripts/bench_adapters/hf_ctc.py::_confidence``가 라인 신뢰도를 내는 공식과
+    수학적으로 같다(그쪽은 원시 로그점수 평균 뒤 한 번만 exp — ``exp(mean(log_p))`` —
+    여기는 이미 exp를 거친 글자별 confidence의 기하평균 — ``exp(mean(log(exp(log_p))))``,
+    같은 값이다). ``everyric2.server.worker._geomean``도 같은 공식을 쓴다 — 라인 conf가
+    비어 있을 때(과거엔 이 함수가 없어 늘 그랬다) 그쪽이 폴백으로 다시 계산해 왔는데,
+    라우팅(``worker._line_log_conf_median``)처럼 **정렬 직후** 라인 단위 신호가 필요한
+    호출부는 그 폴백보다 먼저 실행돼 언제나 ``None``을 봤다 — 실측 버그(2026-08-03,
+    코디네이터 실곡 검증). 엔진 자신이 채워야 모든 소비처가 일관되게 값을 본다.
+    """
+    values = [v for v in word_confidences if v is not None and v > 0]
+    if not values:
+        return None
+    return round(math.exp(sum(math.log(v) for v in values) / len(values)), 6)
+
+
 def _interpolate_line_times(
     times: list[tuple[float, float] | None], audio_length: float
 ) -> list[tuple[float, float]]:
@@ -311,6 +329,7 @@ def _line_results(
                 start_time=start,
                 end_time=end,
                 word_segments=segs or None,
+                confidence=_line_confidence([s.confidence for s in segs]) if segs else None,
             )
         )
     return results

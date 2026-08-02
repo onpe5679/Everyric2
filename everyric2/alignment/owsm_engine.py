@@ -40,6 +40,7 @@ vocab: 5만 유니그램 SentencePiece라 토큰 하나가 가사 글자 여러 
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -103,6 +104,24 @@ def _find_snapshot() -> Path | None:
 
 def _base_language(language: str) -> str:
     return (language or "").strip().lower()
+
+
+def _line_confidence(word_confidences: list[float | None]) -> float | None:
+    """줄 전체 신뢰도 — 글자별(``WordSegment``) confidence의 기하평균.
+
+    ``_owsm_worker.py``가 이미 각 세그에 같은 공식(``exp(min(0, log_score))``)으로
+    ``confidence``를 채워 보낸다 — 이 함수는 그 값들을 라인 하나로 합칠 뿐이다.
+    ``scripts/bench_adapters/hf_ctc.py::_confidence``(원시 로그점수 평균 뒤 exp 한 번)와
+    수학적으로 같은 값이고, ``everyric2.server.worker._geomean``도 같은 공식이다 — 라인
+    conf가 비어 있으면(과거엔 이 함수가 없어 늘 그랬다) 그쪽이 폴백으로 다시 계산해
+    왔는데, 정렬 직후 라인 단위 신호가 필요한 호출부(예: 새 스택 라우팅)는 그 폴백보다
+    먼저 실행돼 언제나 ``None``을 봤다 — 실측 버그(2026-08-03, 코디네이터 실곡 검증
+    — omniasr_engine.py에서 먼저 발견돼 owsm에도 같은 자리를 채웠다).
+    """
+    values = [v for v in word_confidences if v is not None and v > 0]
+    if not values:
+        return None
+    return round(math.exp(sum(math.log(v) for v in values) / len(values)), 6)
 
 
 def _interpolate_line_times(
@@ -172,6 +191,7 @@ def _build_sync_results(
                 start_time=start,
                 end_time=end,
                 word_segments=segs or None,
+                confidence=_line_confidence([s.confidence for s in segs]) if segs else None,
             )
         )
         all_words.extend(

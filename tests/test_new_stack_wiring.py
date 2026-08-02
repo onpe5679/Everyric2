@@ -544,6 +544,84 @@ class TestRoutingDecision:
         assert stack.alignment_text == "omniasr-fast"
         assert stack.routing_meta["route"] == "fast"
 
+    def test_none_score_escalates_to_rescue_not_fast(self, monkeypatch):
+        # 판정 불가(confidence를 하나도 못 구함, score=None)는 "확신 있는 정상곡"이
+        # 아니라 안전한 쪽(구원)으로 떨어져야 한다 — routed.py:228과 같은 방향
+        # (`if score is not None and score >= threshold: return fast`). 2026-08-03
+        # 실곡 검증에서 이 방향이 뒤집혀 있던 결함을 그대로 못박는다.
+        fast_results = [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=None)]
+        fast_anchor = _FakeAnchor(fast_results)
+        rescue_anchor = _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=1.0)])
+        calls: list[str] = []
+
+        def fake_get_engine(engine_type, config=None):
+            calls.append(engine_type)
+            return fast_anchor if len(calls) == 1 else rescue_anchor
+
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
+        )
+        sep = _FakeSepResult(_silence(), _silence())
+        monkeypatch.setattr(
+            "everyric2.audio.separator.get_shared_separator",
+            lambda config=None: _FakeSeparator(True, sep),
+        )
+        stack = worker._run_new_stack_alignment(
+            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
+            _settings(two_pass_enabled=False), lambda s: None,
+        )
+        assert calls == ["omniasr", "owsm"]  # 고속만으로 안 끝나고 구원까지 갔다
+        assert stack.alignment_text == "owsm-rescue"
+        assert stack.routing_meta["route"] == "rescue"
+        assert stack.routing_meta["line_log_conf_median"] is None
+
+    @pytest.mark.parametrize(
+        "log_conf_values,expect_rescue",
+        [
+            # 벤치 실측 극한곡 대역(熱異常·토스트·소실·시니컬·루프더룸): -13.82 ~ -12.02
+            pytest.param([-13.0, -12.5, -12.9], True, id="extreme-band"),
+            # 벤치 실측 정상곡 대역: -11.80 ~ -4.36
+            pytest.param([-11.7, -8.0, -4.5], False, id="normal-band"),
+        ],
+    )
+    def test_measured_bench_bands_route_correctly(
+        self, monkeypatch, log_conf_values, expect_rescue
+    ):
+        import math
+
+        fast_results = [
+            SyncResult(text=f"line{i}", start_time=float(i), end_time=float(i + 1),
+                       confidence=math.exp(v))
+            for i, v in enumerate(log_conf_values)
+        ]
+        fast_anchor = _FakeAnchor(fast_results)
+        rescue_anchor = _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=1.0)])
+        calls: list[str] = []
+
+        def fake_get_engine(engine_type, config=None):
+            calls.append(engine_type)
+            return fast_anchor if len(calls) == 1 else rescue_anchor
+
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
+        )
+        sep = _FakeSepResult(_silence(), _silence())
+        monkeypatch.setattr(
+            "everyric2.audio.separator.get_shared_separator",
+            lambda config=None: _FakeSeparator(True, sep),
+        )
+        stack = worker._run_new_stack_alignment(
+            _silence(), None,
+            [LyricLine(text=f"line{i}", line_number=i + 1) for i in range(len(log_conf_values))],
+            "ja", _settings(two_pass_enabled=False), lambda s: None,
+        )
+        if expect_rescue:
+            assert calls == ["omniasr", "owsm"]
+            assert stack.alignment_text == "owsm-rescue"
+        else:
+            assert calls == ["omniasr"]
+            assert stack.alignment_text == "omniasr-fast"
+
     def test_low_confidence_escalates_to_owsm_rescue(self, monkeypatch):
         fast_results = [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=1e-9)]
         fast_anchor = _FakeAnchor(fast_results)

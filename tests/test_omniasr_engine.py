@@ -193,6 +193,27 @@ def test_confidence_converts_log_score():
     assert omniasr_engine._confidence(-1.0) == pytest.approx(math.exp(-1.0), abs=1e-6)
 
 
+# ── 라인 신뢰도(_line_confidence) — 2026-08-03 실곡 검증에서 잡힌 결함: 이 함수가
+# 없던 시절 SyncResult.confidence가 항상 None이라 새 스택 라우팅 신호(line_log_conf_
+# median)가 절대 값을 못 봤다. 벤치 hf_ctc.py::_confidence(원시 로그점수 평균 후 exp)와
+# 수학적으로 같은 값을 내야 한다 — 문턱값이 그 공식에 대해 실측 보정됐기 때문이다.
+def test_line_confidence_matches_bench_log_mean_formula():
+    raw_log_scores = [-0.1, -0.2, -0.05]
+    word_confs = [omniasr_engine._confidence(s) for s in raw_log_scores]
+    expected = math.exp(sum(raw_log_scores) / len(raw_log_scores))
+    assert omniasr_engine._line_confidence(word_confs) == pytest.approx(expected, abs=1e-6)
+
+
+def test_line_confidence_none_when_no_measured_words():
+    assert omniasr_engine._line_confidence([]) is None
+    assert omniasr_engine._line_confidence([None, None]) is None
+
+
+def test_line_confidence_ignores_none_entries():
+    conf_a = omniasr_engine._confidence(-0.3)
+    assert omniasr_engine._line_confidence([conf_a, None]) == pytest.approx(conf_a)
+
+
 # ── 강제정렬 스팬 -> SyncResult/WordSegment (순수 함수, 합성 스팬으로 검증) ────────────
 
 
@@ -226,6 +247,15 @@ def test_line_results_builds_word_segments_and_interpolates():
     assert results[2].start_time == pytest.approx(0.4)
     # 보간된 중간 줄이 순서를 지킨다 (역전·겹침 없음)
     assert results[0].end_time <= results[1].start_time <= results[1].end_time <= results[2].start_time
+
+    # 라인 단위 confidence — 이게 없으면 새 스택 라우팅(worker._line_log_conf_median)이
+    # 항상 None을 봐서 문턱 판정 자체가 성립하지 않는다(2026-08-03 실곡 검증 결함).
+    assert results[0].confidence is not None
+    assert results[0].confidence == pytest.approx(
+        math.exp((-0.1 + -0.2) / 2), abs=1e-6
+    )
+    assert results[1].confidence is None  # 보간된 빈 줄 — 실측 글자가 없다
+    assert results[2].confidence == pytest.approx(omniasr_engine._confidence(-0.05))
 
 
 # ── emission 노출 계약 (2패스 리파이너용) ─────────────────────────────────────────

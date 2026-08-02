@@ -106,6 +106,10 @@ def test_build_sync_results_maps_segs_to_word_segments():
     assert [w.word for w in sync.word_segments] == ["안", "녕"]
     assert [w.confidence for w in sync.word_segments] == [0.9, 0.8]
     assert len(words) == 2
+    # 라인 단위 confidence — 이게 없으면 새 스택 라우팅(worker._line_log_conf_median)이
+    # 항상 None을 봐서 문턱 판정 자체가 성립하지 않는다(2026-08-03 실곡 검증 결함).
+    assert sync.confidence is not None
+    assert sync.confidence == pytest.approx(owsm_engine._line_confidence([0.9, 0.8]))
 
 
 def test_build_sync_results_interpolates_unaligned_lines():
@@ -128,6 +132,25 @@ def test_build_sync_results_interpolates_unaligned_lines():
 
     assert results[0].end_time <= results[1].start_time
     assert results[1].start_time <= results[1].end_time <= results[2].start_time
+    assert results[1].confidence is None  # 빈 segs — 실측 글자가 없다
+    assert results[0].confidence is not None
+    assert results[2].confidence is not None
+
+
+# ── 라인 신뢰도(_line_confidence) — 2026-08-03 실곡 검증에서 잡힌 결함: 이 함수가
+# 없던 시절 SyncResult.confidence가 항상 None이라 새 스택 라우팅 신호(line_log_conf_
+# median)가 절대 값을 못 봤다. 벤치 hf_ctc.py::_confidence(원시 로그점수 평균 후 exp)와
+# 수학적으로 같은 값을 내야 한다 — 문턱값이 그 공식에 대해 실측 보정됐기 때문이다.
+def test_line_confidence_matches_bench_log_mean_formula():
+    raw_log_scores = [-0.1, -0.2, -0.05]
+    word_confs = [round(math.exp(min(0.0, s)), 6) for s in raw_log_scores]
+    expected = math.exp(sum(raw_log_scores) / len(raw_log_scores))
+    assert owsm_engine._line_confidence(word_confs) == pytest.approx(expected, abs=1e-6)
+
+
+def test_line_confidence_none_when_no_measured_words():
+    assert owsm_engine._line_confidence([]) is None
+    assert owsm_engine._line_confidence([None, None]) is None
 
 
 # ── OwsmEngine 계약: is_available / align / emission_for / get_engine_type ────────────

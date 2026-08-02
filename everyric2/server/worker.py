@@ -4222,11 +4222,18 @@ def _run_new_stack_alignment(
             "line_log_conf_median": None if score is None else round(score, 3),
             "threshold": _ROUTE_THRESHOLD,
         }
-        if score is None or score >= _ROUTE_THRESHOLD:
+        # score가 None(라인 confidence를 하나도 못 구함)이면 **구원으로** 떨어진다 —
+        # 벤치 원본(scripts/bench_adapters/routed.py:228 `if score is not None and
+        # score >= threshold: return fast`)과 같은 방향이다. 판정 불가를 "확신 있는
+        # 정상곡"으로 조용히 넘기면 안 된다 — 극한곡을 놓치는 비용(붕괴 방치)이 정상곡을
+        # 구원으로 잘못 보내는 비용(몇 초 낭비)보다 훨씬 크다(routed.py 모듈 docstring).
+        if score is not None and score >= _ROUTE_THRESHOLD:
             return fast
         logger.info(
-            f"New-stack routing: line_log_conf_median={score:.3f} < {_ROUTE_THRESHOLD} "
-            "-> escalating to rescue stage"
+            "New-stack routing: line_log_conf_median=%s (threshold=%s) -> escalating to "
+            "rescue stage",
+            "unavailable" if score is None else f"{score:.3f}",
+            _ROUTE_THRESHOLD,
         )
     else:
         logger.info(
