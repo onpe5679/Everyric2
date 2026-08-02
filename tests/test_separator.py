@@ -214,7 +214,15 @@ class TestBackendSelection:
 class TestPolarFormerAssetHelpers:
     """everyric2/audio/polarformer_separator.py 자체의 자산 탐색/이름 정규화 로직."""
 
-    def test_missing_reasons_lists_everything_absent(self, tmp_path):
+    def test_missing_reasons_lists_everything_absent(self, tmp_path, monkeypatch):
+        # audio_separator는 2026-08-04부터 pyproject.toml separator extra의 선언된
+        # 의존성이라(--extra separator로 설치되는 배포 환경에선) 실제로 깔려 있을 수
+        # 있다 — 이 테스트는 "패키지가 없을 때"를 실제 환경 상태와 무관하게 재현해야
+        # 한다. sys.modules[name]=None은 그 이름의 import를 무조건 ImportError로 만드는
+        # 표준 관용구다(반대 방향은 아래 test_missing_reasons_omits_audio_separator_
+        # reason_when_importable, 이미 있던 test_missing_reasons_empty_once_assets_and_
+        # dependency_present도 같은 목 패턴으로 "있을 때"를 재현하고 있었다).
+        monkeypatch.setitem(sys.modules, "audio_separator", None)
         reasons = pf._missing_reasons(tmp_path / "models")
         joined = "\n".join(reasons)
         assert "checkpoint" in joined
@@ -222,6 +230,18 @@ class TestPolarFormerAssetHelpers:
         assert "attend.py" in joined
         assert "bs_roformer.py" in joined
         assert "audio-separator" in joined
+
+    def test_missing_reasons_omits_audio_separator_reason_when_importable(
+        self, tmp_path, monkeypatch
+    ):
+        # 반대 방향 — 패키지가 있으면(목으로 재현, 실제 설치 여부와 무관) 그 사유만
+        # 목록에서 빠져야 한다. 다른 자산은 일부러 안 채운다 — "audio-separator" 사유
+        # 하나를 격리해서 보는 것이 목적이다.
+        monkeypatch.setitem(sys.modules, "audio_separator", types.ModuleType("audio_separator"))
+        reasons = pf._missing_reasons(tmp_path / "models")
+        joined = "\n".join(reasons)
+        assert "checkpoint" in joined  # 자산은 여전히 안 채웠으니 다른 사유는 남는다
+        assert "audio-separator" not in joined
 
     def test_missing_reasons_empty_once_assets_and_dependency_present(self, tmp_path, monkeypatch):
         models_dir = tmp_path / "models"
