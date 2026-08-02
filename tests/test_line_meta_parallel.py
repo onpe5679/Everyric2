@@ -90,7 +90,8 @@ def _fake_alignment(captured: dict, audio_file):
     실제 함수와 같은 계약을 지킨다: 단계를 보고하고, finally에서 오디오 파일을 지운다."""
 
     def fake(
-        audio_path, lyrics, language, line_meta=None, on_stage=None, resolver=None, video_id=None
+        audio_path, lyrics, language, line_meta=None, on_stage=None, resolver=None,
+        video_id=None, min_depth=None,
     ):
         try:
             if on_stage is not None:
