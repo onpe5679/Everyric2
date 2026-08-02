@@ -161,3 +161,18 @@ def test_whole_query_as_partial_title_is_still_a_legitimate_match():
     result = vi.match("노래 입니다")
     assert result is not None
     assert result.slug == "song"
+
+
+def test_short_entry_title_inside_artist_token_is_rejected():
+    # 실측 2호: 3글자 곡 "Dec."이 아티스트 후보 "deco27" 안에 포함(길이비 정확히 0.5)돼
+    # 붙었다 — 역방향(n ⊂ q) 포함은 비율 엄격 초과만 허용한다.
+    _set_entries([SongEntry(slug="dec", ko="Dec.", ja="Dec.")])
+    assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
+
+
+def test_entry_title_covering_most_of_a_segment_still_matches():
+    # 정당한 역방향 포함(세그 후보 "シンデレラmv" 안의 "シンデレラ", 비율 5/7 > 0.5)은 유지
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    result = vi.match("DECO*27 - シンデレラ MV")
+    assert result is not None
+    assert result.slug == "cinderella-deco-27"

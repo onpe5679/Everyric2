@@ -107,21 +107,29 @@ def match(title: str) -> SongEntry | None:
                 n = _normalize_title(field)
                 if len(n) < 2:
                     continue
-                if (q in n or n in q) and min(len(q), len(n)) / max(len(q), len(n)) >= 0.5:
-                    if q in n and n != q and q != full_norm:
-                        # 실측 오매핑(2026-08-03): 쿼리 "DECO*27 - ダミーロマンス feat…"의
-                        # 아티스트 후보 "deco27"이 인덱스 ko 필드 "신데렐라/DECO*27"에
-                        # 포함돼 **다른 곡**에 붙었다. q가 다구획 쿼리의 부분 후보일 때
-                        # (q != full_norm — 사용자가 친 문자열 전체가 아닐 때), 포함
-                        # 매칭이 정당하려면 n에서 q를 뺀 나머지(그 항목의 실제 제목부)가
-                        # 풀 쿼리 안에도 있어야 한다 — 없다면 겹친 건 공유 토큰(아티스트)
-                        # 뿐이므로 기각한다. 쿼리 전체가 위키 제목의 부분 문자열인 경우
-                        # (q == full_norm)는 기존처럼 정당한 부분 제목 검색이다.
-                        rest = n.replace(q, "", 1)
-                        if len(rest) >= 2 and rest not in full_norm:
-                            continue
-                    if best is None or len(n) > best[0]:
-                        best = (len(n), entry)
+                ratio = min(len(q), len(n)) / max(len(q), len(n))
+                if not ((q in n or n in q) and ratio >= 0.5):
+                    continue
+                if n in q and n != q and ratio <= 0.5:
+                    # 역방향 오매핑(2026-08-03 실측 2호): 3글자 곡 "Dec."이 아티스트
+                    # 후보 "deco27" **안에** 포함(비율 정확히 0.5)돼 붙었다. 항목 제목이
+                    # 후보의 절반 이하만 덮는 포함은 우연 일치가 지배한다 — 이 방향은
+                    # 엄격 초과만 허용한다(정확 일치는 ① 패스가 이미 잡는다).
+                    continue
+                if q in n and n != q and q != full_norm:
+                    # 실측 오매핑(2026-08-03): 쿼리 "DECO*27 - ダミーロマンス feat…"의
+                    # 아티스트 후보 "deco27"이 인덱스 ko 필드 "신데렐라/DECO*27"에
+                    # 포함돼 **다른 곡**에 붙었다. q가 다구획 쿼리의 부분 후보일 때
+                    # (q != full_norm — 사용자가 친 문자열 전체가 아닐 때), 포함
+                    # 매칭이 정당하려면 n에서 q를 뺀 나머지(그 항목의 실제 제목부)가
+                    # 풀 쿼리 안에도 있어야 한다 — 없다면 겹친 건 공유 토큰(아티스트)
+                    # 뿐이므로 기각한다. 쿼리 전체가 위키 제목의 부분 문자열인 경우
+                    # (q == full_norm)는 기존처럼 정당한 부분 제목 검색이다.
+                    rest = n.replace(q, "", 1)
+                    if len(rest) >= 2 and rest not in full_norm:
+                        continue
+                if best is None or len(n) > best[0]:
+                    best = (len(n), entry)
         if best:
             return best[1]
     return None
