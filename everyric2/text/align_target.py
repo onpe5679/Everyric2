@@ -234,6 +234,15 @@ def derive_en_display_units(source: str, *, entries: dict[int, int] | None = Non
             entry = _the_entry(words, word_index)
         syllables = syllable_units_for_word(word, entry)
         units = units_for_word(word, entry)
+        if syllables and units:
+            # 분할 불변식(2026-08-03 실측 ATM): syllable_units_for_word가 유닛 4개
+            # (에/이/티/엠) 중 2개만 음절에 배정해 표기가 "에이"로 잘렸다 — 음절
+            # 분할이 유닛 전체를 덮지 못하면 분할 실패로 취급하고 아래 통짜 낱말
+            # 경로(전 유닛 보존, en 표시만 낱말 단위)로 떨어진다. 소실보다 성긴
+            # 음절이 낫다.
+            covered = sum(len(syl_units) for _, syl_units in syllables)
+            if covered != len(units):
+                syllables = []
         if syllables:
             for piece, syl_units in syllables:
                 pending_en = piece

@@ -248,3 +248,12 @@ def test_ja_derivation_is_deterministic():
     a = derive_ja_display_units("眩しくて numb numb")
     b = derive_ja_display_units("眩しくて numb numb")
     assert a == b
+
+
+def test_en_acronym_syllabification_must_not_drop_units():
+    # 실측(2026-08-03, ダミーロマンス 3행 "ATM"): syllable_units_for_word가 유닛 4개 중
+    # 2개만 배정해 표기가 "에이"로 잘렸다 — 분할이 유닛 전체를 못 덮으면 통짜 낱말
+    # 경로로 떨어져 전 유닛이 보존돼야 한다.
+    units = derive_en_display_units("ATM")
+    hangul = "".join(o for o in units.owners["hangul"] if o.strip())
+    assert hangul == "에이티엠"

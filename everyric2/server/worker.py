@@ -660,8 +660,20 @@ def _ja_hangul_segments_from_kana(seg: dict[str, Any]) -> list[dict[str, Any]] |
     except Exception:
         logger.exception("hangul mora decomposition failed; skipping hangul segs")
         return None
-    if not moras or len(moras) != len(kana_segs):
+    if not moras:
         return None
+
+    # 모라 수가 kana 세그와 어긋나면(장음 축약·라틴 음차·표기 차이) 예전엔 통째로
+    # 포기했다 — 하필 기본 표기(hangul)만 카라오케 타이밍이 죽는 실사용 구멍이었다
+    # (실측 2026-08-03 6_toWwEFXyA 세그 2·3: 한자 다수/라틴 혼입 줄). 대신 kana
+    # 세그의 시간축을 모라 위치 비례로 재배분하되 **resolved: False**로 근사임을
+    # 정직하게 표시한다(와이어의 기존 근사 플래그 — 확장 디버그가 그대로 보여준다).
+    exact = len(moras) == len(kana_segs)
+
+    def _kana_index(mora_index: int) -> int:
+        if exact:
+            return mora_index
+        return min(len(kana_segs) - 1, mora_index * len(kana_segs) // len(moras))
 
     out: list[dict[str, Any]] = []
     i = 0
@@ -673,9 +685,11 @@ def _ja_hangul_segments_from_kana(seg: dict[str, Any]) -> list[dict[str, Any]] |
             j += 1
         entry: dict[str, Any] = {
             "text": hangul[cs:ce],
-            "start": kana_segs[i]["start"],
-            "end": kana_segs[j]["end"],
+            "start": kana_segs[_kana_index(i)]["start"],
+            "end": kana_segs[_kana_index(j)]["end"],
         }
+        if not exact:
+            entry["resolved"] = False
         # 공백은 kana 모라 공백(문절)이 아니라 **hangul 표기 자신의** 공백 위치를 따른다 —
         # «표시=세그» 불변식(_rebuild == display)은 표기별로 성립해야 한다
         if ce < len(hangul) and hangul[ce].isspace():

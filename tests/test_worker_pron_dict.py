@@ -594,12 +594,17 @@ def test_ja_hangul_segments_merge_final_consonant_moras():
     assert segs[0]["end"] == kana[1]["end"]
 
 
-def test_ja_hangul_segments_bail_on_mora_mismatch():
-    # 표기 모라 수가 kana 세그와 어긋나면 조용히 포기 — 틀린 카라오케보다 없는 쪽
+def test_ja_hangul_segments_mora_mismatch_now_yields_flagged_approximation():
+    # 계약 변경(2026-08-03): 모라 수 불일치를 통째로 포기하면 하필 기본 표기(hangul)만
+    # 카라오케 타이밍이 죽는다(실측 6_toWwEFXyA 세그 2·3). kana 시간축 비례 근사를
+    # resolved: False로 정직하게 내린다 — "틀린 카라오케보다 없는 쪽"에서 "근사임을
+    # 표시한 카라오케"로.
     seg = _seg(NEKURA, "아루")
     attach_pron_variants(seg)
 
-    assert "hangul" not in (seg.get("pron_segs") or {})
+    hangul_segs = (seg.get("pron_segs") or {}).get("hangul")
+    assert hangul_segs, "근사 폴백이 hangul 세그를 내야 한다"
+    assert all(s.get("resolved") is False for s in hangul_segs)
 
 
 def test_ja_hangul_segments_not_derived_over_alignment_output():
@@ -679,3 +684,37 @@ def test_ja_text_with_kana_only_pron_is_not_latin_augmented():
     seg["pron"] = {"kana": "アルバイトハネクラモード"}
     attach_pron_variants(seg)
     assert seg["pron"] == {"kana": "アルバイトハネクラモード"}
+
+
+# ---------------------------------------------------------------------------
+# hangul 세그 근사 폴백 — 모라 수 불일치를 통째 포기하지 않는다 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def _kana_segs(n: int, step: float = 0.5) -> list[dict]:
+    return [{"text": "カ", "start": i * step, "end": (i + 1) * step} for i in range(n)]
+
+
+def test_hangul_segs_exact_mora_match_stays_resolved():
+    from everyric2.server.worker import _ja_hangul_segments_from_kana
+
+    seg = {"pron": {"hangul": "카카카"}, "pron_segs": {"kana": _kana_segs(3)}}
+    out = _ja_hangul_segments_from_kana(seg)
+    assert out and len(out) == 3
+    assert all("resolved" not in s for s in out)  # 정합 경로는 기존 그대로(신뢰 표시)
+
+
+def test_hangul_segs_mismatch_falls_back_to_proportional_approximation():
+    # 실측 6_toWwEFXyA 세그 2·3: 모라 수 불일치(장음 축약·라틴 혼입)면 예전엔 None —
+    # 기본 표기만 카라오케 타이밍이 죽었다. 이제 kana 시간축을 비례 배분하되
+    # resolved: False로 근사임을 표시한다.
+    from everyric2.server.worker import _ja_hangul_segments_from_kana
+
+    seg = {"pron": {"hangul": "카카카카"}, "pron_segs": {"kana": _kana_segs(3)}}
+    out = _ja_hangul_segments_from_kana(seg)
+    assert out and len(out) == 4
+    assert all(s.get("resolved") is False for s in out)
+    # 시간축은 단조 — 비례 매핑(바닥 나눗셈)은 역행하지 않는다
+    starts = [s["start"] for s in out]
+    assert starts == sorted(starts)
+    assert out[-1]["end"] == _kana_segs(3)[-1]["end"]
