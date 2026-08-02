@@ -188,6 +188,49 @@ def test_real_japanese_cover_titles_match_the_original(cover_title):
     assert score == 1.0
 
 
+# ── title_match: cover by 접미 융합 수정(실측, 2026-08) ────────────
+#
+# 사용자 제보(«커버를 이을 때 한국어나 영어 cover인 걸 잘 인식 못해»)를 재조사하며 발견한
+# 별도 결함: 「곡명 cover by 이름」(구분자 없이 곡명 뒤에 바로 붙는, 유튜브에 흔한 표기)이
+# 기존 covered\s*by(과거형 -ed 필수)로는 아예 안 잡혔고, \bcover\b 단독 제거로는 "cover"만
+# 지워져 "by 이름"이 곡명에 알파벳으로 융합돼(둘 다 alnum이라 공백 제거만으로 안 떨어짐)
+# 길이비가 기본 임계값(0.6) 밑으로 떨어졌다(예: "첫사랑cover by 홍길동" → "첫사랑홍길동",
+# 비 0.5). feat. 접미와 같은 "표시부터 끝까지 통째로 버린다" 전략(_COVER_BY_RE)으로 고쳤다.
+
+
+def test_strip_noise_tokens_removes_cover_by_without_ed_suffix():
+    for raw, kept in [
+        ("熱異常 cover by 아무개", "熱異常"),
+        ("熱異常 Cover by 아무개", "熱異常"),  # 대문자 C — 흔한 표기
+        ("熱異常 covered by 아무개", "熱異常"),  # 기존 -ed 표기 — 회귀 확인
+    ]:
+        assert title_match.normalize_title(title_match.strip_noise_tokens(raw)) == kept
+
+
+def test_cover_by_suffix_does_not_fuse_uploader_name_into_title():
+    """구분자 없는 「곡명 cover by 이름」에서 "이름"이 곡명에 융합되지 않고 곡명 단독
+    후보가 살아남는다 — 수정 전에는 이 케이스가 candidate_queries에 아예 없었다."""
+    for raw in ["첫사랑 cover by 홍길동", "첫사랑 Cover by 홍길동", "첫사랑 covered by 홍길동"]:
+        candidates = title_match.candidate_queries(raw, drop_noise=True)
+        assert "첫사랑" in candidates, f"{raw!r} -> {candidates!r}"
+
+
+def test_cover_by_without_ed_now_matches_the_original_title():
+    """실측 재현 — 수정 전에는 "cover by"(비-ed)가 아예 안 잡혀 유사도가 0.5 미만(또는 None)
+    이었다. 이제 covered by와 동등하게 원제와 정확히 일치(score=1.0)한다."""
+    for cover_title in ["첫사랑 cover by 홍길동", "打上花火 cover by さユり"]:
+        original = cover_title.split(" cover by ")[0].split(" Cover by ")[0]
+        score, _ = title_match.match_score(cover_title, original)
+        assert score == 1.0, f"{cover_title!r} vs {original!r} -> {score!r}"
+
+
+def test_cover_by_prefix_form_still_isolates_title_via_separator():
+    """"Covered by 이름 - 곡명"(업로더가 앞에 오는 관례)은 접미 소거(_COVER_BY_RE)가 통째로
+    삼켜도 구분자 분할 경로가 살아 있어 곡명이 여전히 후보로 남는다 — 회귀 없음."""
+    candidates = title_match.candidate_queries("Covered by 홍길동 - 첫사랑", drop_noise=True)
+    assert "첫사랑" in candidates
+
+
 # ── title_match: 매칭 점수 ────────────────────────────────────────
 
 
