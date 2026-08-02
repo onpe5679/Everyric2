@@ -556,6 +556,24 @@ class AlignmentSettings(BaseSettings):
         "times, which run slightly ahead of the voice. Above it the caption time wins.",
     )
 
+    # ── quality_score의 정체 (결함 #6, 감사가 코드로 확정) ──────────────────────────
+    #
+    # SyncResult.quality_score(everyric2/server/db/models.py)에 저장되는 값은 **정렬된 줄들의
+    # 평균 CTC 디코딩 자기확신도**다(정렬 실패로 conf가 없는 줄은 분모에서 빠진다 —
+    # worker._quality_with_coverage). **사람이 매긴 정렬 품질 평가가 아니다.**
+    #
+    # 이 값은 어댑터 vocab 크기에 스케일 의존적이라 **곡 간 비교·정렬에 쓰면 결함**이다 —
+    # 아래 caption_anchors 필드 설명에 이미 실측이 있다(같은 곡이 eng 0.1289 vs kor 0.0492,
+    # zyRt-nBM3dY가 floor-flat 0.001로 보고돼 앵커 실험 자체를 무력화한 사례 포함). 곡 간
+    # 비교가 필요하면 이 값이 아니라 debug.quality_norm(스케일 무관 e^(-α),
+    # worker._scale_free_quality)을 써라.
+    #
+    # 유일한 소비처인 크롬 확장은 절대 임계 `qualityScore < 0.001`만 검사한다
+    # (everyric2-chrome background.ts) — "정렬이 사실상 실패했다"는 이진 신호로만 쓰므로
+    # 이 값의 스케일 의존성과 설계 의도가 우연히 맞아떨어진다(작은 vocab일수록 confidence가
+    # 낮게 눌리므로, 절대 임계가 vocab이 작은 언어에서 더 쉽게 걸리는 비대칭이 있다는
+    # 뜻이기도 하다 — 그 비대칭을 곡 간 순위/정렬에 쓰면 안 되는 이유가 바로 이거다).
+
     caption_anchors: bool = Field(
         default=False,
         description="OFF BY DEFAULT AND MEASURED TO MAKE THINGS WORSE — do not turn this on "

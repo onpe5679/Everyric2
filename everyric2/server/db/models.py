@@ -11,6 +11,16 @@ class Base(AsyncAttrs, DeclarativeBase):
     pass
 
 
+# 현행 정렬 스택 식별자 — 새로 만드는 SyncResult에 새긴다(SyncRepository.create 기본값,
+# ENGINE_VERSION을 그대로 engine_version 컬럼에 stamp). 기존 행은 engine_version=NULL로
+# 남아 "이 스탬프가 생기기 전(구세대) 스택으로 만들어졌다"는 뜻이 된다 — 소급 백필하지
+# 않는다(#5 백필은 language/engine_variant 분리에만 해당, engine_version은 별개).
+#
+# 모델 교체 이니셔티브(bench/model-replacement-owsm, docs/research/2026-07-30-*)가 스택을
+# 갈아끼우면 이 문자열을 그 스택 식별자로 바꿔라 — 배포 시점의 git 커밋이 실제 버전 경계다.
+ENGINE_VERSION = "mms-htdemucs-1"
+
+
 class SyncResult(Base):
     __tablename__ = "sync_results"
 
@@ -19,19 +29,46 @@ class SyncResult(Base):
     lyrics_hash: Mapped[str] = mapped_column(String(64), index=True)
     audio_hash: Mapped[str | None] = mapped_column(String(32), index=True)
     timestamps: Mapped[dict[str, Any]] = mapped_column(JSON)
-    # 이것은 **원문 언어**다(가사가 무슨 말인가). 번역 대상 언어가 아니다.
+    # 이것은 **원문 언어**다(가사가 무슨 말인가). 번역 대상 언어가 아니다. **순수 언어
+    # 코드만 들어간다** ("ja", "ko" 등) — 엔진 변형·폴백 여부는 아래 engine_variant가 진다.
     #
-    # ⚠ 알려진 한계 — 번역·발음은 `timestamps`의 세그먼트에 박혀 저장되는데(생성 시
-    # merge_line_meta), **어느 언어로 번역했는지는 어디에도 기록되지 않는다.** 그래서 같은
-    # 영상을 모국어가 다른 두 사용자가 보면 먼저 만든 쪽의 언어가 그대로 내려간다: 한국인이
-    # 만든 싱크를 일본인이 열면 한국어 번역과 한글 독음을 받는다(확장의 loadTranslations가
-    # "번역이 다 있다"고 판정해 자기 언어로 재요청하지 않는다 — 그쪽 주석에 경로가 있다).
+    # 결함 #5(2026-08 수정): 예전에는 MMS 강제 폴백(force_mms) 정렬 결과가 이 컬럼에
+    # "ja_mms"·"ko_mms"처럼 언어와 엔진 변형이 뭉쳐 저장됐다(ctc_engine._ensure_model_loaded의
+    # cache_key를 worker._run_alignment가 그대로 detected_lang에 흘렸다). 그래서
+    # `WHERE language='ja'` 같은 순수 언어 필터가 실제 ja 곡의 19.8%를 누락했다. 지금은
+    # 엔진이 순수 언어(_current_language)와 변형(_current_engine_variant)을 따로 노출해
+    # 이 컬럼은 항상 순수 언어만 받는다 — MMS 폴백이었으면 engine_variant='mms'로 대신 남는다.
+    # 기존 "{lang}_mms" 행은 마이그레이션(connection.py init_db)이 소급 분리했다
+    # (engine_variant NULL 컬럼이 처음 생기는 시점에 1회, 멱등).
     #
-    # 지금은 한국어권 사용자만 대상이라 두었다. 다국어로 넓힐 때 고칠 자리는 번역을
-    # (video_id, target_lang) 키로 분리하는 것이고, 그 전 단계 임시책은 timestamps에 번역
-    # 언어를 적고 클라이언트가 비교하게 하는 것이다(스키마 변경 없이 가능).
+    # ✓ 해결됨(2026-07-28) — 번역 대상 언어 분리: 예전엔 번역·발음이 `timestamps`의
+    # 세그먼트에 박혀 저장돼(생성 시 merge_line_meta) **어느 언어로 번역했는지 기록이
+    # 없었다.** 지금은 TranslationLayer 테이블(아래, (video_id, fingerprint, target_lang)
+    # 유니크)이 그 언어 슬롯을 따로 갖는다(커밋 6a0e614·76292af·1f1ab0b). 세그의 legacy
+    # translation 슬롯은 ko 하위호환용으로만 남아 있다 — TranslationLayer 독스트링 참고.
     language: Mapped[str | None] = mapped_column(String(8))
     engine: Mapped[str] = mapped_column(String(16), default="ctc")
+    # 이 정렬에 실제로 쓰인 엔진의 변형/폴백 식별자. 지금 유일하게 쓰이는 값은 "mms"
+    # (force_mms 강제 폴백 — 예전엔 language에 "{lang}_mms"로 뭉쳐 저장되던 값, 결함 #5).
+    # None이면 language의 기본 어댑터를 그대로 썼다는 뜻(변형 없음). 기존(마이그레이션
+    # 이전) 행도 NULL이다 — "변형 없음"과 "몰라서 못 남김"을 구분하지 않는다(백필 대상은
+    # language가 "_mms" 접미였던 행뿐이었고, 그 행들은 이미 'mms'로 채워졌다).
+    engine_variant: Mapped[str | None] = mapped_column(String(16))
+    # 이 싱크를 만든 정렬 스택의 식별자 — 생성 시점의 ENGINE_VERSION(위 모듈 상수)을 그대로
+    # 새긴다. NULL이면 이 컬럼이 생기기 전(구세대) 스택으로 만들어졌다는 뜻 — 소급 백필하지
+    # 않는다(모델 교체 전후 스택을 곡 단위로 구분하는 것이 목적이라, 과거 값을 되짚어
+    # 채우면 오히려 거짓 정보가 된다).
+    engine_version: Mapped[str | None] = mapped_column(String(32))
+    # CTC 디코딩 자기확신도(정렬된 줄만의 평균 로그확률류 conf, worker._quality_with_coverage가
+    # 계산) — **사람이 매긴 정렬 품질 평가가 아니다.** 결함 #6(감사 확정): 이 값은 어댑터
+    # vocab 크기에 스케일 의존적이라 **곡 간 비교·정렬에 쓰면 결함**이다(실측: 같은 곡이
+    # eng 어댑터로는 0.1289, kor 어댑터로는 0.0492 — 잔차 정보량은 같은데 스케일만 다르다).
+    # 곡 간 비교가 필요하면 이 값이 아니라 debug.quality_norm(스케일 무관 e^(-α),
+    # worker._scale_free_quality)을 써라. 유일한 소비처인 크롬 확장은 절대 임계
+    # `<0.001`만 검사한다(background.ts) — 그 검사는 "정렬이 사실상 실패했다"는 이진
+    # 신호로만 이 값을 쓰므로 스케일 의존성과 설계 의도가 맞아떨어진다. config/settings.py의
+    # caption_anchors 필드 설명 근처에도 같은 경고가 있다(그 실험이 이 스케일 의존성 때문에
+    # 실패했다).
     quality_score: Mapped[float | None] = mapped_column(Float)
     # 영상 제목/아티스트 — 커버 링크 후보 탐색이 코퍼스에서 같은 곡을 찾는 유일한 단서다
     # (video_id만으로는 곡을 식별할 수 없다). 기존 행은 NULL로 남고, 조회 시 기회적으로
