@@ -852,6 +852,25 @@ class TranslationSettings(BaseSettings):
         "reasoning 모델(gpt-oss 등)은 사고 토큰이 이 예산을 같이 쓰므로 4096이면 "
         "30줄 곡에서 JSON이 잘렸다 — 8192로 상향.",
     )
+    budget_max_round_trips: int = Field(
+        default=8,
+        description="한 번역 요청(OpenAICompatibleTranslator.translate() 한 번 호출) 안에서 "
+        "NIM에 보내는 누적 왕복(실제 HTTP 요청) 상한. 실측(2026-08, 외부 감사 #9): 요청 789건 "
+        "중 42%가 재시도를 겪고 p95 25.4초·최대 57.5초였는데 원인은 429가 아니라 재귀적 "
+        "미스매치 복구(depth 4까지, _translate_batch)와 저품질 배치 재요청(_retry_low_quality)의 "
+        "무제한 중첩이었다 — 영상 하나는 depth 1~4 전 구간에서 'matched 0/N lines'가 150줄어치 "
+        "반복되며 순차 NIM 왕복을 다수 태웠다. 미스매치 복구·저품질 재요청·429 백오프는 각각 "
+        "정당한 메커니즘이라 그대로 두고, 이 상한은 그 위에 씌우는 공용 브레이크다 — 도달 "
+        "즉시 새 왕복을 만들지 않고 그 시점까지의 결과로 정상 반환한다(예외 아님, 부분 번역이 "
+        "무번역보다 낫다). 0 이하면 비활성(무제한, 기존 동작).",
+    )
+    budget_max_duration_sec: float = Field(
+        default=90.0,
+        description="한 번역 요청의 누적 소요시간 상한(초) — 확장 타임아웃(120s)보다 낮게 잡아 "
+        "예산이 소진돼도 확장이 자기 타임아웃으로 먼저 끊기기 전에 서버가 부분 결과로 응답할 "
+        "여유를 남긴다. budget_max_round_trips와 OR 조건 — 둘 중 먼저 닿는 쪽이 예산을 닫는다. "
+        "0 이하면 비활성(무제한, 기존 동작).",
+    )
 
 
 class SegmentationSettings(BaseSettings):
@@ -1064,6 +1083,20 @@ class ServerSettings(BaseSettings):
         description="원격 워커가 클레임한 잡의 리스 만료(초). 진행률 보고(≤2s 간격)가 "
         "하트비트를 겸해 리스를 갱신한다. 만료되면(워커 하트비트 끊김) 다음 claim 처리 "
         "시 잡을 queued로 되돌려 다른 워커가 다시 가져가게 한다.",
+    )
+    orphan_job_ttl_min: int = Field(
+        default=50,
+        description="processing 상태 잡의 마지막 진행 갱신(Job.updated_at) 이후 이 시간(분)이 "
+        "지나면 고아로 보고 회수(failed)한다. worker_lease_sec 기반 리스 스위퍼는 원격 워커가 "
+        "리스를 쥔 잡만 커버한다 — 인프로세스 워커(local_worker=true)와 line_meta 대기 구간"
+        "(worker.LINE_META_WAIT_STAGE, 상한 120s)은 리스 없이 정상적으로 processing이라 그 "
+        "스위퍼의 대상이 아니다. 실측(2026-08, 외부 감사 #7): stage='번역 대기', progress=48로 "
+        "6.3시간 정체한 잡 하나가 확장 폴링을 48시간 동안 10,779회(전체 트래픽 4%) 발생시켰다 "
+        "— 서버는 죽지 않고 잡만 멎어 재기동 시 좀비 정리(db/connection.py init_db)도 발화하지 "
+        "않았다. 번역 경로 p95가 25초, 정상 잡은 수 분 안에 끝나므로 45~60분이면 정상 진행과 "
+        "고아를 넉넉히 가른다. created_at(시작 시각)이 아니라 updated_at(마지막 갱신) 기준 — "
+        "진행 중인 잡은 2~4초 간격으로 진행률을 보고해(_tick_progress/_stage_monitor) "
+        "updated_at이 계속 갱신되므로 실수로 죽이지 않는다. 0 이하면 리퍼 비활성.",
     )
     # ── 중립 연동 (외부 곡 인덱스 / 외부 미디어 캐시) ──────────────────────────
     song_index_url: str = Field(

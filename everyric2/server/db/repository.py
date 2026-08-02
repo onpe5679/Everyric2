@@ -249,6 +249,18 @@ class JobRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_stale_processing(self, cutoff: datetime) -> list[Job]:
+        """updated_at이 cutoff보다 오래된 processing 잡 — 고아 잡 TTL 리퍼(orphan_reaper)가
+        회수 대상을 고르는 데 쓴다.
+
+        기준은 created_at(시작 시각)이 아니라 updated_at(마지막 진행 갱신)이다 — 정상 진행
+        중인 긴 잡은 2~4초 간격으로 진행률을 보고해(worker._tick_progress/_stage_monitor)
+        updated_at이 계속 갱신되므로, 오래 걸리는 정상 잡을 실수로 회수하지 않는다."""
+        result = await self.session.execute(
+            select(Job).where(Job.status == "processing", Job.updated_at < cutoff)
+        )
+        return list(result.scalars().all())
+
     async def get_active_by_video(self, video_id: str, lyrics_hash: str) -> Job | None:
         """같은 영상·같은 가사로 이미 진행 중(pending/processing)인 잡 — 중복 생성 차단용.
 
