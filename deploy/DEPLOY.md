@@ -29,7 +29,10 @@ cd /opt/everyric2
 # uv 미설치 시
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# demucs(보컬 분리) 포함 설치 — 없어도 돌지만 VAD 클램프/멜로디 품질이 떨어진다
+# demucs(보컬 분리, 구스택용) + audio-separator/onnxruntime(bs-polarformer-fp16, 새
+# 스택 구원 단계용) 포함 설치. 새 스택이 기본값이므로(아래 "새 정렬 스택 준비물" 참고)
+# 이 extra는 사실상 필수다 — 없으면 정상곡(고속 단계)만 동작하고 극한곡(구원 승급
+# 대상)은 전부 명시적으로 실패한다.
 uv sync --extra separator
 ```
 
@@ -47,6 +50,46 @@ uv pip install torch torchaudio torchvision --index-url https://download.pytorch
 
 주의: `uv sync`를 다시 돌리면 락파일 버전으로 되돌아가므로, sync 후에는 위 명령을
 재실행해야 한다 (영구 고정하려면 pyproject `[tool.uv.sources]`에 인덱스를 박는다).
+
+### 새 정렬 스택(owsm/omniasr 앵커 + 2패스, 기본값) 준비물
+
+`alignment.engine` 기본값이 `owsm`이라(요청마다 3단계 라우팅이 실제 앵커를 고른다 —
+`everyric2/server/worker.py::_run_new_stack_alignment` 참고) 아래 셋이 **전부** 있어야
+새 스택이 완전히 동작한다. 하나라도 없으면 해당 요청이 조용히 저하되지 않고 명시적으로
+실패한다(운영자 지시 — `jobs.failure_kind='system'`으로 기록됨. 고속 단계만으로 끝나는
+정상곡은 분리·OWSM이 없어도 동작한다 — 아래가 필요해지는 건 구원 단계로 승급하는 곡부터다).
+
+1. **bs-polarformer-fp16 분리기 자산** — `everyric2/audio/polarformer_separator.py`가
+   `EVERYRIC_AUDIO_SEPARATOR_MODEL_DIR`(기본 `~/.cache/everyric2/models`) 아래에서 찾는다:
+   - `model_bs_polarformer_float16.ckpt` / `.yaml` — 체크포인트·설정
+   - `msst_src_<커밋8자리>/models/bs_roformer/{attend.py,bs_roformer.py}` — MSST 벤더
+     소스. 핀 커밋은 그 모듈의 `_MSST_COMMIT` 참고 — 정확히 맞아야 한다(main을 따라가면
+     모델 정의가 바뀌어 체크포인트가 안 붙는다).
+   - 자산 URL·조달 절차는 `scripts/bench_adapters/separators_quality.py`의
+     `BS_POLARFORMER` 정의를 참고한다. **서버는 이 자산을 절대 자동으로 내려받지
+     않는다** — 없으면 기동이 아니라 그 백엔드를 실제로 쓰는 요청 시점에 실패한다.
+2. **`audio-separator` 파이썬 패키지** — `uv sync --extra separator`(위 명령)로 설치.
+   `onnxruntime`(CPU 빌드)을 같이 끌고 온다 — `audio_separator.separator` 패키지의
+   임포트 체인이 무조건 요구하지만, 이 코드 경로는 그걸 실제 추론에는 안 쓴다(로더를
+   몽키패치로 갈아끼운다 — `polarformer_separator.py` 모듈 docstring 참고). 기존
+   torch/numpy/scipy/transformers를 재설치·강등하지 않는다(2026-08-04 `uv lock` 실측
+   확인, `pyproject.toml`의 `separator` extra 주석 참고).
+3. **OWSM 전용 격리 venv** — ESPnet이 메인 venv의 torch/transformers 버전과 충돌해
+   별도 venv가 필요하다(`everyric2/alignment/owsm_engine.py` 모듈 docstring). 기본
+   경로는 `<repo_root>/.venv-owsm`, 다른 경로면 `.env`에
+   `EVERYRIC_ALIGNMENT_OWSM_PYTHON_PATH`를 채운다. 이 venv를 만드는 절차 자체는 이
+   문서 범위 밖이다 — `scripts/bench_adapters/owsm_ctc.py`/`benchmark/.venv-owsm`과
+   같은 구성(ESPnet + SentencePiece + `espnet/owsm_ctc_v4_1B` HF 캐시 스냅샷)으로
+   맞춘다.
+
+**자산 조달 전까지 임시로 구스택으로 되돌리려면** `.env`에 아래 둘을 **함께** 채운다
+(하나만 바꾸면 기동이 거부된다 — `Settings`의 cross-field validator가 새 앵커+htdemucs
+조합을 조용한 오조합으로 보고 막는다):
+
+```bash
+EVERYRIC_ALIGNMENT_ENGINE=ctc
+EVERYRIC_AUDIO_SEPARATOR_BACKEND=htdemucs
+```
 
 ### deno — yt-dlp JS 런타임
 

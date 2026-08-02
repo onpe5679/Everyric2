@@ -65,6 +65,26 @@ dev = [
 ]
 separator = [
     "demucs>=4.0.0",
+    # bs-polarformer-fp16 백엔드(everyric2/audio/polarformer_separator.py) 전용 — 벤치가
+    # 실측 검증한 정확 버전(benchmark/.venv-sep, 2026-08-04 확인)에 핀 고정한다. 이
+    # 패키지의 RoformerLoader/ModelLoadingResult/MDXCSeparator를 몽키패치로 가로채는
+    # 코드라 마이너 버전 사이의 내부 계약 변경에도 깨질 수 있다 — MSST 벤더 소스를 커밋
+    # 해시로 고정한 것과 같은 이유(폴라포머 모듈 docstring의 _MSST_COMMIT 참고)로 여기도
+    # 하한이 아니라 정확히 고정한다.
+    "audio-separator==0.44.1",
+    # audio_separator.separator 패키지의 __init__.py가 무조건 separator.py를 import하고
+    # 그 파일이 모듈 최상단에서 onnxruntime을 요구한다(separator.py:24, mdx_separator.py:7).
+    # polarformer_separator.py는 MDXCSeparator만 쓰고 RoformerLoader.load_model을 통째로
+    # 몽키패치해 실제 추론에서는 ONNX 경로를 절대 안 타지만, 그 임포트 체인 자체가
+    # onnxruntime 없이는 import 시점에 즉시 실패한다(실곡 검증 2026-08-04, 코디네이터
+    # 확인 — "No module named 'audio_separator'"의 배경). audio-separator 자체가 선언한
+    # extra(cpu/gpu/dml)를 거치지 않고 직접 얹는다 — CPU 전용 onnxruntime으로 충분하다:
+    # 이 코드 경로에서 onnxruntime은 실제로 추론에 한 번도 안 쓰이므로(모듈 임포트를
+    # 만족시키는 용도뿐) GPU 빌드가 torch의 CUDA 런타임(cu128)과 얽힐 위험을 감수할
+    # 이유가 없다 — 벤치도 CPU 빌드(1.28.0)로 검증했다(uv pip install --dry-run으로 메인
+    # .venv 대상 해석 확인, 2026-08-04: 기존 torch/numpy/scipy/transformers 어느 것도
+    # 재설치·강등 없이 16개 신규 패키지만 추가된다).
+    "onnxruntime>=1.17",
 ]
 bench = [
     # scripts/align_bench.py — MIREX 표준 정렬 지표(AAE/PCO/지각 지표)를 재구현하지
