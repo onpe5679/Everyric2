@@ -497,6 +497,8 @@ export interface Settings {
   pitchLineOpacity: number;
   /** f0 곡선(음정 보는 선) 밝기 배율 0.2~1.5 — 노트 바(pitchLineOpacity)와 별개 */
   pitchF0Opacity: number;
+  /** 보컬 발성 구간에서 가사창 패널이 은은하게 밝아지는 글로우 효과 */
+  vocalGlow: boolean;
   /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
   pitchPronPosition: 'note' | 'bottom';
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */

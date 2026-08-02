@@ -954,6 +954,12 @@
   "overlay_settings_row_debugInfo": {
     "message": "デバッグ情報を表示 (Alt+Shift+D)"
   },
+  "overlay_settings_row_vocalGlow": {
+    "message": "ボーカル区間グロー"
+  },
+  "overlay_settings_row_vocalGlowTitle": {
+    "message": "ボーカルが聞こえる区間で歌詞パネルがほのかに明るくなります（サーバーの発声分析があるシンクのみ）"
+  },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "音程カーブの明るさ"
   },

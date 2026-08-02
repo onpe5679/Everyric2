@@ -954,6 +954,12 @@
   "overlay_settings_row_debugInfo": {
     "message": "Show debug info (Alt+Shift+D)"
   },
+  "overlay_settings_row_vocalGlow": {
+    "message": "Vocal glow"
+  },
+  "overlay_settings_row_vocalGlowTitle": {
+    "message": "The panel softly glows while vocals are present (only for syncs with server vocal analysis)"
+  },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "Pitch curve brightness"
   },

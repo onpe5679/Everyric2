@@ -954,6 +954,12 @@
   "overlay_settings_row_debugInfo": {
     "message": "디버그 정보 표시 (Alt+Shift+D)"
   },
+  "overlay_settings_row_vocalGlow": {
+    "message": "보컬 구간 글로우"
+  },
+  "overlay_settings_row_vocalGlowTitle": {
+    "message": "보컬이 들리는 구간에서 가사창 테두리가 은은하게 밝아져요 (서버 발성 분석이 있는 싱크에서만)"
+  },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "음정 곡선 밝기"
   },

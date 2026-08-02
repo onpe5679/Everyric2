@@ -143,6 +143,8 @@ export class LyricsOverlay {
   private depthAction: (() => void) | null = null;
   private feedbackBtn: HTMLButtonElement;
   private feedbackPop: HTMLDivElement;
+  /** 보컬 글로우 현재 상태 — 매 tick classList 쓰기를 피하기 위한 캐시 */
+  private vocalGlowOn = false;
   private collapseBtn: HTMLButtonElement;
   private settingsSheet: HTMLDivElement | null = null;
   private settingsDot: HTMLSpanElement | null = null;
@@ -922,6 +924,23 @@ export class LyricsOverlay {
   updateTime(time: number): void {
     for (const { start, el } of this.activeWordEls) {
       el.classList.toggle('sung', start <= time);
+    }
+    this.updateVocalGlow(time);
+  }
+
+  /**
+   * 보컬 존재 구간 글로우 — 서버가 내려준 발성 구간(debugMeta.vad_regions) 안에서 패널
+   * 테두리가 은은하게 밝아진다(웅웅거리는 소프트 펄스는 CSS 애니메이션이 담당, 여기는
+   * 켜고 끄기만). 구간 데이터가 없으면(구서버·자막 싱크) 아무 일도 하지 않는다 — 효과가
+   * 없는 것이지 오류가 아니다.
+   */
+  private updateVocalGlow(time: number): void {
+    const want = this.settings.vocalGlow
+      && this.stateKind === 'synced'
+      && (this.debugMeta?.vad_regions?.some(([s, e]) => time >= s && time < e) ?? false);
+    if (want !== this.vocalGlowOn) {
+      this.vocalGlowOn = want;
+      this.panel.classList.toggle('ey-vocal-glow', want);
     }
   }
 
@@ -1819,6 +1838,11 @@ export class LyricsOverlay {
     debugInfo.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ debugInfo: debugInfo.checked }));
 
+    const vocalGlow = h('input', { attrs: { type: 'checkbox' } });
+    vocalGlow.checked = this.settings.vocalGlow;
+    vocalGlow.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ vocalGlow: vocalGlow.checked }));
+
     const serverInput = h('input', { className: 'ey-input' });
     serverInput.value = this.settings.serverUrl;
     serverInput.addEventListener('change', () => {
@@ -1914,6 +1938,7 @@ export class LyricsOverlay {
         h('label', { text: t('overlay.settings.row.lowConfWarning'), attrs: { title: t('overlay.settings.row.lowConfWarningTitle') } }), lowConfWarning),
       h('div', { className: 'ey-settings-row' },
         h('label', { text: t('overlay.settings.row.notifyOnComplete'), attrs: { title: t('overlay.settings.row.notifyOnCompleteTitle') } }), notifyOnComplete),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.vocalGlow'), attrs: { title: t('overlay.settings.row.vocalGlowTitle') } }), vocalGlow),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.debugInfo') }), debugInfo),
       h('div', { className: 'ey-settings-note', text: t('overlay.settings.serverRequiredNote') }),
       h('button', { className: 'ey-secondary-btn', text: t('overlay.settings.closeButton'), on: { click: () => this.closeSettings() } }),

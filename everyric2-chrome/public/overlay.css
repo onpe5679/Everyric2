@@ -829,6 +829,15 @@
 .ey-feedback-star.on { color: var(--ey-accent); }
 .ey-feedback-status { color: var(--ey-text-dim); font-size: 11px; }
 
+/* 보컬 발성 구간 글로우 (overlay.ts updateVocalGlow) — 은은한 소프트 펄스.
+   box-shadow 전용이라 레이아웃 리플로 없음. 끄면(설정) 클래스 자체가 안 붙는다. */
+.ey-panel { transition: box-shadow 0.6s ease; }
+.ey-panel.ey-vocal-glow { animation: ey-glow-pulse 2.4s ease-in-out infinite; }
+@keyframes ey-glow-pulse {
+  0%, 100% { box-shadow: 0 0 16px rgba(255, 176, 46, 0.10); }
+  50% { box-shadow: 0 0 30px rgba(255, 176, 46, 0.22); }
+}
+
 /* 출처 링크가 있는 배지 (보카로 위키 등) */
 .ey-source.link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .ey-source.link:hover { color: var(--ey-text); }
