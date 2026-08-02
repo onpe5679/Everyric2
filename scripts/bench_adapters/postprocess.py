@@ -244,6 +244,124 @@ def _clamp_pathological(results, vad, line_body_region) -> set[int]:
     return clamped
 
 
+def _coverage(regions: list, start: float, end: float) -> float:
+    duration = max(1e-6, end - start)
+    return sum(
+        max(0.0, min(reg.end, end) - max(reg.start, start)) for reg in regions
+    ) / duration
+
+
+def _silent_run(regions: list, start: float, end: float) -> float:
+    """[start, end] 안에서 발성 구간에 안 덮인 **최장 연속** 길이."""
+    cursor, best = start, 0.0
+    for reg in sorted(regions, key=lambda r: r.start):
+        if reg.end <= start or reg.start >= end:
+            continue
+        best = max(best, reg.start - cursor)
+        cursor = max(cursor, reg.end)
+    return max(best, end - cursor)
+
+
+def _fold_stranded_repeats(lines: list[dict[str, Any]], regions: list) -> int:
+    """간주에 좌초한 **반복 렌디션**을 앞 렌디션 바로 뒤로 접는다.
+
+    Madeon(The Prince) 라인29가 원형이다. 「This love will do」가 두 번 연속 불리는데
+    (PROD 실측 1:25.27~1:26.74 · 1:26.74~1:30.19), 앵커 둘 다(owsm·omniasr) 두 번째
+    렌디션을 62초 간주 위(2:02~2:14)에 앉혔다. emission을 자유 디코드해 보면 그 자리의
+    신스 스탭이 「l」「o」(p 0.5~0.8)로 들린다 — love와 호환되는 가짜 증거가 실제로 있어서
+    DP가 속은 것이고, 마지막 음절은 2:13.4의 짧은 발화성 소리(우세도 0.82)가 앵커였다.
+
+    꼬리 클램프는 여기 무력하다 — **마지막 세그가 발성 위에** 있어 자를 무음 꼬리가 없다.
+    라인 전체가 잘못 놓인 것이므로 라인 단위로 옮기는 수밖에 없다. 13곡 스캔에서 이 조건
+    (지속 6초 이상 + 커버리지 0.30 미만 + 직전 라인과 같은 텍스트)에 걸리는 라인은 정확히
+    그 하나였다(2026-08-02) — 오검출 0인 조건만 옮긴다.
+
+    세그는 앞 렌디션의 리듬을 복사한다. 같은 텍스트를 같은 곡조로 부르므로 앞 렌디션의
+    세그 오프셋이 우리가 가진 가장 좋은 추정이고, 세그 수가 다르면 비례 배치로 물러선다.
+    """
+    folded = 0
+    for index in range(1, len(lines)):
+        line, prev = lines[index], lines[index - 1]
+        start, end = float(line["start"]), float(line["end"])
+        if end - start < 6.0 or not line.get("segs"):
+            continue
+        if str(line.get("text") or "").strip() != str(prev.get("text") or "").strip():
+            continue
+        if not prev.get("segs") or float(prev["end"]) >= start:
+            continue
+        if _coverage(regions, start, end) >= 0.30:
+            continue
+        next_start = (
+            float(lines[index + 1]["start"]) if index + 1 < len(lines) else float("inf")
+        )
+        prev_start, prev_end = float(prev["start"]), float(prev["end"])
+        room = next_start - 0.05 - prev_end
+        if room < 0.8:
+            continue
+        new_start = prev_end
+        length = min(prev_end - prev_start, room)
+        line["start"] = round(new_start, 3)
+        line["end"] = round(new_start + length, 3)
+        segs, pattern = line["segs"], prev["segs"]
+        if len(segs) == len(pattern):
+            scale = length / max(1e-6, prev_end - prev_start)
+            for seg, ref in zip(segs, pattern):
+                seg["start"] = round(new_start + (float(ref["start"]) - prev_start) * scale, 3)
+                seg["end"] = round(new_start + (float(ref["end"]) - prev_start) * scale, 3)
+        else:
+            step = length / len(segs)
+            for pos, seg in enumerate(segs):
+                seg["start"] = round(new_start + pos * step, 3)
+                seg["end"] = round(new_start + (pos + 1) * step, 3)
+        line.setdefault("meta", {})["postprocessed"] = True
+        folded += 1
+    return folded
+
+
+def _pull_disconnected_tails(lines: list[dict[str, Any]], regions: list) -> int:
+    """몸통과 무음으로 끊긴 라인 꼬리 세그를 몸통 끝으로 되당긴다.
+
+    rookie 0:14가 원형이다. 「booing」의 마지막 두 세그가 몸통(~0:11.0)에서 3.3초 떨어진
+    0:14.3에 앉았는데, 그 자리는 가사에 없는 「데코」 캐치프레이즈다 — owsm 자유 디코드가
+    「て」p=0.80 「こ」p=0.70으로 실제 가창(p 0.3~0.4)보다 또렷하게 들었다. 가사에 없는
+    발화의 프레임을 DP가 가장 가까운 라인 꼬리에 먹인 것이다. butcher 2:08의 「라」「입」도
+    같은 꼴이고(UST 실측 정위치 2:01.0, 7초 지각), Madeon 라인28의 「두」는 클램프가 길이를
+    0으로 눌렀지만 **시작이 그대로 무음 위**(2:01.14)에 남아 있었다.
+
+    판정: 라인 안 인접 세그 간격 ≥ 2초이고 그 사이 연속 무음 ≥ 1초. 13곡 스캔에서 5자리,
+    UST·청취로 전부 결함 확정(2026-08-02). 꼬리 세그는 몸통 끝 +0.3초 지점으로 모으고
+    라인 끝도 거기로 줄인다 — 세그 시작을 옮기는 드문 자리지만, 여기의 시작은 CTC 실측이
+    아니라 남의 소리에 붙잡힌 잔해라는 것을 emission으로 확인했다.
+    """
+    pulled = 0
+    for index, line in enumerate(lines):
+        segs = line.get("segs") or []
+        cut = None
+        for k in range(len(segs) - 1):
+            body_end = float(max(segs[k]["end"], segs[k]["start"]))
+            tail_start = float(segs[k + 1]["start"])
+            if tail_start - body_end < 2.0:
+                continue
+            if _silent_run(regions, body_end, tail_start) < 1.0:
+                continue
+            cut = k
+            break
+        if cut is None:
+            continue
+        body_end = float(max(segs[cut]["end"], segs[cut]["start"]))
+        next_start = (
+            float(lines[index + 1]["start"]) if index + 1 < len(lines) else float("inf")
+        )
+        target = round(min(body_end + 0.3, next_start - 0.01), 3)
+        target = max(target, body_end)
+        for seg in segs[cut + 1 :]:
+            seg["start"] = seg["end"] = target
+        line["end"] = round(max(float(line["start"]), min(float(line["end"]), target)), 3)
+        line.setdefault("meta", {})["postprocessed"] = True
+        pulled += 1
+    return pulled
+
+
 class PostProcessedAligner(AlignerAdapter):
     """기반 정렬기 출력에 프로드 보정층을 적용한다."""
 
@@ -346,6 +464,14 @@ class PostProcessedAligner(AlignerAdapter):
                     seg["end"] = round(max(seg["start"], new[1]), 3)
                     trimmed += 1
 
+        # 좌초 보정 두 장치 — 둘 다 우세도 위에서만 판정한다(분리 스템에서 VAD가 죽는 것이
+        # 이 층의 교훈이었다). 접기를 먼저 돌린다: 좌초 라인이 제자리로 가면 그 안의 끊긴
+        # 꼬리는 함께 사라지므로, 순서를 바꾸면 접힐 라인의 꼬리를 먼저 뭉개 버린다.
+        folded = pulled = 0
+        if self.config.clamp_only and activity_source == "dominance":
+            folded = _fold_stranded_repeats(lines, activity.regions)
+            pulled = _pull_disconnected_tails(lines, activity.regions)
+
         return {
             "applied": True,
             "vad_stem": stem_used,
@@ -356,6 +482,8 @@ class PostProcessedAligner(AlignerAdapter):
             "trimmed_segments": trimmed,
             "clamped_lines": len(clamped),
             "snapped_lines": len(snapped),
+            "folded_lines": folded,
+            "pulled_tails": pulled,
             "total_lines": len(lines),
             "elapsed_sec": round(time.perf_counter() - started, 3),
         }
