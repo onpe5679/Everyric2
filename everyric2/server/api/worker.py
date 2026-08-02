@@ -333,6 +333,9 @@ class CacheCheckResponse(BaseModel):
 class ResultRequest(BaseModel):
     timestamps: list[dict[str, Any]]
     language: str | None = None
+    # MMS 강제 폴백 등 엔진 변형 식별자 — 결함 #5, PipelineResult.engine_variant를 그대로 싣는다.
+    # 구버전 원격 워커는 이 필드를 안 보내므로 기본값 None(엔진 변형 정보 없음, 기존 동작).
+    engine_variant: str | None = None
     quality_score: float | None = None
     audio_hash: str | None = None
     extra: dict[str, Any] | None = None
@@ -609,6 +612,7 @@ async def submit_result(
             timestamps=request.timestamps,
             language=request.language,
             engine="ctc",
+            engine_variant=request.engine_variant,
             quality_score=request.quality_score,
             audio_hash=request.audio_hash,
             extra=request.extra,

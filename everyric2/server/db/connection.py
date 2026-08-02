@@ -65,6 +65,33 @@ async def init_db():
                 await conn.execute(text("ALTER TABLE sync_results ADD COLUMN title VARCHAR(256)"))
             if sync_cols and "artist" not in sync_cols:
                 await conn.execute(text("ALTER TABLE sync_results ADD COLUMN artist VARCHAR(128)"))
+            # 결함 #5: language와 엔진 변형(MMS 강제 폴백 등)을 분리하는 컬럼 — models.py의
+            # SyncResult.engine_variant/engine_version 독스트링 참고.
+            if sync_cols and "engine_variant" not in sync_cols:
+                await conn.execute(
+                    text("ALTER TABLE sync_results ADD COLUMN engine_variant VARCHAR(16)")
+                )
+                # 일회성 소급 백필: 이 컬럼이 생기기 전에는 force_mms 정렬 결과가
+                # language="{순수언어}_mms"로 뭉쳐 저장됐다(ctc_engine.py 654행 cache_key를
+                # worker.py가 그대로 detected_lang에 흘리던 시절의 흔적). 순수 언어를 되살리고
+                # 변형을 engine_variant로 옮긴다. SUBSTR(-4)='_mms' 정확 비교라 언어 코드
+                # 안에 우연히 "mms"가 들어가는 경우와 섞이지 않는다(LIKE '%_mms'는 SQLite에서
+                # '_'가 단일문자 와일드카드라 오탐 가능 — 그래서 LIKE가 아니라 SUBSTR로 짠다).
+                # 컬럼이 막 생긴 시점엔 모든 행의 engine_variant가 NULL이라 이 UPDATE가 그
+                # 조건과 겹칠 일이 없고, WHERE 조건 자체도 재실행에 안전(멱등)하다 — 한 번
+                # 분리된 행은 language가 더 이상 "_mms"로 안 끝나 다시 걸리지 않는다.
+                await conn.execute(
+                    text(
+                        "UPDATE sync_results SET "
+                        "language = SUBSTR(language, 1, LENGTH(language) - 4), "
+                        "engine_variant = 'mms' "
+                        "WHERE language IS NOT NULL AND SUBSTR(language, -4) = '_mms'"
+                    )
+                )
+            if sync_cols and "engine_version" not in sync_cols:
+                await conn.execute(
+                    text("ALTER TABLE sync_results ADD COLUMN engine_version VARCHAR(32)")
+                )
         # 서버가 죽으며 남긴 좀비 잡(pending/processing) 정리 — 방치하면 같은 영상의
         # 생성 요청이 죽은 잡에 합류해 영구 "전사 중"에 갇힌다
         from sqlalchemy import text as _text

@@ -582,7 +582,15 @@ class CTCEngine(BaseAlignmentEngine):
         super().__init__(config)
         self._model = None
         self._processor = None
+        # 캐시 키 — force_mms면 "{language}_mms", 아니면 순수 언어 그대로. 어댑터 재사용
+        # 여부 판정(_ensure_model_loaded 655행)에만 쓰는 내부 값이라 그대로 둔다.
         self._current_lang = None
+        # DB로 흘러가는 값은 이 둘로 갈라서 노출한다(결함 #5) — worker.py의 _run_alignment가
+        # 여기서 순수 언어와 변형을 따로 읽어 SyncResult.language/engine_variant에 각각
+        # 저장한다. _current_lang(위)은 "{language}_mms" 캐시 키를 그대로 유지하므로 절대
+        # DB에 직접 쓰지 마라 — 결함 #5가 바로 그 실수였다.
+        self._current_language: str | None = None
+        self._current_engine_variant: str | None = None
         # 현재 상주 중인 베이스 모델 식별자와 MMS 어댑터 코드 — 언어 전환 시 전체 재로드가
         # 필요한지(베이스가 다름) 어댑터 교체로 충분한지(베이스가 같음) 판단하는 근거다.
         self._current_base: str | None = None
@@ -688,6 +696,8 @@ class CTCEngine(BaseAlignmentEngine):
                     )
                 self._current_adapter = mms_lang_code
                 self._current_lang = cache_key
+                self._current_language = language
+                self._current_engine_variant = "mms" if force_mms else None
                 return
 
             from transformers import Wav2Vec2ForCTC
@@ -719,6 +729,8 @@ class CTCEngine(BaseAlignmentEngine):
             self._current_adapter = None
 
         self._current_lang = cache_key
+        self._current_language = language
+        self._current_engine_variant = "mms" if force_mms else None
 
     def transcribe(
         self,

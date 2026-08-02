@@ -7,6 +7,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from everyric2.server.db.models import (
+    ENGINE_VERSION,
     ActionLog,
     Job,
     LinkJob,
@@ -205,6 +206,11 @@ class SyncRepository:
         timestamps: list[dict[str, Any]],
         language: str | None = None,
         engine: str = "ctc",
+        engine_variant: str | None = None,
+        # 새로 만드는 싱크는 전부 현행 스택 식별자를 새긴다(결함 #5 부수 작업) — 호출부가
+        # 일일이 넘기지 않아도 되게 기본값을 ENGINE_VERSION으로 둔다. 옛 스택 흔적을 남기고
+        # 싶은 백필/마이그레이션 스크립트만 명시적으로 None을 넘기면 된다.
+        engine_version: str | None = ENGINE_VERSION,
         quality_score: float | None = None,
         audio_hash: str | None = None,
         extra: dict[str, Any] | None = None,
@@ -219,6 +225,8 @@ class SyncRepository:
             timestamps={"segments": timestamps, **(extra or {})},
             language=language,
             engine=engine,
+            engine_variant=engine_variant,
+            engine_version=engine_version,
             quality_score=quality_score,
             title=(title.strip()[:256] if title else None),
             artist=(artist.strip()[:128] if artist else None),

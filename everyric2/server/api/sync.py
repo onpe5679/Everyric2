@@ -216,6 +216,11 @@ class SyncLookupResponse(BaseModel):
     quality_score: float | None = None
     audio_hash: str | None = None
     language: str | None = None
+    # 결함 #5 additive 필드 — 구버전 확장은 모르는 필드를 무시하므로 하위호환 유지.
+    # engine_variant: MMS 강제 폴백 등 엔진 변형("mms" | None). engine_version: 이 싱크를
+    # 만든 정렬 스택 식별자(models.ENGINE_VERSION) — NULL이면 이 컬럼이 생기기 전 구세대.
+    engine_variant: str | None = None
+    engine_version: str | None = None
     created_at: str | None = None
     # 곡 단위 진단 정보 (star 흡수 구간, VAD 발성 구간) — 확장 디버그 스트립용
     debug: dict[str, Any] | None = None
@@ -561,6 +566,8 @@ def _build_sync_response(
         quality_score=result.quality_score,
         audio_hash=result.audio_hash,
         language=result.language,
+        engine_variant=result.engine_variant,
+        engine_version=result.engine_version,
         created_at=result.created_at.isoformat() if result.created_at else None,
         debug=timestamps.get("debug"),
         attribution=timestamps.get("attribution"),
@@ -2088,6 +2095,8 @@ async def search_by_audio_hash(request: SearchByAudioRequest):
                 quality_score=result.quality_score,
                 audio_hash=result.audio_hash,
                 language=result.language,
+                engine_variant=result.engine_variant,
+                engine_version=result.engine_version,
                 created_at=result.created_at.isoformat() if result.created_at else None,
             )
         return SyncLookupResponse(found=False)
@@ -2107,6 +2116,8 @@ async def list_syncs_for_video(video_id: str):
                     "audio_hash": r.audio_hash,
                     "quality_score": r.quality_score,
                     "language": r.language,
+                    "engine_variant": r.engine_variant,
+                    "engine_version": r.engine_version,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                 }
                 for r in results
@@ -2132,6 +2143,8 @@ async def search_available_syncs(request: SearchSyncRequest):
                     "audio_hash": r.audio_hash,
                     "quality_score": r.quality_score,
                     "language": r.language,
+                    "engine_variant": r.engine_variant,
+                    "engine_version": r.engine_version,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                     "lyrics_preview": _get_lyrics_preview(r.timestamps),
                 }

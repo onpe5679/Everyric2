@@ -1135,6 +1135,13 @@ async def _complete_from_cache_db(
                 timestamps=segments,
                 language=existing.language,
                 engine=existing.engine,
+                # 이건 새 정렬이 아니라 기존 행의 **복사**다 — create()의 engine_variant/
+                # engine_version 기본값(None/현행 ENGINE_VERSION)에 맡기면 원본이 어떤
+                # 변형·스택으로 만들어졌는지가 이 복사본에서 조용히 사라지거나(variant),
+                # 실제로는 옛 스택이 만든 결과인데 지금 막 만든 것처럼 현행 스택으로
+                # 잘못 표시된다(version) — 원본 값을 그대로 옮긴다.
+                engine_variant=existing.engine_variant,
+                engine_version=existing.engine_version,
                 quality_score=existing.quality_score,
                 audio_hash=audio_hash,
                 extra=src,
@@ -1252,6 +1259,9 @@ class PipelineResult:
     quality_score: float | None
     audio_hash: str
     extra: dict[str, Any] | None
+    # MMS 강제 폴백 등 엔진 변형 식별자 — None이면 변형 없음(결함 #5, ctc_engine.py의
+    # _current_engine_variant를 그대로 옮긴다). SyncRepository.create(engine_variant=...)로 간다.
+    engine_variant: str | None = None
 
 
 class PipelineHooks(Protocol):
@@ -1403,6 +1413,7 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
         quality_score=result.get("quality_score"),
         audio_hash=audio_hash,
         extra=_build_extra(result, attribution),
+        engine_variant=result.get("engine_variant"),
     )
 
 
@@ -1489,6 +1500,7 @@ async def _process_job_inner(job_id: str, job) -> None:
                 timestamps=result.timestamps,
                 language=result.language,
                 engine="ctc",
+                engine_variant=result.engine_variant,
                 quality_score=result.quality_score,
                 audio_hash=result.audio_hash,
                 extra=result.extra,
@@ -4432,9 +4444,15 @@ def _run_alignment(
                 f"{quality_score} instead of {coverage_meta['measured_conf']}"
             )
 
+        # 결함 #5: DB로 흘러가는 language는 반드시 순수 언어여야 한다. 엔진의 _current_lang은
+        # 내부 캐시 키라 force_mms 정렬이면 "{language}_mms"로 뭉쳐 있다(ctc_engine.py 654행) —
+        # 그 값을 그대로 language 컬럼에 썼던 것이 결함의 원인이다. 대신 엔진이 따로 노출하는
+        # 순수 언어(_current_language)와 변형(_current_engine_variant)을 각각 읽는다.
         detected_lang = language
-        if hasattr(engine, "_current_lang"):
-            detected_lang = engine._current_lang
+        engine_variant = None
+        if hasattr(engine, "_current_language"):
+            detected_lang = engine._current_language
+            engine_variant = getattr(engine, "_current_engine_variant", None)
 
         # 곡 단위 디버그 메타 — star가 흡수한 구간(가사 밖 가창)과 VAD 발성 구간,
         # 그리고 어떤 텍스트로 정렬했는지(원문 vs 독음) 클라 디버그 표시용.
@@ -4480,6 +4498,7 @@ def _run_alignment(
         return {
             "timestamps": timestamps,
             "language": detected_lang,
+            "engine_variant": engine_variant,
             "quality_score": quality_score,
             "debug": debug_meta,
             "alignment_text": alignment_text,
