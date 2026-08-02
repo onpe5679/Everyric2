@@ -264,6 +264,12 @@ class SyncResultVersion(Base):
     timestamps: Mapped[dict[str, Any]] = mapped_column(JSON)
     language: Mapped[str | None] = mapped_column(String(8))
     engine: Mapped[str] = mapped_column(String(16), default="ctc")
+    # 스냅샷된 세대의 엔진 정체 — 고스트 비교의 **라벨**이다("구: mms-htdemucs-1 →
+    # 신: ..."). 이 둘이 없으면 이전 버전이 어느 스택 산출물인지 알 길이 없어
+    # engine_version을 시각 추산 대신 값으로 기록한 이유 자체가 사라진다.
+    # 구세대 행은 engine_version이 NULL이고, 그 NULL 자체가 "스탬프 이전 세대"라는 정보다.
+    engine_variant: Mapped[str | None] = mapped_column(String(16))
+    engine_version: Mapped[str | None] = mapped_column(String(32))
     quality_score: Mapped[float | None] = mapped_column(Float)
     # 스냅샷된 sync_results 행이 **원래** 만들어진 시각 (그 세대의 생성 시각 — 고스트 라벨용).
     # server_default를 쓰지 않는다: 이 값은 지금이 아니라 옮겨 담는 원본 행의 created_at을

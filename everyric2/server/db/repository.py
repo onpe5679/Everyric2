@@ -314,6 +314,8 @@ class SyncResultVersionRepository:
             existing.timestamps = previous.timestamps
             existing.language = previous.language
             existing.engine = previous.engine
+            existing.engine_variant = previous.engine_variant
+            existing.engine_version = previous.engine_version
             existing.quality_score = previous.quality_score
             existing.created_at = previous.created_at
         else:
@@ -324,6 +326,8 @@ class SyncResultVersionRepository:
                     timestamps=previous.timestamps,
                     language=previous.language,
                     engine=previous.engine,
+                    engine_variant=previous.engine_variant,
+                    engine_version=previous.engine_version,
                     quality_score=previous.quality_score,
                     created_at=previous.created_at,
                 )

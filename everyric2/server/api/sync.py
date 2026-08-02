@@ -278,6 +278,10 @@ class SyncPreviousVersionResponse(BaseModel):
     # (붙여넣기/검색 생성 — 줄이 대응하지 않아 비교가 무의미)인지 **확장이** 가리는 재료다.
     # 서버는 판정하지 않는다 — additive 필드라 구버전 확장은 무시하면 그만이다.
     lyrics_hash: str | None = None
+    # 스냅샷된 세대의 엔진 정체 — 고스트 비교의 라벨("구: mms-htdemucs-1 → 신: ...").
+    # engine_version이 NULL이면 스탬프 도입 이전 세대라는 뜻이다(그 자체가 정보).
+    engine_variant: str | None = None
+    engine_version: str | None = None
 
 
 class LineMeta(BaseModel):
@@ -1499,6 +1503,8 @@ async def get_previous_sync_version(video_id: str):
             created_at=version.created_at.isoformat() if version.created_at else None,
             replaced_at=version.replaced_at.isoformat() if version.replaced_at else None,
             lyrics_hash=version.lyrics_hash,
+            engine_variant=version.engine_variant,
+            engine_version=version.engine_version,
         )
 
 

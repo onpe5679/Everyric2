@@ -375,3 +375,62 @@ def test_paste_style_replacement_snapshots_the_old_rows_distinct_lyrics_hash():
             assert resp.lyrics_hash == "old-wrong-lyrics-hash"
 
     asyncio.run(body())
+
+
+# ⑦ 스냅샷은 그 세대의 **엔진 정체**(engine_variant·engine_version)도 함께 옮긴다.
+# 이 둘이 없으면 고스트 비교에 "구: mms-htdemucs-1 → 신: ..." 라벨을 붙일 수 없어,
+# engine_version을 생성 시각 추산 대신 값으로 기록하기로 한 결정 자체가 무의미해진다.
+# 통합 시점에 드러난 구멍이다 — 버저닝 테이블이 정의된 뒤 engine_* 컬럼이 추가됐다.
+
+
+def test_snapshot_carries_engine_identity_of_the_replaced_generation():
+    """구세대(engine_version=NULL) 위에 새 스택 싱크가 덮이면, 스냅샷은 **구세대의**
+    엔진 정체를 담는다 — NULL이라는 사실 자체가 "스탬프 이전 세대"라는 정보다."""
+
+    async def body():
+        async with _env() as sm:
+            # 구세대: 스탬프 이전에 만들어진 행(engine_version 없음, MMS 폴백이었음)
+            await _create(
+                sm, lyrics_hash="same-hash", segments=SEGMENTS_V1,
+                engine_variant="mms", engine_version=None,
+            )
+            # 새 스택으로 재처리 — 같은 가사(재생성 버튼 경로)
+            await _create(
+                sm, lyrics_hash="same-hash", segments=SEGMENTS_V2,
+                engine_variant=None, engine_version="mms-htdemucs-1",
+            )
+
+            snap = await _get_version(sm)
+            assert snap.engine_variant == "mms"      # 덮인 쪽(구세대)의 값
+            assert snap.engine_version is None       # 스탬프 이전 세대
+
+            resp = await get_previous_sync_version(VIDEO)
+            assert resp.engine_variant == "mms"
+            assert resp.engine_version is None
+
+    asyncio.run(body())
+
+
+def test_snapshot_engine_identity_survives_second_replacement():
+    """두 번째 교체에서도(update 분기) 엔진 정체가 갱신된다 — insert 분기만 고치고
+    update 분기를 빠뜨리면 첫 스냅샷의 값이 그대로 굳는다."""
+
+    async def body():
+        async with _env() as sm:
+            first = await _create(
+                sm, lyrics_hash="h", segments=SEGMENTS_V1, engine_version=None
+            )
+            second = await _create(
+                sm, lyrics_hash="h", segments=SEGMENTS_V2, engine_version="mms-htdemucs-1",
+            )
+            # 세 번째 저장이 "직전 최신"으로 second를 집게 순서를 못박는다(초 단위 동률 회피)
+            await _force_creation_order(sm, [first, second])
+            await _create(
+                sm, lyrics_hash="h", segments=SEGMENTS_V3, engine_version="next-stack-1",
+            )
+
+            # 직전 세대는 두 번째 행(mms-htdemucs-1)이다 — 첫 세대(NULL)가 아니다
+            snap = await _get_version(sm)
+            assert snap.engine_version == "mms-htdemucs-1"
+
+    asyncio.run(body())
