@@ -70,6 +70,32 @@ class AudioSettings(BaseSettings):
         "quality averaging (10 shifts = 10× separation time).",
     )
 
+    # 분리기 백엔드 선택 — 이 값을 바꾸는 것만으로 실제 배선(worker.py 등)이 전환되지는
+    # 않는다. VocalSeparator가 이 값을 보고 분기할 뿐이고, 그 분기를 실제로 태우는 것은
+    # 별도 작업(worker.py 배선 전환) 몫이다.
+    separator_backend: Literal["htdemucs", "bs-polarformer-fp16"] = Field(
+        default="htdemucs",
+        description="Which vocal separator backend VocalSeparator uses. 'htdemucs' (default) "
+        "keeps the existing demucs subprocess path completely unchanged. 'bs-polarformer-fp16' "
+        "routes to the ported bench candidate that measured +26.7pp alignment accuracy on hard "
+        "songs (no-separation 47.6 -> polar 74.3; see docs/research/2026-07-30-model-replacement/"
+        "ust-precision-comparison.md). That path requires CUDA and pre-provisioned model assets "
+        "under separator_model_dir (see everyric2/audio/polarformer_separator.py) — it never "
+        "downloads them at request time and never silently falls back to htdemucs; missing "
+        "assets or a missing CUDA device raise a clear exception instead, because if you don't "
+        "know which separator actually ran, the alignment result becomes uninterpretable.",
+    )
+    separator_model_dir: Path = Field(
+        default=Path.home() / ".cache" / "everyric2" / "models",
+        description="Directory VocalSeparator looks for pre-provisioned bs-polarformer-fp16 "
+        "assets in when separator_backend=bs-polarformer-fp16: model_bs_polarformer_float16."
+        "ckpt/.yaml plus the pinned-commit MSST vendor source under "
+        "msst_src_<commit8>/models/bs_roformer/{attend,bs_roformer}.py — same filenames as "
+        "scripts/bench_adapters/separators_quality.py's benchmark/models layout, so a bench-"
+        "provisioned directory can be pointed at directly. Unused when separator_backend is the "
+        "default 'htdemucs'.",
+    )
+
     # Temp directory
     temp_dir: Path = Field(
         default=Path("/tmp/everyric2"), description="Temporary directory for processing"

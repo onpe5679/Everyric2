@@ -1,6 +1,7 @@
-"""Vocal separation using Demucs."""
+"""Vocal separation using Demucs (default) or the ported bs-polarformer-fp16 backend."""
 
 import logging
+import shutil
 import subprocess
 import sys
 import threading
@@ -55,6 +56,16 @@ class DemucsNotAvailableError(SeparationError):
     pass
 
 
+class SeparatorBackendUnavailableError(SeparationError):
+    """설정된 분리기 백엔드(예: bs-polarformer-fp16)의 의존성/모델 자산/CUDA가 없을 때.
+
+    DemucsNotAvailableError와 대칭인 non-demucs 백엔드용 예외 — 조용히 htdemucs로 새지 않고
+    이 예외로 표면화한다(everyric2/audio/polarformer_separator.py의 조용한 폴백 금지 정책).
+    """
+
+    pass
+
+
 @dataclass
 class SeparationResult:
     """Result of vocal separation."""
@@ -62,6 +73,10 @@ class SeparationResult:
     vocals: AudioData
     accompaniment: AudioData
     original: AudioData
+    # 실제로 돌아간 분리기 이름 — 새 필드지만 기본값이 있어 기존 호출부(worker.py 등)는
+    # 수정 없이 동작한다. htdemucs 경로는 실제 demucs 모델 이름(예: "htdemucs_ft")을 채워
+    # 넣고, bs-polarformer-fp16 경로는 polarformer_separator.BACKEND_NAME을 채워 넣는다.
+    backend: str = "htdemucs"
 
 
 class VocalSeparator:
@@ -87,11 +102,20 @@ class VocalSeparator:
         self._demucs_available: bool | None = None
 
     def is_available(self) -> bool:
-        """Check if Demucs is available.
+        """Check whether the CONFIGURED separator backend is available.
 
         Returns:
-            True if Demucs is installed and working.
+            True if the backend named by ``config.separator_backend`` is installed/provisioned.
         """
+        if self.config.separator_backend == "bs-polarformer-fp16":
+            # 필요조건은 파일시스템 stat 몇 개 + 임포트 시도뿐이라 캐시하지 않는다 — 캐시하면
+            # 서버가 떠 있는 동안 자산을 사후 조달해도 "불가" 판정이 프로세스 재시작 전까지
+            # 굳어버린다.
+            from everyric2.audio import polarformer_separator as pf
+
+            return pf.dependencies_and_assets_available(self.config.separator_model_dir)
+
+        # 기존 htdemucs 경로 — 아래는 변경하지 않는다.
         if self._demucs_available is not None:
             return self._demucs_available
 
@@ -129,9 +153,19 @@ class VocalSeparator:
             SeparationResult with vocals and accompaniment.
 
         Raises:
-            DemucsNotAvailableError: If Demucs is not installed.
+            DemucsNotAvailableError: If Demucs is not installed (htdemucs backend).
+            SeparatorBackendUnavailableError: If the configured non-demucs backend's
+                dependencies/model assets/CUDA are missing (e.g. bs-polarformer-fp16).
             SeparationError: If separation fails.
         """
+        if self.config.separator_backend == "bs-polarformer-fp16":
+            # ``model``은 demucs 모델 선택 인자라 이 백엔드에서는 의미가 없다(단일 스펙) —
+            # 조용히 무시한다. 지금 이 값을 넘기는 호출부는 없다(everyric2/cli.py,
+            # everyric2/melody/extractor.py, everyric2/server/worker.py 전부 위치인자 없이
+            # audio/use_gpu만 넘긴다).
+            return self._separate_polarformer(audio, use_gpu=use_gpu)
+
+        # 기존 htdemucs 경로 — 이 시점부터 아래는 변경하지 않는다.
         if not self.is_available():
             raise DemucsNotAvailableError(
                 "Demucs is not installed. Install with: pip install demucs"
@@ -208,6 +242,7 @@ class VocalSeparator:
                 vocals=vocals,
                 accompaniment=accompaniment,
                 original=audio,
+                backend=model,
             )
 
         except subprocess.TimeoutExpired:
@@ -220,6 +255,51 @@ class VocalSeparator:
             # Cleanup input file
             if input_path.exists():
                 input_path.unlink()
+
+    def _separate_polarformer(self, audio: AudioData, use_gpu: bool) -> SeparationResult:
+        """bs-polarformer-fp16 경로 — everyric2/audio/polarformer_separator.py로 위임한다.
+
+        모델 조달 실패(자산 부재)와 CUDA 부재는 SeparatorBackendUnavailableError로,
+        분리 자체의 실패는 SeparationError로 표면화한다 — 둘 다 htdemucs로 조용히
+        폴백하지 않는다(어느 분리기가 실제로 돌았는지 모르면 결과 해석이 불가능해진다).
+        """
+        from everyric2.audio import polarformer_separator as pf
+
+        models_dir = self.config.separator_model_dir
+        try:
+            pf.require_available(models_dir)
+        except pf.PolarFormerUnavailableError as exc:
+            raise SeparatorBackendUnavailableError(str(exc)) from exc
+
+        temp_dir = self.config.temp_dir
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        input_path = temp_dir / "polarformer_input.wav"
+        audio.to_file(input_path)
+        work_dir = temp_dir / "polarformer_output"
+
+        try:
+            try:
+                result = pf.separate(input_path, work_dir, models_dir, use_gpu=use_gpu)
+            except pf.PolarFormerUnavailableError as exc:
+                raise SeparatorBackendUnavailableError(str(exc)) from exc
+            except pf.PolarFormerBackendError as exc:
+                raise SeparationError(f"{pf.BACKEND_NAME} separation failed: {exc}") from exc
+
+            logger.info(
+                "separator backend used: %s (elapsed=%.2fs)", pf.BACKEND_NAME, result.elapsed_sec
+            )
+            vocals = self.loader.load(result.vocals_path)
+            accompaniment = self.loader.load(result.inst_path)
+
+            return SeparationResult(
+                vocals=vocals,
+                accompaniment=accompaniment,
+                original=audio,
+                backend=pf.BACKEND_NAME,
+            )
+        finally:
+            input_path.unlink(missing_ok=True)
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     def separate_file(
         self,
