@@ -7,6 +7,7 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -27,7 +28,14 @@ const ctx = await chromium.launchPersistentContext(userDataDir, {
 });
 
 try {
-  await (ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: 15000 }));
+  const sw = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: 15000 });
+  const extId = new URL(sw.url()).host;
+  const localServerUrl = 'http://127.0.0.1:8000';
+  // serverUrl 기본값이 프로드로 바뀐 뒤로는(host-permissions.ts) 여기서 로컬을 명시하고
+  // optional_host_permissions도 실제 흐름으로 부여해야 "서버 싱크가 즉시 로드"(DB에 있음)
+  // 전제가 성립한다 — 이전엔 빠져 있어서 실제로는 프로드를 보고 있었다.
+  await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, localServerUrl);
+  await sw.evaluate(s => chrome.storage.local.set({ settings: s }), { serverUrl: localServerUrl });
   const page = ctx.pages()[0] ?? await ctx.newPage();
   await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForSelector('#everyric-root', { state: 'attached', timeout: 30000 });

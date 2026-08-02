@@ -8,6 +8,7 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -39,8 +40,13 @@ const ctx = await chromium.launchPersistentContext(userDataDir, {
 try {
   // 디버그 모드 + 넓은 창(8마디)을 미리 저장해 두고 페이지를 연다
   const sw = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: 15000 });
+  const extId = new URL(sw.url()).host;
+  const localServerUrl = 'http://127.0.0.1:8000';
+  // serverUrl 기본값이 프로드로 바뀐 뒤로는(host-permissions.ts) 여기서 로컬을 명시하고
+  // optional_host_permissions도 실제 흐름으로 부여해야 이 곡의 로컬 싱크가 패널에 뜬다.
+  await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, localServerUrl);
   await sw.evaluate(s => chrome.storage.local.set({ settings: s }), {
-    debugInfo: true, pitchWindowMeasures: 8,
+    debugInfo: true, pitchWindowMeasures: 8, serverUrl: localServerUrl,
   });
 
   const page = ctx.pages()[0] ?? await ctx.newPage();

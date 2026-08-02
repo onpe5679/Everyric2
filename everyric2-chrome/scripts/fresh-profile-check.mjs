@@ -10,6 +10,7 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -38,8 +39,15 @@ const ctx = await chromium.launchPersistentContext(userDataDir, {
 
 try {
   const sw = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: 15000 });
+  const extId = new URL(sw.url()).host;
+  const localServerUrl = 'http://127.0.0.1:8000';
+  // serverUrl 기본값이 프로드로 바뀐 뒤로는(host-permissions.ts) 여기서 로컬을 명시하고
+  // optional_host_permissions도 실제 흐름으로 부여해야 "서버 싱크에 저장된 발음/번역"
+  // 전제(로컬 DB)가 성립한다.
+  await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, localServerUrl);
   // 사용자 설정 재현: 번역 표시 ON (문제가 발생했던 조건)
-  await sw.evaluate(s => chrome.storage.local.set({ settings: s }), { showTranslation: true, translationLanguage: 'ko' });
+  await sw.evaluate(s => chrome.storage.local.set({ settings: s }),
+    { showTranslation: true, translationLanguage: 'ko', serverUrl: localServerUrl });
 
   const page = ctx.pages()[0] ?? await ctx.newPage();
   await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -106,8 +114,10 @@ try {
   await page.waitForTimeout(1000);
 
   // pitchGuide OFF → 리로드 → PiP에서 음정 바 숨김 확인
+  // storage.local.set({settings: s})는 병합이 아니라 통째로 교체다 — serverUrl을 다시
+  // 안 넣으면 getSettings()가 DEFAULT_SETTINGS(프로드)로 되돌린다.
   await sw.evaluate(s => chrome.storage.local.set({ settings: s }),
-    { showTranslation: true, translationLanguage: 'ko', pitchGuide: false });
+    { showTranslation: true, translationLanguage: 'ko', pitchGuide: false, serverUrl: localServerUrl });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => {
     const root = document.getElementById('everyric-root')?.shadowRoot;

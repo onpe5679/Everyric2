@@ -13,6 +13,7 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -150,6 +151,10 @@ async function testSong(page, vid, slug, lang) {
 try {
   const sw = await acquireServiceWorker();
   console.log('extension loaded:', sw.url().slice(0, 60));
+  const extId = new URL(sw.url()).host;
+  // SERVER가 프로드(기본값)면 무동작. EVERYRIC_E2E_SERVER로 로컬을 가리키면 실제
+  // 옵션 페이지 "허용" 흐름을 재현해 optional_host_permissions를 부여한다.
+  await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, SERVER);
   await setSettings(sw, {
     serverUrl: SERVER, apiKey: '',
     showTranslation: true, showPronunciation: true,

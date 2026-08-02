@@ -6,6 +6,7 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -41,6 +42,15 @@ try {
   }
   // EVERYRIC_SMOKE_DEBUG=1 → 디버그 정보 스트립 켜고 시작
   if (process.env.EVERYRIC_SMOKE_DEBUG === '1') injected.debugInfo = true;
+  // EVERYRIC_SMOKE_SERVER=http://127.0.0.1:8000 → mock-server.mjs/실서버 등 로컬을 명시.
+  // serverUrl 기본값이 프로드로 바뀐 뒤로는 이걸 안 주면 TRANSLATE/DEBUG 옵션도 조용히
+  // 프로드를 보게 된다. 로컬이면 optional_host_permissions를 실제 흐름으로 부여한다.
+  const localServer = process.env.EVERYRIC_SMOKE_SERVER;
+  if (localServer) {
+    const extId = new URL(sw.url()).host;
+    await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, localServer);
+    injected.serverUrl = localServer;
+  }
   if (Object.keys(injected).length > 0) {
     await sw.evaluate(s => chrome.storage.local.set({ settings: s }), injected);
     console.log('settings injected:', JSON.stringify(injected));
