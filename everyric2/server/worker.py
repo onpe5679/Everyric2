@@ -809,22 +809,59 @@ def _attach_ko_pron_variants(seg: dict[str, Any], text: str) -> None:
         seg.setdefault("pron_segs", {})["romaji"] = romaja_segments
 
 
-def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
-    """라틴(영어) 곡 세그: 일본어권 사용자를 위한 가나 발음만 붙인다.
+def _join_display_units(owners: list[str], word_end: list[bool]) -> str:
+    """``LineUnits.owners[key]``(``align_target``의 문자 단위 소유자 배열) → 표시
+    문자열. ``word_end``가 걸린 자리 뒤에 공백 하나를 넣는다 — 라틴 낱말 사이 공백이
+    소유자 배열 자체엔 없으므로(``align_target`` 모듈 docstring) 이 플래그로 복원한다.
+    ``refine_window._join_pron``과 같은 규칙이지만 시간 축(세그) 없이 문자열만
+    조립한다 — 이 경로(``_attach_latin_pron_variants``)는 실측 정렬이 아니라 결정론
+    근사라 세그를 안 낸다.
 
-    ``latin_hangul``의 느슨 음차를 거쳐 만든 결정론 근사라 글자 스팬을 신뢰할 근거가
-    없다 — CTC 정렬 자체가 라틴 위에서 약하다는 것이 기존 실측이다(``latin_hangul``
-    모듈 docstring). 그래서 ``pron_segs``는 붙이지 않고 표시 문자열만 남긴다.
+    ``shown.strip()``으로 공백뿐인 소유자를 건너뛴다 — ``derive_en_display_units``는
+    낱말 사이 원문 공백도 owners에 그 글자 그대로(=" ") 얹으므로(``align_target`` 모듈의
+    "낱말 사이 공백·구두점" 패스스루), 그걸 그대로 이으면 word_end가 넣는 공백과 겹쳐
+    낱말 사이가 두 칸으로 벌어진다. ``refine_window._build_segments``가 같은 자리를
+    ``if not owner.strip(): continue``로 건너뛰는 것과 같은 규칙이다."""
+    parts: list[str] = []
+    for shown, is_word_end in zip(owners, word_end):
+        if shown.strip():
+            parts.append(shown)
+        if is_word_end:
+            parts.append(" ")
+    return "".join(parts).strip()
+
+
+def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
+    """라틴(영어) 곡 세그: 표기 4종(hangul/kana/romaji/en)을 전부 표시로 붙인다.
+
+    ``align_target.derive_en_display_units``(2패스 리파이너가 실측 정렬에 쓰는 것과
+    같은 파생 함수)로 표기별 소유자 배열을 얻어 문자열만 조립한다 — 이 함수 자체는
+    CTC 정렬을 하지 않으므로(``latin_hangul`` 모듈 실측: CTC가 라틴 위에서 약해 글자
+    스팬을 신뢰할 근거가 없다) ``pron_segs``는 붙이지 않는다.
+
+    예전엔 일본어권용 가나 근사(``latin_to_kana``) 하나만 냈다 — 2패스가 안 닿은 en
+    곡(고속 라우팅으로 끝난 곡, 라인별 2패스 폴백 등)의 **한국어 사용자가 기본 표기
+    (hangul)를 아예 못 받는** 결함이었다(운영자 지시, 2026-08-03: 사용자가 표기를
+    바꿀 때마다 재생성하지 않고 즉시 전환하려면 넷 다 있어야 한다). 2패스와 같은
+    파생 함수를 쓰므로 "실측 vs 근사"의 유일한 차이가 타이밍(``pron_segs`` 유무)이지
+    표기 문자열 자체는 갈리지 않는다.
     """
     try:
-        from everyric2.text.ko_reading import latin_to_kana
+        from everyric2.text.align_target import derive_en_display_units
 
-        kana = latin_to_kana(text)
+        units = derive_en_display_units(text)
     except Exception:
         logger.exception("latin pron rendering failed")
         return
 
-    seg["pron"] = {"kana": kana}
+    pron = {
+        key: joined
+        for key, owners in units.owners.items()
+        if (joined := _join_display_units(owners, units.word_end))
+    }
+    if not pron:
+        return
+    seg["pron"] = pron
 
 
 def attach_pron_variants(seg: dict[str, Any], *, referee_tokens: list | None = None) -> None:
@@ -845,8 +882,8 @@ def attach_pron_variants(seg: dict[str, Any], *, referee_tokens: list | None = N
     2. 그렇지 않고 한글이 있으면(즉 한글 수 > 일본어 수) **ko 곡** — 가타카나+RR
        로마자를 그 자리에서 결정론 생성한다(``pronunciation`` 필드 불필요 — 원문
        자체가 독음이다).
-    3. 둘 다 없고 라틴 알파벳(``_LATIN_CHAR_RE``)이 있으면 **라틴 곡** — 일본어권
-       사용자용 가나 근사만 표시로 붙인다.
+    3. 둘 다 없고 라틴 알파벳(``_LATIN_CHAR_RE``)이 있으면 **라틴 곡** — 표기 4종
+       (hangul/kana/romaji/en)을 전부 근사로 붙인다(``_attach_latin_pron_variants``).
     4. 셋 다 없으면(숫자·기호뿐인 줄 등) 아무것도 붙이지 않는다.
 
     멱등 — 이미 ``pron``이 있으면 아무것도 하지 않는다. 캐시 재사용·늦은 메타 병합이

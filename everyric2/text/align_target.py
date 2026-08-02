@@ -116,7 +116,35 @@ def _slots_from_pieces(word: str, pieces: list[str]) -> list[str]:
     return slots
 
 
-def derive_en_display_units(source: str) -> LineUnits:
+# "the"의 두 발음(ðə/ði)은 사전이 못 정하는 모호함이 아니라 **다음 낱말의 첫소리**가 이미
+# 정하는 문맥이다 — 모음 앞이면 ði, 자음 앞이면 ðə. 오디오 심판에 맡기면 문맥과 무관하게
+# 청음 우세인 쪽으로 쏠린다(실사용자 청취로 오류 확정, 2026-08-01: weathergirl에서
+# 「디 웨더」·「디 눗」·「디 선」처럼 전부 자음 앞인데 ði로 읽혔다). 그래서 심판 후보에서
+# 제외하고(``en_referee_candidates``) 이 규칙으로 항상 직접 정한다 — 심판 유무와 무관하다.
+_CONTEXT_DETERMINED_WORDS = frozenset({"the"})
+_ARPABET_VOWEL_PREFIX = frozenset("AEIOU")
+
+
+def _the_entry(words: list[str], index: int) -> int:
+    """``words[index]``(="the")가 쓸 CMU 발음 번호. 다음 낱말이 모음으로 시작하면 ði,
+    아니면(자음·문장 끝) ðə. 표제어 순서가 늘 [ðə, ...]는 아니므로 마지막 음소 문자열로
+    ði 항목을 찾는다(``entry[-1].startswith("IY")``)."""
+    from everyric2.text.en_g2p import pronunciations
+
+    following = words[index + 1] if index + 1 < len(words) else ""
+    phones = pronunciations(following)
+    if not phones or not phones[0]:
+        return 0
+    if phones[0][0][:1] not in _ARPABET_VOWEL_PREFIX:
+        return 0
+    entries = pronunciations("the")
+    for position, entry in enumerate(entries):
+        if entry and entry[-1].startswith("IY"):
+            return position
+    return 0
+
+
+def derive_en_display_units(source: str, *, entries: dict[int, int] | None = None) -> LineUnits:
     """영어 한 줄 → (IPA 정렬 타깃, {hangul, kana, romaji, en} 표시).
 
     낱말마다 ``en_g2p.units_for_word``로 IPA 유닛 열을 얻는다. 유닛 하나가 타깃 문자
@@ -133,6 +161,12 @@ def derive_en_display_units(source: str) -> LineUnits:
 
     OOV(사전에 없는 낱말)는 타깃에 원문 철자를 그대로 두고, 표기별 표시를 철자 길이에
     비례 배분한다(``_distribute_by_length``/``_slots_from_pieces``) — 통째로 몰지 않는다.
+
+    ``entries``는 낱말 순번(``_WORD_RE`` 매치 순서, 0부터) → 쓸 CMU 발음 번호다. 오디오
+    심판(``en_referee_candidates``)이 낱말 하나만 바꾼 대체 타깃을 만들 때, 그리고 이긴
+    낱말들을 한꺼번에 반영한 최종 타깃을 만들 때 쓴다. 주지 않은 낱말은 0번(사전 첫
+    발음)이다 — ``the``만 예외로 문맥이 직접 정한다(``_the_entry``, 이 낱말은 심판 후보에도
+    안 오르므로 ``entries``에 있어도 무시된다).
     """
     from everyric2.text.en_g2p import syllabify_unknown, syllable_units_for_word, units_for_word
     from everyric2.text.kana_romaji import kana_to_romaji
@@ -166,12 +200,17 @@ def derive_en_display_units(source: str) -> LineUnits:
             en_owners.extend([""] * pad)
 
     pos = 0
-    for match in _WORD_RE.finditer(source):
+    matches = list(_WORD_RE.finditer(source))
+    words = [m.group(0) for m in matches]
+    for word_index, match in enumerate(matches):
         for char in source[pos : match.start()]:  # 낱말 사이 공백·구두점
             emit(char, char, char, char)
         word = match.group(0)
-        syllables = syllable_units_for_word(word, 0)
-        units = units_for_word(word, 0)
+        entry = (entries or {}).get(word_index, 0)
+        if word.lower() in _CONTEXT_DETERMINED_WORDS:
+            entry = _the_entry(words, word_index)
+        syllables = syllable_units_for_word(word, entry)
+        units = units_for_word(word, entry)
         if syllables:
             for piece, syl_units in syllables:
                 pending_en = piece
@@ -222,6 +261,64 @@ def derive_en_display_units(source: str) -> LineUnits:
             "en": en_owners,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# en: 오디오 심판 후보 (scripts/bench_adapters/two_pass.py 이식, 2026-08-03)
+# ---------------------------------------------------------------------------
+
+# 한 낱말에서 시험할 대체 발음 수 상한. CMU에 5개까지 있는 낱말이 있지만 뒤로 갈수록
+# 희귀 이형(지명·강세 변이)이라 값을 못 하면서 정렬 횟수만 선형으로 늘린다(벤치 채택값).
+MAX_REFEREE_ALTERNATES = 2
+
+
+@dataclass(frozen=True)
+class EnRefereeCandidate:
+    """en 오디오 심판이 견줄 대체 후보 하나 — 낱말 ``word_index`` 하나만 사전의
+    ``entry``번째 발음으로 바꾼, 그 외에는 ``base``와 같은 전체 라인."""
+
+    word_index: int
+    entry: int
+    units: LineUnits
+
+
+def en_referee_candidates(
+    source: str, base: LineUnits, *, allow_length_change: bool = False
+) -> list[EnRefereeCandidate]:
+    """오디오 심판이 견줄 en 낱말별 대체 후보 목록 — 낱말 하나씩만 바꾼 전체 라인.
+
+    조합(2^k)은 만들지 않는다 — 낱말끼리 서로 다른 시간 구간을 차지하므로 독립으로 보고,
+    이긴 것들을 호출부(``refine_window.refine_lines``)가 나중에 **한꺼번에**
+    ``entries={winner_word_index: winner_entry, ...}``로 반영해 최종 타깃을 한 번 더 만든다
+    — 그래서 라인당 정렬 횟수가 후보 수에 선형으로만 늘고도 여러 낱말을 동시에 고칠 수 있다.
+
+    ``base``는 ``derive_en_display_units(source)``(대체 없는 기본 후보)를 그대로 받는다 —
+    다시 만들지 않고 대체 타깃의 길이를 비교하는 기준으로 쓴다. ``the``는 문맥이 이미
+    정하므로 제외한다(``_the_entry`` — ``derive_en_display_units``가 항상 적용하므로
+    후보로 만들어봤자 ``base``와 같아 걸러진다).
+
+    ``allow_length_change=False``(ja 채택값과 같은 기본값)면 타깃 길이가 같은 후보만
+    남긴다. en 채택 구성은 ``True``로 이 필터를 끈다 — "짧은 타깃이 구조적으로 유리하다"는
+    옛 실측이 죽은 토큰(사전 밖 OOV 통과 등) 비율이 높던 상태(30.2%)에서 잰 값이었고, IPA
+    경로로 옮겨 죽은 토큰이 2.4%(문장부호뿐)로 떨어진 뒤 재검증이 필요해졌다는 것이
+    벤치의 결론이다(``TwoPassRefineConfig`` 이 필드 참고).
+    """
+    from everyric2.text.en_g2p import pronunciations
+
+    out: list[EnRefereeCandidate] = []
+    for word_index, match in enumerate(_WORD_RE.finditer(source)):
+        word = match.group(0)
+        if word.lower() in _CONTEXT_DETERMINED_WORDS:
+            continue
+        total = len(pronunciations(word))
+        for entry in range(1, min(total, MAX_REFEREE_ALTERNATES + 1)):
+            alt = derive_en_display_units(source, entries={word_index: entry})
+            if alt.target == base.target:
+                continue
+            if not allow_length_change and len(alt.target) != len(base.target):
+                continue
+            out.append(EnRefereeCandidate(word_index=word_index, entry=entry, units=alt))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +445,11 @@ _LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z']*")
 
 
 def derive_ja_display_units(
-    source: str, *, phonetic: bool = True, expand_long: bool = True
+    source: str,
+    *,
+    phonetic: bool = True,
+    expand_long: bool = True,
+    tokens: list | None = None,
 ) -> LineUnits:
     """일본어 한 줄 → (가나 독음 정렬 타깃, {hangul, kana, romaji} 표시).
 
@@ -370,10 +471,16 @@ def derive_ja_display_units(
     조사(は→わ 등)·장음까지 반영된 발음형 독음이다. ``expand_long=True``(기본값, 채택
     구성과 동일)는 장음부 ー를 앞 모음으로 펴 정렬 타깃 커버리지를 지킨다
     (``_expand_choonpu``) — 표시는 원래대로 앞 글자에 흡수된다.
+
+    ``tokens``를 주면(오디오 심판이 고른 읽기 — ``pron_style.candidate_token_sets`` 참조)
+    자체 토큰화를 건너뛰고 그 읽기를 그대로 쓴다 — ``pron_style.romaji_line``이 이미 쓰는
+    것과 같은 계약이다. 생략하면 지금처럼 ``tokenize_reading(source, phonetic=phonetic)``로
+    새로 만든다.
     """
     from everyric2.text.ja_reading import tokenize_reading
 
-    tokens = tokenize_reading(source, phonetic=phonetic)
+    if tokens is None:
+        tokens = tokenize_reading(source, phonetic=phonetic)
     pieces: list[str] = []
     for token in tokens:
         reading = token.reading or token.surface
@@ -432,3 +539,38 @@ def derive_ja_display_units(
         word_end=word_end,
         owners={"hangul": hangul_owners, "kana": kana_owners, "romaji": romaji_owners},
     )
+
+
+# ---------------------------------------------------------------------------
+# ja: 오디오 심판 후보 (scripts/bench_adapters/two_pass.py의 _ja_reading_variants 이식,
+# 2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def ja_referee_candidates(source: str) -> tuple[LineUnits, list[LineUnits]]:
+    """(기본 LineUnits, 대체 읽기 LineUnits 목록) — ``pron_style.candidate_token_sets``
+    (레거시 kor 어댑터 심판 ``worker._referee_candidates``와 같은 후보 생성기, 실오디오
+    검증을 거친 애매 낱말 표 기반)를 그대로 재사용한다.
+
+    ja 후보는 en과 달리 **라인 전체** 단위다 — 사전(MeCab)의 단위가 en(CMU, 낱말별)과
+    달라 형태소 분석 자체가 문장 전체를 다시 훑어야 다른 경로를 낸다. 그래서 en처럼
+    여러 낱말의 승자를 조합하지 않는다 — 후보 하나를 통째로 채택하거나 안 하거나다
+    (``refine_window.refine_lines``가 이긴 후보 하나의 target/owners를 그대로 쓴다).
+
+    ``candidate_token_sets(source)[0]``이 ``base``의 재료다 — ``phonetic=True`` + 루비
+    채택(``wiki_pronunciation``·레거시 ja 심판과 동일 관례)이라, 이 함수를 거치면 ja 라인의
+    기본 읽기도 그 관례를 따르게 된다(라인에 루비 표기가 없으면 ``derive_ja_display_units
+    (source)``의 기본 토큰화와 값이 같다 — 갈리는 건 루비가 있는 드문 줄뿐이고, 그 경우도
+    ``_attach_ja_pron_variants``(레거시 폴백)가 이미 쓰는 값과 같아지므로 더 일관적이다).
+
+    후보가 1개뿐이면(대립 읽기 없음) ``derive_ja_display_units(source)``(자체 토큰화)와
+    빈 목록을 돌려준다 — 심판을 돌릴 이유가 없다(비용 0).
+    """
+    from everyric2.text.pron_style import candidate_token_sets
+
+    _, token_sets = candidate_token_sets(source)
+    if len(token_sets) < 2:
+        return derive_ja_display_units(source), []
+    base = derive_ja_display_units(source, tokens=token_sets[0])
+    alternates = [derive_ja_display_units(source, tokens=ts) for ts in token_sets[1:]]
+    return base, alternates

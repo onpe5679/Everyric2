@@ -442,3 +442,271 @@ def test_refine_lines_mixed_ja_latin_line_has_no_gap_in_hangul_track():
     # 라인 경계를 벗어나지 않는다.
     assert hangul_segs[0].start >= -1e-6
     assert hangul_segs[-1].end <= line_end + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# _derive_units — 문자 계열 판정 (결함 수정, 2026-08-03 실사용자 보고 熱異常/b2NTglk9tvI)
+#
+# language=None(미판정)이 en 경로로 조용히 떨어져 ja 원문이 한자까지 그대로 통과하던
+# 결함. worker.attach_pron_variants와 같은 원리(문자 수 우세)로 곡 단위 language 라벨이
+# 아니라 이 라인 원문을 직접 본다.
+# ---------------------------------------------------------------------------
+
+
+def test_derive_units_picks_ja_by_character_majority_when_language_is_none():
+    from everyric2.alignment.refine_window import _derive_units
+    from everyric2.text.align_target import derive_ja_display_units
+
+    source = "死んだ変数で繰り返す"
+    units = _derive_units(source, None)
+    expected = derive_ja_display_units(source)
+    assert units.target == expected.target
+    assert units.owners == expected.owners
+
+    # 원문 한자가 표시에 그대로 남지 않는다 — 예전 결함은 이 자리에서 원문을 그대로 돌려줬다.
+    hangul_display = "".join(units.owners["hangul"])
+    assert hangul_display != source
+    assert "死" not in hangul_display
+    assert "変" not in hangul_display
+
+
+def test_derive_units_ignores_a_wrong_language_label_and_follows_character_majority():
+    # 곡 단위 라벨이 틀려도(예: 혼합 줄이라 다른 줄에서 결정된 en 라벨이 새어 들어온
+    # 경우) 이 라인 자체가 ja 우세면 ja 파생을 따른다 — 라벨은 문자로 못 정할 때의
+    # 최후 타이브레이커일 뿐이다.
+    from everyric2.alignment.refine_window import _derive_units
+    from everyric2.text.align_target import derive_ja_display_units
+
+    source = "死んだ変数で繰り返す"
+    units = _derive_units(source, "en")
+    expected = derive_ja_display_units(source)
+    assert units.target == expected.target
+    assert units.owners == expected.owners
+
+
+def test_derive_units_still_uses_en_path_for_non_ja_source():
+    # 회귀 방지 — ja 글자가 없는 줄(en/ko 등)은 그대로 en 경로다(기존 동작 유지, 이
+    # 모듈에 ko 전용 파생 경로는 없다).
+    from everyric2.alignment.refine_window import _derive_units
+    from everyric2.text.align_target import derive_en_display_units
+
+    for source in ("hello world", "사랑해"):
+        units = _derive_units(source, None)
+        expected = derive_en_display_units(source)
+        assert units.target == expected.target
+        assert units.owners == expected.owners
+
+
+def test_derive_units_falls_back_to_language_hint_only_when_character_majority_is_ambiguous():
+    # ja/한글 둘 다 없는 줄(숫자·기호뿐)만 language 힌트가 타이브레이커로 쓰인다.
+    from everyric2.alignment.refine_window import _derive_units
+    from everyric2.text.align_target import derive_en_display_units, derive_ja_display_units
+
+    source = "123!"
+    assert _derive_units(source, "ja").owners == derive_ja_display_units(source).owners
+    assert _derive_units(source, "en").owners == derive_en_display_units(source).owners
+    assert _derive_units(source, None).owners == derive_en_display_units(source).owners
+
+
+def test_refine_lines_derives_ja_display_even_when_language_is_none():
+    # refine_lines 전체 경로에서도 language=None이 ja 라인의 표기를 en으로 새지 않게
+    # 막는다(단위 테스트만이 아니라 실제 정렬 파이프라인 계약을 못박는다).
+    from everyric2.text.align_target import derive_ja_display_units
+
+    text = "ひらひら"
+    units = derive_ja_display_units(text)
+    target = units.target
+    vocab = _build_vocab(target)
+    frames_per_char = 5
+    token_ids_per_frame: list[int | None] = []
+    for ch in target:
+        token_ids_per_frame.extend([vocab.get(ch)] * frames_per_char)
+    token_ids_per_frame.extend([None] * 10)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor,
+        blank_id=0,
+        frame_sec=FRAME_SEC,
+        audio_sec=len(token_ids_per_frame) * FRAME_SEC,
+        vocab=vocab,
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+
+    line_end = len(token_ids_per_frame) * FRAME_SEC
+    anchors = [_line(text, 0.0, line_end)]
+    lines = refine_lines(anchors, [text], refiner, Path("dummy.wav"), language=None)
+
+    line = lines[0]
+    assert line.fallback_reason is None
+    assert line.pron["hangul"] != text  # 원문 그대로 새지 않았다(예전 결함의 증상)
+    assert line.pron_segs["hangul"]  # 세그도 실제로 생긴다
+
+
+# ---------------------------------------------------------------------------
+# 오디오 심판 — 결함 수정(2026-08-03, 벤치에서 이식 누락됐던 부분).
+#
+# ja 검증 픽스처는 team lead가 못박은 실사용자 사례 그대로다: numb numb(ba7YbGO2aq4)의
+# 「好き好き」가 사전 기본값으로는 連濁된 「스키즈키」(すきずき)로 나오는데, 벤치가
+# 청취 6/6으로 확정한 정답은 「스키스키」(すきすき)다. 오디오(합성 emission)가 すきすき
+# 쪽을 강하게 지지하도록 만들어, 심판이 실제로 그 쪽을 채택하는지 못박는다.
+# ---------------------------------------------------------------------------
+
+
+def _refine_one_line(text: str, target: str, *, language: str, config=None, vocab_chars: str | None = None):
+    """text 한 줄을 ``target`` 문자열을 강하게 지지하는 합성 emission으로 정렬한다.
+
+    vocab은 기본적으로 ``target``만 커버한다 — 심판이 켜져 있고 다른 후보(예: 기본 발음)도
+    같은 창에서 정렬을 시도한다면 그 문자까지 ``vocab_chars``로 함께 넘겨야 한다. 안 그러면
+    vocab에 없는 문자가 ``_tokenize_target``에서 조용히 드롭돼(그 문자는 원래 「정렬 불가」
+    취급이라 세그 자체가 안 생긴다) 엉뚱한 실패로 보인다 — 실제 심판 버그가 아니다.
+    """
+    vocab = _build_vocab(vocab_chars if vocab_chars is not None else target)
+    frames_per_char = 5
+    token_ids_per_frame: list[int | None] = []
+    for ch in target:
+        token_ids_per_frame.extend([vocab.get(ch)] * frames_per_char)
+    token_ids_per_frame.extend([None] * 10)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor,
+        blank_id=0,
+        frame_sec=FRAME_SEC,
+        audio_sec=len(token_ids_per_frame) * FRAME_SEC,
+        vocab=vocab,
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+    line_end = len(token_ids_per_frame) * FRAME_SEC
+    anchors = [_line(text, 0.0, line_end)]
+    return refine_lines(
+        anchors, [text], refiner, Path("dummy.wav"), language=language, config=config
+    )[0]
+
+
+def test_referee_ja_adopts_the_correct_reading_when_audio_supports_it():
+    # 벤치·team lead 실측 픽스처 그대로: 사전 기본값은 連濁된 「스키즈키」인데 정답은
+    # 「스키스키」다. vocab을 두 후보(すきずき/すきすき)의 합집합으로 짜서, 오디오는
+    # すきすき쪽만 지지하도록 만든다.
+    text = "好き好き"
+    vocab_source = "すきずきすきすき"  # 두 후보 문자 전부 포함(ず도 vocab엔 있어야 실패가 아니라 "심판이 진다"가 된다)
+    vocab = _build_vocab(vocab_source)
+    frames_per_char = 5
+    correct = "すきすき"
+    token_ids_per_frame: list[int | None] = []
+    for ch in correct:
+        token_ids_per_frame.extend([vocab.get(ch)] * frames_per_char)
+    token_ids_per_frame.extend([None] * 10)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor,
+        blank_id=0,
+        frame_sec=FRAME_SEC,
+        audio_sec=len(token_ids_per_frame) * FRAME_SEC,
+        vocab=vocab,
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+    line_end = len(token_ids_per_frame) * FRAME_SEC
+    anchors = [_line(text, 0.0, line_end)]
+    lines = refine_lines(anchors, [text], refiner, Path("dummy.wav"), language="ja")
+
+    line = lines[0]
+    assert line.fallback_reason is None
+    assert line.pron["hangul"] == "스키스키"  # 정답 — "스키즈키"면 실패
+    assert line.referee is not None
+    assert line.referee["default"] == "스키즈키"
+    assert line.referee["chosen"] == "스키스키"
+    assert line.referee["gain"] is not None and line.referee["gain"] >= line.referee["margin"]
+
+
+def test_referee_ja_keeps_default_when_audio_does_not_support_the_alternate():
+    # 대칭 검증 — 오디오가 기본값(すきずき)을 지지하면 그대로 유지해야 한다(회귀 방지:
+    # 심판이 항상 대체를 고르는 버그였다면 이 테스트가 잡는다).
+    text = "好き好き"
+    default = "すきずき"
+    line = _refine_one_line(text, default, language="ja")
+    assert line.fallback_reason is None
+    assert line.pron["hangul"] == "스키즈키"
+    assert line.referee is not None
+    assert line.referee["chosen"] == line.referee["default"] == "스키즈키"
+
+
+def test_referee_ja_off_never_switches_even_when_audio_disagrees():
+    # referee=False면 예전 동작(항상 사전 첫 발음) 그대로다 — 오디오가 대체를 강하게
+    # 지지해도 무시한다.
+    from everyric2.alignment.refine_window import TwoPassRefineConfig
+
+    text = "好き好き"
+    line = _refine_one_line(
+        text, "すきすき", language="ja", config=TwoPassRefineConfig(referee=False)
+    )
+    assert line.fallback_reason is None
+    assert line.pron["hangul"] == "스키즈키"  # 심판이 꺼졌으니 사전 기본값 그대로
+    assert line.referee is None
+
+
+def test_referee_ja_no_op_when_line_has_no_ambiguous_word():
+    # 애매 낱말이 없는 절대다수의 라인은 후보가 아예 없다 — 심판이 안 돈다(비용 0).
+    text = "ひらひら"
+    line = _refine_one_line(text, "ひらひら", language="ja")
+    assert line.fallback_reason is None
+    assert line.referee is None
+
+
+def test_referee_en_switches_the_pronunciation_when_audio_supports_it():
+    # "our"는 CMU에 세 발음이 있다(AW1 ER0 / AW1 R / AA1 R) — entry 0(기본, aur)가 아니라
+    # entry 2(ar)를 오디오가 지지하도록 만든다. allow_length_change=True(en 채택값)라
+    # 길이가 달라도(aur=3자 vs ar=2자) 후보에 오른다.
+    from everyric2.text.align_target import derive_en_display_units
+
+    text = "our house"
+    base = derive_en_display_units(text)
+    winner = derive_en_display_units(text, entries={0: 2})  # entry 2 = AA1 R ("ar")
+    assert winner.target != base.target  # 길이도 다르다(회귀 방지: allow_length_change 확인)
+
+    line = _refine_one_line(text, winner.target, language="en")
+    assert line.fallback_reason is None
+    assert line.referee is not None
+    assert line.referee["chosen"] != line.referee["default"]
+    assert line.pron["hangul"] == "".join(winner.owners["hangul"])
+
+
+def test_referee_en_the_is_never_a_candidate_and_is_context_corrected_regardless():
+    # "the"는 심판 후보에서 제외된다(문맥이 이미 정한다) — referee on/off와 무관하게
+    # 다음 낱말의 첫소리로 결정된 발음이 나와야 한다.
+    from everyric2.alignment.refine_window import TwoPassRefineConfig
+    from everyric2.text.align_target import derive_en_display_units
+
+    text = "the apple"  # apple = 모음 시작 -> ði("디")
+    expected = derive_en_display_units(text)
+    for config in (None, TwoPassRefineConfig(referee=False)):
+        line = _refine_one_line(text, expected.target, language="en", config=config)
+        assert line.fallback_reason is None
+        assert line.pron["hangul"] == "".join(expected.owners["hangul"])
+        assert line.pron["hangul"].startswith("디")
+
+
+def test_referee_en_debug_records_default_chosen_margin_and_scores():
+    from everyric2.text.align_target import derive_en_display_units
+
+    text = "our house"
+    winner = derive_en_display_units(text, entries={0: 2})
+    line = _refine_one_line(text, winner.target, language="en")
+    assert line.referee is not None
+    assert set(line.referee) >= {"default", "chosen", "margin", "gain", "scores"}
+    assert line.referee["margin"] == 0.03
+    assert line.referee["scores"]  # 시도한 후보들의 (라벨, gain) 목록이 남는다
+
+
+def test_referee_mixed_ja_latin_line_does_not_referee_the_embedded_latin_word():
+    # latin_referee는 채택 구성에서 의도적으로 꺼져 있다 — 혼재(ja+라틴) 줄의 라틴 낱말은
+    # 이 포트에서 아예 심판 후보로 만들지 않는다(entry 0 고정). "numb"는 CMU에 발음이
+    # 하나뿐이라 이 자체로는 대체가 없지만, ja 쪽 심판이 라틴 구간까지 건드리지 않는지
+    # (라틴 owners가 en 파생과 동일한지)를 못박는다.
+    from everyric2.text.align_target import derive_en_display_units, derive_ja_display_units
+
+    text = "好き numb"
+    units = derive_ja_display_units(text)
+    line = _refine_one_line(text, units.target, language="ja")
+    assert line.fallback_reason is None
+    # 라틴 구간(numb)의 hangul 표시는 항상 entry 0 기반 파생과 같다 — 심판이 안 건드렸다.
+    expected_latin = derive_en_display_units("numb").owners["hangul"]
+    assert "".join(expected_latin) in line.pron["hangul"]

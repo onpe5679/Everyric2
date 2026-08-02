@@ -494,6 +494,12 @@ class TestRunDeepStage:
         assert entry["pronunciation"] == entry["pron"]["hangul"]
         assert entry["pron_segs"]["hangul"]
         assert entry["pron_segments"] == entry["pron_segs"]["hangul"]
+        # 결함 수정(2026-08-03): "표기 4종 중 3종이 저장 단계에서 유실된다"는 실사용자
+        # 보고(weathergirl/M7VSEZOQIlg)를 못박는다 — refine_lines가 낸 표기별 pron/
+        # pron_segs가 하나도 안 빠지고 pron_data 진입점(entry)까지 전부 실려야 한다.
+        for key in ("hangul", "kana", "romaji", "en"):
+            assert entry["pron"].get(key), f"pron[{key!r}] missing or empty"
+            assert entry["pron_segs"].get(key), f"pron_segs[{key!r}] missing or empty"
 
     def test_refine_lines_failure_propagates_not_silently_dropped(self, monkeypatch):
         anchor = _FakeAnchor([SyncResult(text="가", start_time=0.0, end_time=0.08)])
@@ -859,6 +865,60 @@ class TestFinishNewStackAlignment:
         assert out["debug"]["routing"]["route"] == "fast"
         assert out["adlib"] is None
         assert "key" in out and "tempo" in out
+
+
+# ---------------------------------------------------------------------------
+# 번역 레이어 배선 — available_langs/translations_by_lang/translation_lang은
+# _run_alignment의 반환값이 아니라 sync.py._apply_translation_lang/
+# _build_translations_by_lang이 **조회 시점에** DB(translation_layers 테이블 + 저장된
+# timestamps)에서 계산한다(server/api/sync.py 참고) — 그 계산은 어느 정렬 스택이
+# timestamps를 만들었는지 모른다. 유일한 전제는 "세그의 text가 원문 가사 줄과 정확히
+# 같다"는 것이다: merge_line_meta(run_pipeline_core가 두 스택 공통으로 부른다)와
+# translation_layer_lines(레이어 저장 재료)가 둘 다 텍스트로 매칭하기 때문이다. 이
+# 절이 새 스택이 그 전제를 지키는지만 못박는다(감사 결함③, 2026-08-03).
+# ---------------------------------------------------------------------------
+
+
+class TestFinishNewStackAlignmentTranslationWiring:
+    def test_segments_carry_original_line_text_for_translation_layer_matching(self, monkeypatch):
+        results = [
+            SyncResult(text="Hello", start_time=0.0, end_time=1.0, confidence=0.9),
+            SyncResult(text="World", start_time=1.0, end_time=2.0, confidence=0.9),
+        ]
+        anchor = _FakeAnchor(results)
+        monkeypatch.setattr(
+            "everyric2.alignment.factory.EngineFactory.get_engine",
+            lambda engine_type, config=None: anchor,
+        )
+        lyric_lines = [
+            LyricLine(text="Hello", line_number=1),
+            LyricLine(text="World", line_number=2),
+        ]
+        out = worker._finish_new_stack_alignment(
+            _silence(0.5), None, None, lyric_lines, "ja", _settings(), lambda s: None,
+            gloss_folded=None, melody_extractor=None, f0_future=None, f0_executor=None,
+        )
+
+        # merge_line_meta(구/신 두 경로가 run_pipeline_core에서 공유하는 병합 함수)가
+        # 텍스트로 매칭하므로, 새 스택 세그의 text가 원문 가사 줄과 정확히 같아야
+        # 번역이 실제로 붙는다.
+        line_meta = [
+            {"text": "Hello", "translation": "안녕"},
+            {"text": "World", "translation": "세상"},
+        ]
+        merged = worker.merge_line_meta(out["timestamps"], line_meta)
+        assert merged == 2
+        assert [seg["translation"] for seg in out["timestamps"]] == ["안녕", "세상"]
+
+        # translations_by_lang(sync.py._build_translations_by_lang)의 저장 재료인
+        # translation_layer_lines도 같은 텍스트 매칭에 기댄다 — (text, translation) 쌍이
+        # 실제 라인 텍스트·순서·개수와 정확히 일치해야 나중에 lang= 조회가 그 레이어로
+        # 세그를 되찾을 수 있다.
+        pairs = worker.translation_layer_lines(out["timestamps"])
+        assert pairs == [
+            {"text": "Hello", "translation": "안녕"},
+            {"text": "World", "translation": "세상"},
+        ]
 
 
 # ---------------------------------------------------------------------------

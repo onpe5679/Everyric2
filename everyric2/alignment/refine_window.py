@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,6 +118,12 @@ class RefinedLine:
     pron_segs: dict[str, list[PronSegmentSpan]] = field(default_factory=dict)
     refined: bool = False
     fallback_reason: str | None = None
+    # 오디오 심판 판정 근거 — 후보를 하나라도 견줬을 때만 채워진다(``{"default", "chosen",
+    # "margin", "gain", "scores"}``, 세그 wire의 ``debug.referee``와 같은 모양). 후보가
+    # 없던(애매하지 않은) 라인은 None — 심판을 아예 안 돌렸다는 뜻이다. 이긴 것이 없어도
+    # (``chosen == default``) 시도한 흔적은 남는다 — legacy
+    # ``worker._referee_switched``가 ``chosen != default``로 전환 여부를 판정한다.
+    referee: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +160,27 @@ class TwoPassRefineConfig:
     # 반복 훅에서 렌디션을 건너뛴 자리를 되돌릴 것인가.
     respace_repeats: bool = True
 
+    # ── 오디오 심판(referee) — scripts/bench_adapters/two_pass.py 이식, 2026-08-03 ──
+    # 사전이 발음을 하나로 못 정하는 낱말(en: CMU 대체 발음, ja: 애매 낱말 표)을 오디오에
+    # 묻는다: 대체 발음으로 타깃을 바꿔 같은 창에서 다시 정렬하고, 창 전체 프레임당 평균
+    # 로그확률(``_window_score``)이 ``referee_margin`` 이상 오르면 채택한다. **ja·en 둘 다
+    # 켜진 것이 채택 구성**이다 — en 가사 출현 낱말의 36.35%가 발음이 둘 이상이고, en 채택
+    # 구성 실측상 "후보가 있던 라인의 76.3%에서 첫 발음이 틀렸다"(고정 발음은 틀린
+    # 기본값이었다). 끄면 완전히 예전 동작(항상 사전 첫 발음)과 같다.
+    referee: bool = True
+    # en 대체 후보 필터 — 타깃 길이가 달라도 견줄 것인가(ja는 이 필드를 안 본다, 라인 전체
+    # 단위라 길이 개념이 없다). **채택값 True**: "짧은 타깃이 구조적으로 유리하다"는 옛
+    # 실측이 죽은 토큰(사전 밖 낱말이 철자 그대로 통과) 비율 30.2%에서 잰 값이었는데, IPA
+    # 경로로 옮겨 죽은 토큰이 2.4%(문장부호뿐)로 떨어진 뒤 재검증한 결론이다
+    # (``align_target.en_referee_candidates`` 참고).
+    allow_length_change: bool = True
+    # 도전 후보가 기존 발음을 뒤집으려면 이만큼(프레임당 평균 로그확률, nats) 이겨야 한다.
+    # 0이면 측정 노이즈로도 뒤집힌다. **프로드가 실오디오로 보정한 값**(legacy
+    # ``AlignmentSettings.pron_referee_margin``과 같은 값, 2026-07-26 실측): 맞는 후보가
+    # 이긴 최소 폭이 +0.0375, 틀린 후보가 진 최대 폭이 −0.056이라 그 사이에 0.03이 놓인다.
+    # 절대 바꾸지 마라.
+    referee_margin: float = 0.03
+
 
 # ---------------------------------------------------------------------------
 # 정렬 타깃 → 토큰
@@ -186,27 +214,260 @@ def _tokenize_target(
     return token_ids, ranges
 
 
+# 문자 계열 판정 — everyric2.server.worker.attach_pron_variants(_JA_CHAR_RE/_HANGUL_CHAR_RE)와
+# 같은 코드포인트 범위(가나 U+3040~30FF·한자 U+3400~9FFF, 완성형 한글 U+AC00~D7A3)다. import로
+# 공유하지 않고 여기서 다시 정의한다 — worker.py가 alignment 패키지를 쓰는 방향이라(레이어
+# 역전 금지) 그 반대로 끌어올 수 없다.
+_JA_CHAR_RE = re.compile("[぀-ヿ㐀-鿿]")
+_HANGUL_CHAR_RE = re.compile("[가-힣]")
+
+
+def _is_ja_source(source: str, language: str) -> bool:
+    """이 라인이 ja 파생 경로로 가야 하는가 — **곡 단위 language 라벨이 아니라 원문의
+    문자 계열**로 정한다(2026-08-03 감사: language=None(미판정)이거나 라벨이 실제 라인과
+    다르면 — 예컨대 ko 곡에 섞인 ja 낱말 — 그 라인만 엉뚱한 파생을 받았다. 특히
+    language=None은 예전엔 en 경로로 조용히 떨어져 ja 원문이 그대로 통과했다: CMU 사전에
+    일본어 문자가 전부 OOV라 표시가 원문 그대로 나왔다).
+
+    ``worker.attach_pron_variants``가 이미 같은 문제를 문자 수 우세(ja 글자 수 ≥ 한글 수 →
+    ja)로 풀었다 — 언어 라벨 없이도 원문만 보고 옳게 갈랐다(그 결과가 이 함수의 옛 버전보다
+    항상 정답이었다). 여기서도 같은 원리를 쓴다: ja 문자가 하나라도 있고 한글보다 적지
+    않으면 ja, 그 외(en/ko/숫자·기호뿐인 줄 등)는 en — en 경로는 라틴 낱말을 IPA로 정렬하고
+    그 외 문자(한글 등)는 원문 그대로 통과시키므로(``derive_en_display_units`` 문서 참고)
+    ko 원문에는 지금과 같은 근사가 유지된다.
+
+    ja/한글이 둘 다 없는 줄(숫자·기호뿐 등)만 ``language`` 힌트를 최후 타이브레이커로
+    쓴다 — 문자만으로 못 정하는 자리에서까지 힌트를 버릴 이유는 없다. ``refine_lines``의
+    파생 선택과 심판 후보 생성기 선택(en/ja) 둘 다 이 판정 하나를 공유한다."""
+    ja_n = len(_JA_CHAR_RE.findall(source))
+    ko_n = len(_HANGUL_CHAR_RE.findall(source))
+    if ja_n and ja_n >= ko_n:
+        return True
+    return not ja_n and not ko_n and language == "ja"
+
+
 def _derive_units(source: str, language: str):
-    """언어 힌트 → ``align_target`` 파생 함수 선택. ja/ko 이외는 en 경로로 떨어진다
-    (다국어 라인이라도 일단 라틴 회로가 있어야 라틴 구간이라도 건진다)."""
+    """``align_target`` 파생 함수 선택 — ``_is_ja_source`` 판정 하나로 갈린다."""
     from everyric2.text.align_target import derive_en_display_units, derive_ja_display_units
 
-    if language == "ja":
+    if _is_ja_source(source, language):
         return derive_ja_display_units(source)
     return derive_en_display_units(source)
 
 
 # ---------------------------------------------------------------------------
-# 창 전체 점수 (참고용 — 심판은 이 모듈 범위 밖이다)
+# 창 전체 점수 — 심판이 후보끼리 견주는 값
 # ---------------------------------------------------------------------------
 
 
 def _window_score(frame_scores: Any) -> float | None:
     """창 전체의 프레임당 평균 로그확률. blank 프레임까지 포함해 정규화한다 — 프로드와
-    같은 정의(``ctc_engine._score_tokens``)."""
+    같은 정의(``ctc_engine._score_tokens``).
+
+    ① **삭제가 공짜가 되면 안 된다** — 토큰이 차지한 프레임만 평균 내면 짧은 후보가 자신
+    없는 구간을 blank로 넘기고 그 비용을 안 낸다(legacy 심판이 처음 이 실수로 134줄 중
+    53줄을 잘못 바꿨다 — ``AlignmentSettings.pron_referee`` 문서 참고). blank 프레임의
+    로그확률까지 합에 넣으면 그 비용이 후보에게 그대로 돌아간다.
+    ② **낱말 구간만 봐도 안 된다** — 라인 전체 창으로 정규화해야 짧은 후보가 그 낱말에서
+    번 이득을 옆 낱말에서 치르는 대가가 계산에 들어간다.
+    """
     if frame_scores is None or len(frame_scores) == 0:
         return None
     return float(frame_scores.sum()) / len(frame_scores)
+
+
+# ---------------------------------------------------------------------------
+# 오디오 심판 — 낱말/라인 후보를 창 안에서 다시 정렬해 창 전체 점수로 견준다
+# ---------------------------------------------------------------------------
+
+
+def _align_candidate(
+    units: Any,
+    vocab: dict[str, int],
+    window: Any,
+    frame_sec: float,
+    device: Any,
+    blank_id: int,
+) -> tuple[Any, list[tuple[int, int] | None], Any, str | None]:
+    """타깃 하나(기본 후보든 심판 대체 후보든)를 창 안에서 정렬한다.
+
+    반환: (스팬, 토큰 범위, 프레임별 점수, 실패 사유|None). 실패하면 앞 셋은 무의미하다 —
+    후보 하나가 실패해도 그 후보만 버리고 나머지를 계속 견줄 수 있게 예외 대신 신호로
+    돌려준다(``refine_lines`` 본선의 폴백 규약과 같다). ``functional``/``torch``는
+    ``refine_lines``가 이미 지연 import했으므로 여기서는 그 전역을 재사용하지 않고 각자
+    다시 import한다(모듈 함수 단위 테스트가 이 함수만 부를 수 있게).
+    """
+    import torch
+    import torchaudio.functional as functional
+
+    token_ids, ranges = _tokenize_target(units.target, vocab)
+    if not token_ids:
+        return None, ranges, None, "no_in_vocab_chars"
+    repeats = sum(1 for a, b in zip(token_ids, token_ids[1:]) if a == b)
+    if int(window.shape[1]) < len(token_ids) + repeats:
+        return None, ranges, None, "window_shorter_than_targets"
+    targets = torch.tensor([token_ids], dtype=torch.int32, device=device)
+    try:
+        aligned, scores = functional.forced_align(window, targets, blank=blank_id)
+        spans = functional.merge_tokens(aligned[0], scores[0], blank=blank_id)
+    except Exception:
+        return None, ranges, None, "forced_align_failed"
+    if len(spans) != len(token_ids):
+        return None, ranges, None, "span_count_mismatch"
+    return spans, ranges, scores[0], None
+
+
+def _referee_ja(
+    source: str,
+    base_units: Any,
+    base_spans: Any,
+    base_ranges: list[tuple[int, int] | None],
+    base_frames: Any,
+    vocab: dict[str, int],
+    window: Any,
+    frame_sec: float,
+    device: Any,
+    blank_id: int,
+    margin: float,
+) -> tuple[Any, Any, list[tuple[int, int] | None], dict[str, Any] | None]:
+    """ja 라인 심판 — 후보는 **라인 전체** 단위라 이긴 것 하나를 통째로 채택한다
+    (``align_target.ja_referee_candidates``). 후보가 없으면(애매 낱말이 없는 절대다수의
+    라인) 5번째 반환값이 None — 심판을 안 돌렸다는 뜻이고 나머지는 기본 후보 그대로다.
+    """
+    from everyric2.text.align_target import ja_referee_candidates
+
+    _, alternates = ja_referee_candidates(source)
+    if not alternates:
+        return base_units, base_spans, base_ranges, None
+
+    before = _window_score(base_frames)
+    default_hangul = "".join(base_units.owners["hangul"])
+    scored: list[list[Any]] = []
+    best: tuple[float, Any, Any, list[tuple[int, int] | None]] | None = None
+    for rank, cand_units in enumerate(alternates, start=1):
+        spans, ranges, frames, fail = _align_candidate(cand_units, vocab, window, frame_sec, device, blank_id)
+        if fail:
+            continue
+        after = _window_score(frames)
+        if before is None or after is None:
+            continue
+        gain = after - before
+        scored.append([f"cand#{rank}", round(gain, 5)])
+        if gain >= margin and (best is None or gain > best[0]):
+            best = (gain, cand_units, spans, ranges)
+
+    if best is None:
+        debug = {
+            "default": default_hangul,
+            "chosen": default_hangul,
+            "margin": margin,
+            "gain": max((g for _, g in scored), default=None),
+            "scores": scored,
+        }
+        return base_units, base_spans, base_ranges, debug
+
+    gain, chosen_units, chosen_spans, chosen_ranges = best
+    debug = {
+        "default": default_hangul,
+        "chosen": "".join(chosen_units.owners["hangul"]),
+        "margin": margin,
+        "gain": round(gain, 5),
+        "scores": scored,
+    }
+    logger.info(
+        "Audio referee (ja) switched line %r reading: %r -> %r (+%.4f nats/token >= margin %s)",
+        source[:24], debug["default"], debug["chosen"], gain, margin,
+    )
+    return chosen_units, chosen_spans, chosen_ranges, debug
+
+
+def _referee_en(
+    source: str,
+    base_units: Any,
+    base_spans: Any,
+    base_ranges: list[tuple[int, int] | None],
+    base_frames: Any,
+    vocab: dict[str, int],
+    window: Any,
+    frame_sec: float,
+    device: Any,
+    blank_id: int,
+    margin: float,
+    allow_length_change: bool,
+) -> tuple[Any, Any, list[tuple[int, int] | None], dict[str, Any] | None]:
+    """en 라인 심판 — 후보는 **낱말 하나씩** 독립으로 견주고, 이긴 낱말들을 한꺼번에 반영한
+    최종 타깃으로 한 번 더 정렬한다(``align_target.en_referee_candidates``). "the"는 후보에
+    안 오른다(``align_target._the_entry``가 문맥으로 항상 정하므로 심판이 볼 것이 없다).
+    """
+    from everyric2.text.align_target import derive_en_display_units, en_referee_candidates
+
+    candidates = en_referee_candidates(source, base_units, allow_length_change=allow_length_change)
+    if not candidates:
+        return base_units, base_spans, base_ranges, None
+
+    before = _window_score(base_frames)
+    default_hangul = "".join(base_units.owners["hangul"])
+    scored: list[list[Any]] = []
+    winners: dict[int, tuple[int, float]] = {}
+    for cand in candidates:
+        spans, ranges, frames, fail = _align_candidate(
+            cand.units, vocab, window, frame_sec, device, blank_id
+        )
+        if fail:
+            continue
+        after = _window_score(frames)
+        if before is None or after is None:
+            continue
+        gain = after - before
+        label = f"word{cand.word_index}#{cand.entry}"
+        scored.append([label, round(gain, 5)])
+        if gain >= margin:
+            current = winners.get(cand.word_index)
+            if current is None or gain > current[1]:
+                winners[cand.word_index] = (cand.entry, gain)
+
+    if not winners:
+        debug = {
+            "default": default_hangul,
+            "chosen": default_hangul,
+            "margin": margin,
+            "gain": max((g for _, g in scored), default=None),
+            "scores": scored,
+        }
+        return base_units, base_spans, base_ranges, debug
+
+    entries = {index: entry for index, (entry, _gain) in winners.items()}
+    combined_units = derive_en_display_units(source, entries=entries)
+    combined_spans, combined_ranges, _frames, fail = _align_candidate(
+        combined_units, vocab, window, frame_sec, device, blank_id
+    )
+    if fail:
+        # 조합 재정렬 실패(드묾) — 이긴 낱말들이 서로 겹치는 등 조합 타깃이 이번엔 창을
+        # 못 넘겼다는 뜻이다. 개별 승자는 이미 검증됐으니 기본으로 조용히 되돌아가지 않고
+        # 실패를 debug에 남긴다 — 그래도 하한(기본 후보)은 지킨다.
+        debug = {
+            "default": default_hangul,
+            "chosen": default_hangul,
+            "margin": margin,
+            "gain": max((g for _, g in scored), default=None),
+            "scores": scored,
+            "combine_failed": fail,
+        }
+        return base_units, base_spans, base_ranges, debug
+
+    chosen_hangul = "".join(combined_units.owners["hangul"])
+    debug = {
+        "default": default_hangul,
+        "chosen": chosen_hangul,
+        "margin": margin,
+        "gain": max(gain for _, gain in winners.values()),
+        "scores": scored,
+    }
+    logger.info(
+        "Audio referee (en) switched line %r reading: %r -> %r (%d word(s) >= margin %s)",
+        source[:24], debug["default"], debug["chosen"], len(winners), margin,
+    )
+    return combined_units, combined_spans, combined_ranges, debug
 
 
 # ---------------------------------------------------------------------------
@@ -615,9 +876,6 @@ def refine_lines(
     모듈은 하한을 보장할 뿐 앵커 세그 자체를 모른다 — "하한이 앵커 단독으로 고정된다"
     불변식).
     """
-    import torch
-    import torchaudio.functional as functional
-
     resolved_config = config or TwoPassRefineConfig()
     if len(anchor_lines) != len(source_lines):
         raise ValueError(
@@ -680,39 +938,48 @@ def refine_lines(
     seg_gate = gate if resolved_config.extend_voiced_only else None
 
     for line, source in zip(lines, source_lines):
-        units = _derive_units(source, language)
-        if not units.target:
-            line.fallback_reason = "empty_derived_text"
-            continue
-        token_ids, ranges = _tokenize_target(units.target, vocab)
-        if not token_ids:
-            line.fallback_reason = "no_in_vocab_chars"
-            continue
         start, end = line.start, line.end
         if end <= start:
             line.fallback_reason = "no_anchor_window"
             continue
+
+        units = _derive_units(source, language)
+        if not units.target:
+            line.fallback_reason = "empty_derived_text"
+            continue
+
         first = max(0, int((start - resolved_config.window_pad_sec) / frame_sec))
         last = min(
             total_frames, int(math.ceil((end + resolved_config.window_pad_sec) / frame_sec))
         )
-        repeats = sum(1 for a, b in zip(token_ids, token_ids[1:]) if a == b)
-        if last - first < len(token_ids) + repeats:
-            line.fallback_reason = "window_shorter_than_targets"
+        window = emission.emission[:, first:last, :]
+
+        spans, ranges, base_frames, fail = _align_candidate(
+            units, vocab, window, frame_sec, device, blank_id
+        )
+        if fail:
+            if fail != "no_in_vocab_chars":
+                logger.warning("%s: 라인 재정렬 실패(%s), 세그 없이 폴백", source[:24], fail)
+            line.fallback_reason = fail
             continue
 
-        window = emission.emission[:, first:last, :]
-        targets = torch.tensor([token_ids], dtype=torch.int32, device=device)
-        try:
-            aligned, scores = functional.forced_align(window, targets, blank=blank_id)
-            spans = functional.merge_tokens(aligned[0], scores[0], blank=blank_id)
-        except Exception:
-            logger.warning("%s: 라인 재정렬 실패, 세그 없이 폴백", source[:24], exc_info=True)
-            line.fallback_reason = "forced_align_failed"
-            continue
-        if len(spans) != len(token_ids):
-            line.fallback_reason = "span_count_mismatch"
-            continue
+        # ── 오디오 심판 — 하한(기본 후보의 spans/ranges/units)은 이미 확보됐다. 후보가
+        # 있고 더 나은 것이 있으면 이 자리에서만 units/spans/ranges를 갈아 끼운다. 실패해도
+        # (후보 재정렬 실패 등) 위에서 확보한 기본값으로 조용히 안전하게 되돌아간다 — 그
+        # 모듈 불변식("하한이 앵커 단독으로 고정된다")이 심판에도 그대로 적용된다.
+        if resolved_config.referee:
+            referee_fn = _referee_ja if _is_ja_source(source, language) else _referee_en
+            kwargs = (
+                {}
+                if referee_fn is _referee_ja
+                else {"allow_length_change": resolved_config.allow_length_change}
+            )
+            units, spans, ranges, referee_debug = referee_fn(
+                source, units, spans, ranges, base_frames, vocab, window, frame_sec,
+                device, blank_id, resolved_config.referee_margin, **kwargs,
+            )
+            if referee_debug is not None:
+                line.referee = referee_debug
 
         offset = first * frame_sec
         for key, owners in units.owners.items():

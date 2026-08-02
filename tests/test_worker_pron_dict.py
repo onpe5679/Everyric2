@@ -402,17 +402,33 @@ def test_ko_segment_display_survives_when_timing_is_unavailable():
     assert "pron_segs" not in seg
 
 
-def test_latin_segment_gets_kana_display_only():
-    # 라틴 곡은 일본어권용 가나 근사만 표시로 붙는다 — CTC 정렬이 라틴 위에서 약해서
-    # (latin_hangul 모듈 실측) pron_segs는 만들지 않는다.
-    from everyric2.text.ko_reading import latin_to_kana
-
+def test_latin_segment_gets_all_four_display_scripts():
+    # 결함 수정(2026-08-03, 운영자 지시): 라틴 곡도 표기 4종(hangul/kana/romaji/en)을
+    # 전부 받는다 — 예전엔 가나 근사 하나뿐이라 2패스가 안 닿은 en 곡(고속 라우팅으로
+    # 끝난 곡 등)의 한국어 사용자가 기본 표기(hangul)를 아예 못 받았다. CTC 정렬이 라틴
+    # 위에서 약해서(latin_hangul 모듈 실측) pron_segs(타이밍)는 여전히 안 만든다 — 표기
+    # 문자열만 결정론 근사다.
     seg = _seg("Take it easy", "", words=True)
     attach_pron_variants(seg)
 
-    assert seg["pron"] == {"kana": latin_to_kana("Take it easy")}
+    assert seg["pron"] == {
+        "hangul": "테익 잇 이지",
+        "kana": "テイク イト イーズィー",
+        "romaji": "teiku ito iiずぃ",
+        "en": "Take it easy",
+    }
     assert "pron_segs" not in seg
-    assert "romaji" not in seg["pron"]  # 라틴 곡 세그는 romaji 표기를 만들지 않는다(원문이 이미 로마자)
+
+
+def test_latin_segment_display_has_no_doubled_word_gaps():
+    # derive_en_display_units가 낱말 사이 원문 공백도 owners에 그 글자 그대로 얹으므로
+    # (align_target 모듈의 "낱말 사이 공백·구두점" 패스스루), word_end 플래그가 넣는
+    # 공백과 겹쳐 두 칸으로 벌어지지 않아야 한다(_join_display_units 회귀 방지).
+    seg = _seg("Take it easy", "", words=True)
+    attach_pron_variants(seg)
+
+    for script, display in seg["pron"].items():
+        assert "  " not in display, (script, display)
 
 
 def test_mora_segments_follow_the_given_tokens():
