@@ -916,7 +916,23 @@ def adlib_candidates(
     starts = sorted(float(s["start"]) for s in every)
     levels = _vocal_db_curve(video_id, hop) if video_id else None
 
+    def loud(t0: float, t1: float) -> bool:
+        # 소리가 실제로 나는가 — 우세도는 비율이라 이걸 못 본다(디지털 무음 0/0 잡음 방어)
+        if levels:
+            lo, hi = int(t0 / hop), min(len(levels), max(int(t0 / hop) + 1, int(t1 / hop)))
+            if hi > lo and max(levels[lo:hi]) < ADLIB_MIN_DB:
+                return False
+        return True
+
     def keep(t0: float, t1: float) -> bool:
+        # ⓪ 3초 넘게 이어지는 설명 안 된 발성은 늘임음도 온셋 끝자락도 아니다 — 온셋갭·딥
+        #    규칙을 면제한다(절대 크기만 본다). ロキ 2:48~2:54 스크림이 원형: 「ベイビー」의
+        #    「ビー」에서 딥 없이 매끄럽게 이어져 규칙 ②③이 «늘임음 연속»으로 기각하지만,
+        #    5초짜리 늘임음은 없다. 14곡 스캔에서 이 면제로 새로 잡히는 곳은 정확히 2곳
+        #    (ロキ 2:48.1~2:54.1 — 사용자 청취 확정 추임새 · butcher 2:38.6~2:45.0 —
+        #    PROD·채택 모두 라인이 없는 가사 밖 발성)이었다(2026-08-02).
+        if t1 - t0 >= 3.0:
+            return loud(t0, t1)
         # ① 다음 세그에 붙어 있으면 그 세그의 온셋이지 추임새가 아니다
         following = next((x for x in starts if x >= t1 - 0.01), None)
         if following is not None and following - t1 < ADLIB_MIN_TAIL_GAP:
@@ -930,12 +946,8 @@ def adlib_candidates(
         high = min(len(values), int(t0 / hop) + 2)
         if high > low and min(values[low:high]) > ADLIB_DIP_LEVEL:
             return False
-        # ④ 소리가 실제로 나는가 — 우세도는 비율이라 이걸 못 본다
-        if levels:
-            lo, hi = int(t0 / hop), min(len(levels), max(int(t0 / hop) + 1, int(t1 / hop)))
-            if hi > lo and max(levels[lo:hi]) < ADLIB_MIN_DB:
-                return False
-        return True
+        # ④ 소리가 실제로 나는가
+        return loud(t0, t1)
 
     out: list[list[float]] = []
     for start, end in free:
