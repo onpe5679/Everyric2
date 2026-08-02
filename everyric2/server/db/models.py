@@ -253,6 +253,12 @@ class SyncResultVersion(Base):
     __tablename__ = "sync_result_versions"
 
     video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # 스냅샷된 sync_results 행의 lyrics_hash 원본 그대로 (SyncResult.lyrics_hash와 같은
+    # 타입/길이). 새로 저장되는 행의 lyrics_hash와 대조해 "가사가 같은 재정렬"(재생성
+    # 버튼 — A/B 스택 비교가 성립)인지 "가사 자체가 다른 새 생성"(붙여넣기/검색 생성 —
+    # 줄이 대응하지 않아 비교가 무의미)인지 **확장이** 가릴 수 있게 하는 재료다. 서버는
+    # 판정하지 않는다 — 정책은 확장 대개편에서 정한다(코디네이터 지시, 2026-08-03).
+    lyrics_hash: Mapped[str] = mapped_column(String(64))
     # sync_results.timestamps와 같은 통짜 JSON(스냅샷 시점의 segments+extra 전체) — 고스트
     # 비교가 세그먼트 타이밍·번역·발음까지 그대로 다시 그릴 수 있어야 한다
     timestamps: Mapped[dict[str, Any]] = mapped_column(JSON)

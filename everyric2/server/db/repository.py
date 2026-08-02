@@ -200,7 +200,19 @@ class SyncRepository:
 
     async def delete_by_video(self, video_id: str) -> int:
         """이 영상의 모든 싱크 삭제(초기화) — 잘못 붙여넣은 가사 등에서 완전히 새로 시작.
-        삭제된 행 수를 반환."""
+        삭제된 행 수를 반환한다(반환값은 sync_results 삭제 건수만 — 아래 스냅샷 삭제는
+        포함하지 않는다. reset_video_syncs의 removed_syncs 응답 계약을 그대로 유지한다).
+
+        같은 트랜잭션에서 sync_result_versions의 스냅샷도 함께 지운다 — 스냅샷은
+        "재처리가 덮어쓴 직전 버전"을 보여주는 재료인데, 사용자가 초기화로 sync_results를
+        통째로 지운 뒤에도 그 스냅샷이 남으면 GET /api/sync/{video_id}/previous가
+        사용자가 지우라고 한 옛 내용을 계속 돌려준다(재생성 후에도 create()는 지워진
+        video_id에 "기존 행 없음=최초 생성"으로 보아 새 스냅샷을 안 만드므로, 고아
+        스냅샷은 재처리로도 자연 정리되지 않고 영구 잔류한다). 이 삭제는 video_id 하나의
+        PK 행 하나만 건드리므로(SyncResultVersion.video_id가 PK) 전체 스캔이 아니다."""
+        await self.session.execute(
+            delete(SyncResultVersion).where(SyncResultVersion.video_id == video_id)
+        )
         result = await self.session.execute(
             delete(SyncResult).where(SyncResult.video_id == video_id)
         )
@@ -298,6 +310,7 @@ class SyncResultVersionRepository:
         기존 스냅샷이 있으면 이번 것으로 교체 — replaced_at은 onupdate로 자동 갱신)."""
         existing = await self.get(previous.video_id)
         if existing:
+            existing.lyrics_hash = previous.lyrics_hash
             existing.timestamps = previous.timestamps
             existing.language = previous.language
             existing.engine = previous.engine
@@ -307,6 +320,7 @@ class SyncResultVersionRepository:
             self.session.add(
                 SyncResultVersion(
                     video_id=previous.video_id,
+                    lyrics_hash=previous.lyrics_hash,
                     timestamps=previous.timestamps,
                     language=previous.language,
                     engine=previous.engine,
