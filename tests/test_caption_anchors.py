@@ -540,9 +540,14 @@ def _run_worker_alignment(monkeypatch, tmp_path, *, anchors_on: bool, tracks, sc
         "melody": settings.melody.enabled,
         "anchors": settings.alignment.caption_anchors,
         "scaffold": settings.alignment.caption_scaffold,
+        # 캡션 앵커는 레거시 CTC 엔진의 forbidden_spans 계약을 시험한다(위 get_shared_ctc_
+        # engine 대역) — 새 스택(기본값 owsm/omniasr)은 이 경로를 안 쓰므로 이 테스트가
+        # 실제로 exercising하는 레거시 경로로 강제 고정한다.
+        "engine": settings.alignment.engine,
     }
     object.__setattr__(settings.melody, "enabled", False)
     object.__setattr__(settings.alignment, "caption_anchors", anchors_on)
+    object.__setattr__(settings.alignment, "engine", "ctc")
     if scaffold_on is not None:
         object.__setattr__(settings.alignment, "caption_scaffold", scaffold_on)
     try:
@@ -553,6 +558,7 @@ def _run_worker_alignment(monkeypatch, tmp_path, *, anchors_on: bool, tracks, sc
         object.__setattr__(settings.melody, "enabled", saved["melody"])
         object.__setattr__(settings.alignment, "caption_anchors", saved["anchors"])
         object.__setattr__(settings.alignment, "caption_scaffold", saved["scaffold"])
+        object.__setattr__(settings.alignment, "engine", saved["engine"])
     return result, engine
 
 

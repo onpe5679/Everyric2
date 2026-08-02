@@ -1,8 +1,11 @@
-"""OWSM-CTC v4 1B / omniASR-CTC-300M 엔진의 배선 검증 — 등록·선택·기본값 불변.
+"""OWSM-CTC v4 1B / omniASR-CTC-300M 엔진의 배선 검증 — 등록·선택·기본값.
 
-새 엔진은 ``EngineFactory``에 등록만 되고 ``AlignmentSettings.engine``의 **기본값은
-"ctc"로 그대로 남는다** — 배선 전환(기본 엔진 교체)은 이 작업의 범위 밖인 별도 작업이다.
-이 스위트는 그 경계를 못박는다.
+2026-08-03 배선 전환(everyric2/server/worker.py::_run_new_stack_alignment,
+tests/test_new_stack_wiring.py) 이전에는 이 엔진들이 ``EngineFactory``에 등록만 되고
+``AlignmentSettings.engine`` 기본값은 "ctc"로 남아 있었다. 배선이 실제로 태워진 지금은
+기본값이 "owsm"(새 스택 켜짐의 동의어 — 언어별 실제 앵커는 owsm/omniasr로 갈린다,
+AlignmentSettings.engine 필드 docstring 참고)이다 — 구스택(ctc 등)은 명시적으로 골라야
+나온다(``EVERYRIC_ALIGNMENT_ENGINE=ctc``). 이 스위트는 그 경계를 못박는다.
 """
 
 from __future__ import annotations
@@ -22,10 +25,16 @@ def _audio() -> AudioData:
     return AudioData(waveform=None, sample_rate=16000, duration=1.0)  # type: ignore[arg-type]
 
 
-def test_default_engine_is_still_ctc():
-    # 새 엔진 이식이 기존 배선을 조용히 바꾸면 안 된다.
-    assert AlignmentSettings().engine == "ctc"
-    assert get_settings().alignment.engine == "ctc"
+def test_default_engine_is_now_owsm():
+    # 배선 전환(2026-08-03) 이후 기본값 — "owsm" 리터럴 자체는 새 스택 스위치일 뿐이고
+    # 실제 앵커는 언어별로 갈린다(worker._new_stack_anchor_type). 구스택은 여전히 명시적
+    # 선택으로 그대로 나온다(아래 테스트).
+    assert AlignmentSettings().engine == "owsm"
+    assert get_settings().alignment.engine == "owsm"
+
+
+def test_legacy_ctc_still_selectable_explicitly():
+    assert AlignmentSettings(engine="ctc").engine == "ctc"
 
 
 def test_factory_resolves_owsm_engine():
@@ -42,11 +51,17 @@ def test_factory_resolves_omniasr_engine():
     assert engine.get_engine_type() == "omniasr"
 
 
-def test_factory_default_engine_type_unaffected():
-    # engine_type을 안 주면 여전히 설정 기본값(ctc)을 쓴다.
+def test_factory_default_engine_type_follows_settings():
+    # engine_type을 안 주면 설정 기본값을 쓴다 — 배선 전환 이후 그 기본값은 owsm이다.
+    engine = EngineFactory.get_engine()
+    assert isinstance(engine, OwsmEngine)
+
+
+def test_factory_default_engine_type_honours_explicit_config():
+    # 설정을 명시적으로 ctc로 주면 여전히 CTCEngine이 나온다(구스택 경로 그대로).
     from everyric2.alignment.ctc_engine import CTCEngine
 
-    engine = EngineFactory.get_engine()
+    engine = EngineFactory.get_engine(config=AlignmentSettings(engine="ctc"))
     assert isinstance(engine, CTCEngine)
 
 

@@ -284,6 +284,11 @@ export interface EveryricSyncResponse {
    *  필드 자체가 없다 — 그 경우 세션 내 첫 전환까지는 기존 로컬 체인(자막→위키→LLM)이
    *  그대로 동작한다(폴백, 회귀 아님). */
   translations_by_lang?: Record<string, (string | null)[]> | null;
+  /** 곡 단위 추임새 후보 [(start, end), ...] — 가사가 주장하지 않은 가창 구간. 새 정렬
+   *  스택(owsm/omniasr 앵커) 전용 additive 필드다 — 판정이 아니라 후보이고, 레거시
+   *  스택으로 만든 싱크에는 이 필드가 없다(undefined). 구버전 확장은 필드 자체를 모르니
+   *  무시하면 그만이다. */
+  adlib?: [number, number][] | null;
 }
 
 /** GET /api/sync/list 항목 — 링크 후보 선택용 */

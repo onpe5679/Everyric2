@@ -44,10 +44,17 @@ def _write_polarformer_assets(models_dir: Path) -> None:
 
 
 class TestAudioSettingsBackend:
-    """새 설정 키 — 기본값은 htdemucs, 새 값은 명시적으로 골라야만 나온다."""
+    """새 설정 키 — 2026-08-03 배선 전환 이후 기본값은 bs-polarformer-fp16이다
+    (alignment.engine=owsm/omniasr 새 스택 기본값과 짝을 이룬다 — Settings의 cross-field
+    validator가 어긋나면 기동 시점에 실패시킨다). htdemucs로 되돌리려면 명시적으로 골라야
+    한다(아래 TestHtdemucsRegression)."""
 
-    def test_default_backend_is_htdemucs(self):
+    def test_default_backend_is_polarformer(self):
         settings = AudioSettings()
+        assert settings.separator_backend == "bs-polarformer-fp16"
+
+    def test_htdemucs_still_selectable_explicitly(self):
+        settings = AudioSettings(separator_backend="htdemucs")
         assert settings.separator_backend == "htdemucs"
 
     def test_default_model_dir(self):
@@ -97,12 +104,15 @@ class TestSeparationResultBackendField:
 
 
 class TestHtdemucsRegression:
-    """demucs 경로는 이 이식 작업으로 절대 바뀌지 않았다는 것을 확인한다."""
+    """demucs 경로는 이 이식 작업으로 절대 바뀌지 않았다는 것을 확인한다.
+
+    기본 백엔드가 bs-polarformer-fp16으로 바뀐 뒤로는(TestAudioSettingsBackend) htdemucs
+    경로를 켜려면 명시적으로 골라야 한다 — 이 클래스의 모든 설정이 그렇게 한다."""
 
     def test_is_available_true_by_default(self):
         # demucs는 이 리포의 필수 의존성(pyproject.toml [separator])이라 개발/CI venv에
         # 실제로 설치돼 있다 — 이 값 자체가 기존 동작(회귀 없음)이다.
-        separator = VocalSeparator(AudioSettings())
+        separator = VocalSeparator(AudioSettings(separator_backend="htdemucs"))
         assert separator.is_available() is True
 
     def test_separate_still_uses_demucs_subprocess_and_tags_backend(self, tmp_path, monkeypatch):
@@ -113,7 +123,7 @@ class TestHtdemucsRegression:
         그 호출까지 가로채면 무관한 이유로 깨지므로, demucs 커맨드가 아니면 진짜
         subprocess.run으로 통과시킨다.
         """
-        settings = AudioSettings(temp_dir=tmp_path / "work")
+        settings = AudioSettings(temp_dir=tmp_path / "work", separator_backend="htdemucs")
         separator = VocalSeparator(settings)
         real_run = subprocess.run
 
@@ -137,7 +147,7 @@ class TestHtdemucsRegression:
         assert result.backend == "htdemucs"
 
     def test_demucs_not_available_raises(self, monkeypatch):
-        separator = VocalSeparator(AudioSettings())
+        separator = VocalSeparator(AudioSettings(separator_backend="htdemucs"))
         monkeypatch.setattr(separator, "_demucs_available", False)
         with pytest.raises(DemucsNotAvailableError):
             separator.separate(_silence())

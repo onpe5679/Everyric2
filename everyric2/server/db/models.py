@@ -18,7 +18,14 @@ class Base(AsyncAttrs, DeclarativeBase):
 #
 # 모델 교체 이니셔티브(bench/model-replacement-owsm, docs/research/2026-07-30-*)가 스택을
 # 갈아끼우면 이 문자열을 그 스택 식별자로 바꿔라 — 배포 시점의 git 커밋이 실제 버전 경계다.
-ENGINE_VERSION = "mms-htdemucs-1"
+#
+# 2026-08-03: worker.py 배선 전환(_run_new_stack_alignment/_finish_new_stack_alignment)과
+# 함께 settings 기본값(alignment.engine=owsm, audio.separator_backend=bs-polarformer-fp16,
+# alignment.two_pass_enabled=True)이 새 스택으로 넘어가면서 이 상수도 함께 올린다 — 구스택
+# 결과에 새 라벨이 붙으면 A/B 판정이 통째로 거짓이 된다는 지시(코디네이터)에 따라, 실제
+# 배선이 기본이 된 시점에 딱 맞춰 올렸다. 이 배선은 GPU 없이 계약 수준으로만 검증됐다
+# (tests/test_new_stack_wiring.py) — 실곡 대조는 아직 없었다(별도 검증 작업).
+ENGINE_VERSION = "polar-owsm-2pass-1"
 
 
 class SyncResult(Base):

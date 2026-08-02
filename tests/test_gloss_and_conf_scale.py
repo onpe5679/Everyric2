@@ -370,7 +370,11 @@ def _run_alignment_with_fake_engine(monkeypatch, tmp_path, lyrics: str, **align_
 
     settings = get_settings()
     saved_melody = settings.melody.enabled
+    # gloss 처리/신뢰도 스케일은 레거시 CTC 엔진 전용 경로다(위 get_shared_ctc_engine 대역)
+    # — 새 스택(기본값 owsm/omniasr)은 이 경로가 없으므로 레거시로 강제 고정한다.
+    saved_engine = settings.alignment.engine
     object.__setattr__(settings.melody, "enabled", False)
+    object.__setattr__(settings.alignment, "engine", "ctc")
     saved_align = {k: getattr(settings.alignment, k) for k in align_overrides}
     for k, v in align_overrides.items():
         object.__setattr__(settings.alignment, k, v)
@@ -378,6 +382,7 @@ def _run_alignment_with_fake_engine(monkeypatch, tmp_path, lyrics: str, **align_
         result = worker_mod._run_alignment(str(audio_file), lyrics, "ja")
     finally:
         object.__setattr__(settings.melody, "enabled", saved_melody)
+        object.__setattr__(settings.alignment, "engine", saved_engine)
         for k, v in saved_align.items():
             object.__setattr__(settings.alignment, k, v)
     return result, engine

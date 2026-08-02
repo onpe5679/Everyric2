@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,16 +74,23 @@ class AudioSettings(BaseSettings):
     # 않는다. VocalSeparator가 이 값을 보고 분기할 뿐이고, 그 분기를 실제로 태우는 것은
     # 별도 작업(worker.py 배선 전환) 몫이다.
     separator_backend: Literal["htdemucs", "bs-polarformer-fp16"] = Field(
-        default="htdemucs",
-        description="Which vocal separator backend VocalSeparator uses. 'htdemucs' (default) "
-        "keeps the existing demucs subprocess path completely unchanged. 'bs-polarformer-fp16' "
-        "routes to the ported bench candidate that measured +26.7pp alignment accuracy on hard "
-        "songs (no-separation 47.6 -> polar 74.3; see docs/research/2026-07-30-model-replacement/"
-        "ust-precision-comparison.md). That path requires CUDA and pre-provisioned model assets "
-        "under separator_model_dir (see everyric2/audio/polarformer_separator.py) — it never "
-        "downloads them at request time and never silently falls back to htdemucs; missing "
+        default="bs-polarformer-fp16",
+        description="Which vocal separator backend VocalSeparator uses. 'bs-polarformer-fp16' "
+        "(default since the model-replacement wiring landed) routes to the ported bench "
+        "candidate that measured +26.7pp alignment accuracy on hard songs (no-separation "
+        "47.6 -> polar 74.3; see docs/research/2026-07-30-model-replacement/"
+        "ust-precision-comparison.md) — that's the combination alignment.engine=owsm/omniasr "
+        "was actually measured with, and the Settings cross-field validator enforces the pairing "
+        "(see AlignmentSettings.engine). This path requires CUDA and pre-provisioned model "
+        "assets under separator_model_dir (see everyric2/audio/polarformer_separator.py) — it "
+        "never downloads them at request time and never silently falls back to htdemucs; missing "
         "assets or a missing CUDA device raise a clear exception instead, because if you don't "
-        "know which separator actually ran, the alignment result becomes uninterpretable.",
+        "know which separator actually ran, the alignment result becomes uninterpretable. NOTE "
+        "(2026-08-03): the assets are not provisioned on every deployment yet (separate task) — "
+        "until they are, is_available() is False and worker._separate_stems() gracefully "
+        "returns None (logged, not raised), so alignment falls back to the unseparated mix. "
+        "'htdemucs' keeps the original demucs subprocess path completely unchanged — set this "
+        "explicitly to revert.",
     )
     separator_model_dir: Path = Field(
         default=Path.home() / ".cache" / "everyric2" / "models",
@@ -159,9 +166,17 @@ class AlignmentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_ALIGNMENT_")
 
     engine: Literal["ctc", "nemo", "gpu-hybrid", "sofa", "owsm", "omniasr"] = Field(
-        default="ctc",
-        description="Alignment engine to use. 기본값은 ctc로 유지한다 — owsm/omniasr는 "
-        "벤치에서 채택된 앵커 모델의 엔진 이식일 뿐, 기본 배선 전환은 별도 작업이다.",
+        default="owsm",
+        description="Alignment engine to use. 'owsm'과 'omniasr' 두 값은 **새 앵커 스택을 "
+        "켜는 스위치**로 취급된다(everyric2/server/worker.py의 _new_stack_enabled) — 둘 중 "
+        "어느 리터럴을 고르든 실제로 어느 모델이 도는지는 곡 언어별로 갈린다(코디네이터 "
+        "확정 라우팅, 2026-08-03: ja는 owsm, 그 밖은 전부 omniasr — _new_stack_anchor_type). "
+        "즉 engine='owsm'이어도 영어 곡은 omniasr로 정렬된다 — 이 필드는 '이 엔진 하나만 "
+        "강제로 써라'가 아니라 '새 스택 켜짐'의 동의어 두 가지다. 새 스택이 켜지면 "
+        "audio.separator_backend도 'bs-polarformer-fp16'이어야 한다(아래 Settings의 "
+        "cross-field validator가 어긋나면 기동 시점에 바로 실패시킨다) — 그 조합만 실측됐다 "
+        "(docs/research/2026-07-30-model-replacement/ust-precision-comparison.md). ctc/nemo/"
+        "gpu-hybrid/sofa는 전부 구스택(get_shared_ctc_engine 등 기존 경로) 그대로다.",
     )
     language: Literal["auto", "en", "ja", "ko"] = Field(
         default="auto", description="Language for transcription/alignment"
@@ -858,11 +873,12 @@ class AlignmentSettings(BaseSettings):
     # 이 설정 추가와 별개 작업이라 two_pass_enabled 기본값은 False다 — 켜기 전까지는
     # 기존 동작이 완전히 그대로다.
     two_pass_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable the 2-pass refiner (heavy anchor for line boundaries + light CTC "
-        "for syllable-level resync inside each line window). OFF by default — wiring this into "
-        "the alignment factory/worker is separate work from adding the module and its settings; "
-        "flipping this alone does nothing until that wiring exists.",
+        "for syllable-level resync inside each line window). ON by default now that "
+        "everyric2/server/worker.py wires it (_run_new_stack_alignment) — it only takes effect "
+        "when alignment.engine is 'owsm'/'omniasr' (new stack) and a separation result is "
+        "available; the legacy ctc/nemo/gpu-hybrid/sofa path never reads this field.",
     )
     two_pass_window_pad_sec: float = Field(
         default=0.2,
@@ -1401,6 +1417,28 @@ class Settings(BaseSettings):
 
     # Debug mode
     debug: bool = Field(default=False, description="Enable debug mode")
+
+    @model_validator(mode="after")
+    def _check_new_stack_separator_consistency(self) -> "Settings":
+        """새 정렬 스택(owsm/omniasr 앵커, alignment.engine)이 켜졌는데 분리기가 여전히
+        htdemucs면 조합이 어긋난다 — 이식 근거(무분리 47.6 -> bs-polarformer-fp16 74.3,
+        +26.7pp)는 그 분리 스템을 전제로 실측됐다(docs/research/2026-07-30-model-replacement/
+        ust-precision-comparison.md). 조용히 섞이면 어느 조합이 실제로 돌았는지 해석
+        불가능해지므로(everyric2/audio/polarformer_separator.py의 "조용한 폴백 금지" 정책과
+        같은 결) 기동 시점(Settings() 생성, get_settings()의 첫 호출)에 바로 실패시킨다 —
+        요청이 한참 진행된 뒤 애매하게 저품질로 새는 것보다 낫다.
+        """
+        new_stack = self.alignment.engine in ("owsm", "omniasr")
+        if new_stack and self.audio.separator_backend != "bs-polarformer-fp16":
+            raise ValueError(
+                f"alignment.engine={self.alignment.engine!r} selects the new anchor stack "
+                "(owsm/omniasr), which requires audio.separator_backend='bs-polarformer-fp16' "
+                f"(got {self.audio.separator_backend!r}). Mixing the new anchor with htdemucs "
+                "was never measured and the alignment result would be uninterpretable — set "
+                "EVERYRIC_AUDIO_SEPARATOR_BACKEND=bs-polarformer-fp16, or revert "
+                "EVERYRIC_ALIGNMENT_ENGINE to a legacy engine (ctc/nemo/gpu-hybrid/sofa)."
+            )
+        return self
 
 
 # Global settings instance (lazy loaded)

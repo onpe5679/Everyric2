@@ -6,6 +6,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -1748,7 +1749,7 @@ def _download_and_hash(video_id: str, job_id: str) -> dict:
 
 
 def _build_extra(result: dict[str, Any], attribution: dict[str, Any] | None) -> dict[str, Any] | None:
-    """싱크 JSON의 segments 밖 부가정보(디버그 메타, 출처 표기, 템포, 키) 조립."""
+    """싱크 JSON의 segments 밖 부가정보(디버그 메타, 출처 표기, 템포, 키, 추임새) 조립."""
     extra: dict[str, Any] = {}
     if result.get("debug"):
         extra["debug"] = result["debug"]
@@ -1756,6 +1757,9 @@ def _build_extra(result: dict[str, Any], attribution: dict[str, Any] | None) -> 
         extra["tempo"] = result["tempo"]
     if result.get("key"):
         extra["key"] = result["key"]
+    if result.get("adlib"):
+        # 새 스택 전용 additive 필드 — 구간 배열 [[start,end],...] (레거시 응답엔 없다).
+        extra["adlib"] = result["adlib"]
     if attribution is not None:
         extra["attribution"] = attribution
     return extra or None
@@ -3769,6 +3773,423 @@ def _anchor_kwargs(forbidden_spans, line_starts=None) -> dict[str, Any]:
     return kwargs
 
 
+# ── 새 정렬 스택 배선 (owsm/omniasr 앵커 + 2패스 리파이너) ──────────────────────
+#
+# 이식된 부품(everyric2/alignment/{owsm_engine,omniasr_engine,refine_window}.py,
+# everyric2/alignment/display_fixes.py, everyric2/text/align_target.py)을 _run_alignment에
+# 배선한다. 레거시 ko/ja 이중정렬·star 토큰·pron_data DP 근사 경로(_align_with_pronunciation
+# 이하)는 완전히 별개로 남겨 둔다 — 섞지 않는다. 새 스택은 앵커·리파이너가 이미 다표기
+# 음절을 **실측**하므로, "DP 근사를 사후에 바로잡는" 레거시 후반 단계(ko/ja 융합·뭉침
+# 세분화·붕괴 재합성)를 다시 태우면 오히려 실측값을 헤친다 — new_stack_active 가드로
+# 그 넷을 건너뛴다(_run_alignment 본문 참고).
+
+
+def _new_stack_enabled(settings) -> bool:
+    """``settings.alignment.engine``이 새 앵커 스택(owsm/omniasr) 중 하나를 가리키면 True.
+
+    둘 다 "새 스택 켜짐"의 동의어다 — 실제로 어느 모델이 도는지는 곡 언어별로
+    ``_new_stack_anchor_type``이 정한다(예: engine="owsm"이어도 en 곡은 omniasr로 정렬된다
+    — 아래 함수 docstring 참고). engine이 기존 값("ctc" 등)으로 남아 있는 한 이 함수는
+    False이고 _run_alignment는 구스택(get_shared_ctc_engine)으로 그대로 정렬한다(폴백).
+    """
+    return settings.alignment.engine in ("owsm", "omniasr")
+
+
+def _new_stack_anchor_type(language: str | None) -> str:
+    """언어 → 새 스택 앵커 엔진 타입.
+
+    코디네이터 확정 라우팅(2026-08-03, 모델 교체 이니셔티브): ja는 OWSM-CTC v4 1B(붕괴
+    방어 실측 — owsm_engine.py 모듈 docstring), 그 밖은 전부 omniASR-CTC-300M(1,600+ 언어
+    체크포인트라 언어 게이트가 없다 — omniasr_engine.py 모듈 docstring)로 떨어진다. ko도
+    포함된다: omniASR이 이미 다국어 단일 모델이고, 2패스 리파이너가 어차피 omniasr을
+    상주시키므로(``_run_new_stack_alignment``) 같은 모델을 앵커로 겸용하면 모델 로드가
+    1회로 끝난다. «무분리 asr 빠른 경로 → 붕괴 의심 시 owsm 3단계 구원» 같은 성능
+    라우팅(scripts/bench_adapters/routed.py)은 이 표의 범위 밖이다 — 별도 후속 작업.
+    """
+    return "owsm" if (language or "").strip().lower() == "ja" else "omniasr"
+
+
+class _PathBridgedRefiner:
+    """refine_window.SyllableRefiner 계약과 BaseAlignmentEngine.emission_for 계약 사이의
+    배선층 어댑터.
+
+    두 이식이 ``emission_for``의 입력 타입을 서로 다르게 확정해 뒀다: OmniASREngine은
+    ``BaseAlignmentEngine.emission_for(self, audio: AudioData)``(base.py:88)를 그대로
+    override하는데, ``refine_window.refine_lines``는 ``refiner.emission_for(vocals_path)``로
+    **Path**를 넘긴다(``SyllableRefiner`` 프로토콜과 tests/test_refine_window.py의
+    ``_FakeRefiner.emission_for(self, audio_path: Path)``가 그 계약을 고정한다). 실제
+    엔진을 리파이너로 그대로 넘기면 AudioData 자리에 Path가 들어가 ``AudioLoader.
+    prepare_for_alignment``이 즉시 깨진다. 양쪽 다 각자 테스트로 계약이 고정돼 있어 어느
+    쪽 모듈도 못 고친다 — 배선 층에서 흡수한다.
+    """
+
+    def __init__(self, engine: Any, loader: Any) -> None:
+        self._engine = engine
+        self._loader = loader
+
+    def emission_for(self, audio_path: Path) -> Any:
+        audio = self._loader.load(audio_path)
+        return self._engine.emission_for(audio)
+
+
+def _pron_seg_to_wire(span: Any) -> dict[str, Any]:
+    """``refine_window.PronSegmentSpan`` → 서버 wire ``PronSegment`` 딕셔너리
+    (everyric2-chrome/src/types.ts ``PronSegment``와 필드 단위로 대응)."""
+    out: dict[str, Any] = {"text": span.text, "start": span.start, "end": span.end}
+    if not span.resolved:
+        out["resolved"] = False
+    if span.confidence is not None:
+        out["confidence"] = span.confidence
+    if span.word_end:
+        # PronSegment 계약에 없는 추가 필드 — additive라 구버전 확장은 무시한다
+        # (refine_window.py 모듈의 "표시(발음) 세그" 절 참고).
+        out["word_end"] = True
+    return out
+
+
+def _write_stems_for_two_pass(sep_result: Any) -> tuple[Path, Path]:
+    """분리 결과를 임시 vocals.wav/inst.wav 쌍으로 쓴다.
+
+    ``refine_window._dominance_curve``가 ``vocals_path.with_name("inst.wav")``라는 형제
+    파일 관례로 반주를 찾는다 — 분리기 자체의 산출 파일(예: bs-polarformer-fp16의
+    work_dir)은 서버가 상주 프로세스라 요청마다 이미 정리돼 있으므로(polarformer_
+    separator.py의 finally) 리파이너를 위해 별도로 다시 쓴다. 반환: (지워야 할 임시
+    디렉터리, vocals 경로) — 호출부가 finally에서 디렉터리를 지운다.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="two_pass_stems_"))
+    vocals_path = tmp_dir / "vocals.wav"
+    sep_result.vocals.to_file(vocals_path)
+    sep_result.accompaniment.to_file(tmp_dir / "inst.wav")
+    return tmp_dir, vocals_path
+
+
+@dataclass
+class _NewStackResult:
+    """``_run_new_stack_alignment`` 반환 묶음 — ``_run_alignment``의 공용 꼬리(타임스탬프
+    직렬화 → 멜로디 → 품질 → 응답 조립)가 레거시 분기와 **같은 이름**으로 기대하는 지역
+    변수들에 1:1 대응한다."""
+
+    results: list[Any]
+    alignment_text: str
+    pron_data: dict[int, dict[str, Any]]
+    fixes: dict[int, list[str]]
+    raw_spans: list[tuple[float, float]]
+    vad_regions: list[tuple[float, float]] | None
+    clamped_lines: set[int]
+    engine: Any
+    adlib: list[tuple[float, float]] | None
+
+
+def _run_new_stack_alignment(
+    audio: Any,
+    align_audio: Any,
+    sep_result: Any,
+    lyric_lines: list[Any],
+    language: str | None,
+    settings: Any,
+    report: Any,
+) -> "_NewStackResult":
+    """새 정렬 스택(owsm/omniasr 앵커 + 2패스 리파이너) 본체.
+
+    실행 순서(각 단계 이유는 인라인 주석):
+      1. 앵커 정렬(라인 경계 확정) → 2. 우세도 기반 병적 길이 절단(``_clamp_pathological``,
+      display_fixes.py 모듈 docstring이 "worker.py 배선 시 더 이른 단계에서 별도로
+      호출하라"고 지시한 자리) → 3. 기존 VAD 기반 보정(``TimingPostProcessor``·
+      ``_clamp_stretched_lines`` — 구스택과 같은 함수를 재사용, 회귀 표면을 늘리지
+      않는다) → 4. 우세도 기반 좌초 보정(``display_fixes.apply_stranded_corrections``) →
+      5. 추임새 후보 계산 → 6. 2패스 음절 재정렬(``refine_window.refine_lines`` — 위에서
+      **최종 확정된** 라인 경계 위에서만 돈다, refine_lines의 "라인 경계는 앵커가 정한다"
+      불변식과 맞물린다: 경계가 이 시점 이후 다시 안 움직여야 그 위의 음절 스팬이
+      어긋나지 않는다).
+
+    캡션 앵커(caption_anchors/caption_scaffold)·star 토큰·ko/ja 이중정렬 안전망은 이
+    경로에 배선하지 않는다 — 전부 레거시 CTC 엔진의 특정 실패 모드(균일 posterior 등)에
+    맞춰진 장치라 새 앵커에는 전제가 성립하지 않는다(범위 밖, 후속 작업으로 남긴다).
+    """
+    from everyric2.alignment import display_fixes as df
+    from everyric2.alignment.factory import EngineFactory
+    from everyric2.alignment.refine_window import TwoPassRefineConfig, refine_lines
+    from everyric2.alignment.timing_postprocess import TimingPostProcessor
+    from everyric2.audio.loader import AudioLoader
+    from everyric2.audio.vad import VocalActivityDetector
+
+    anchor_type = _new_stack_anchor_type(language)
+    anchor = EngineFactory.get_engine(anchor_type, settings.alignment)
+    if not anchor.is_available():
+        raise RuntimeError(f"{anchor_type} anchor engine not available")
+
+    results = anchor.align(align_audio, lyric_lines, language=language)
+    raw_spans = [(r.start_time, r.end_time) for r in results]
+    fixes: dict[int, list[str]] = {}
+
+    vocals = sep_result.vocals if sep_result is not None else None
+    accompaniment = sep_result.accompaniment if sep_result is not None else None
+
+    # 우세도(dominance) — display_fixes의 장치 전부와 늘이기 게이트가 공유하는 신호.
+    # VAD는 분리 스템의 간주 블리드에 죽으므로(display_fixes.py 모듈 docstring) 따로
+    # 만든다. 스템이 없으면(분리 실패/미설치) 이 신호에 기대는 장치는 전부 조용히
+    # 건너뛴다 — display_fixes.py 모듈 docstring의 계약("우세도가 없으면 전부 조용히
+    # 건너뛴다") 그대로.
+    activity = None
+    if vocals is not None and accompaniment is not None:
+        activity = df.dominance_activity_from_waveforms(
+            vocals.waveform, accompaniment.waveform, vocals.sample_rate
+        )
+
+    if activity is not None:
+        df._clamp_pathological(results, activity.regions)
+        _diff_fixes(fixes, "dom-clamp", raw_spans, results)
+        raw_spans = [(r.start_time, r.end_time) for r in results]
+
+    vad_regions: list[tuple[float, float]] | None = None
+    clamped_lines: set[int] = set()
+    if vocals is not None:
+        try:
+            vad_result = VocalActivityDetector().detect(vocals)
+            pp = TimingPostProcessor(settings.segmentation, extend_to_vocal=False).process(
+                results, vad_result, "line"
+            )
+            _diff_fixes(fixes, "pp", raw_spans, pp.results, tol=0.2)
+            results = pp.results
+            results, clamped_lines = _clamp_stretched_lines(results, vad_result, fixes=fixes)
+            vad_regions = [(round(reg.start, 2), round(reg.end, 2)) for reg in vad_result.regions]
+        except Exception:
+            logger.exception("New-stack VAD timing post-process failed; keeping anchor timing")
+
+    # 우세도 기반 좌초 보정은 VAD 보정 **뒤에** 건다 — VAD가 분리 스템의 간주 블리드로
+    # 못 잡는 좌초를 우세도가 잡고(display_fixes.py 모듈 docstring), 이 둘로 최종
+    # 확정된 경계 위에서만 아래 2패스가 음절을 다시 잡아야 그 스팬이 나중에 어긋나지
+    # 않는다("실행 순서" 문단의 doctring 참고).
+    if activity is not None:
+        before_stranded = [(r.start_time, r.end_time) for r in results]
+        df.apply_stranded_corrections(results, activity)
+        _diff_fixes(fixes, "stranded", before_stranded, results)
+
+    adlib: list[tuple[float, float]] | None = None
+    if activity is not None:
+        adlib = df.adlib_candidates(results, activity)
+
+    pron_data: dict[int, dict[str, Any]] = {}
+    if not settings.alignment.two_pass_enabled:
+        logger.info("Two-pass refiner disabled (two_pass_enabled=False); anchor-only segments")
+    elif sep_result is None:
+        logger.info("Two-pass refiner needs separated vocals; skipping (no separation result)")
+    else:
+        report("음절 재정렬")
+        refiner = (
+            anchor
+            if anchor_type == "omniasr"
+            else EngineFactory.get_engine("omniasr", settings.alignment)
+        )
+        stems_dir: Path | None = None
+        try:
+            stems_dir, vocals_path = _write_stems_for_two_pass(sep_result)
+            bridged = _PathBridgedRefiner(refiner, AudioLoader())
+            lines_text = [ln.text for ln in lyric_lines]
+            refined = refine_lines(
+                results,
+                lines_text,
+                bridged,
+                vocals_path,
+                language=language or "en",
+                config=TwoPassRefineConfig(),
+            )
+            for i, rl in enumerate(refined):
+                entry: dict[str, Any] = {}
+                if rl.pron.get("hangul"):
+                    entry["pronunciation"] = rl.pron["hangul"]
+                if rl.pron_segs.get("hangul"):
+                    entry["pron_segments"] = [_pron_seg_to_wire(s) for s in rl.pron_segs["hangul"]]
+                if rl.pron:
+                    entry["pron"] = dict(rl.pron)
+                if rl.pron_segs:
+                    entry["pron_segs"] = {
+                        key: [_pron_seg_to_wire(s) for s in segs] for key, segs in rl.pron_segs.items()
+                    }
+                if entry:
+                    pron_data[i] = entry
+        except Exception:
+            logger.exception("Two-pass refine failed; falling back to anchor-only segments")
+        finally:
+            if stems_dir is not None:
+                shutil.rmtree(stems_dir, ignore_errors=True)
+
+    alignment_text = f"{anchor_type}-2pass" if pron_data else anchor_type
+
+    return _NewStackResult(
+        results=results,
+        alignment_text=alignment_text,
+        pron_data=pron_data,
+        fixes=fixes,
+        raw_spans=raw_spans,
+        vad_regions=vad_regions,
+        clamped_lines=clamped_lines,
+        engine=anchor,
+        adlib=adlib,
+    )
+
+
+def _finish_new_stack_alignment(
+    audio: Any,
+    align_audio: Any,
+    sep_result: Any,
+    vocals: Any,
+    lyric_lines: list[Any],
+    language: str | None,
+    settings: Any,
+    report: Any,
+    gloss_folded: Any,
+    melody_extractor: Any,
+    f0_future: Any,
+    f0_executor: Any,
+) -> dict[str, Any]:
+    """새 스택 정렬을 실행하고 ``_run_alignment``과 같은 모양의 응답 dict를 조립한다.
+
+    타임스탬프 직렬화 → gloss 되붙이기 → 다표기 부착 → 멜로디 → 품질 → debug_meta 꼬리는
+    레거시 분기(``_run_alignment`` 본문, ``report("전사 정렬")`` 이후)의 같은 단계를
+    의도적으로 **복제**했다 — 둘 다 ``getattr(engine, ..., default)`` 가드 위주라 원래는
+    공유해도 안전하지만, 레거시 쪽 수백 줄 블록을 들여쓰기 수술로 감싸는 것보다 이 함수
+    하나로 **조기 반환**(``_run_alignment``의 try/finally가 f0_executor·anchor_executor
+    정리를 그대로 수행한다)하는 편이 기존 경로를 한 글자도 건드리지 않는다 — 회귀 표면을
+    0으로 유지하는 쪽을 골랐다. 두 사본이 갈리면(예: quality_score 계산 방식이 바뀌면)
+    여기도 함께 고쳐야 한다는 뜻이니 그 사실을 남겨 둔다.
+
+    캡션 앵커·star span·caption scaffold는 새 스택에 배선하지 않았으므로
+    (``_run_new_stack_alignment`` docstring 참고) debug_meta에 그 키들이 아예 없다 —
+    레거시 응답의 "기능이 꺼져 있어 없음"과 달리 "이 스택엔 그 개념이 없음"이다.
+    """
+    stack = _run_new_stack_alignment(
+        audio, align_audio, sep_result, lyric_lines, language, settings, report
+    )
+    results = stack.results
+    pron_data = stack.pron_data
+    fixes = stack.fixes
+    raw_spans = stack.raw_spans
+    vad_regions = stack.vad_regions
+    clamped_lines = stack.clamped_lines
+    engine = stack.engine
+    alignment_text = stack.alignment_text
+
+    timestamps: list[dict[str, Any]] = []
+    pron_referee_tokens: list[Any] = []
+    for i, r in enumerate(results):
+        seg: dict[str, Any] = {"text": r.text, "start": r.start_time, "end": r.end_time}
+        line_conf = r.confidence
+        if line_conf is None and r.word_segments:
+            line_conf = _geomean([w.confidence for w in r.word_segments])
+        if line_conf is not None:
+            seg["confidence"] = round(line_conf, 6)
+        if r.word_segments:
+            seg["words"] = _full_coverage_words(r.text, r.word_segments, r.start_time, r.end_time)
+        pd = pron_data.get(i) or {}
+        if pd.get("pronunciation"):
+            seg["pronunciation"] = pd["pronunciation"]
+        if pd.get("pron_segments"):
+            seg["pron_segments"] = pd["pron_segments"]
+        # 다표기(pron/pron_segs) — 레거시엔 없는 새 필드지만 attach_pron_variants가
+        # seg.get("pron")로 멱등 가드를 거니 순서를 맞출 필요가 없다(먼저 실어도 안전 —
+        # 아래 attach_pron_variants가 그대로 스킵한다).
+        if pd.get("pron"):
+            seg["pron"] = pd["pron"]
+        if pd.get("pron_segs"):
+            seg["pron_segs"] = pd["pron_segs"]
+        debug: dict[str, Any] = {}
+        if vad_regions is not None:
+            dur = max(0.001, r.end_time - r.start_time)
+            vocal = sum(
+                max(0.0, min(e, r.end_time) - max(s, r.start_time)) for s, e in vad_regions
+            )
+            debug["active_ratio"] = round(vocal / dur, 2)
+            debug["clamped"] = i in clamped_lines
+            fx = fixes.get(i)
+            if fx:
+                debug["orig"] = [round(raw_spans[i][0], 2), round(raw_spans[i][1], 2)]
+                debug["fixes"] = fx
+        if debug:
+            seg["debug"] = debug
+        pron_referee_tokens.append(None)
+        timestamps.append(seg)
+
+    if gloss_folded:
+        attached = _fold_gloss_into_segments(timestamps, gloss_folded)
+        logger.info(
+            f"Re-attached {attached} excluded gloss line(s) to their source segment "
+            f"for display (alignment input untouched)"
+        )
+
+    for seg, referee_tokens in zip(timestamps, pron_referee_tokens):
+        attach_pron_variants(seg, referee_tokens=referee_tokens)
+
+    if vad_regions is not None:
+        for text in _drop_nonvocal_nonlyric_edges(timestamps):
+            logger.info(f"Dropped non-vocal non-lyric edge line: {text!r}")
+
+    report("멜로디 분석")
+    f0_curve = None
+    song_key = None
+    if melody_extractor is not None:
+        try:
+            precomputed_f0 = f0_future.result() if f0_future is not None else None
+            annotated = melody_extractor.annotate_timestamps(
+                audio, timestamps, vocals=vocals, precomputed_f0=precomputed_f0
+            )
+            f0_curve = melody_extractor.last_f0_curve
+            song_key = melody_extractor.last_key
+            logger.info(f"Melody notes annotated on {annotated} spans")
+        except Exception:
+            logger.exception("Melody extraction failed; continuing without notes")
+        finally:
+            if f0_executor is not None:
+                f0_executor.shutdown(wait=True)
+
+    avg_confidence = None
+    confidences = [t.get("confidence") for t in timestamps if t.get("confidence") is not None]
+    if confidences:
+        avg_confidence = sum(confidences) / len(confidences)
+
+    quality_score, coverage_meta = _quality_with_coverage(
+        avg_confidence, len(confidences), len(timestamps)
+    )
+    if coverage_meta.get("failed"):
+        logger.warning(
+            f"Alignment coverage too low: only {coverage_meta['aligned_lines']}/"
+            f"{coverage_meta['total_lines']} line(s) have measured char timing "
+            f"(the rest are interpolated); reporting quality_score="
+            f"{quality_score} instead of {coverage_meta['measured_conf']}"
+        )
+
+    detected_lang = language
+    engine_variant = getattr(engine, "_current_engine_variant", None)
+    if hasattr(engine, "_current_language"):
+        detected_lang = engine._current_language
+
+    quality_adapter = getattr(engine, "_current_adapter", None)
+    quality_norm = _scale_free_quality(avg_confidence, quality_adapter)
+    debug_meta: dict[str, Any] = {
+        "star_spans": [],
+        "vad_regions": [list(v) for v in vad_regions] if vad_regions is not None else None,
+        "alignment_text": alignment_text,
+        "f0_curve": f0_curve,
+        "quality_adapter": quality_adapter,
+        "quality_norm": None if quality_norm is None else round(quality_norm, 6),
+        "align_coverage": coverage_meta,
+    }
+
+    return {
+        "timestamps": timestamps,
+        "language": detected_lang,
+        "engine_variant": engine_variant,
+        "quality_score": quality_score,
+        "debug": debug_meta,
+        "alignment_text": alignment_text,
+        "tempo": _estimate_tempo(audio),
+        "key": song_key,
+        # 곡 단위 추임새 후보 — 새 스택 전용 additive 필드(레거시 응답엔 없다). 프런트
+        # 계약: [[start,end],...] (팀리드 지시 필드명 "adlib" 그대로).
+        "adlib": [[round(s, 3), round(e, 3)] for s, e in stack.adlib] if stack.adlib else None,
+    }
+
+
 def _run_alignment(
     audio_path: str,
     lyrics: str,
@@ -3817,14 +4238,21 @@ def _run_alignment(
             lyric_lines, settings.alignment.exclude_gloss_lines
         )
 
-        # CTC 엔진은 웜 캐시 싱글턴 — 같은 언어의 두 번째 잡부터 모델 재로드 0회 (WS2-A).
-        # torch를 최상위 import하는 모듈이라 반드시 여기서 지연 import한다 (API 전용 모드
-        # 프로세스에 torch가 딸려 들어오지 않게 — main.py 지연 임포트 계약).
-        from everyric2.alignment.ctc_engine import get_shared_ctc_engine
+        # 새 정렬 스택(owsm/omniasr 앵커) 게이트 — 켜져 있으면 구스택 CTC 엔진은 아예
+        # 웜업하지 않는다(안 쓸 모델을 GPU에 올려 둘 이유가 없다). 이 값 하나로 아래
+        # 두 지점(엔진 웜업 스킵, 앵커/구스택 이중정렬 분기)이 갈린다.
+        new_stack_active = _new_stack_enabled(settings)
 
-        engine = get_shared_ctc_engine(settings.alignment)
-        if not engine.is_available():
-            raise RuntimeError("CTC engine not available")
+        engine = None
+        if not new_stack_active:
+            # CTC 엔진은 웜 캐시 싱글턴 — 같은 언어의 두 번째 잡부터 모델 재로드 0회 (WS2-A).
+            # torch를 최상위 import하는 모듈이라 반드시 여기서 지연 import한다 (API 전용 모드
+            # 프로세스에 torch가 딸려 들어오지 않게 — main.py 지연 임포트 계약).
+            from everyric2.alignment.ctc_engine import get_shared_ctc_engine
+
+            engine = get_shared_ctc_engine(settings.alignment)
+            if not engine.is_available():
+                raise RuntimeError("CTC engine not available")
 
         # 자막 앵커 조달은 네트워크 IO(트랙당 yt-dlp 1회)라 보컬 분리와 **겹쳐서** 돌린다 —
         # 정렬 진입 전에만 있으면 되므로 분리 시간에 그대로 숨는다(f0 병렬과 같은 방식).
@@ -3911,7 +4339,7 @@ def _run_alignment(
         # 실패·미가용은 평평한 star로 계속한다(성형은 있으면 좋은 신호다). anchor_kw에
         # 싣는 이유: ko/ja/이중정렬/재정렬이 전부 이 dict를 쓰므로 모든 정렬이 같은
         # 가격을 본다 — 한쪽만 성형하면 누출 가드가 성형 차이를 누출로 오독한다.
-        if settings.alignment.star_prior and settings.alignment.star_tokens:
+        if settings.alignment.star_prior and settings.alignment.star_tokens and not new_stack_active:
             presence = None
             try:
                 if sep_result is not None:
@@ -3946,6 +4374,24 @@ def _run_alignment(
                 logger.exception("Star prior: presence derivation failed; star stays flat")
 
         report("전사 정렬")
+        if new_stack_active:
+            # 새 스택은 여기서 조기 반환한다 — 아래 ko/ja 이중정렬·star 토큰·pron_data DP
+            # 근사 블록(레거시 전용, 수백 줄)은 건드리지 않고 그대로 폴백 경로로 남긴다.
+            # try/finally(f0_executor·anchor_executor 정리)는 조기 return에도 그대로 돈다.
+            return _finish_new_stack_alignment(
+                audio,
+                align_audio,
+                sep_result,
+                vocals,
+                lyric_lines,
+                language,
+                settings,
+                report,
+                gloss_folded,
+                melody_extractor,
+                f0_future,
+                f0_executor,
+            )
         # 독음(ko) 정렬 경로: 커버리지가 충분하면 한국어 발음 텍스트+kor adapter로 정렬하고
         # 원문 라인에 역매핑한다. 미달/실패 시 원문 정렬로 폴백 (회귀 0).
         by_text = _pron_by_text(line_meta)

@@ -255,6 +255,11 @@ class SyncLookupResponse(BaseModel):
     # None. lang 파라미터의 기존 동작(legacy 슬롯 오버레이·translation_lang)은 이 필드와
     # 무관하게 그대로다 — 추가 필드라 구버전 클라이언트는 무시하면 그만이다.
     translations_by_lang: dict[str, list[str | None]] | None = None
+    # 곡 단위 추임새 후보 [(start, end), ...] — 가사가 주장하지 않은 가창 구간(새 정렬
+    # 스택의 display_fixes.adlib_candidates 전용, 레거시 스택은 이 필드를 채우지 않는다).
+    # 판정이 아니라 후보다 — 화면에 띄워 귀로 확인하는 용도. additive 필드라 구버전
+    # 확장은 무시하면 그만이다.
+    adlib: list[list[float]] | None = None
 
 
 class SyncPreviousVersionResponse(BaseModel):
@@ -601,6 +606,7 @@ def _build_sync_response(
         attribution=timestamps.get("attribution"),
         tempo=timestamps.get("tempo"),
         key=timestamps.get("key"),
+        adlib=timestamps.get("adlib"),
         linked=linked,
     )
 

@@ -210,12 +210,17 @@ def _run_alignment_with_fake_engine(monkeypatch, tmp_path, language: str, varian
 
     settings = get_settings()
     saved_melody = settings.melody.enabled
+    # engine_variant/force_mms 분리는 레거시 CTC 엔진 전용 개념이다(위 get_shared_ctc_engine
+    # 대역) — 새 스택(기본값 owsm/omniasr)은 이 경로가 없으므로 레거시로 강제 고정한다.
+    saved_engine = settings.alignment.engine
     object.__setattr__(settings.melody, "enabled", False)
+    object.__setattr__(settings.alignment, "engine", "ctc")
     try:
         lyrics = "\n".join(f"テスト行{i}" for i in range(3))
         return worker_mod._run_alignment(str(audio_file), lyrics, language)
     finally:
         object.__setattr__(settings.melody, "enabled", saved_melody)
+        object.__setattr__(settings.alignment, "engine", saved_engine)
 
 
 def test_run_alignment_reports_pure_language_and_mms_variant(monkeypatch, tmp_path):

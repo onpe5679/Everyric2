@@ -222,12 +222,17 @@ def _run_alignment_with_unaligned_engine(
 
     settings = get_settings()
     saved_melody = settings.melody.enabled
+    # 이 헬퍼는 레거시 CTC 엔진을 직접 대역(_UnalignedEngine)한다(위 get_shared_ctc_engine
+    # 대역) — 새 스택(기본값 owsm/omniasr)은 이 경로가 없으므로 레거시로 강제 고정한다.
+    saved_engine = settings.alignment.engine
     object.__setattr__(settings.melody, "enabled", False)
+    object.__setattr__(settings.alignment, "engine", "ctc")
     try:
         lyrics = "\n".join(f"揺らめく光の中で{i}" for i in range(lines))
         return worker_mod._run_alignment(str(audio_file), lyrics, "ja")
     finally:
         object.__setattr__(settings.melody, "enabled", saved_melody)
+        object.__setattr__(settings.alignment, "engine", saved_engine)
 
 
 # ── ② 나중 빈 line_meta가 앞의 진짜 메타를 지우지 않는다 ─────────────
