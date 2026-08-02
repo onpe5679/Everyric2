@@ -4,6 +4,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,13 +175,21 @@ class VocalSeparator:
         model = model or self.config.demucs_model
         temp_dir = self.config.temp_dir
         temp_dir.mkdir(parents=True, exist_ok=True)
+        # 잡마다 고유한 하위 디렉터리 — 예전엔 temp_dir 바로 아래 고정 파일명
+        # (demucs_input.wav/demucs_output/<model>/demucs_input/...)을 썼는데, temp_dir이
+        # 프로세스 전역 공유라 동시 요청은 물론 같은 잡 안에서도(멜로디 f0가 별도
+        # ThreadPoolExecutor에서 자기 VocalSeparator로 재분리할 때 — melody/extractor.py의
+        # _maybe_separate) 서로의 입력·출력 파일을 덮어쓰거나 지웠다(운영자 지시, 2026-08-04
+        # 실곡 검증 — bs-polarformer-fp16 경로에서 먼저 재현됐지만 이 경로도 같은 결함).
+        # tempfile.mkdtemp가 원자적으로 고유 이름을 보장한다.
+        call_dir = Path(tempfile.mkdtemp(dir=temp_dir, prefix="demucs_"))
 
         # Save input audio to temp file
-        input_path = temp_dir / "demucs_input.wav"
+        input_path = call_dir / "input.wav"
         audio.to_file(input_path)
 
         # Output directory for Demucs
-        output_dir = temp_dir / "demucs_output"
+        output_dir = call_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -225,8 +234,8 @@ class VocalSeparator:
                 raise SeparationError(f"Demucs failed: {result.stderr}")
 
             # Find output files
-            # Demucs outputs to: output_dir/model/input_name/vocals.wav, no_vocals.wav
-            model_output_dir = output_dir / model / "demucs_input"
+            # Demucs outputs to: output_dir/model/<input stem>/vocals.wav, no_vocals.wav
+            model_output_dir = output_dir / model / input_path.stem
 
             vocals_path = model_output_dir / "vocals.wav"
             no_vocals_path = model_output_dir / "no_vocals.wav"
@@ -252,9 +261,14 @@ class VocalSeparator:
                 raise
             raise SeparationError(f"Separation failed: {e}") from e
         finally:
-            # Cleanup input file
-            if input_path.exists():
-                input_path.unlink()
+            # call_dir 하나만 지운다(입력 wav + demucs 출력 전부 그 안에 있다) — 공유
+            # temp_dir 자체는 절대 건드리지 않는다(다른 잡의 call_dir이 같은 부모 밑에
+            # 나란히 있을 수 있다). vocals/accompaniment는 이미 loader.load()로 메모리에
+            # 읽어 둔 뒤라(AudioData.waveform은 numpy 배열, 파일을 다시 참조하지 않는다)
+            # 디렉터리를 지워도 반환값엔 영향이 없다. 예전엔 input_path만 지우고
+            # output_dir(=demucs_output/)은 영영 안 지워 잡마다 디스크가 계속 쌓였다 —
+            # call_dir 단위 정리가 그 누수도 함께 없앤다.
+            shutil.rmtree(call_dir, ignore_errors=True)
 
     def _separate_polarformer(self, audio: AudioData, use_gpu: bool) -> SeparationResult:
         """bs-polarformer-fp16 경로 — everyric2/audio/polarformer_separator.py로 위임한다.
@@ -273,9 +287,18 @@ class VocalSeparator:
 
         temp_dir = self.config.temp_dir
         temp_dir.mkdir(parents=True, exist_ok=True)
-        input_path = temp_dir / "polarformer_input.wav"
+        # 잡마다 고유한 하위 디렉터리 — temp_dir 바로 아래 고정 파일명(polarformer_input.wav/
+        # polarformer_output)을 쓰면 동시 요청은 물론 같은 잡 안에서도 경합한다: 멜로디 f0가
+        # 별도 ThreadPoolExecutor에서 자기 VocalSeparator로 재분리할 때(vocals=None으로
+        # precompute_f0에 들어가면 melody/extractor.py._maybe_separate가 독립적으로
+        # VocalSeparator().separate()를 부른다) 메인 스레드의 분리와 동시에 같은 파일에
+        # 쓰고 지운다(운영자 지시, 2026-08-04 실곡 검증 — 熱異常이 이 경합으로 죽었다: 한쪽
+        # finally의 unlink가 다른 쪽이 읽던 파일을 지웠다). tempfile.mkdtemp가 원자적으로
+        # 고유 이름을 보장한다.
+        call_dir = Path(tempfile.mkdtemp(dir=temp_dir, prefix="polarformer_"))
+        input_path = call_dir / "input.wav"
         audio.to_file(input_path)
-        work_dir = temp_dir / "polarformer_output"
+        work_dir = call_dir / "output"
 
         try:
             try:
@@ -298,8 +321,11 @@ class VocalSeparator:
                 backend=pf.BACKEND_NAME,
             )
         finally:
-            input_path.unlink(missing_ok=True)
-            shutil.rmtree(work_dir, ignore_errors=True)
+            # call_dir 하나만 지운다(입력 wav + 분리 출력 전부 그 안에 있다) — 공유
+            # temp_dir 자체는 절대 건드리지 않는다(다른 잡의 call_dir이 같은 부모 밑에
+            # 나란히 있을 수 있다). vocals/accompaniment는 이미 loader.load()로 메모리에
+            # 읽어 둔 뒤라 디렉터리를 지워도 반환값엔 영향이 없다.
+            shutil.rmtree(call_dir, ignore_errors=True)
 
     def separate_file(
         self,

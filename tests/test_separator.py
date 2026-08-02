@@ -8,6 +8,7 @@ scripts/bench_adapters/separators_quality.py for the bench harness that DOES run
 
 import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -29,6 +30,15 @@ from everyric2.config.settings import AudioSettings
 def _silence(seconds: float = 0.1, sr: int = 24000) -> AudioData:
     n = int(seconds * sr)
     return AudioData(waveform=np.zeros(n, dtype=np.float32), sample_rate=sr, duration=seconds)
+
+
+def _marked_audio(value: float, seconds: float = 0.1, sr: int = 24000) -> AudioData:
+    """상수 값으로 채운 오디오 — 동시성 테스트에서 "이 결과가 정말 내 입력에서 나왔는가"를
+    파일 내용으로 직접 확인하기 위한 마커."""
+    n = int(seconds * sr)
+    return AudioData(
+        waveform=np.full(n, value, dtype=np.float32), sample_rate=sr, duration=seconds
+    )
 
 
 def _write_polarformer_assets(models_dir: Path) -> None:
@@ -130,10 +140,14 @@ class TestHtdemucsRegression:
         def fake_run(cmd, **kwargs):
             if not (isinstance(cmd, list) and "-n" in cmd and "demucs" in cmd):
                 return real_run(cmd, **kwargs)
-            # demucs가 만드는 파일 레이아웃을 재현: output_dir/model/demucs_input/*.wav
+            # demucs가 만드는 파일 레이아웃을 재현: output_dir/model/<입력 stem>/*.wav.
+            # 입력 stem을 하드코딩하지 않는다 — 잡마다 고유한 call_dir 아래 임의의 파일명을
+            # 쓰므로(separator.py 2026-08-04 수정, 고정 파일명 경합 방지) 실제 커맨드의
+            # 마지막 인자(입력 wav 경로)에서 그대로 읽는다.
             model = cmd[cmd.index("-n") + 1]
             out_dir = Path(cmd[cmd.index("-o") + 1])
-            stem_dir = out_dir / model / "demucs_input"
+            input_stem = Path(cmd[-1]).stem
+            stem_dir = out_dir / model / input_stem
             stem_dir.mkdir(parents=True, exist_ok=True)
             sf.write(stem_dir / "vocals.wav", np.zeros(2400, dtype=np.float32), 24000)
             sf.write(stem_dir / "no_vocals.wav", np.zeros(2400, dtype=np.float32), 24000)
@@ -145,6 +159,10 @@ class TestHtdemucsRegression:
 
         assert isinstance(result, SeparationResult)
         assert result.backend == "htdemucs"
+        # call_dir(입력+출력 전부)이 정리됐는지 — temp_dir 자체는 남아 있어야 한다(다음
+        # 잡의 call_dir이 그 아래 생긴다).
+        assert settings.temp_dir.exists()
+        assert list(settings.temp_dir.iterdir()) == []
 
     def test_demucs_not_available_raises(self, monkeypatch):
         separator = VocalSeparator(AudioSettings(separator_backend="htdemucs"))
@@ -310,3 +328,147 @@ class TestPolarFormerAssetHelpers:
 
         assert vocals_path == vocals
         assert inst_path == inst
+
+
+class TestConcurrentSeparation:
+    """separator.py의 고정 임시 파일명 경합 회귀 테스트(운영자 지시, 2026-08-04 실곡
+    검증 — 熱異常이 이 경합으로 죽었다).
+
+    원인: 예전엔 두 백엔드 다 프로세스 전역 공유 temp_dir 바로 아래 고정 파일명
+    (demucs_input.wav/polarformer_input.wav)을 썼다. 멜로디 f0 추론이 별도
+    ThreadPoolExecutor에서 도는데(worker.py의 f0_future), vocals가 아직 없으면(새 스택의
+    고속 경로처럼 분리를 미리 안 돌린 경우) melody/extractor.py._maybe_separate가 **자기
+    VocalSeparator 인스턴스로 독립적으로 재분리한다** — 메인 스레드가 구원 단계에서 도는
+    분리와 같은 파일 경로를 동시에 쓰게 된다. 한쪽의 finally 정리가 다른 쪽이 아직 읽는
+    중인 파일을 지우면 즉시 실패(熱異常이 그랬다)하고, 타이밍이 조금만 달랐으면 **한쪽이
+    다른 쪽의 스템을 읽는 조용한 오염**(예외 없이 A곡 가사가 B곡 보컬로 정렬됨)이 됐을
+    자리다 — 그 조용한 오염 쪽이 훨씬 위험하다.
+
+    계약 테스트로는 절대 안 잡힌다 — 단일 호출은 항상 성공한다. 실제로 스레드 둘을
+    동시에 돌려서, 그것도 "겹치는 순간"을 barrier로 강제해야 드러난다. 각 스레드가 받는
+    결과가 **자기 입력에서 나온 값**인지(다른 스레드가 쓴 파일을 읽지 않았는지)까지
+    파일 내용의 마커로 직접 확인한다 — 경로 문자열이 다르다는 것만으로는 "정말 그 경로의
+    파일을 읽었는가"를 증명하지 못한다.
+    """
+
+    def test_two_threads_htdemucs_dont_cross_contaminate(self, tmp_path, monkeypatch):
+        settings = AudioSettings(temp_dir=tmp_path / "work", separator_backend="htdemucs")
+        separator = VocalSeparator(settings)
+        real_run = subprocess.run
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        seen_input_paths: list[Path] = []
+
+        def fake_run(cmd, **kwargs):
+            if not (isinstance(cmd, list) and "-n" in cmd and "demucs" in cmd):
+                return real_run(cmd, **kwargs)
+            input_path = Path(cmd[-1])
+            with lock:
+                seen_input_paths.append(input_path)
+            # 두 스레드가 실제로 겹치도록 강제한다 — 원래 버그(고정 경로 공유)가 있었다면
+            # 이 시점에 서로의 출력 디렉터리를 밟는다.
+            barrier.wait(timeout=5)
+            # 자기 입력 파일을 실제로 읽어 마커를 정한다 — 고정 경로였다면 상대방이 쓴
+            # 파일을 읽었을 수 있다.
+            data, _ = sf.read(str(input_path))
+            marker = float(data[0]) if len(data) else 0.0
+            model = cmd[cmd.index("-n") + 1]
+            out_dir = Path(cmd[cmd.index("-o") + 1])
+            stem_dir = out_dir / model / input_path.stem
+            stem_dir.mkdir(parents=True, exist_ok=True)
+            sf.write(stem_dir / "vocals.wav", np.full(2400, marker, dtype=np.float32), 24000)
+            sf.write(stem_dir / "no_vocals.wav", np.zeros(2400, dtype=np.float32), 24000)
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        results: dict[str, SeparationResult] = {}
+        errors: dict[str, BaseException] = {}
+
+        def worker(name: str, value: float) -> None:
+            try:
+                results[name] = separator.separate(_marked_audio(value))
+            except BaseException as exc:  # noqa: BLE001 - 스레드 예외를 메인으로 옮긴다
+                errors[name] = exc
+
+        threads = [
+            threading.Thread(target=worker, args=("songA", 0.1)),
+            threading.Thread(target=worker, args=("songB", 0.9)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, errors
+        assert len(results) == 2
+        # 각 곡이 자기 마커만 받았다 — 고정 경로였다면 한쪽이 다른 쪽 스템을 읽었을 것이다.
+        # abs=1e-3: WAV round-trip이 16비트 PCM으로 양자화해 마지막 몇 비트가 흔들린다
+        # (예: 0.1 -> 0.0999755859375) — 오염이었다면 0.8 가까이 틀렸을 것이므로 이
+        # 여유는 실제 판별력을 안 줄인다.
+        assert float(results["songA"].vocals.waveform[0]) == pytest.approx(0.1, abs=1e-3)
+        assert float(results["songB"].vocals.waveform[0]) == pytest.approx(0.9, abs=1e-3)
+        # 두 호출이 서로 다른 call_dir을 썼다.
+        assert seen_input_paths[0].parent != seen_input_paths[1].parent
+        # 정리 후 temp_dir 아래 남는 게 없다(자기 call_dir만 지웠고 공유 루트는 안 건드렸다).
+        assert list(settings.temp_dir.iterdir()) == []
+
+    def test_two_threads_polarformer_dont_cross_contaminate(self, tmp_path, monkeypatch):
+        settings = AudioSettings(
+            temp_dir=tmp_path / "work",
+            separator_backend="bs-polarformer-fp16",
+            separator_model_dir=tmp_path / "models",
+        )
+        separator = VocalSeparator(settings)
+        monkeypatch.setattr(pf, "require_available", lambda models_dir: None)
+
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        seen_input_paths: list[Path] = []
+
+        def fake_separate(input_path, work_dir, models_dir, use_gpu=True):
+            input_path = Path(input_path)
+            with lock:
+                seen_input_paths.append(input_path)
+            barrier.wait(timeout=5)
+            data, _ = sf.read(str(input_path))
+            marker = float(data[0]) if len(data) else 0.0
+            work_dir = Path(work_dir)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            vocals_path = work_dir / "vocals.wav"
+            inst_path = work_dir / "inst.wav"
+            sf.write(vocals_path, np.full(2400, marker, dtype=np.float32), 24000)
+            sf.write(inst_path, np.zeros(2400, dtype=np.float32), 24000)
+            return pf.PolarFormerOutput(
+                vocals_path=vocals_path, inst_path=inst_path, elapsed_sec=0.01
+            )
+
+        monkeypatch.setattr(pf, "separate", fake_separate)
+
+        results: dict[str, SeparationResult] = {}
+        errors: dict[str, BaseException] = {}
+
+        def worker(name: str, value: float) -> None:
+            try:
+                results[name] = separator.separate(_marked_audio(value), use_gpu=True)
+            except BaseException as exc:  # noqa: BLE001
+                errors[name] = exc
+
+        threads = [
+            threading.Thread(target=worker, args=("songA", 0.1)),
+            threading.Thread(target=worker, args=("songB", 0.9)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, errors
+        assert len(results) == 2
+        # abs=1e-3: WAV round-trip이 16비트 PCM으로 양자화해 마지막 몇 비트가 흔들린다
+        # (예: 0.1 -> 0.0999755859375) — 오염이었다면 0.8 가까이 틀렸을 것이므로 이
+        # 여유는 실제 판별력을 안 줄인다.
+        assert float(results["songA"].vocals.waveform[0]) == pytest.approx(0.1, abs=1e-3)
+        assert float(results["songB"].vocals.waveform[0]) == pytest.approx(0.9, abs=1e-3)
+        assert seen_input_paths[0].parent != seen_input_paths[1].parent
+        assert list(settings.temp_dir.iterdir()) == []
