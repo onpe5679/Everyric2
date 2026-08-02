@@ -66,6 +66,13 @@ class PostProcessConfig:
     pron_path: bool = True
     # 프로드 보정층 전체가 아니라 **병적 라인 절단 한 규칙만** 적용한다.
     clamp_only: bool = False
+    # 보정을 다 걸고도 좌초 시그니처(``_stranded_sites``)가 남으면 이 정렬기로 **승급
+    # 재정렬**한다 — en의 실종된 난이도 축이다. ja/ko는 라우팅의 logConf 신호가 난이도를
+    # 재지만 en은 그 신호가 원리상 무력해(라틴 posterior — 붕괴한 Madeon이 −6.38로 정상
+    # ja곡보다 높다) 사전 판정이 불가능하고, 대신 **사후 결과**로 난이도를 잰다. 시그니처가
+    # 줄어든 쪽을 채택하므로 승급이 곡을 더 망치는 방향으로는 못 간다. 확장의 «분석 깊이
+    # 올리기» 버튼은 이 경로를 시그니처 없이 강제 발동하는 형태가 될 예정이다.
+    retry_base: str | None = None
     note: str = ""
 
 
@@ -96,12 +103,18 @@ CONFIGS: tuple[PostProcessConfig, ...] = (
     # 1:30~2:32의 비가창 62초(우세도 0.033)에 우리 레인이 38.0초를 덮는 반면 PROD는 0.2초다.
     # 원인은 라인28의 「윌」 한 세그가 32.19초를 먹은 것이고, 그 라인은 35.6초 지속에 발성
     # 커버리지 ~4%라 「8초 초과 + 커버리지 50% 미만」 조건에 정확히 걸린다(2026-08-02).
+    # 승급 대상은 owsm 앵커 3단계(분리+owsm+asr)다. butcher 실측(2026-08-02): 자기앵커는
+    # L50~54 블록이 4~8초 지각(L53 「The slaughter's on」 2:15.53), owsm 앵커면 전부
+    # PROD ±0.2s(L53 2:11.34). en 세 구성 대조(8-01)가 앵커를 기각한 표본 5곡에 butcher가
+    # 없었다 — 집계로 뺀 부품이 극한곡 1곡의 파국을 막는 부품이었다. 표기 대조군
+    # (``-en+pp``·``-phonetic+pp``)은 승급하지 않는다 — 대조군까지 올리면 A/B가 사라진다.
     PostProcessConfig(
         name="2pass-asr-ipa-hangul+pp",
         base="2pass-asr-ipa-hangul",
         pron_path=False,
         clamp_only=True,
-        note="en 채택 스택 + 병적 라인 절단만",
+        retry_base="2pass-en-ipa-hangul",
+        note="en 채택 스택 + 병적 라인 절단 + 좌초 시 owsm 3단계 승급",
     ),
     PostProcessConfig(
         name="2pass-asr-ipa-en+pp",
@@ -135,6 +148,11 @@ def _resolve_base(name: str) -> Any:
     if adapter is None:
         raise ValueError(f"후처리 래퍼가 가리키는 정렬기가 없다: {name!r}")
     return adapter()
+
+
+def _max_or_none(a: float | None, b: float | None) -> float | None:
+    values = [x for x in (a, b) if x is not None]
+    return max(values) if values else None
 
 
 def _vad_source(vocals_path: Path) -> tuple[Path, str]:
@@ -382,6 +400,35 @@ def _pull_disconnected_tails(lines: list[dict[str, Any]], regions: list) -> int:
     return pulled
 
 
+def _stranded_sites(lines: list[dict[str, Any]], regions: list) -> int:
+    """좌초 시그니처 — «감당 안 되는 난이도»의 사후 판정 신호(이동 장치가 아니다).
+
+    조건은 갭 되당김(기각된 장치)의 발동 조건에서 온다: 직전 갭 ≥ 3초 · 갭 안 미설명 발성
+    ≥ 1.5초 · 다음 라인 **머리 1초** 커버리지 < 0.2. 원판은 라인 전체 커버리지를 봤는데,
+    꼬리 가드(≤2세그) 이후 butcher L50이 다음 절 가창까지 뻗어(2:09.12~2:12.42) 전체
+    커버리지가 0.2를 넘어 버렸다 — 제자리 라인은 **머리부터** 제 발성 위에 있으므로 머리로
+    재는 것이 원리에도 맞다. 14곡 스캔에서 butcher L50 단 1건·오검출 0(2026-08-02).
+    장치로는 기각됐지만(옮기면 비워진 자리가 새 증상) **탐지기로는 그대로 유효하다** —
+    이 시그니처가 남아 있다는 것은 가사 어딘가가 제 발성을 못 찾았다는 뜻이다.
+    """
+    count = 0
+    for index in range(1, len(lines)):
+        prev, line = lines[index - 1], lines[index]
+        gap0, gap1 = float(prev["end"]), float(line["start"])
+        if gap1 - gap0 < 3.0:
+            continue
+        start, end = float(line["start"]), float(line["end"])
+        if _coverage(regions, start, min(end, start + 1.0)) >= 0.2:
+            continue
+        inside = [
+            reg for reg in regions if reg.end > gap0 + 0.05 and reg.start < gap1 - 0.05
+        ]
+        voiced = sum(min(reg.end, gap1) - max(reg.start, gap0) for reg in inside)
+        if voiced >= 1.5:
+            count += 1
+    return count
+
+
 def _snap_silent_heads(lines: list[dict[str, Any]], activity) -> int:
     """«명백한 무음» 위에 앉은 라인 머리를 첫 가창 온셋으로 되민다.
 
@@ -468,8 +515,33 @@ class PostProcessedAligner(AlignerAdapter):
         started = time.perf_counter()
         out = self._base_aligner().align(vocals_path, lyrics, language)
         stats = self._apply(out.lines, vocals_path)
-        out.elapsed_sec = round(time.perf_counter() - started, 2)
         out.meta = {**out.meta, "postprocess": stats}
+
+        # 사후 난이도 승급 — 보정으로도 좌초가 남으면 상위 구성으로 재정렬하고, 좌초가
+        # **줄어든 쪽**을 채택한다(악화 방향으로는 못 간다). 배경은 ``retry_base`` 주석.
+        sites = int(stats.get("stranded_sites") or 0)
+        if sites and self.config.retry_base:
+            retry = _resolve_base(self.config.retry_base).align(vocals_path, lyrics, language)
+            retry_stats = self._apply(retry.lines, vocals_path)
+            retry_sites = int(retry_stats.get("stranded_sites") or 0)
+            escalation = {
+                "from": self.config.base,
+                "to": self.config.retry_base,
+                "sites_before": sites,
+                "sites_after": retry_sites,
+                "adopted": retry_sites < sites,
+            }
+            if retry_sites < sites:
+                retry.meta = {**retry.meta, "postprocess": retry_stats, "escalation": escalation}
+                retry.vram_peak_mb = _max_or_none(retry.vram_peak_mb, out.vram_peak_mb)
+                retry.vram_device_peak_mb = _max_or_none(
+                    retry.vram_device_peak_mb, out.vram_device_peak_mb
+                )
+                retry.elapsed_sec = round(time.perf_counter() - started, 2)
+                return retry
+            out.meta["escalation"] = escalation
+
+        out.elapsed_sec = round(time.perf_counter() - started, 2)
         return out
 
     def _apply(self, lines: list[dict[str, Any]], vocals_path: Path) -> dict[str, Any]:
@@ -561,11 +633,13 @@ class PostProcessedAligner(AlignerAdapter):
         # 2:07~2:12가 통째로 비어 2:11 「The slaughter's on」 시작이 앵커 단독보다 더
         # 어긋나 보였다. 블록 지각 곡은 손대지 않는 것이 낫다 — 잔해 이동은 이동한 라인만
         # 보면 이득이어도 «비워진 자리»가 새 증상이 된다.
-        folded = pulled = snapped_heads = 0
+        folded = pulled = snapped_heads = stranded = 0
         if self.config.clamp_only and activity_source == "dominance":
             folded = _fold_stranded_repeats(lines, activity.regions)
             pulled = _pull_disconnected_tails(lines, activity.regions)
             snapped_heads = _snap_silent_heads(lines, activity)
+            # 보정을 다 걸고 남은 좌초 — align()의 승급 판정이 읽는다.
+            stranded = _stranded_sites(lines, activity.regions)
 
         return {
             "applied": True,
@@ -580,6 +654,7 @@ class PostProcessedAligner(AlignerAdapter):
             "folded_lines": folded,
             "pulled_tails": pulled,
             "snapped_heads": snapped_heads,
+            "stranded_sites": stranded,
             "total_lines": len(lines),
             "elapsed_sec": round(time.perf_counter() - started, 3),
         }
