@@ -346,6 +346,15 @@ class LinkResultRequest(BaseModel):
 
 class FailRequest(BaseModel):
     error: str
+    # sync 잡(/jobs/{id}/fail) 전용 — jobs.failure_kind (MoRef 감사 #3). 원격 워커(cli.py)가
+    # classify_job_failure로 계산해 실어 보낸다. "cancelled"는 이 경로로 오지 않는다(취소는
+    # cancel API가 서버 쪽에서 이미 확정한다 — report_progress의 cancel_requested 참고).
+    # 구버전 워커는 이 필드를 안 보내므로 기본값 None(미분류)으로 남는다.
+    failure_kind: str | None = None
+    # link-jobs(/link-jobs/{id}/fail) 전용 — True면 오류가 아니라 무다운로드 원칙에 따른
+    # 정책적 종결(cache_miss_no_download 등, MoRef 감사 #4). sync 잡 쪽은 이 필드를 읽지
+    # 않는다(항상 기본값 False로 무해하게 무시됨).
+    declined: bool = False
 
 
 class AcceptResponse(BaseModel):
@@ -644,7 +653,9 @@ async def submit_fail(
         if not job:
             raise HTTPException(status_code=404, detail="잡을 찾을 수 없어요")
         if job.status == "processing":
-            await job_repo.update_status(job_id, "failed", error=request.error)
+            await job_repo.update_status(
+                job_id, "failed", error=request.error, failure_kind=request.failure_kind
+            )
     _LEASES.pop(job_id, None)
     _cleanup_worker_audio(job_id)
     _pop_stashes(job_id)
@@ -702,7 +713,8 @@ async def submit_link_fail(
     x_worker_key: str | None = Header(default=None),
     x_worker_id: str | None = Header(default=None),
 ):
-    """링크 잡 실패 보고 → status=failed. processing일 때만 반영(뒤늦은/중복 실패 무시)."""
+    """링크 잡 실패/거절 보고 → status=failed(오류) 또는 declined(request.declined=True,
+    무다운로드 정책 종결 — MoRef 감사 #4). processing일 때만 반영(뒤늦은/중복 보고 무시)."""
     _require_worker_key(x_worker_key)
     lease_key = f"link:{link_job_id}"
     _require_lease(lease_key, x_worker_id)
@@ -713,6 +725,9 @@ async def submit_link_fail(
         if not link_job:
             raise HTTPException(status_code=404, detail="링크 잡을 찾을 수 없어요")
         if link_job.status == "processing":
-            await repo.mark_failed(link_job_id, request.error)
+            if request.declined:
+                await repo.mark_declined(link_job_id, request.error)
+            else:
+                await repo.mark_failed(link_job_id, request.error)
     _LEASES.pop(lease_key, None)
     return AcceptResponse(accepted=True)

@@ -47,7 +47,9 @@ async def cancel_job(job_id: str):
             raise HTTPException(status_code=404, detail="Job not found")
         if job.status in ("pending", "queued", "processing"):
             request_cancel(job_id)
-            await job_repo.update_status(job_id, "failed", error="요청으로 취소했어요")
+            await job_repo.update_status(
+                job_id, "failed", error="요청으로 취소했어요", failure_kind="cancelled"
+            )
             return {"job_id": job_id, "cancelled": True}
         return {"job_id": job_id, "cancelled": False, "status": job.status}
 

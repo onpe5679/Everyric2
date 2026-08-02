@@ -390,6 +390,9 @@ def test_init_db_requeues_zombie_link_jobs_and_fails_zombie_sync_jobs(monkeypatc
             assert (await repo.get_by_id(queued_link.id)).status == "queued"
             job = await JobRepository(s).get_by_id(zombie_job.id)
             assert job.status == "failed"
+            # 서버 재기동으로 죽은 잡은 진짜 시스템 오류다 — 사용자 취소도 다운로드의 외부
+            # 요인도 아니다 (MoRef 감사 #3, failure_kind 구조화 분류)
+            assert job.failure_kind == "system"
         await engine.dispose()
 
     asyncio.run(body())

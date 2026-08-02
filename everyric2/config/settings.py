@@ -1190,7 +1190,7 @@ class ServerSettings(BaseSettings):
         description="같은 (영상, 후보) 쌍의 검증 잡을 다시 제출하기까지의 쿨다운(일). "
         "get_active_pair는 진행 중(queued/processing) 중복만 막아서, 완료·실패한 쌍은 "
         "사용자가 그 영상을 열 때마다 GPU를 다시 태울 수 있다. 최근 이 기간 안에 끝난 "
-        "(done/failed) 이력이 있으면 자동 제출을 건너뛴다. 0이면 쿨다운 비활성.",
+        "(done/failed/declined) 이력이 있으면 자동 제출을 건너뛴다. 0이면 쿨다운 비활성.",
     )
     manual_link_requires_admin: bool = Field(
         default=False,

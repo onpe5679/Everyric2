@@ -330,7 +330,11 @@ class JobRepository:
         result_id: str | None = None,
         error: str | None = None,
         stage: str | None = None,
+        failure_kind: str | None = None,
     ) -> None:
+        """failure_kind는 status="failed" 쓰기 지점만 넘긴다 — "cancelled"/"external"/"system".
+        분류가 애매한 실패(과길이 등 정책 거절)는 넘기지 않아 컬럼이 NULL로 남는다(억지
+        분류 금지, MoRef 감사 #3). 완료·진행 갱신 등 나머지 호출부는 그대로 생략한다."""
         values: dict[str, Any] = {"status": status}
         if progress is not None:
             values["progress"] = progress
@@ -340,6 +344,8 @@ class JobRepository:
             values["error"] = error
         if stage is not None:
             values["stage"] = stage
+        if failure_kind is not None:
+            values["failure_kind"] = failure_kind
 
         await self.session.execute(update(Job).where(Job.id == job_id).values(**values))
 
@@ -634,12 +640,16 @@ class LinkJobRepository:
     async def get_recent_attempt(
         self, video_id: str, source_video_id: str, days: int
     ) -> LinkJob | None:
-        """최근 N일 안에 끝난(done/failed) 같은 쌍의 잡 — 자동 재제출 쿨다운용.
+        """최근 N일 안에 끝난(done/failed/declined) 같은 쌍의 잡 — 자동 재제출 쿨다운용.
 
         get_active_pair는 진행 중(queued/processing) 중복만 막는다. 그래서 완료·실패한
         쌍은 사용자가 그 영상을 열 때마다 다시 제출돼 GPU를 반복해 태울 수 있다 (온디맨드
         자동 제출 경로가 생기며 실제 남용 경로가 됐다). 이력이 있으면 그 잡을 돌려준다.
-        days<=0이면 쿨다운 비활성으로 보고 항상 None."""
+        days<=0이면 쿨다운 비활성으로 보고 항상 None.
+
+        declined(무다운로드 정책 종결 — MoRef 감사 #4)도 "끝난 잡"이라 여기 포함한다: 빼면
+        캐시 미스로 거절된 쌍이 그 영상을 열 때마다 매번 새 링크 잡을 만들어 워커 claim
+        왕복만 반복하게 된다(다운로드가 없어 GPU 비용은 없지만 같은 남용 경로다)."""
         if days <= 0:
             return None
         since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
@@ -648,7 +658,7 @@ class LinkJobRepository:
             .where(
                 LinkJob.video_id == video_id,
                 LinkJob.source_video_id == source_video_id,
-                LinkJob.status.in_(["done", "failed"]),
+                LinkJob.status.in_(["done", "failed", "declined"]),
                 LinkJob.created_at >= since,
             )
             .order_by(LinkJob.created_at.desc())
@@ -688,4 +698,13 @@ class LinkJobRepository:
     async def mark_failed(self, link_job_id: str, error: str) -> None:
         await self.session.execute(
             update(LinkJob).where(LinkJob.id == link_job_id).values(status="failed", error=error)
+        )
+
+    async def mark_declined(self, link_job_id: str, error: str) -> None:
+        """무다운로드 원칙에 따른 정책적 종결(예: cache_miss_no_download) — 오류가 아니므로
+        failed와 갈라 기록한다 (MoRef 감사 #4). error 자유텍스트는 그대로 보존한다."""
+        await self.session.execute(
+            update(LinkJob)
+            .where(LinkJob.id == link_job_id)
+            .values(status="declined", error=error)
         )
