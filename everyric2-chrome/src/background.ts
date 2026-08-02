@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
+import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchPreviousSync, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { mirahezeLookup } from './lib/miraheze';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
@@ -307,6 +307,13 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
         saveUserOffset(server, message.payload.videoId, message.payload.offsetSec, sink));
     }
 
+    case 'SYNC_PREVIOUS': {
+      // 디버그 패널의 A/B 고스트 비교 — 이력이 없으면 서버가 found=false를 준다
+      const server = await getServerConfig();
+      return call('sync_previous_failed', sink =>
+        fetchPreviousSync(server, message.payload.videoId, sink));
+    }
+
     case 'SYNC_LIST': {
       // 검색 필터가 생겨 후보를 넉넉히 받는다 — 서버 목록은 최신순.
       // 빈 배열([])과 "서버가 못 줬다"를 화면이 구분할 수 있게 실패 사유를 함께 보낸다
@@ -378,7 +385,15 @@ async function fetchLyricsChain(
         // 세션 언어별 캐시 선채움용(V2 확장) — segmentsToLines가 lines와 같은 순서로
         // 이미 재정렬해 왔다. 구서버는 undefined(기존 폴백 그대로).
         translationsByLang,
-        debugMeta: sync.debug ?? undefined,
+        // 엔진 정체(스택 스탬프·변형)는 응답 최상위 필드 — 디버그 표시가 한 곳(debugMeta)만
+        // 보면 되도록 여기서 접어 넣는다. 둘 다 없고 debug도 없으면 기존처럼 undefined.
+        debugMeta: sync.debug || sync.engine_version || sync.engine_variant
+          ? {
+              ...(sync.debug ?? {}),
+              engine_version: sync.engine_version ?? null,
+              engine_variant: sync.engine_variant ?? null,
+            }
+          : undefined,
         attribution: fromWireAttribution(sync.attribution),
         tempo: sync.tempo ?? undefined,
         key: sync.key ?? undefined,

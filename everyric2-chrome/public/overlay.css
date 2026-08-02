@@ -923,6 +923,12 @@
 
 .ey-debug-row-time { flex-shrink: 0; color: var(--ey-text-faint); padding-top: 1px; }
 
+/* A/B 고스트 비교 (debug-panel.ts) — Δ = 현재 세대 − 이전 세대 줄 시각 */
+.ey-debug-compare-bar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; }
+.ey-debug-compare-status { color: var(--ey-text-dim); font-size: 11px; }
+.ey-debug-row-delta { flex-shrink: 0; min-width: 52px; color: var(--ey-text-faint); padding-top: 1px; }
+.ey-debug-row-delta.big { color: var(--ey-accent); font-weight: 600; }
+
 /* 정렬 신뢰도 등급 칩 — pip.ts confBucketColor·위쪽 .ey-conf-*(단어 색)와 같은 3색 규칙 재사용,
    여기서는 배경 틴트를 더해 칩 모양으로 */
 .ey-debug-row-chip {

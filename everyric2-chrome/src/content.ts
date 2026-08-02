@@ -39,6 +39,7 @@ import type {
   SongInfo,
   SourceAttribution,
   SyncListItem,
+  SyncPreviousVersion,
   TranslateResult,
   TranslatedLine,
 } from './types';
@@ -564,6 +565,12 @@ function ensureOverlay(): LyricsOverlay {
     onCancelGenerate: () => void handleCancelGenerate(),
     onUnlinkSync: () => void handleUnlinkSync(),
     onRequestSyncList: () => void handleRequestSyncList(),
+    onLoadPreviousSync: async () => {
+      const videoId = currentVideoId;
+      if (!videoId) return null;
+      const res = await sendToBackground<SyncPreviousVersion>({ type: 'SYNC_PREVIOUS', payload: { videoId } });
+      return res.data ?? null;
+    },
     onResetSync: () => void handleResetSync(),
     onRecheckServer: () => void refreshServerStatus(),
     onOpenPermissions: () => void openPermissionsPage(),

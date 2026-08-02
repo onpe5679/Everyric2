@@ -191,6 +191,24 @@
   "debugPanel_empty": {
     "message": "表示する行がありません"
   },
+  "debugPanel_engine": {
+    "message": "エンジン $P1$"
+  },
+  "debugPanel_engineLegacy": {
+    "message": "旧世代（バージョン刻印なし）"
+  },
+  "debugPanel_engineSummaryTitle": {
+    "message": "このシンクを作った整列スタック。langの後の*はラベルが空で歌詞の文字種から判定した印"
+  },
+  "debugPanel_comparePrev": {
+    "message": "前世代と比較"
+  },
+  "debugPanel_comparePrevNone": {
+    "message": "前世代なし（再処理履歴なし）"
+  },
+  "debugPanel_comparePrevLoaded": {
+    "message": "前世代: $P1$ · 対応 $P2$/$P3$行 (Δ = 現在 − 以前)"
+  },
   "debugPanel_heardPrefix": {
     "message": "認識: $P1$",
     "placeholders": {
@@ -883,7 +901,7 @@
     "message": "キューに入れた転写が終わるとブラウザ通知でお知らせします。別のタブにいても確認できます。"
   },
   "overlay_settings_row_debugInfo": {
-    "message": "デバッグ情報を表示"
+    "message": "デバッグ情報を表示 (Alt+Shift+D)"
   },
   "overlay_settings_serverRequiredNote": {
     "message": "同期の生成・翻訳にはEveryricサーバーが必要です"

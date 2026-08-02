@@ -234,6 +234,35 @@ export interface SyncDebugMeta {
     track?: string | null;
     drift_median?: number | null;
   } | null;
+  /** 이 싱크를 만든 정렬 스택 식별자(서버 models.ENGINE_VERSION). 응답 최상위 필드를
+   *  background이 디버그 표시용으로 여기에 접어 넣는다. null/없음 = 스탬프 도입 전 구세대 */
+  engine_version?: string | null;
+  /** 엔진 변형 (MMS 강제 폴백 등) — engine_version과 같은 경로로 접힌다 */
+  engine_variant?: string | null;
+  /** 새 스택 라우팅 판정 근거 — route는 채택된 깊이(fast/medium/heavy), language_source가
+   *  "script_census"면 라벨이 비어 가사 문자 계열로 판정했다는 뜻 */
+  routing?: {
+    route?: string;
+    language?: string;
+    language_source?: string;
+    line_log_conf_median?: number | null;
+    threshold?: number;
+    stranded_before?: number;
+    stranded_after?: number;
+  } | null;
+}
+
+/** GET /api/sync/{video_id}/previous — 재처리로 덮어써지기 전 세대 (A/B 고스트 비교용) */
+export interface SyncPreviousVersion {
+  found: boolean;
+  timestamps?: EveryricSegment[];
+  language?: string | null;
+  quality_score?: number | null;
+  created_at?: string | null;
+  replaced_at?: string | null;
+  lyrics_hash?: string | null;
+  engine_variant?: string | null;
+  engine_version?: string | null;
 }
 
 /** RAW f0 곡선 (다운샘플) — midi[i]의 시각 = t0 + i*dt */
@@ -257,6 +286,9 @@ export interface EveryricSyncResponse {
   lyrics_source?: string;
   quality_score?: number;
   language?: string;
+  /** 이 싱크를 만든 정렬 스택 식별자 — 없으면 스탬프 도입 전 구세대 (additive 필드) */
+  engine_version?: string | null;
+  engine_variant?: string | null;
   created_at?: string;
   error?: string;
   debug?: SyncDebugMeta | null;
@@ -607,6 +639,8 @@ export type BgRequest =
   | { type: 'SYNC_RESET'; payload: { videoId: string } }
   | { type: 'SYNC_OFFSET'; payload: { videoId: string; offsetSec: number } }
   | { type: 'SYNC_LIST' }
+  /** 이 영상 싱크의 직전 세대 조회 — 디버그 패널의 A/B 고스트 비교용 */
+  | { type: 'SYNC_PREVIOUS'; payload: { videoId: string } }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'JOB_CANCEL'; payload: { jobId: string } }
   | { type: 'NOTIFY'; payload: { id?: string; title: string; message: string } }

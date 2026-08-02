@@ -1,4 +1,4 @@
-import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, ServerLogEntry, ServerStatus, Settings, SongInfo, SourceAttribution, SyncDebugMeta, SyncListItem } from '../types';
+import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, ServerLogEntry, ServerStatus, Settings, SongInfo, SourceAttribution, SyncDebugMeta, SyncListItem, SyncPreviousVersion } from '../types';
 import { resolveScript, resolvedPronSegments, resolvedPronunciation, type PronScript } from '../lib/lang';
 import { t } from '../lib/i18n';
 import { needsHostPermission, serverUsable, statusLine, unknownStatus } from '../lib/server-status';
@@ -44,6 +44,8 @@ export interface OverlayCallbacks {
   onUnlinkSync: () => void;
   /** 서버 저장 싱크 목록 요청 — 결과는 showSyncList로 되돌아온다 */
   onRequestSyncList: () => void;
+  /** 이 영상 싱크의 직전 세대 조회 — 디버그 패널 A/B 고스트 비교용. 이력 없으면 found=false */
+  onLoadPreviousSync: () => Promise<SyncPreviousVersion | null>;
   /** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사에서 새로 시작 */
   onResetSync: () => void;
   /** 검색 시트에서 원래 보던 가사 화면으로 복귀 (실수로 검색을 연 경우 탈출구) */
@@ -1216,7 +1218,8 @@ export class LyricsOverlay {
     // SEEK_INTO_LINE_SEC 보정은 여기서 적용 — debug-panel.ts는 line.time을 그대로 받는
     // "UI만" 모듈이라 이 보정을 모른다(라인 목록의 클릭 시크와 같은 이유·같은 값)
     const { el } = buildDebugPanel(this.lines, this.debugMeta,
-      time => this.callbacks.onSeek(time + SEEK_INTO_LINE_SEC));
+      time => this.callbacks.onSeek(time + SEEK_INTO_LINE_SEC),
+      () => this.callbacks.onLoadPreviousSync());
     this.debugPanelEl.replaceChildren(el);
     this.debugPanelEl.style.display = '';
   }

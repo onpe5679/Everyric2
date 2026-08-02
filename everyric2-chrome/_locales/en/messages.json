@@ -191,6 +191,24 @@
   "debugPanel_empty": {
     "message": "No lines to show"
   },
+  "debugPanel_engine": {
+    "message": "Engine $P1$"
+  },
+  "debugPanel_engineLegacy": {
+    "message": "legacy (no version stamp)"
+  },
+  "debugPanel_engineSummaryTitle": {
+    "message": "Alignment stack that produced this sync. * after lang means the label was empty and the language was judged from the lyrics script"
+  },
+  "debugPanel_comparePrev": {
+    "message": "Compare with previous generation"
+  },
+  "debugPanel_comparePrevNone": {
+    "message": "No previous generation (never reprocessed)"
+  },
+  "debugPanel_comparePrevLoaded": {
+    "message": "Previous: $P1$ · $P2$/$P3$ lines matched (Δ = current − previous)"
+  },
   "debugPanel_heardPrefix": {
     "message": "Heard: $P1$",
     "placeholders": {
@@ -883,7 +901,7 @@
     "message": "Sends a browser notification when a queued transcription finishes, even in another tab."
   },
   "overlay_settings_row_debugInfo": {
-    "message": "Show debug info"
+    "message": "Show debug info (Alt+Shift+D)"
   },
   "overlay_settings_serverRequiredNote": {
     "message": "Generating sync and translating requires the Everyric server"

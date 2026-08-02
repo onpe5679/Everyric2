@@ -1,4 +1,4 @@
-import type { LyricLine, SyncDebugMeta } from '../types';
+import type { LyricLine, SyncDebugMeta, SyncPreviousVersion } from '../types';
 import { t } from '../lib/i18n';
 import { h } from './dom';
 
@@ -20,6 +20,25 @@ function confGrade(conf: number | undefined): { cls: string; label: string } | n
 /** updateDebug의 시각 표기(초 2자리)와 같은 형식으로 통일 */
 function fmtTime(t: number | null): string {
   return t === null ? '-' : `${t.toFixed(2)}s`;
+}
+
+/**
+ * 엔진 정체 요약 한 줄 — 어느 스택(engine_version)·어느 깊이(routing.route)가 이 싱크를
+ * 만들었는지. depth=/lang= 토큰은 언어 중립 디버그 표기라 i18n하지 않는다. lang 뒤의
+ * `*`는 라벨이 비어 가사 문자 계열로 판정했다는 표시(서버 language_source=script_census).
+ */
+function engineSummary(meta: SyncDebugMeta | null | undefined): string | null {
+  if (!meta) return null;
+  const parts: string[] = [];
+  if (meta.engine_version !== undefined) {
+    parts.push(t('debugPanel.engine', [meta.engine_version ?? t('debugPanel.engineLegacy')]));
+  }
+  if (meta.engine_variant) parts.push(meta.engine_variant);
+  if (meta.alignment_text) parts.push(meta.alignment_text);
+  const r = meta.routing;
+  if (r?.route) parts.push(`depth=${r.route}`);
+  if (r?.language) parts.push(`lang=${r.language}${r.language_source === 'script_census' ? '*' : ''}`);
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 /** 곡 단위 자막 스캐폴드 요약 한 줄 — 없으면(구서버·미배선·해당 없음) null로 생략된다 */
@@ -54,8 +73,19 @@ export function buildDebugPanel(
   lines: LyricLine[],
   debugMeta: SyncDebugMeta | null | undefined,
   onSeek: (time: number) => void,
+  loadPrevious?: () => Promise<SyncPreviousVersion | null>,
 ): DebugPanelRefs {
   const el = h('div', { className: 'ey-debug-panel' });
+
+  const engine = engineSummary(debugMeta);
+  if (engine) {
+    el.append(h('div', {
+      className: 'ey-debug-panel-summary',
+      text: engine,
+      // lang 뒤 `*`의 의미는 툴팁으로 — 요약 한 줄에 다 적으면 소음이다
+      title: t('debugPanel.engineSummaryTitle'),
+    }));
+  }
 
   const summary = scaffoldSummary(debugMeta);
   if (summary) {
@@ -65,6 +95,54 @@ export function buildDebugPanel(
   if (lines.length === 0) {
     el.append(h('div', { className: 'ey-debug-panel-empty', text: t('debugPanel.empty') }));
     return { el };
+  }
+
+  // A/B 고스트 비교 — 서버가 보관한 직전 세대(재처리로 덮어써지기 전)의 줄 시각과
+  // 지금 화면의 줄 시각을 라인 단위 Δ로 대비한다. 줄 텍스트가 같은 라인만 비교하고
+  // (재생성 = 같은 가사의 재정렬일 때만 A/B가 성립), 다른 줄은 Δ— 로 남긴다.
+  const deltaEls: HTMLSpanElement[] = [];
+  if (loadPrevious) {
+    const status = h('span', { className: 'ey-debug-compare-status' });
+    const btn = h('button', {
+      className: 'ey-btn',
+      attrs: { type: 'button' },
+      text: t('debugPanel.comparePrev'),
+      on: {
+        click: () => {
+          btn.disabled = true;
+          status.textContent = '…';
+          void loadPrevious().then(prev => {
+            if (!prev?.found || !prev.timestamps || prev.timestamps.length === 0) {
+              status.textContent = t('debugPanel.comparePrevNone');
+              return;
+            }
+            let matched = 0;
+            lines.forEach((line, i) => {
+              const old = prev.timestamps?.[i];
+              const deltaEl = deltaEls[i];
+              if (!deltaEl) return;
+              if (!old || old.text !== line.text || line.time === null) {
+                deltaEl.textContent = 'Δ—';
+                return;
+              }
+              matched++;
+              const d = line.time - old.start;
+              deltaEl.textContent = `Δ${d >= 0 ? '+' : ''}${d.toFixed(2)}s`;
+              // 0.15s 이내는 흐리게(사실상 동일), 그 밖은 또렷하게 — 큰 이동만 눈에 띄게
+              deltaEl.classList.toggle('big', Math.abs(d) > 0.15);
+            });
+            status.textContent = t('debugPanel.comparePrevLoaded', [
+              prev.engine_version ?? t('debugPanel.engineLegacy'),
+              String(matched), String(lines.length),
+            ]);
+          }).catch(() => {
+            status.textContent = t('debugPanel.comparePrevNone');
+            btn.disabled = false;
+          });
+        },
+      },
+    }) as HTMLButtonElement;
+    el.append(h('div', { className: 'ey-debug-compare-bar' }, btn, status));
   }
 
   const list = h('div', { className: 'ey-debug-panel-list' });
@@ -94,6 +172,10 @@ export function buildDebugPanel(
       textCol.append(h('div', { className: 'ey-debug-row-labels', text: labels.join(' · ') }));
     }
 
+    // 고스트 비교 Δ 자리 — 비교를 실행하기 전에는 비어 있다(레이아웃만 확보)
+    const deltaEl = h('span', { className: 'ey-debug-row-delta' });
+    deltaEls.push(deltaEl);
+
     const row = h('button', {
       className: 'ey-debug-row',
       attrs: { type: 'button' },
@@ -103,7 +185,7 @@ export function buildDebugPanel(
           if (line.time !== null) onSeek(line.time);
         },
       },
-    }, h('span', { className: 'ey-debug-row-time', text: fmtTime(line.time) }), chip, textCol);
+    }, h('span', { className: 'ey-debug-row-time', text: fmtTime(line.time) }), deltaEl, chip, textCol);
 
     list.append(row);
   }

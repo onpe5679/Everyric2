@@ -1,4 +1,4 @@
-import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, TranslateResult } from '../types';
+import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, SyncPreviousVersion, TranslateResult } from '../types';
 import { affectsServerStatus, failureKindFromStatus, failureToStatus, maskPath, maskSecret, okStatus } from './server-status';
 import { localPermissionBlock, normalizeLoopbackUrl } from './host-permissions';
 
@@ -204,6 +204,18 @@ export function lookupSync(
   // «됐다가 안 됐다가» 타임아웃이 났다(사용자 실보고). 서버 gzip과 함께 양쪽에서 잡는다.
   return request<EveryricSyncResponse>(
     server, `/api/sync/${encodeURIComponent(videoId)}${query}`, undefined, 8000, sink,
+  );
+}
+
+/**
+ * 이 영상 자기 싱크의 직전(재처리로 덮어써지기 전) 세대 — 디버그 패널의 A/B 고스트
+ * 비교용. 이력이 없으면 서버가 found=false를 준다(404가 아니다 — 조회 관례 동일).
+ */
+export async function fetchPreviousSync(
+  server: ServerConfig, videoId: string, sink?: FailureSink,
+): Promise<SyncPreviousVersion | null> {
+  return request<SyncPreviousVersion>(
+    server, `/api/sync/${encodeURIComponent(videoId)}/previous`, undefined, 8000, sink,
   );
 }
 
