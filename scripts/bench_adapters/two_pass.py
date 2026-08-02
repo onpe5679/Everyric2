@@ -83,6 +83,21 @@ class TwoPassConfig:
     # 우세도 × 발화 2축. 켜면 seg_hold_max_sec은 오디오가 반박할 수 있는 기본값이 된다.
     # **실측 기각**(구간 IoU 49.71 → 49.46) — 자를 곳만 있고 늘릴 곳이 없었다. 아래를 쓴다.
     extend_gate: bool = False
+    # 세그 사이 늘이기도 «발성이 이어지는 동안»만 할 것인가. 라인 꼬리에 이미 쓰는
+    # ``voiced_reach``를 세그 사이에도 건다 — 발화 축도, 상한 완화도 없는 절반짜리다.
+    #
+    # 앞서 기각한 ``extend_gate``와 다르다. 그쪽은 발화 축(``speak_level``)까지 써서 정상
+    # 가창 한가운데를 잘랐고 구간 IoU가 49.71 → 49.46으로 내려갔다. 여기서는 우세도 하나만
+    # 본다 — 라인 꼬리에서 이미 안전이 확인된 축이다.
+    #
+    # 증상: 세그가 무음 위에서 켜져 있는 시간이 ja 100.6초 · en 169.6초다(클램프 후, 13곡).
+    # 최악은 Black Wood 「립」 3.28초 · weathergirl 「버」 2.02초로, 화면에서는 음절 하나가
+    # 홀로 몇 초를 버틴다.
+    #
+    # **채택**(2026-08-02, 문턱 0.12): ja 7곡에서 증상 104.2 → 70.5초(−32%)인데 구간 IoU는
+    # 49.84 → 49.89로 오히려 미세 상승, 덮음만 60.70 → 60.16이다. 음절 축은 전 문턱에서
+    # 완전 불변 — 세그 **시작**을 안 건드린다는 증거다. 문턱 선택은 ``seg_voiced_level`` 참조.
+    extend_voiced_only: bool = True
     # 라인 마지막 세그의 끝을 우세도가 이어지는 동안 다음 라인 전까지 민다. 자르지 않는다.
     # **채택**(2026-08-02, 짝지은 7곡 3,837세그): 구간 IoU 50.28 → 51.15, 덮음 60.66 →
     # 62.09, 음절 75.29 → 75.32(불변 — start를 안 건드리므로). 7곡 전부 상승, 지는 곡 없음.
@@ -333,6 +348,33 @@ CONFIGS: tuple[TwoPassConfig, ...] = (
         referee=True,
         extend_line_tails=False,
         note="위와 같은 정렬, 라인 꼬리 늘이기만 끔(축 분리 대조군)",
+    ),
+    # ★발성 조건 축 대조군 — 세그 사이 늘이기의 우세도 조건만 끈다(기본은 켬·문턱 0.12).
+    TwoPassConfig(
+        name="2pass-owsm-mixed-novoiced",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        extend_voiced_only=False,
+        note="위와 같은 정렬, 세그 사이 발성 조건만 끔(축 분리 대조군)",
+    ),
+    # 문턱 대조군 두 개. 채택값 0.12보다 높은 쪽이 어디서 손해가 나는지 남겨 둔다.
+    TwoPassConfig(
+        name="2pass-owsm-mixed-voiced",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        note="위와 같음, 발성 문턱 0.30(간주 판정용 문턱 — 늘임음 꼬리를 자른다)",
+    ),
+    TwoPassConfig(
+        name="2pass-owsm-mixed-voiced20",
+        anchor="owsm-ctc-v4-1b-bf16",
+        refiner="omniasr-ctc",
+        refiner_script="ja-mixed",
+        referee=True,
+        note="위와 같음, 발성 문턱 0.20",
     ),
     # ★꼬리 상한·끊김 판정을 푼 대조군. 청취에서 남은 오검출 5개가 전부 «늘임음»이었고 원인이
     # 두 가지로 갈렸다(2026-08-02 사용자 판정): 深海少女 2:06·3:24는 앞 간격이 1.98·1.81초로
@@ -1258,10 +1300,28 @@ class TwoPassAligner(AlignerAdapter):
     # 2초씩 늘어났다(numb numb 「で」 34.55~36.55·「く」 40.53~42.56). 켜니 그 세 자리가 되살아났고
     # UST 축은 중립이었다(구간 IoU 49.93 → 49.90 · 음절 불변).
     line_tail_deep: bool = True
+    # 세그 사이 늘이기의 발성 문턱. 0.30은 「간주 vs 가창」용이라 늘임음 감쇠에는 너무
+    # 높다 — Kikuo·토스트처럼 긴 늘임음이 있는 곡에서 실제 노트 꼬리를 자른다.
+    #
+    # 스윕(ja 7곡, 클램프 후):
+    #
+    #   문턱      무음 위 점등   구간 IoU   덮음%    음절%
+    #   끔          104.2초      49.84    60.70    73.68
+    #   0.30         48.3초      49.35    59.25    73.68   ← Kikuo −2.73 · 토스트 −2.14
+    #   0.20         58.9초      49.66    59.73    73.68
+    #   0.12         70.5초      49.89    60.16    73.68   ← 채택
+    #
+    # 0.12는 UST 축이 회귀하지 않는 유일한 지점이다. 0.30은 증상을 절반으로 줄이지만 그 손해가
+    # 긴 늘임음 두 곡에 몰린다 — 감쇠하는 노트 꼬리를 무음으로 오인하기 때문이다.
+    seg_voiced_level: float = 0.12
 
     def __init__(self, config: TwoPassConfig | None = None) -> None:
         if config is None:
             config = self.config
+        if config.name.endswith("-voiced"):
+            self.seg_voiced_level = 0.30
+        if config.name.endswith("-voiced20"):
+            self.seg_voiced_level = 0.20
         if config.name.endswith("-longtail"):
             self.line_tail_max_sec = 4.0
             self.line_tail_quiet_sec = 0.25
@@ -1435,7 +1495,7 @@ class TwoPassAligner(AlignerAdapter):
                     self.line_tail_deep,
                 )
         # 세그 사이 게이트는 «자르는» 쪽이라 기각됐다 — 라인 꼬리만 늘릴 때는 물리지 않는다.
-        seg_gate = gate if self.config.extend_gate else None
+        seg_gate = gate if (self.config.extend_gate or self.config.extend_voiced_only) else None
         converted = 0
         # 경량 모델이 자기 타깃을 얼마나 확신하는지. 라인 confidence는 **앵커** 값이라
         # 표기를 바꿔도 안 움직인다 — 표기 적합도(가나 vs 한글 vs IPA)를 비교하려면
@@ -1762,7 +1822,13 @@ class TwoPassAligner(AlignerAdapter):
                 continue
             if self.config.extend_segments:
                 stretched += _extend_segments(
-                    segs, line["end"], self.seg_hold_max_sec, seg_gate, self.seg_hold_max_held_sec
+                    segs,
+                    line["end"],
+                    self.seg_hold_max_sec,
+                    seg_gate,
+                    self.seg_hold_max_held_sec,
+                    self.config.extend_voiced_only,
+                    self.seg_voiced_level,
                 )
             line["segs"] = segs
             line.setdefault("meta", {})["refined_by"] = self.config.refiner
@@ -1787,6 +1853,8 @@ class TwoPassAligner(AlignerAdapter):
                         self.seg_hold_max_sec,
                         seg_gate,
                         self.seg_hold_max_held_sec,
+                        self.config.extend_voiced_only,
+                        self.seg_voiced_level,
                     )
         if self.config.spread_piles:
             stats["segments_spread"] = spread
@@ -2064,7 +2132,7 @@ class _ExtendGate:
                     run = None
         return max(t0, min(stops))
 
-    def voiced_reach(self, t0: float, t1: float) -> float:
+    def voiced_reach(self, t0: float, t1: float, level: float | None = None) -> float:
         """``t0``부터 **발성이 이어지는 동안** 갈 수 있는 끝. 자르는 데 쓰지 않는다.
 
         ``limit``과 달리 발화 축을 안 본다. 늘임음은 우세도가 높은 채로 발화가 없는 구간이라
@@ -2072,20 +2140,21 @@ class _ExtendGate:
         """
         if self.dominance is None or t1 <= t0:
             return t0
+        floor = _HOLD_DOMINANCE if level is None else level
         need = max(1, int(self.quiet_sec / self.dom_hop))
         deep_need = max(1, int(_HOLD_DEEP_SEC / self.dom_hop))
         lo, hi = int(t0 / self.dom_hop), min(len(self.dominance), int(t1 / self.dom_hop))
         run = deep_run = None
         for index in range(lo, hi):
             value = self.dominance[index]
-            if self.deep and value < _HOLD_DEEP_LEVEL:
+            if self.deep and value < min(_HOLD_DEEP_LEVEL, floor):
                 if deep_run is None:
                     deep_run = index
                 elif index - deep_run + 1 >= deep_need:
                     return deep_run * self.dom_hop
             else:
                 deep_run = None
-            if value < _HOLD_DOMINANCE:
+            if value < floor:
                 if run is None:
                     run = index
                 elif index - run + 1 >= need:
@@ -2111,6 +2180,8 @@ def _extend_segments(
     hold_max: float,
     gate: "_ExtendGate | None" = None,
     hold_max_held: float = 3.0,
+    voiced_only: bool = False,
+    voiced_level: float | None = None,
 ) -> int:
     """세그 끝을 **다음 세그 시작까지** 늘린다 — 프로드 ``segmentation._extend_to_next_start``.
 
@@ -2140,6 +2211,13 @@ def _extend_segments(
         cap = seg["start"] + hold_max
         if gate is None:
             return min(boundary, cap)
+        if voiced_only:
+            # 발성이 이어지는 동안만. 자르기만 하고 상한은 그대로 지킨다.
+            return min(
+                boundary,
+                cap,
+                max(seg["end"], gate.voiced_reach(seg["end"], boundary, voiced_level)),
+            )
         # 오디오가 멈추라는 곳(발성이 끊겼거나 새 발성이 시작되는 곳)에서 멈춘다. 그 전까지
         # 내내 부르고 있었다면 «시간이 길다»는 이유만으로 자르지 않는다 — 그것이 늘임음이다.
         stop = gate.limit(seg["end"], boundary)

@@ -44,6 +44,9 @@ ALIGNER_HUE = {
     # 150°(owsm 기준선)·120°(가나 표시)와 붙지 않는 빈 구간으로 뺀다 — 처음에 156°로 뒀다가
     # 셋이 전부 민트로 읽혔다(사용자 2026-08-02). 각도는 눈대중이 아니라 빈 구간으로 고른다.
     "2pass-owsm-mixed+pp": 244 / 360,      # 2패스 · ★우세도 클램프(ja)
+    "2pass-owsm-mixed-voiced": 249 / 360,  # 2패스 · 발성 문턱 0.30(대조군)
+    "2pass-owsm-mixed-voiced20": 240 / 360,
+    "2pass-owsm-mixed-novoiced": 258 / 360,  # 2패스 · 발성 조건 끔(대조군)
     "2pass-asr-ipa-hangul+pp": 254 / 360,  # 2패스 · ★우세도 클램프(en)
     "2pass-owsm-mixed-hangul": 262 / 360,  # 2패스 · ★한글 표시층
     "2pass-owsm-mixed-star": 340 / 360,   # 2패스 · star 실험(추임새 흡수)
@@ -595,6 +598,9 @@ VIEWER_ALIGNERS = {
     "2pass-owsm-omniasr",   # 다국어 단일 경로(ja 17곡 음절 86.7%)
     "2pass-owsm-mixed",     # 클램프 없는 대조군
     "2pass-owsm-mixed+pp",  # ★ja 채택 — 위 + 우세도 기반 병적 라인 절단
+    "2pass-owsm-mixed-voiced",  # 발성 문턱 대조군(0.30)
+    "2pass-owsm-mixed-voiced20",  # 발성 문턱 대조군(0.20)
+    "2pass-owsm-mixed-novoiced",  # 발성 조건 끄기 대조군
     "2pass-owsm-mixed-hangul",
     # 라인 클램프층(간주 좌초 스냅 제외) — 병적 라인 절단 + 소절 끝 늘임음 연장.
     # ── en 채택 스택 ────────────────────────────────────────────────────────
@@ -630,6 +636,7 @@ RETIRED_ALIGNERS = {
     "2pass-owsm-mixed-staradlib": "추임새 자리 star — 같은 라벨 오류 위에서 만들어 검증 못 함",
     "2pass-owsm-mixed-hold": "늘이기 오디오 게이트 — 상한에 닿는 세그가 0.20%뿐이라 «자르기»만 남아 기각(구간 IoU 49.71 → 49.46)",
     "2pass-owsm-mixed-tail": "라인 꼬리 늘임 — 채택되어 2pass-owsm-mixed 본선에 편입(구간 IoU +0.87)",
+    "2pass-owsm-mixed-voiced12": "세그 사이 발성 조건(문턱 0.12) — 채택되어 2pass-owsm-mixed 본선에 편입",
     "2pass-asr-ipa-hangul-noref": "en 심판 채택 확정 — 정답 4/17 → 14/17",
     "2pass-asr-ipa-en-noref": "위와 같음",
     "2pass-asr-ipa-en-energy": "오디오 강도 봉우리 — 14/17 → 11~12/17로 기각",
@@ -749,7 +756,18 @@ def dominance_curve(video_id: str) -> dict | None:
 # 910개가 앞 노트에 붙은 연장) 이를 구분하는 필드가 없다. 그래서 화면에 띄워 귀로 판정한다.
 # 띠를 그릴 기준 레인 — **채택 스택**. 클램프가 비가창 구간을 놓아주므로 그만큼 후보가
 # 더 정확해진다(Madeon 라인28의 32초짜리 세그가 잘리는 것과 같은 효과).
-ADLIB_LANE = "2pass-owsm-mixed+pp"
+# 언어마다 채택 레인이 다르다. 고르는 기준은 **가사 표기**다 — 메타데이터는 못 쓴다
+# (rookie의 stratum·language는 ``en_mms``, numb numb는 ``mixed``/``ja_mms``인데 둘 다 가사가
+# 가나이고 ja 레인으로 검수했다). **가나**가 한 자라도 있으면 ja 스택이다 — 한자까지 세면
+# butcher vanity(zh)처럼 한자가 섞인 영어 가사가 ja로 새는데, ja 가사는 조사·활용 때문에
+# 가나가 반드시 나오므로 가나만 보는 쪽이 더 좁고 정확하다.
+#
+# 두 레인을 **합쳐서** 「어느 쪽도 안 덮은 자리」만 후보로 두는 방식도 재 봤는데 기각이다.
+# 언어 배선이 필요 없어지는 대신, 곡 언어가 아닌 레인의 세그가 확정된 추임새 위로 번져
+# 청취로 확인된 구간을 지웠다(熱異常 9 → 5 · rookie 9 → 6 · numb numb 6 → 5 · 토스트 8 → 6).
+ADLIB_LANE_JA = "2pass-owsm-mixed+pp"
+ADLIB_LANE_EN = "2pass-asr-ipa-hangul+pp"
+_KANA = re.compile("[\u3040-\u30ff]")
 ADLIB_LEVEL = 0.35
 ADLIB_MIN_SEC = 0.40
 # 뒤 세그와 이만큼은 떨어져 있어야 한다. 붙어 있으면 그것은 **다음 라인의 실제 가사 온셋**을
@@ -828,18 +846,28 @@ def adlib_candidates(
         part = name.split(" · ", 1)[1] if " · " in name else name
         return part.split("→")[0].split(" ")[0]
 
-    lane = next(
-        (
-            t
-            for t in tracks
-            if not t.get("ust") and t.get("segs") and lane_base(t.get("name", "")) == ADLIB_LANE
-        ),
-        None,
+    # 가사 표기로 스택을 고른다 — 가나가 보이면 ja, 아니면 en. **후보 레인이 정렬한 가사만**
+    # 본다: 곡의 모든 트랙을 훑으면 다른 언어 UST·자막의 가나가 섞여 들어온다(butcher
+    # vanity(zh)가 그래서 ja로 샜다).
+    candidates = {
+        lane_base(t.get("name", "")): t
+        for t in tracks
+        if not t.get("ust") and t.get("segs")
+        and lane_base(t.get("name", "")) in (ADLIB_LANE_JA, ADLIB_LANE_EN)
+    }
+    if not candidates:
+        return None
+    kana = any(
+        _KANA.search(str(line.get("text") or ""))
+        for track in candidates.values()
+        for line in track.get("lines") or ()
     )
+    lane = candidates.get(ADLIB_LANE_JA if kana else ADLIB_LANE_EN)
     if lane is None:
         return None
     merged: list[list[float]] = []
-    for seg in sorted(lane["segs"], key=lambda s: s["start"]):
+    every = sorted(lane["segs"], key=lambda s: float(s["start"]))
+    for seg in every:
         start, end = float(seg["start"]), float(max(seg["end"], seg["start"]))
         if merged and start <= merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], end)
@@ -855,7 +883,7 @@ def adlib_candidates(
         cursor = max(cursor, end)
     free.append((cursor, len(values) * hop))
 
-    starts = sorted(float(s["start"]) for s in lane["segs"])
+    starts = sorted(float(s["start"]) for s in every)
     levels = _vocal_db_curve(video_id, hop) if video_id else None
 
     def keep(t0: float, t1: float) -> bool:
