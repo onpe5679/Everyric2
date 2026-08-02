@@ -441,6 +441,11 @@ function checkCurrentPage(): void {
     // 전환을 감지한 첫 tick에만 흔적을 새긴다 — 보류 중 cleanupForPage가 currentSong을
     // 비운 뒤 다시 덮으면 songTitle 흔적을 잃는다(docTitle은 cleanup이 안 건드린다).
     staleTraces = { docTitle: followedPageTitle, songTitle: currentSong?.title ?? null };
+  } else {
+    // 무영상 페이지(홈·검색)를 거쳐 온 경우 — 이전 전환의 흔적은 이미 낡았고, 남기면
+    // 같은 영상으로 복귀했을 때 자기 자신의 정상 결과를 stale로 오판한다(A→홈→A,
+    // 코덱스 감사 Low). 무영상 경유는 DOM이 정착할 시간이 있었으므로 흔적이 불필요.
+    staleTraces = null;
   }
   // SPA 이동 직후에는 **주소만 새 영상이고 DOM은 아직 이전 영상의 것**이다 — document.title과
   // 채널명이 이전 값으로 남는 것이 실측됐다(새 videoId + 이전 제목인 표본: 한 번은 750ms까지,

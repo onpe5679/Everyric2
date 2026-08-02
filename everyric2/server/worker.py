@@ -4333,6 +4333,10 @@ def _resolve_stack_language(language: str | None, lyric_lines: list[Any]) -> tup
     """
     lang = (language or "").strip().lower()
     if lang:
+        # 지역 서브태그 제거(코덱스 감사 Med, 2026-08-03): "EN-us"/"zh_TW" 류 라벨은
+        # 라우팅(startswith)은 통과하지만 OWSM 언어 심볼 매칭(ko/ja/en/zh 정확 키)이
+        # 실패해 무언어(<nolang>) 정렬로 조용히 저하됐다 — 기본 언어 코드만 남긴다.
+        lang = lang.split("-")[0].split("_")[0]
         return lang, "label"
     from everyric2.alignment.ctc_engine import detect_language_from_text
 

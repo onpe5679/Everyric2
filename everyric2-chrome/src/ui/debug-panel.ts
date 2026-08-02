@@ -114,6 +114,7 @@ export function buildDebugPanel(
           void loadPrevious().then(prev => {
             if (!prev?.found || !prev.timestamps || prev.timestamps.length === 0) {
               status.textContent = t('debugPanel.comparePrevNone');
+              btn.disabled = false; // 이력 없음/구서버 — 재시도 가능하게 되살린다(감사 Low)
               return;
             }
             let matched = 0;

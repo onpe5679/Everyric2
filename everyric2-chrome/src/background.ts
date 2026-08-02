@@ -397,14 +397,15 @@ async function fetchLyricsChain(
         // 이미 재정렬해 왔다. 구서버는 undefined(기존 폴백 그대로).
         translationsByLang,
         // 엔진 정체(스택 스탬프·변형)는 응답 최상위 필드 — 디버그 표시가 한 곳(debugMeta)만
-        // 보면 되도록 여기서 접어 넣는다. 둘 다 없고 debug도 없으면 기존처럼 undefined.
-        debugMeta: sync.debug || sync.engine_version || sync.engine_variant
-          ? {
-              ...(sync.debug ?? {}),
-              engine_version: sync.engine_version ?? null,
-              engine_variant: sync.engine_variant ?? null,
-            }
-          : undefined,
+        // 보면 되도록 여기서 접어 넣는다. **메타가 전무한 구서버 응답에도 합성한다**(코덱스
+        // 감사 Med): meta 자체가 없으면 updateDepthButton이 버튼을 통째로 숨겨, 구서버
+        // 싱크(=구세대)에서 노란 업그레이드 유도가 사라졌다 — engine_version:null 합성이
+        // 곧 "구세대" 신호다.
+        debugMeta: {
+          ...(sync.debug ?? {}),
+          engine_version: sync.engine_version ?? null,
+          engine_variant: sync.engine_variant ?? null,
+        },
         attribution: fromWireAttribution(sync.attribution),
         tempo: sync.tempo ?? undefined,
         key: sync.key ?? undefined,

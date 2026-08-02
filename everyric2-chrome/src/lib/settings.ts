@@ -61,14 +61,26 @@ export async function getSettings(): Promise<Settings> {
   }
 }
 
-export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
-  const merged = { ...(await getSettings()), ...patch };
-  try {
-    await chrome.storage.local.set({ [SETTINGS_KEY]: merged });
-  } catch {
-    /* storage 실패 시에도 메모리 값은 유지 */
-  }
-  return merged;
+// 저장 직렬화 체인(코덱스 감사 Med, 2026-08-03): read-modify-write가 비원자라 토글을
+// 빠르게 연타하면 겹친 두 저장 중 나중 것이 먼저 것의 변경을 덮어썼다 — 저장을 한
+// 줄로 세워 각 patch가 직전 저장 결과 위에 병합되게 한다. 실패해도 체인은 끊기지
+// 않는다(catch 후 다음 저장 진행).
+let saveChain: Promise<unknown> = Promise.resolve();
+
+export function saveSettings(patch: Partial<Settings>): Promise<Settings> {
+  const next = saveChain
+    .catch(() => undefined)
+    .then(async () => {
+      const merged = { ...(await getSettings()), ...patch };
+      try {
+        await chrome.storage.local.set({ [SETTINGS_KEY]: merged });
+      } catch {
+        /* storage 실패 시에도 메모리 값은 유지 */
+      }
+      return merged;
+    });
+  saveChain = next;
+  return next;
 }
 
 function geometryKey(): string {

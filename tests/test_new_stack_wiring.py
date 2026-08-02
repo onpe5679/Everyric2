@@ -845,6 +845,12 @@ class TestResolveStackLanguage:
     def test_label_passes_through_normalized(self):
         assert worker._resolve_stack_language(" JA ", []) == ("ja", "label")
 
+    def test_regional_subtags_are_stripped_from_labels(self):
+        # 코덱스 감사 Med: "EN-us"류는 라우팅(startswith)은 통과하지만 OWSM 언어 심볼
+        # 매칭(정확 키)이 실패해 무언어 정렬로 조용히 저하됐다 — 기본 코드만 남긴다.
+        assert worker._resolve_stack_language("EN-us", []) == ("en", "label")
+        assert worker._resolve_stack_language("zh_TW", []) == ("zh", "label")
+
     def test_empty_label_pure_latin_resolves_en(self):
         lines = [LyricLine(text="the weathergirl says sunshine again", line_number=1)]
         assert worker._resolve_stack_language(None, lines) == ("en", "script_census")

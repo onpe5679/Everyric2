@@ -875,6 +875,13 @@
   box-shadow: none !important;
   text-shadow: none !important;
 }
+/* 칩·서버 배너·패널 조각은 읽혀야 하는 전경 요소다 — 배경을 되살린다(코덱스 감사 Med:
+   위 블랭킷이 진행/알림 칩 배경까지 지워 키 컬러 위에서 텍스트만 떠 보였다) */
+:root.ey-chroma body.ey-pip .ey-pip-chip,
+:root.ey-chroma body.ey-pip .ey-server-bar,
+:root.ey-chroma body.ey-pip .ey-feedback-pop {
+  background: rgba(8, 8, 8, 0.82) !important;
+}
 
 /* 출처 링크가 있는 배지 (보카로 위키 등) */
 .ey-source.link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }

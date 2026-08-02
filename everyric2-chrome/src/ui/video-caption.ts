@@ -41,6 +41,10 @@ export class VideoCaption {
     this.lines = lines;
     this.currentIndex = -1;
     this.render(null);
+    // 코덱스 감사 Med(2026-08-03): 싱크 없는 영상으로 넘어가면 자체 자막은 비는데
+    // 유튜브 자막 숨김 클래스는 unmount에서만 지워져 **둘 다 안 보이는** 상태로
+    // 방치됐다 — 표시할 라인이 있을 때만 유튜브 자막을 숨긴다.
+    this.syncYtSuppression();
   }
 
   applyDisplay(pronScript: PronScript, showPron: boolean, showTr: boolean): void {
@@ -82,7 +86,7 @@ export class VideoCaption {
         '.ey-video-caption-on .ytp-caption-window-container { display: none !important; }';
       document.head.append(this.styleEl);
     }
-    player.classList.add('ey-video-caption-on');
+    this.syncYtSuppression();
     if (this.host?.isConnected) return;
     this.host = document.createElement('div');
     // 자막 관례 위치: 하단 중앙, 조작을 막지 않게 pointer-events 없음
@@ -108,6 +112,12 @@ export class VideoCaption {
     }
     player.append(this.host);
     this.render(this.currentIndex >= 0 ? this.lines[this.currentIndex] ?? null : null, this.currentIndex);
+  }
+
+  /** 유튜브 자막 숨김은 "우리 자막이 실제로 나올 때"만 — 모듈 on + 표시할 라인 존재 */
+  private syncYtSuppression(): void {
+    const on = this.enabled && this.lines.length > 0;
+    document.querySelector('#movie_player')?.classList.toggle('ey-video-caption-on', on);
   }
 
   private unmount(): void {

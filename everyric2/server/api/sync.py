@@ -2332,6 +2332,18 @@ async def regenerate_sync(
         # 재생성도 같은 잡 진행 중이면 합류 — 연타가 동시 다운로드(WinError 32)를 만들지 않게
         active = await job_repo.get_active_by_video(request.video_id, lyrics_hash_value)
         if active:
+            if request.min_depth:
+                # 코덱스 감사 High(2026-08-03): 이 조기 반환이 min_depth 스태시보다 앞이라
+                # 깊이 상향 요청이 조용히 무시됐다(재생성 연타 직후 깊이 버튼). 활성 잡에
+                # best-effort로 스태시한다 — 잡이 아직 정렬 캡처 전(다운로드/분리 중)이면
+                # 그대로 적용되고, 이미 지났으면 잡 터미널의 _pop_stashes가 걷어간다.
+                # 적용 보장은 못 하지만(그 한계는 결과의 depth 배지가 정직하게 보여준다)
+                # "말없이 버림"보다는 낫다.
+                from everyric2.server.worker import stash_force as _stash_force
+                from everyric2.server.worker import stash_min_depth as _stash_min_depth
+
+                _stash_force(active.id)
+                _stash_min_depth(active.id, request.min_depth)
             return GenerateResponse(
                 job_id=active.id,
                 status="processing",
