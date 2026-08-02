@@ -30,9 +30,9 @@ cd /opt/everyric2
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # demucs(보컬 분리, 구스택용) + audio-separator/onnxruntime(bs-polarformer-fp16, 새
-# 스택 구원 단계용) 포함 설치. 새 스택이 기본값이므로(아래 "새 정렬 스택 준비물" 참고)
-# 이 extra는 사실상 필수다 — 없으면 정상곡(고속 단계)만 동작하고 극한곡(구원 승급
-# 대상)은 전부 명시적으로 실패한다.
+# 스택 medium/heavy 깊이용) 포함 설치. 새 스택이 기본값이므로(아래 "새 정렬 스택 준비물"
+# 참고) 이 extra는 사실상 필수다 — 없으면 정상곡(fast 깊이)만 동작하고 극한곡(medium/
+# heavy로 승급하는 곡)은 전부 명시적으로 실패한다.
 uv sync --extra separator
 ```
 
@@ -53,11 +53,12 @@ uv pip install torch torchaudio torchvision --index-url https://download.pytorch
 
 ### 새 정렬 스택(owsm/omniasr 앵커 + 2패스, 기본값) 준비물
 
-`alignment.engine` 기본값이 `owsm`이라(요청마다 3단계 라우팅이 실제 앵커를 고른다 —
-`everyric2/server/worker.py::_run_new_stack_alignment` 참고) 아래 셋이 **전부** 있어야
-새 스택이 완전히 동작한다. 하나라도 없으면 해당 요청이 조용히 저하되지 않고 명시적으로
-실패한다(운영자 지시 — `jobs.failure_kind='system'`으로 기록됨. 고속 단계만으로 끝나는
-정상곡은 분리·OWSM이 없어도 동작한다 — 아래가 필요해지는 건 구원 단계로 승급하는 곡부터다).
+`alignment.engine` 기본값이 `owsm`이라(요청마다 fast/medium/heavy 3단계 라우팅이 실제
+앵커를 고른다 — `everyric2/server/worker.py::_run_new_stack_alignment` 참고) 아래 셋이
+**전부** 있어야 새 스택이 완전히 동작한다. 하나라도 없으면 해당 요청이 조용히 저하되지
+않고 명시적으로 실패한다(운영자 지시 — `jobs.failure_kind='system'`으로 기록됨. fast
+깊이만으로 끝나는 정상곡은 분리·OWSM이 없어도 동작한다 — 아래가 필요해지는 건
+medium/heavy로 승급하는 곡부터다).
 
 1. **bs-polarformer-fp16 분리기 자산** — `everyric2/audio/polarformer_separator.py`가
    `EVERYRIC_AUDIO_SEPARATOR_MODEL_DIR`(기본 `~/.cache/everyric2/models`) 아래에서 찾는다:
