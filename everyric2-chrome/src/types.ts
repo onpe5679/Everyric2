@@ -495,6 +495,8 @@ export interface Settings {
   /** 음정선(f0 곡선·노트 바) 밝기 배율 — 0.2~1.0, 기존 알파값에 곱해진다. 기본 1(현행과
    *  동일 — f0 곡선 0.65·노트 채움 0.55/0.65가 그대로 유지돼 무회귀) */
   pitchLineOpacity: number;
+  /** f0 곡선(음정 보는 선) 밝기 배율 0.2~1.5 — 노트 바(pitchLineOpacity)와 별개 */
+  pitchF0Opacity: number;
   /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
   pitchPronPosition: 'note' | 'bottom';
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */
@@ -526,7 +528,7 @@ export interface Settings {
   /** 패널 하단에 내부 상태(비디오 바인딩, 싱크 소스 등) 표시 */
   debugInfo: boolean;
   /** 발음 표기 방식 — 'auto'면 translationLanguage 기준 자동 결정(lib/lang.ts resolveScript) */
-  pronunciationScript: 'auto' | 'hangul' | 'romaji' | 'kana';
+  pronunciationScript: 'auto' | 'hangul' | 'romaji' | 'kana' | 'ipa';
   /** 확장 UI 언어 — 'auto'면 브라우저 로케일. 지금은 값만 저장(i18n 태스크에서 소비) */
   uiLanguage: 'auto' | 'ko' | 'en' | 'ja';
 }

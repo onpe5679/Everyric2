@@ -921,6 +921,15 @@
   "overlay_settings_row_debugInfo": {
     "message": "デバッグ情報を表示 (Alt+Shift+D)"
   },
+  "overlay_settings_row_pitchF0Opacity": {
+    "message": "音程カーブの明るさ"
+  },
+  "overlay_settings_row_pitchF0OpacityTitle": {
+    "message": "音程を見る線（f0カーブ）の明るさです — ノートバーとは別に調整できます。1より大きくすると既定より明るく太く表示されます"
+  },
+  "overlay_settings_pronScript_ipa": {
+    "message": "IPA（発音記号）"
+  },
   "overlay_settings_serverRequiredNote": {
     "message": "同期の生成・翻訳にはEveryricサーバーが必要です"
   },

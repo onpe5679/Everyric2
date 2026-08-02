@@ -1578,7 +1578,7 @@ export class LyricsOverlay {
     // (lib/lang.ts resolveScript). 서버가 표기별 발음(pron dict)을 아직 안 주므로 지금은
     // hangul(한글 독음) 외의 선택은 화면상 차이가 없다 — 표기가 배포되면 그대로 반영된다.
     const pronScriptSelect = this.buildSelect(
-      [['auto', t('overlay.settings.optAuto')], ['hangul', t('overlay.settings.pronScript.hangul')], ['romaji', t('overlay.settings.pronScript.romaji')], ['kana', t('overlay.settings.pronScript.kana')]],
+      [['auto', t('overlay.settings.optAuto')], ['hangul', t('overlay.settings.pronScript.hangul')], ['romaji', t('overlay.settings.pronScript.romaji')], ['kana', t('overlay.settings.pronScript.kana')], ['ipa', t('overlay.settings.pronScript.ipa')]],
       this.settings.pronunciationScript,
       v => this.callbacks.onSettingsChange({ pronunciationScript: v as Settings['pronunciationScript'] }),
     );
@@ -1653,6 +1653,9 @@ export class LyricsOverlay {
 
     // K3: 음정선(f0 곡선·노트 바) 밝기 — 0.2~1.0(기존 볼륨 슬라이더와 같은 buildRange,
     // 범위만 좁힌다)
+    const pitchF0Opacity = this.buildRange(
+      this.settings.pitchF0Opacity, v => this.callbacks.onSettingsChange({ pitchF0Opacity: v }), 0.2, 1.5,
+    );
     const pitchLineOpacity = this.buildRange(
       this.settings.pitchLineOpacity, v => this.callbacks.onSettingsChange({ pitchLineOpacity: v }), 0.2, 1,
     );
@@ -1791,6 +1794,7 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchCountdown') }), pitchCountdown),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchF0Curve'), attrs: { title: t('overlay.settings.row.pitchF0CurveTitle') } }), pitchF0Curve),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchLineOpacity'), attrs: { title: t('overlay.settings.row.pitchLineOpacityTitle') } }), pitchLineOpacity),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchF0Opacity'), attrs: { title: t('overlay.settings.row.pitchF0OpacityTitle') } }), pitchF0Opacity),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pronPosition'), attrs: { title: t('overlay.settings.row.pronPositionTitle') } }), pitchPronPosition),
       h('div', { className: 'ey-settings-row' },
         h('label', { text: t('overlay.settings.row.melodyPlayback'), attrs: { title: t('overlay.settings.row.melodyPlaybackTitle') } }),

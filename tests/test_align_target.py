@@ -74,7 +74,7 @@ def test_en_target_is_ipa_not_spelling():
 def test_en_hangul_and_kana_share_the_same_target():
     # display 선택은 owners만 바꾸고 target(IPA)은 절대 안 바뀐다 — 벤치가 실측한 성질.
     units = derive_en_display_units("They say my hunger's got a mind of its own")
-    assert set(units.owners) == {"hangul", "kana", "romaji", "en"}
+    assert set(units.owners) == {"hangul", "kana", "romaji", "en", "ipa"}
     # 네 표기 모두 같은 LineUnits 안에서 하나의 target을 공유한다(호출 자체가 하나뿐이므로
     # "정렬 재실행 없이 표기가 갈린다"는 요구사항이 구조적으로 성립한다).
     assert len(units.owners["hangul"]) == len(units.target)

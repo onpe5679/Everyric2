@@ -892,6 +892,9 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
   if (patch.pitchLineOpacity !== undefined) {
     pip.setPitchLineOpacity(patch.pitchLineOpacity);
   }
+  if (patch.pitchF0Opacity !== undefined) {
+    pip.setPitchF0Opacity(patch.pitchF0Opacity);
+  }
 
   // 가라오케 음정 바 토글 즉시 반영
   if (patch.pitchGuide !== undefined) {
@@ -3139,6 +3142,7 @@ async function handlePipToggle(): Promise<void> {
     pitchCountdown: settings.pitchCountdown,
     solfegeNotation: settings.solfegeNotation,
     pitchLineOpacity: settings.pitchLineOpacity,
+    pitchF0Opacity: settings.pitchF0Opacity,
     pitchPronPosition: settings.pitchPronPosition,
     showConfidence: settings.debugInfo,
     onPitchHeightChange: px => {

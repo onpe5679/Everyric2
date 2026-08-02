@@ -55,8 +55,10 @@ export interface PipOptions {
   pitchCountdown: boolean;
   /** 계이름 표기: korean(도레미)·english(C4·D#5 등, 옥타브 포함) */
   solfegeNotation: 'korean' | 'english';
-  /** 음정선(f0 곡선·노트 바) 밝기 배율 0.2~1.0 — 기존 알파값에 곱해진다 */
+  /** 음정선(노트 바) 밝기 배율 0.2~1.0 — 기존 알파값에 곱해진다 */
   pitchLineOpacity: number;
+  /** f0 곡선(음정 보는 선) 밝기 배율 0.2~1.5 — 노트 바와 별개 페이더 (운영자 요청) */
+  pitchF0Opacity: number;
   /** 디버그: 글자별 CTC 신뢰도를 색으로 표시 */
   showConfidence: boolean;
   /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
@@ -394,8 +396,10 @@ export class PipController {
   private onPitchWindowChange: (measures: number) => void = () => {};
   /** K2: 계이름 표기 — korean(도레미)·english(C4·D#5) */
   private solfegeNotation: 'korean' | 'english' = 'korean';
-  /** K3: 음정선(f0 곡선·노트 바) 밝기 배율 — 기존 알파값에 곱해진다 */
+  /** K3: 음정선(노트 바) 밝기 배율 — 기존 알파값에 곱해진다 */
   private pitchLineOpacity = 1;
+  /** f0 곡선(음정 보는 선) 밝기 배율 — 노트 바와 별개 (renderF0Curve 전용) */
+  private f0Opacity = 1;
   private pitchCountdown = true;
   private pitchPronPosition: 'note' | 'bottom' = 'note';
   /** 발음 표기 방식 — setLines가 만드는 pitch.notes의 발음 부착(collectPitchData)도
@@ -502,6 +506,7 @@ export class PipController {
     this.onPitchWindowChange = opts.onPitchWindowChange;
     this.solfegeNotation = opts.solfegeNotation;
     this.pitchLineOpacity = opts.pitchLineOpacity;
+    this.f0Opacity = opts.pitchF0Opacity;
     this.pitchPronPosition = opts.pitchPronPosition;
     this.pronScript = opts.pronScript;
     this.showConfidence = opts.showConfidence;
@@ -951,9 +956,15 @@ export class PipController {
     this.renderPitch(this.lastTime);
   }
 
-  /** K3: 음정선(f0 곡선·노트 바) 밝기 배율 즉시 반영 — [0.2, 1] 클램프. */
+  /** K3: 음정선(노트 바) 밝기 배율 즉시 반영 — [0.2, 1] 클램프. */
   setPitchLineOpacity(opacity: number): void {
     this.pitchLineOpacity = Math.min(1, Math.max(0.2, opacity));
+    this.renderPitch(this.lastTime);
+  }
+
+  /** f0 곡선(음정 보는 선) 밝기 배율 즉시 반영 — [0.2, 1.5] 클램프(1 초과 = 기본보다 밝게). */
+  setPitchF0Opacity(opacity: number): void {
+    this.f0Opacity = Math.min(1.5, Math.max(0.2, opacity));
     this.renderPitch(this.lastTime);
   }
 
@@ -2072,9 +2083,10 @@ export class PipController {
   ): void {
     const f0 = this.debugMeta?.f0_curve;
     if (!f0 || f0.dt <= 0 || f0.midi.length === 0) return;
-    // K3: 기존 알파(0.65)에 pitchLineOpacity를 곱한다(기본 1 = 현행과 동일, 무회귀)
-    ctx.strokeStyle = `rgba(77, 171, 247, ${0.65 * this.pitchLineOpacity})`;
-    ctx.lineWidth = 1;
+    // f0 곡선 전용 페이더(f0Opacity) — 노트 바(pitchLineOpacity)와 분리(운영자 요청:
+    // "음정 보는 선"만 따로 밝게). 1 초과면 알파 상한(0.98)에 두께로 마저 보탠다.
+    ctx.strokeStyle = `rgba(77, 171, 247, ${Math.min(0.98, 0.65 * this.f0Opacity)})`;
+    ctx.lineWidth = this.f0Opacity > 1 ? 1.6 : 1;
     ctx.beginPath();
     let pen = false;
     const i0 = Math.max(0, Math.floor((t0 - f0.t0) / f0.dt));

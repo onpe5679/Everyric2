@@ -416,6 +416,8 @@ def test_latin_segment_gets_all_four_display_scripts():
         "kana": "テイク イト イーズィー",
         "romaji": "teiku ito iiずぃ",
         "en": "Take it easy",
+        # ipa는 정렬 타깃 자체(IPA 표시 옵션, 2026-08-03) — 파생이 아니라 타깃 문자열
+        "ipa": "teik it izi",
     }
     assert "pron_segs" not in seg
 

@@ -66,7 +66,7 @@ class LineUnits:
             )
 
 
-EN_DISPLAY_KEYS: tuple[str, ...] = ("hangul", "kana", "romaji", "en")
+EN_DISPLAY_KEYS: tuple[str, ...] = ("hangul", "kana", "romaji", "en", "ipa")
 JA_DISPLAY_KEYS: tuple[str, ...] = ("hangul", "kana", "romaji")
 
 
@@ -274,14 +274,21 @@ def derive_en_display_units(source: str, *, entries: dict[int, int] | None = Non
     for index in word_end_at:
         if 0 <= index < len(word_end):
             word_end[index] = True
+    target = "".join(chars)
     return LineUnits(
-        "".join(chars),
+        target,
         word_end=word_end,
         owners={
             "hangul": hangul_owners,
             "kana": kana_owners,
             "romaji": romaji_owners,
             "en": en_owners,
+            # 정렬 타깃 자체가 IPA라(유닛 emit이 unit.ipa를 chars에 얹는다) 문자마다
+            # 자기 자신을 소유자로 얹으면 IPA 표기가 된다 — 확장의 IPA 표시 옵션
+            # (디버그 연계, 운영자 요청 2026-08-03). OOV 낱말 구간은 타깃이 원문
+            # 철자이므로 그 구간만 IPA가 아니라 철자가 그대로 보인다(정직한 표시 —
+            # 그 낱말은 실제로 IPA를 모른 채 정렬됐다).
+            "ipa": list(target),
         },
     )
 

@@ -1,6 +1,6 @@
 import type { LyricLine, PronSegment, Settings } from '../types';
 
-export type PronScript = 'hangul' | 'romaji' | 'kana';
+export type PronScript = 'hangul' | 'romaji' | 'kana' | 'ipa';
 
 /**
  * 발음 표기 방식 해석 — 'auto'면 번역 언어 기준 자동 결정표를 따른다

@@ -362,8 +362,9 @@ def test_refine_lines_aligns_simple_en_word_and_produces_multi_key_segs():
     line = lines[0]
     assert line.fallback_reason is None
     assert line.refined is True
-    # 네 표기(hangul/kana/romaji/en)가 전부 나와야 한다.
-    assert set(line.pron_segs) == {"hangul", "kana", "romaji", "en"}
+    # 다섯 표기(hangul/kana/romaji/en/ipa)가 전부 나와야 한다 — ipa는 정렬 타깃 자체를
+    # 표시로 얹은 것(IPA 표시 옵션, 2026-08-03).
+    assert set(line.pron_segs) == {"hangul", "kana", "romaji", "en", "ipa"}
     assert line.pron["hangul"] == "캣"
     assert line.start == 0.0 and line.end == 0.6  # 라인 경계는 안 바뀐다
 

@@ -36,6 +36,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pitchF0Curve: true,
   solfegeNotation: 'korean',
   pitchLineOpacity: 1,
+  pitchF0Opacity: 1,
   pitchPronPosition: 'note',
   lowConfWarning: true,
   notifyOnComplete: true,
