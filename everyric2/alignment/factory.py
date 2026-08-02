@@ -3,7 +3,7 @@ from typing import Literal
 from everyric2.alignment.base import BaseAlignmentEngine, EngineNotAvailableError
 from everyric2.config.settings import AlignmentSettings, get_settings
 
-EngineType = Literal["ctc", "nemo", "gpu-hybrid", "sofa"]
+EngineType = Literal["ctc", "nemo", "gpu-hybrid", "sofa", "owsm", "omniasr"]
 
 
 class EngineFactory:
@@ -31,6 +31,14 @@ class EngineFactory:
             from everyric2.alignment.sofa_engine import SOFAEngine
 
             engine = SOFAEngine(config)
+        elif engine_type == "owsm":
+            from everyric2.alignment.owsm_engine import OwsmEngine
+
+            engine = OwsmEngine(config)
+        elif engine_type == "omniasr":
+            from everyric2.alignment.omniasr_engine import OmniASREngine
+
+            engine = OmniASREngine(config)
         else:
             raise ValueError(f"Unknown engine type: {engine_type}")
 
@@ -97,6 +105,46 @@ class EngineFactory:
                     "type": "sofa",
                     "available": False,
                     "description": "SOFA singing-oriented forced aligner (English/Japanese)",
+                }
+            )
+
+        try:
+            from everyric2.alignment.owsm_engine import OwsmEngine
+
+            engine = OwsmEngine()
+            engines.append(
+                {
+                    "type": "owsm",
+                    "available": engine.is_available(),
+                    "description": "OWSM-CTC v4 1B (subprocess-isolated, multilingual)",
+                }
+            )
+        except Exception:
+            engines.append(
+                {
+                    "type": "owsm",
+                    "available": False,
+                    "description": "OWSM-CTC v4 1B (subprocess-isolated, multilingual)",
+                }
+            )
+
+        try:
+            from everyric2.alignment.omniasr_engine import OmniASREngine
+
+            engine = OmniASREngine()
+            engines.append(
+                {
+                    "type": "omniasr",
+                    "available": engine.is_available(),
+                    "description": "omniASR-CTC-300M (in-process, multilingual)",
+                }
+            )
+        except Exception:
+            engines.append(
+                {
+                    "type": "omniasr",
+                    "available": False,
+                    "description": "omniASR-CTC-300M (in-process, multilingual)",
                 }
             )
 
