@@ -577,6 +577,25 @@ function ensureOverlay(): LyricsOverlay {
       });
       return Boolean(res.data?.ok);
     },
+    onWrongLyrics: () => {
+      // 오매칭 제보 — 기존 피드백 시스템으로 수집(가사 오류=최저 별점 의미론), 매칭
+      // 근거(페이지 제목·URL)를 코멘트에 자동 첨부한다. 제보 직후 검색 시트를 열어
+      // 사용자가 그 자리에서 올바른 가사를 고를 수 있게 한다.
+      const videoId = currentVideoId;
+      if (!videoId) return;
+      const matched = currentData?.matchedTitle ?? '';
+      void sendToBackground({
+        type: 'SYNC_FEEDBACK',
+        payload: {
+          videoId,
+          rating: 1,
+          category: 'lyrics',
+          comment: `[오매칭] matched=${matched} url=${currentSourceUrl ?? ''}`,
+        },
+      });
+      showNotice(t('content.wrongLyrics.thanks'), 6000);
+      overlay?.openSearch();
+    },
     onPipToggle: () => void handlePipToggle(),
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),
@@ -2056,6 +2075,7 @@ function adoptVocaroResult(videoId: string, vocaro: VocaroResult): LyricsData {
     synced: false,
     lines,
     plainText: lines.map(l => l.text).join('\n'),
+    matchedTitle: vocaro.pageTitle,
     humanTranslated: showTranslation ? lines.some(l => l.translation) : undefined,
     translationLang: showTranslation ? 'ko' : undefined,
   };
@@ -2108,6 +2128,7 @@ function adoptSourceResult(result: SourceResult): LyricsData {
     synced: false,
     lines,
     plainText: lines.map(l => l.text).join('\n'),
+    matchedTitle: result.pageTitle,
     attribution: attributionFromSource(result),
     humanTranslated: showTranslation ? lines.some(l => l.translation) : undefined,
     translationLang: showTranslation ? result.translationLang : undefined,
@@ -2318,6 +2339,8 @@ function applyLyricsData(data: LyricsData | null): void {
   // 영상 자막 모듈 — 싱크가 있으면 같은 라인 배열을 공유한다(번역이 늦게 라인 객체에
   // 붙어도 다음 렌더에 자연 반영). 없으면 비운다.
   videoCaption.setLines(data?.synced ? data.lines : []);
+  // 자동 매칭 표시줄 — 위키가 고른 곡 제목(서버 싱크·매칭 없음이면 숨김)
+  panel.setMatchedSource(data?.matchedTitle ?? null);
   // 영상별 저장 오프셋 복원 (서버에 저장된 값, 없으면 0) — UI 라벨도 함께
   videoOffset = data?.userOffset ?? 0;
   panel.setOffsetValue(videoOffset);

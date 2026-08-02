@@ -544,6 +544,18 @@
   "overlay_feedback_failed": {
     "message": "Failed to send — please try again later"
   },
+  "overlay_matched_label": {
+    "message": "Matched lyrics"
+  },
+  "overlay_matched_notThis": {
+    "message": "Not this song"
+  },
+  "overlay_matched_notThisTitle": {
+    "message": "Report the mismatch and search for the right lyrics — reports help improve matching"
+  },
+  "content_wrongLyrics_thanks": {
+    "message": "Thanks for the report! Pick the right lyrics in search"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "Run AI transcription"
   },

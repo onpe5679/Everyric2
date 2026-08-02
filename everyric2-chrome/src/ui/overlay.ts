@@ -63,6 +63,8 @@ export interface OverlayCallbacks {
   onDepthUpgrade: (minDepth?: 'medium' | 'heavy') => void;
   /** 정렬 품질 별점(1~5) + 선택 오류 제보 전송 — 성공 여부를 돌려준다 */
   onSubmitFeedback: (rating: number, category?: string, comment?: string) => Promise<boolean>;
+  /** 매칭 표시줄의 "이 가사가 아니에요" — 오매칭 제보 후 검색 시트를 연다 */
+  onWrongLyrics: () => void;
   /** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사에서 새로 시작 */
   onResetSync: () => void;
   /** 검색 시트에서 원래 보던 가사 화면으로 복귀 (실수로 검색을 연 경우 탈출구) */
@@ -152,6 +154,8 @@ export class LyricsOverlay {
   /** [모듈] 레인이 지금 화면에 있는가 — 꺼져 있을 때 매 tick 캔버스를 만지지 않기 위한 게이트 */
   private laneShown = false;
   private nextUpEl: HTMLDivElement;
+  private matchedBar: HTMLDivElement;
+  private matchedTitleEl: HTMLSpanElement;
   /**
    * [모듈] 가라오케 레인 (설정 modMainLane) — PiP 창의 음정 레인을 메인 패널에도 띄운다.
    * 그리는 코드는 PiP와 **완전히 같은** PitchLaneRenderer 하나뿐이라 둘이 갈라질 수 없다.
@@ -429,6 +433,23 @@ export class LyricsOverlay {
     this.nextUpEl = h('div', { className: 'ey-nextup' });
     this.nextUpEl.style.display = 'none';
 
+    // 자동 매칭 표시줄 — 위키가 고른 곡 제목을 가사 위에 명시하고, 오매칭이면 그 자리에서
+    // 제보(기존 피드백 시스템)할 수 있게 한다(운영자 요청 2026-08-03: ダミーロマンス가
+    // 다른 곡에 붙었는데 화면만으로는 무엇에 매칭됐는지 알 수 없었다).
+    this.matchedTitleEl = h('span', { className: 'ey-matched-title' });
+    this.matchedBar = h('div', { className: 'ey-matched-bar' },
+      h('span', { className: 'ey-matched-label', text: t('overlay.matched.label') }),
+      this.matchedTitleEl,
+      h('button', {
+        className: 'ey-matched-report',
+        text: t('overlay.matched.notThis'),
+        title: t('overlay.matched.notThisTitle'),
+        attrs: { type: 'button' },
+        on: { click: () => this.callbacks.onWrongLyrics() },
+      }),
+    );
+    this.matchedBar.style.display = 'none';
+
     // [모듈] 가라오케 레인 (설정 modMainLane) — 기본 꺼짐, applySettings가 표시를 정한다
     this.laneCanvas = h('canvas', {
       className: 'ey-main-lane',
@@ -438,7 +459,7 @@ export class LyricsOverlay {
     this.laneCanvas.style.display = 'none';
 
     this.panel = h('div', { className: 'ey-panel' },
-      this.header, this.langChipsRow, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
+      this.header, this.matchedBar, this.langChipsRow, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
       this.warnBar, this.translationPendingBar, this.body, this.resumeChip, this.nextUpEl, this.laneCanvas,
       this.footer, this.debugStrip, this.debugPanelEl,
     );
@@ -1332,6 +1353,17 @@ export class LyricsOverlay {
 
   /** 곡 단위 정렬 진단(자막 스캐폴드 등) — 디버그 패널 머리 요약줄이 이걸 읽는다.
    *  content가 아직 이 메서드를 안 부르면 null로 남고, 패널은 요약줄만 생략한 채 동작한다. */
+  /** 자동 매칭 표시줄 — 위키가 고른 곡 제목. null이면 숨김(서버 싱크·매칭 없음) */
+  setMatchedSource(title: string | null): void {
+    if (title) {
+      this.matchedTitleEl.textContent = title;
+      this.matchedTitleEl.title = title;
+      this.matchedBar.style.display = '';
+    } else {
+      this.matchedBar.style.display = 'none';
+    }
+  }
+
   /** 다음 영상 정보 모듈 — null이면 숨김 (설정 modNextUp이 꺼져 있어도 content가 null을 준다) */
   setNextUp(title: string | null): void {
     if (title) {

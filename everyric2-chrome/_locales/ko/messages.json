@@ -544,6 +544,18 @@
   "overlay_feedback_failed": {
     "message": "전송 실패 — 잠시 후 다시 시도해 주세요"
   },
+  "overlay_matched_label": {
+    "message": "찾은 가사"
+  },
+  "overlay_matched_notThis": {
+    "message": "이 가사가 아니에요"
+  },
+  "overlay_matched_notThisTitle": {
+    "message": "오매칭을 제보하고 올바른 가사를 직접 검색해요 — 제보는 매칭 개선에 쓰여요"
+  },
+  "content_wrongLyrics_thanks": {
+    "message": "제보 고마워요! 검색에서 올바른 가사를 골라 주세요"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI 전사 생성"
   },

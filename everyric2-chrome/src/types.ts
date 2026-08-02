@@ -100,6 +100,9 @@ export interface LyricsData {
   debugMeta?: SyncDebugMeta;
   /** 가사 원출처 (서버 저장분 또는 vocaro 직접 조회) — 푸터에 병기 */
   attribution?: SourceAttribution;
+  /** 자동 매칭이 고른 위키 페이지 제목 — 헤더 아래 "찾은 가사" 줄과 오매칭 제보의 재료.
+   *  위키 채택 경로에서만 채워진다(서버 싱크는 페이지 제목을 안 갖는다). */
+  matchedTitle?: string;
   /** 자동 생성(ASR) 자막인가 — source가 'caption'일 때만 의미가 있다.
    *  노래를 ASR로 받아 적으면 원문과 딴 텍스트가 나오므로(실측) 화면 표시까지만
    *  허용하고 싱크 생성의 원문으로는 승격하지 않는다 (content.handleGenerate). */

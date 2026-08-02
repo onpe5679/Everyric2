@@ -94,6 +94,8 @@
 .ey-panel.collapsed .ey-footer,
 .ey-panel.collapsed .ey-resume-chip,
 .ey-panel.collapsed .ey-main-lane,
+.ey-panel.collapsed .ey-matched-bar,
+.ey-panel.collapsed .ey-nextup,
 .ey-panel.collapsed .ey-settings,
 .ey-panel.collapsed .ey-debug-strip,
 .ey-panel.collapsed .ey-debug-panel-wrap {
@@ -1431,4 +1433,24 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   width: 0;
   background: var(--ey-accent);
   border-radius: 2px;
+}
+
+/* 자동 매칭 표시줄 (overlay.ts setMatchedSource) — 헤더 바로 아래, 오매칭 즉시 제보 */
+.ey-matched-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--ey-border);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.ey-matched-label { color: var(--ey-text-faint); flex-shrink: 0; }
+.ey-matched-title {
+  color: var(--ey-text-dim); font-weight: 600;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ey-matched-report {
+  margin-left: auto; flex-shrink: 0;
+  border: none; background: none; cursor: pointer;
+  color: var(--ey-danger-text); font-size: 11px; padding: 0 2px;
+  text-decoration: underline; text-underline-offset: 2px;
 }

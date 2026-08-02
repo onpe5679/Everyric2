@@ -544,6 +544,18 @@
   "overlay_feedback_failed": {
     "message": "送信失敗 — 後でもう一度お試しください"
   },
+  "overlay_matched_label": {
+    "message": "見つかった歌詞"
+  },
+  "overlay_matched_notThis": {
+    "message": "この歌詞ではない"
+  },
+  "overlay_matched_notThisTitle": {
+    "message": "誤マッチを報告して正しい歌詞を検索します — 報告はマッチング改善に使われます"
+  },
+  "content_wrongLyrics_thanks": {
+    "message": "報告ありがとうございます！検索で正しい歌詞を選んでください"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI転写を実行"
   },
