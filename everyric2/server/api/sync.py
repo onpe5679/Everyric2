@@ -22,6 +22,7 @@ from everyric2.server.db.repository import (
     LinkJobRepository,
     SyncLinkRepository,
     SyncRepository,
+    SyncResultVersionRepository,
     TranslationLayerRepository,
     VideoOffsetRepository,
     hash_lyrics,
@@ -249,6 +250,24 @@ class SyncLookupResponse(BaseModel):
     # None. lang 파라미터의 기존 동작(legacy 슬롯 오버레이·translation_lang)은 이 필드와
     # 무관하게 그대로다 — 추가 필드라 구버전 클라이언트는 무시하면 그만이다.
     translations_by_lang: dict[str, list[str | None]] | None = None
+
+
+class SyncPreviousVersionResponse(BaseModel):
+    """이 영상 자기 싱크의 직전(재처리로 덮어써지기 전) 버전 — 확장의 A/B 고스트 비교용.
+
+    SyncLookupResponse와 최대한 같은 모양을 쓴다(같은 필드명: timestamps=세그먼트 리스트,
+    created_at=그 세대의 원래 생성 시각). 없으면(최초 생성뿐이었거나 아직 재처리된 적이
+    없으면) found=false — GET /api/sync/{video_id}의 미존재 관례(404가 아니라 found=false)를
+    그대로 따른다. 롤백 API는 이번 스코프 밖이라 이 응답에는 sync_id/롤백 액션이 없다."""
+
+    found: bool
+    timestamps: list[dict[str, Any]] | None = None
+    language: str | None = None
+    quality_score: float | None = None
+    # 스냅샷된 행이 원래 만들어진 시각 (교체 전 세대의 생성 시각)
+    created_at: str | None = None
+    # 이 스냅샷이 찍힌(=재처리가 그 세대를 덮어쓴) 시각
+    replaced_at: str | None = None
 
 
 class LineMeta(BaseModel):
@@ -1440,6 +1459,34 @@ async def get_sync(
                 )
 
         return SyncLookupResponse(found=False, user_offset=user_offset)
+
+
+@router.get("/{video_id}/previous", response_model=SyncPreviousVersionResponse)
+async def get_previous_sync_version(video_id: str):
+    """이 영상 **자기 싱크**의 직전(재처리로 덮어써지기 전) 버전 스냅샷을 조회한다.
+
+    확장의 재처리 전/후 A/B 고스트 비교용 — 롤백 자체는 이번 스코프 밖(확장 대개편 때
+    설계). 링크(sync_links)로 빌려온 싱크는 다루지 않는다 — 여기서 보는 건 **이 video_id
+    자신의** 이력뿐이고 링크 해소 로직과는 무관하다(빌려온 영상이 previous를 조회하면
+    항상 found=false).
+
+    스냅샷은 (video_id당 최신 1건) `SyncRepository.create()`가 새 sync_results 행을 넣기
+    직전에 만든다 — 최초 생성뿐이었거나 아직 한 번도 재처리되지 않았으면 스냅샷이 없어
+    found=false다. 미존재를 404가 아니라 found=false로 답하는 것은 기존 GET
+    /api/sync/{video_id}와 같은 관례다."""
+    _validate_video_id(video_id)
+    async with get_session() as session:
+        version = await SyncResultVersionRepository(session).get(video_id)
+        if not version:
+            return SyncPreviousVersionResponse(found=False)
+        return SyncPreviousVersionResponse(
+            found=True,
+            timestamps=(version.timestamps or {}).get("segments", []),
+            language=version.language,
+            quality_score=version.quality_score,
+            created_at=version.created_at.isoformat() if version.created_at else None,
+            replaced_at=version.replaced_at.isoformat() if version.replaced_at else None,
+        )
 
 
 @router.post("/{video_id}/translations", response_model=SaveTranslationLayerResponse)

@@ -177,3 +177,44 @@ class LinkJob(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SyncResultVersion(Base):
+    """sync_results가 재처리(모델 스택 교체 등)로 덮어써지기 **직전**의 1세대 스냅샷.
+
+    확장의 재처리 전/후 "고스트" A/B 비교 + (향후) 롤백의 재료다. video_id를 PK로 써서
+    video_id당 최신 직전 버전 1건만 유지한다 — 여러 세대를 쌓지 않는 이유는 sync_results
+    자체가 행당 평균 272KB(JSON, SyncRepository.create 참고)라, 재처리마다 무한히 누적되면
+    이 서버(SQLite 단일 파일)의 저장·백업 비용이 재처리 횟수에 비례해 무한정 자라기
+    때문이다. 롤백 API는 이번 스코프 밖(확장 대개편 때 설계) — 여기서는 조회만 제공한다
+    (GET /api/sync/{video_id}/previous, server/api/sync.py).
+
+    **스냅샷 시점**: `sync_results`는 UPDATE가 아니라 매 처리마다 새 행을 INSERT하는
+    구조라(같은 video_id에 여러 행이 공존하고, 조회는 created_at 최신 행을 우선한다 —
+    SyncRepository.get_by_video 등 참고) DB 레벨의 "덮어쓰기"(UPDATE)는 일어나지 않는다.
+    여기서 "덮어쓰기"는 **"새 행이 조회 우선순위에서 기존 행을 가린다"**는 제품 레벨
+    사건이고, 그 사건이 일어나는 유일한 지점은 `SyncRepository.create()`다(두 저장 경로 —
+    인프로세스 `worker._process_job_inner`, 원격 워커 `api/worker.submit_result` — 가 모두
+    이 메서드 하나로 수렴한다). 그래서 스냅샷도 그 안에서 찍는다: 새 행을 만들기 직전에
+    같은 video_id의 기존 최신 행을 여기로 옮겨 담는다. 최초 생성(기존 행 없음)은
+    스냅샷을 만들지 않는다 — 비교할 "직전"이 없다.
+    """
+
+    __tablename__ = "sync_result_versions"
+
+    video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # sync_results.timestamps와 같은 통짜 JSON(스냅샷 시점의 segments+extra 전체) — 고스트
+    # 비교가 세그먼트 타이밍·번역·발음까지 그대로 다시 그릴 수 있어야 한다
+    timestamps: Mapped[dict[str, Any]] = mapped_column(JSON)
+    language: Mapped[str | None] = mapped_column(String(8))
+    engine: Mapped[str] = mapped_column(String(16), default="ctc")
+    quality_score: Mapped[float | None] = mapped_column(Float)
+    # 스냅샷된 sync_results 행이 **원래** 만들어진 시각 (그 세대의 생성 시각 — 고스트 라벨용).
+    # server_default를 쓰지 않는다: 이 값은 지금이 아니라 옮겨 담는 원본 행의 created_at을
+    # 그대로 옮긴 것이다.
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    # 이 스냅샷이 찍힌(=새 행이 덮어쓴) 시각. 갱신(두 번째 이후 교체)에서도 onupdate로
+    # 자동 갱신된다 — VideoOffset.updated_at과 같은 관례(레포지토리가 직접 손대지 않는다).
+    replaced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )

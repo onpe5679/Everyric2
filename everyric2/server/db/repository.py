@@ -12,6 +12,7 @@ from everyric2.server.db.models import (
     LinkJob,
     SyncLink,
     SyncResult,
+    SyncResultVersion,
     TranslationLayer,
     VideoOffset,
 )
@@ -211,12 +212,19 @@ class SyncRepository:
         title: str | None = None,
         artist: str | None = None,
     ) -> SyncResult:
+        payload = {"segments": timestamps, **(extra or {})}
+        # 이 video_id의 기존 최신 행이 있으면(=이 새 행이 조회 우선순위에서 그 행을
+        # 가리게 되면) 새로 넣기 **직전**에 스냅샷한다 — 모든 저장 경로(인프로세스
+        # worker._process_job_inner, 원격 워커 api/worker.submit_result, 캐시 재사용의
+        # 교차 영상 복사 _complete_from_cache_db)가 이 메서드 하나로 수렴하므로 여기가
+        # "덮어쓰기" 지점의 유일한 문이다. SyncResultVersion.__doc__ 참고.
+        await self._snapshot_previous_version(video_id, payload)
         sync_result = SyncResult(
             video_id=video_id,
             lyrics_hash=lyrics_hash,
             audio_hash=audio_hash,
             # extra: segments 밖의 곡 단위 부가정보 (예: {"debug": {...}})
-            timestamps={"segments": timestamps, **(extra or {})},
+            timestamps=payload,
             language=language,
             engine=engine,
             quality_score=quality_score,
@@ -226,6 +234,73 @@ class SyncRepository:
         self.session.add(sync_result)
         await self.session.flush()
         return sync_result
+
+    async def _snapshot_previous_version(
+        self, video_id: str, new_payload: dict[str, Any]
+    ) -> None:
+        """새 행이 가리게 될 이 video_id의 기존 최신 행을 sync_result_versions로 옮긴다.
+
+        기존 행이 없으면(최초 생성) 아무것도 하지 않는다 — 비교할 "직전"이 없다.
+
+        기존 행의 timestamps가 새 payload와 **완전히 같으면**(캐시 재사용의 교차 영상
+        복사가 다른 video_id의 동일 내용을 그대로 옮겨 담는 경우 등) 스냅샷도 만들지
+        않는다 — 실질적으로 아무것도 안 바뀐 "교체"를 버전으로 남기면 고스트 A/B 비교가
+        내용이 같은 두 스냅샷을 나란히 보여주는 무의미한 diff가 된다. 이미 이 조회
+        하나로 두 값을 다 들고 있으므로 비교 비용은 이 video_id 한 건에 한정된다(전체
+        스캔이나 다른 행의 하이드레이션은 없다).
+        """
+        result = await self.session.execute(
+            select(SyncResult)
+            .where(SyncResult.video_id == video_id)
+            .order_by(SyncResult.created_at.desc())
+            .limit(1)
+        )
+        previous = result.scalars().first()
+        if previous is None or previous.timestamps == new_payload:
+            return
+        await SyncResultVersionRepository(self.session).snapshot(previous)
+
+
+class SyncResultVersionRepository:
+    """직전 버전 스냅샷 CRUD — video_id가 PK라 video_id당 최신 1건만 존재한다.
+
+    SyncLinkRepository.upsert·VideoOffsetRepository.upsert와 같은 관례(조회 후 있으면
+    필드 교체, 없으면 새로 삽입 후 flush)를 따른다 — DELETE 후 INSERT가 아니라 같은
+    PK 행을 UPDATE하는 편이 "video_id당 최신 1건" 불변식을 SQLite 레벨(PK 유일성)에서
+    그대로 보장하면서 왕복도 하나 더 줄인다.
+    """
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get(self, video_id: str) -> SyncResultVersion | None:
+        result = await self.session.execute(
+            select(SyncResultVersion).where(SyncResultVersion.video_id == video_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def snapshot(self, previous: SyncResult) -> None:
+        """덮어써지기 직전의 sync_results 행 하나를 스냅샷한다 (video_id당 최신 1건,
+        기존 스냅샷이 있으면 이번 것으로 교체 — replaced_at은 onupdate로 자동 갱신)."""
+        existing = await self.get(previous.video_id)
+        if existing:
+            existing.timestamps = previous.timestamps
+            existing.language = previous.language
+            existing.engine = previous.engine
+            existing.quality_score = previous.quality_score
+            existing.created_at = previous.created_at
+        else:
+            self.session.add(
+                SyncResultVersion(
+                    video_id=previous.video_id,
+                    timestamps=previous.timestamps,
+                    language=previous.language,
+                    engine=previous.engine,
+                    quality_score=previous.quality_score,
+                    created_at=previous.created_at,
+                )
+            )
+        await self.session.flush()
 
 
 class JobRepository:
