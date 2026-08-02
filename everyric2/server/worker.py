@@ -369,6 +369,8 @@ def _attach_pron_segments(seg: dict[str, Any]) -> None:
 # 일본어 글자 — reading._is_japanese_char와 같은 범위(U+3040~U+30FF 가나, U+3400~U+9FFF 한자).
 # 문자 클래스의 경계 글자는 그 코드포인트의 실제 글자다(편집 시 치환 주의).
 _JA_CHAR_RE = re.compile("[぀-ヿ㐀-鿿]")
+# 가나만(한자 제외) — zh 곡 게이트에서 "일본어 인용이 섞인 라인"을 ja 파생에 남기는 판정용
+_KANA_CHAR_RE = re.compile("[぀-ヿ]")
 
 # 한글 완성형 음절(U+AC00~D7A3). ko_reading._decompose_hangul과 같은 범위다.
 _HANGUL_CHAR_RE = re.compile("[가-힣]")
@@ -820,6 +822,31 @@ def _attach_ko_pron_variants(seg: dict[str, Any], text: str) -> None:
         seg.setdefault("pron_segs", {})["romaji"] = romaja_segments
 
 
+def _attach_zh_pron_variants(seg: dict[str, Any], text: str) -> None:
+    """zh 곡 세그: 병음/한글 음차/가나 근사 3형을 표시로 붙인다(``zh_reading``).
+
+    결정론 근사라 글자 스팬을 신뢰할 근거가 없다 — 라틴 경로와 같은 이유로
+    ``pron_segs``는 붙이지 않고 표시 문자열만 남긴다. 다음자 판독은 pypinyin이
+    맡는다(pyproject 의존성 — 없는 배포는 예외를 삼키고 무표기로 남는다).
+    """
+    try:
+        from everyric2.text.align_target import join_display
+        from everyric2.text.zh_reading import derive_zh_display_units
+
+        units = derive_zh_display_units(text)
+    except Exception:
+        logger.exception("zh pron rendering failed")
+        return
+
+    pron = {
+        key: joined
+        for key, owners in units.owners.items()
+        if (joined := join_display(owners, units.word_end))
+    }
+    if pron:
+        seg["pron"] = pron
+
+
 def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
     """라틴(영어) 곡 세그: 표기 4종(hangul/kana/romaji/en)을 전부 표시로 붙인다.
 
@@ -853,7 +880,12 @@ def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
     seg["pron"] = pron
 
 
-def attach_pron_variants(seg: dict[str, Any], *, referee_tokens: list | None = None) -> None:
+def attach_pron_variants(
+    seg: dict[str, Any],
+    *,
+    referee_tokens: list | None = None,
+    language: str | None = None,
+) -> None:
     """세그먼트에 표기별 발음(``pron``)과 가능하면 모라 스팬(``pron_segs``)을 얹는다.
 
     기존 ``pronunciation``/``pron_segments``(한글, ja 곡 전용)는 손대지 않는다 — 구버전
@@ -886,6 +918,15 @@ def attach_pron_variants(seg: dict[str, Any], *, referee_tokens: list | None = N
 
     ja_n = len(_JA_CHAR_RE.findall(text))
     ko_n = len(_HANGUL_CHAR_RE.findall(text))
+    # zh 곡 게이트 — 순한자 라인은 문자만으로 ja와 구별할 수 없어(한자는 두 언어 공용)
+    # **곡 단위 언어**로 가른다. 게이트가 없으면 중국어 가사가 ja 분기로 빠져 일본어
+    # 한자 독음이 붙는다(오표기 — 무표기가 아니라). 가나가 섞인 라인(일본어 인용 등)은
+    # zh 곡이어도 ja 파생이 맞으므로 제외. language를 모르는 호출부(캐시 병합 등)는
+    # 기존 동작 그대로다 — 게이트는 아는 곳에서만 작동한다.
+    lang = (language or "").strip().lower()
+    if lang.startswith("zh") and ja_n and not _KANA_CHAR_RE.search(text):
+        _attach_zh_pron_variants(seg, text)
+        return
     if ja_n and ja_n >= ko_n:
         _attach_ja_pron_variants(seg, text, referee_tokens=referee_tokens)
     elif ko_n:
@@ -4539,7 +4580,12 @@ def _finish_new_stack_alignment(
         )
 
     for seg, referee_tokens in zip(timestamps, pron_referee_tokens):
-        attach_pron_variants(seg, referee_tokens=referee_tokens)
+        # 곡 언어(라벨 없으면 라우팅의 문자 계열 판정값)를 넘긴다 — zh 곡 게이트 재료
+        attach_pron_variants(
+            seg,
+            referee_tokens=referee_tokens,
+            language=(stack.routing_meta or {}).get("language") or language,
+        )
 
     if vad_regions is not None:
         for text in _drop_nonvocal_nonlyric_edges(timestamps):
@@ -5316,7 +5362,8 @@ def _run_alignment(
         # 참고). debug["referee"]는 이미 각 세그에 실려 있어 attach가 심판 개입 라인을
         # 알아본다 — 순서 의존은 그 필드뿐이라 여기로 옮겨도 무관하다.
         for seg, referee_tokens in zip(timestamps, pron_referee_tokens):
-            attach_pron_variants(seg, referee_tokens=referee_tokens)
+            # 레거시 경로는 잡 라벨만 넘긴다(없으면 게이트 미작동 = 기존 동작)
+            attach_pron_variants(seg, referee_tokens=referee_tokens, language=language)
 
         # 앞뒤에 섞여 들어온 비가창 줄(크레딧·출처·URL) 제거 — 발성 근거와 텍스트 근거가
         # 함께 성립할 때만 버린다. 자세한 판정 근거는 _drop_nonvocal_nonlyric_edges 참고.

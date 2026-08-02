@@ -610,3 +610,35 @@ def test_ja_hangul_segments_not_derived_over_alignment_output():
     attach_pron_variants(seg)
 
     assert "hangul" not in (seg.get("pron_segs") or {})
+
+
+# ---------------------------------------------------------------------------
+# zh 곡 게이트 — 순한자 라인은 곡 언어로만 ja와 갈린다 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def test_zh_song_gate_attaches_chinese_readings():
+    # 순한자 라인은 문자만으로 ja와 구별할 수 없다(한자는 두 언어 공용) — 곡 언어(zh)로
+    # 게이트한다. 게이트가 없으면 중국어 가사에 일본어 한자 독음이 붙는다(오표기).
+    seg = _seg("月亮代表我的心", "", words=False)
+    attach_pron_variants(seg, language="zh")
+    assert set(seg["pron"]) >= {"hangul", "kana", "romaji"}
+    # 병음 성조 문자가 실렸다는 것 자체가 zh 분기의 증거다 — ja 분기는 병음을 못 만든다
+    assert "yuè" in seg["pron"]["romaji"]
+
+
+def test_zh_gate_leaves_kana_mixed_lines_to_ja():
+    # zh 곡이어도 가나가 섞인 라인(일본어 인용 등)은 ja 파생이 맞다
+    seg = _seg("愛してる", "", words=False)
+    attach_pron_variants(seg, language="zh")
+    assert seg["pron"]["kana"]
+    assert "ì" not in seg["pron"]["romaji"]  # 헵번 로마자 — 병음 성조가 아니다
+
+
+def test_no_language_keeps_existing_ja_behavior_for_pure_han():
+    # language를 모르는 호출부(캐시 병합 등)는 기존 동작 그대로 — 게이트 미작동
+    gated = _seg("月亮代表我的心", "", words=False)
+    attach_pron_variants(gated, language="zh")
+    ungated = _seg("月亮代表我的心", "", words=False)
+    attach_pron_variants(ungated)
+    assert ungated.get("pron") != gated.get("pron")

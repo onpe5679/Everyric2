@@ -1068,7 +1068,8 @@ async def _lazy_attach_pron_variants(
 
         for seg in segments:
             try:
-                attach_pron_variants(seg)
+                # 곡 언어를 넘긴다 — zh 곡의 순한자 라인이 ja 분기로 새지 않게 하는 게이트
+                attach_pron_variants(seg, language=resp.language)
             except Exception:
                 logger.exception("Lazy pron attach failed for a segment; leaving it as-is")
         return True
