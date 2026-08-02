@@ -506,6 +506,9 @@ export interface Settings {
   videoCaptions: boolean;
   /** [모듈] 다음 영상 정보 — 메인 패널·PIP에 다음 재생 영상 제목 표시 */
   modNextUp: boolean;
+  /** [모듈] 가라오케 레인 — PIP 전용이던 음정 레인(피아노롤)을 메인 가사창 아래에도 표시.
+   *  그리는 코드는 PIP와 완전히 같고(ui/pitch-lane.ts), 표시 취향도 같은 설정을 따른다 */
+  modMainLane: boolean;
   /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
   pitchPronPosition: 'note' | 'bottom' | 'both';
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */

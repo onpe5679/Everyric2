@@ -1,4 +1,4 @@
-import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, ServerLogEntry, ServerStatus, Settings, SongInfo, SourceAttribution, SyncDebugMeta, SyncListItem, SyncPreviousVersion } from '../types';
+import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, ServerLogEntry, ServerStatus, Settings, SongInfo, SongKey, SongTempo, SourceAttribution, SyncDebugMeta, SyncListItem, SyncPreviousVersion } from '../types';
 import { resolveScript, resolvedPronSegments, resolvedPronunciation, type PronScript } from '../lib/lang';
 import { t } from '../lib/i18n';
 import { needsHostPermission, serverUsable, statusLine, unknownStatus } from '../lib/server-status';
@@ -6,6 +6,7 @@ import { resolveTheme } from '../lib/theme';
 import { buildDebugPanel } from './debug-panel';
 import { h, icon, ICONS } from './dom';
 import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
+import { PitchLaneRenderer } from './pitch-lane';
 import {
   applyServerGate,
   buildEmptyState,
@@ -145,7 +146,19 @@ export class LyricsOverlay {
   private feedbackPop: HTMLDivElement;
   /** 보컬 글로우 현재 상태 — 매 tick classList 쓰기를 피하기 위한 캐시 */
   private vocalGlowOn = false;
+  /** 마지막으로 받은 재생 시각·정지 여부 — 레인을 tick 밖에서 즉시 다시 그릴 때 쓴다 */
+  private lastTime = 0;
+  private lanePaused = false;
+  /** [모듈] 레인이 지금 화면에 있는가 — 꺼져 있을 때 매 tick 캔버스를 만지지 않기 위한 게이트 */
+  private laneShown = false;
   private nextUpEl: HTMLDivElement;
+  /**
+   * [모듈] 가라오케 레인 (설정 modMainLane) — PiP 창의 음정 레인을 메인 패널에도 띄운다.
+   * 그리는 코드는 PiP와 **완전히 같은** PitchLaneRenderer 하나뿐이라 둘이 갈라질 수 없다.
+   * 캔버스는 body 밖(푸터 위)에 두어 resetBody()의 화면 전환에 쓸려 나가지 않는다.
+   */
+  private laneCanvas: HTMLCanvasElement;
+  private lane = new PitchLaneRenderer();
   private collapseBtn: HTMLButtonElement;
   private settingsSheet: HTMLDivElement | null = null;
   private settingsDot: HTMLSpanElement | null = null;
@@ -416,10 +429,20 @@ export class LyricsOverlay {
     this.nextUpEl = h('div', { className: 'ey-nextup' });
     this.nextUpEl.style.display = 'none';
 
+    // [모듈] 가라오케 레인 (설정 modMainLane) — 기본 꺼짐, applySettings가 표시를 정한다
+    this.laneCanvas = h('canvas', {
+      className: 'ey-main-lane',
+      title: t('overlay.mainLane.seekTitle'),
+      on: { click: e => this.seekFromLane(e) },
+    });
+    this.laneCanvas.style.display = 'none';
+
     this.panel = h('div', { className: 'ey-panel' },
       this.header, this.langChipsRow, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
-      this.warnBar, this.translationPendingBar, this.body, this.resumeChip, this.nextUpEl, this.footer, this.debugStrip, this.debugPanelEl,
+      this.warnBar, this.translationPendingBar, this.body, this.resumeChip, this.nextUpEl, this.laneCanvas,
+      this.footer, this.debugStrip, this.debugPanelEl,
     );
+    this.lane.attach(this.laneCanvas, this.panel);
     // 패널 안 타이핑(검색창·가사 붙여넣기)이 유튜브 전역 단축키(스페이스=재생/정지,
     // 방향키=시킹 등)로 새지 않도록 키 이벤트를 패널에서 끊는다
     for (const type of ['keydown', 'keyup', 'keypress'] as const) {
@@ -557,6 +580,9 @@ export class LyricsOverlay {
     this.updateDepthButton();
     // 별점·오류 제보도 everyric 싱크에서만 — 평가 대상이 서버 정렬이다
     this.feedbackBtn.style.display = source === 'everyric' ? '' : 'none';
+    // [모듈] 레인도 같은 가사를 받는다 — 노트가 없으면 applyLaneVisibility가 알아서 숨긴다
+    this.lane.setLines(lines);
+    this.applyLaneVisibility();
   }
 
   showPlainLyrics(lines: LyricLine[], source: LyricsSource, plainText: string): void {
@@ -898,6 +924,7 @@ export class LyricsOverlay {
     if (this.stateKind !== 'synced') return;
     const prevIndex = this.currentIndex;
     this.currentIndex = index;
+    this.lane.setIndex(index); // 레인의 현재 라인 번역·발음 폴백 줄이 이 값을 따른다
     this.activeWordEls = [];
     this.lineEls.forEach((el, i) => {
       el.classList.toggle('active', i === index);
@@ -926,11 +953,50 @@ export class LyricsOverlay {
     }
   }
 
-  updateTime(time: number): void {
+  updateTime(time: number, paused = false): void {
     for (const { start, el } of this.activeWordEls) {
       el.classList.toggle('sung', start <= time);
     }
     this.updateVocalGlow(time);
+    this.lastTime = time;
+    this.lanePaused = paused;
+    // 모듈이 꺼져 있으면(기본값) 렌더러를 아예 부르지 않는다 — 숨긴 캔버스라도 매 프레임
+    // clientWidth를 읽으면 유튜브 페이지에 강제 리플로우를 60Hz로 얹게 된다
+    if (this.laneShown) this.lane.render(time, paused);
+  }
+
+  /**
+   * 레인 클릭 → 그 시각으로 시크 (노트 위면 노트 시작으로 스냅) — PiP 레인의 클릭 시크와
+   * 같은 규칙이다. 드래그 팬·휠 줌은 PiP에만 두었다: 메인 패널은 휠이 가사 목록 스크롤과
+   * 겹치고, 여기서 창 설정을 바꾸면 저장 경로가 갈라진다.
+   */
+  private seekFromLane(e: MouseEvent): void {
+    const view = this.lane.viewport();
+    if (!view) return;
+    const rect = this.laneCanvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    if (px < view.plotX || py > view.staffBottom) return; // 사이드바·가사 줄 클릭은 무시
+    const t = view.t0 + ((px - view.plotX) / view.plotW) * view.W;
+    const hit = this.lane.noteAt(t);
+    this.callbacks.onSeek(hit ? hit.start : Math.max(0, t));
+  }
+
+  /** 레인을 마지막 시각으로 즉시 다시 그린다 — 일시정지·설정 변경 때 다음 tick을 안 기다린다 */
+  private renderLane(): void {
+    if (this.laneShown) this.lane.render(this.lastTime, this.lanePaused);
+  }
+
+  /**
+   * 레인 표시 조건 = [모듈] 설정 on + 싱크 가사 화면 + 노트 데이터 있음.
+   * 노트가 없는 곡(자막·LRCLIB 싱크)에서 빈 오선지만 남기지 않으려는 것으로, PiP의
+   * applyPitchVisibility와 같은 규칙이다.
+   */
+  private applyLaneVisibility(): void {
+    const show = this.settings.modMainLane && this.stateKind === 'synced' && this.lane.hasNotes();
+    this.laneShown = show;
+    this.laneCanvas.style.display = show ? '' : 'none';
+    if (show) this.renderLane(); // 켠 즉시 한 프레임 — 정지 상태에서도 빈 칸으로 남지 않게
   }
 
   /**
@@ -1113,6 +1179,11 @@ export class LyricsOverlay {
       }
       if (line?.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation, attrs: { dir: 'auto' } }));
     });
+    // 레인의 노트 부착 발음은 setLines 시점에 계산된다 — 번역·발음이 뒤늦게 붙은 라인을
+    // 반영하려면 같은 배열로 다시 한 번 태워야 한다(라인 객체는 그대로라 비용은 평탄화뿐)
+    this.lane.setLines(this.lines);
+    this.lane.setIndex(this.currentIndex);
+    this.applyLaneVisibility();
   }
 
   setTranslationStatus(text: string | null): void {
@@ -1273,8 +1344,18 @@ export class LyricsOverlay {
 
   setDebugMeta(meta: SyncDebugMeta | null): void {
     this.debugMeta = meta;
+    this.lane.setDebugMeta(meta); // 레인의 f0 곡선·VAD 스트립이 같은 메타를 쓴다
     if (this.debugPanelOpen) this.renderDebugPanel(); // 열려 있으면 요약줄도 즉시 갱신
     this.updateDepthButton(); // 깊이·세대 정보의 출처가 이 메타다
+  }
+
+  /**
+   * [모듈] 레인이 쓰는 곡 단위 값 — 마디 격자(템포)와 좌상단 키·BPM 라벨.
+   * PiP는 pip.setTempo/setKey로 같은 값을 받는다. 없으면 레인은 120BPM 가정으로 폴백한다.
+   */
+  setLaneMeta(tempo: SongTempo | null, key: SongKey | null): void {
+    this.lane.setTempo(tempo);
+    this.lane.setKey(key);
   }
 
   private toggleDebugPanel(): void {
@@ -1320,6 +1401,25 @@ export class LyricsOverlay {
     this.panel.classList.toggle('ey-show-conf', settings.debugInfo);
     // 디버그 토글은 서버 요청 로그의 노출 조건이기도 하다 — 배너를 다시 그려 반영
     this.renderServerBar();
+    // [모듈] 레인은 PiP와 **같은 설정 값**을 그대로 따른다 — 창마다 다른 축을 만들지
+    // 않는다(마디 창·글자 크기·계이름·밝기는 사용자가 한 번만 정한다). content가 설정이
+    // 바뀔 때마다 이 함수를 부르므로 별도 배선 없이 여기가 유일한 반영 지점이다.
+    this.lane.setOptions({
+      windowMeasures: settings.pitchWindowMeasures,
+      scrollMode: settings.pitchScrollMode,
+      fontScale: settings.pitchFontScale,
+      countdown: settings.pitchCountdown,
+      solfege: settings.solfegeNotation,
+      lineOpacity: settings.pitchLineOpacity,
+      f0Opacity: settings.pitchF0Opacity,
+      pronPosition: settings.pitchPronPosition,
+      pronScript: resolveScript(settings),
+      showF0: settings.pitchF0Curve,
+      showConfidence: settings.debugInfo,
+      metronomeBeat: settings.metronomeBeat,
+    });
+    this.lane.refreshColors(); // 테마가 바뀌었을 수 있다 — CSS 변수를 다시 읽게 한다
+    this.applyLaneVisibility();
   }
 
   // ── 내부 헬퍼 ─────────────────────────────────────────────────
@@ -1491,6 +1591,11 @@ export class LyricsOverlay {
     this.searchResultsEl = null;
     this.closeSettings();
     this.closeDebugPanel(); // 곡이 바뀌면 이전 곡의 디버그 패널(원문·heard·시크 대상)이 남으면 안 된다
+    // 레인도 같은 지점에서 비운다 — 모든 화면 전환이 이 함수를 지나므로 이전 곡 노트가
+    // 새 화면에 남는 경로가 생기지 않는다(가사가 있는 경로는 곧바로 setLines로 다시 채운다)
+    this.lane.setLines([]);
+    this.laneShown = false;
+    this.laneCanvas.style.display = 'none';
   }
 
   private showBanner(text: string, action?: HTMLElement): void {
@@ -1885,6 +1990,11 @@ export class LyricsOverlay {
     modNextUp.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ modNextUp: modNextUp.checked }));
 
+    const modMainLane = h('input', { attrs: { type: 'checkbox' } });
+    modMainLane.checked = this.settings.modMainLane;
+    modMainLane.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ modMainLane: modMainLane.checked }));
+
     const serverInput = h('input', { className: 'ey-input' });
     serverInput.value = this.settings.serverUrl;
     serverInput.addEventListener('change', () => {
@@ -1984,6 +2094,7 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.vocalGlow'), attrs: { title: t('overlay.settings.row.vocalGlowTitle') } }), vocalGlow),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.videoCaptions'), attrs: { title: t('overlay.settings.row.videoCaptionsTitle') } }), videoCaptions),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.modNextUp'), attrs: { title: t('overlay.settings.row.modNextUpTitle') } }), modNextUp),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.modMainLane'), attrs: { title: t('overlay.settings.row.modMainLaneTitle') } }), modMainLane),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.debugInfo') }), debugInfo),
       h('div', { className: 'ey-settings-note', text: t('overlay.settings.serverRequiredNote') }),
       h('button', { className: 'ey-secondary-btn', text: t('overlay.settings.closeButton'), on: { click: () => this.closeSettings() } }),

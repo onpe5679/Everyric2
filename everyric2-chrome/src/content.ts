@@ -2380,6 +2380,8 @@ function applyLyricsData(data: LyricsData | null): void {
     // 안에만 있어 non-PiP 흐름에서 패널 debugMeta가 이전 곡 값으로 남았다(깊이 버튼이
     // 생기면서 이 메타가 항상 필요해졌다).
     panel.setDebugMeta(data.debugMeta ?? null);
+    // [모듈] 가라오케 레인의 마디 격자·키 라벨 재료 — PiP의 setTempo/setKey와 같은 값
+    panel.setLaneMeta(data.tempo ?? null, data.key ?? null);
     if (pip.isOpen()) {
       // 검색을 시작할 때 띄운 패널(pip.showPanelLoading)을 반드시 접는다 — 레인 표시
       // 조건에 !panelActive가 들어 있어, 안 접으면 싱크가 도착해도 가라오케가 닫힌
@@ -2426,7 +2428,7 @@ function makeEngineHandlers(): SyncHandlers {
       pip.update(index);
     },
     onTick: time => {
-      overlay?.updateTime(time);
+      overlay?.updateTime(time, engine.isPaused()); // [모듈] 레인도 이 시각으로 그린다
       videoCaption.updateTime(time);
       refreshNextUp();
       pip.tick(time, engine.getDuration(), engine.isPaused());

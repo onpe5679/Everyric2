@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pipChromaKey: 'off',
   videoCaptions: false,
   modNextUp: false,
+  modMainLane: false,
   pitchPronPosition: 'note',
   lowConfWarning: true,
   notifyOnComplete: true,

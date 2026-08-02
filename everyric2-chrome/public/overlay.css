@@ -93,6 +93,7 @@
 .ey-panel.collapsed .ey-warn-bar,
 .ey-panel.collapsed .ey-footer,
 .ey-panel.collapsed .ey-resume-chip,
+.ey-panel.collapsed .ey-main-lane,
 .ey-panel.collapsed .ey-settings,
 .ey-panel.collapsed .ey-debug-strip,
 .ey-panel.collapsed .ey-debug-panel-wrap {
@@ -850,6 +851,19 @@
   color: var(--ey-text-dim);
   font-size: calc(10px * var(--ey-pip-fs, 1));
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* [모듈] 가라오케 레인 (설정 modMainLane) — 메인 패널 푸터 위 고정 높이 캔버스.
+   PiP 레인(.ey-pip-pitch)과 같은 렌더러가 그리지만, 이쪽은 창을 채우는 flex 요소가
+   아니라 가사 목록(.ey-body)이 성장을 계속 가져가도록 고정 높이 + flex-shrink: 0이다. */
+.ey-main-lane {
+  width: 100%;
+  height: 160px;
+  flex-shrink: 0;
+  display: block;
+  border-top: 1px solid var(--ey-border);
+  box-sizing: border-box;
+  cursor: pointer;
 }
 
 /* 크로마키 스트리밍 모드 (pip.ts applyChroma) — PIP 문서 배경을 단색 키 컬러로 통일.
