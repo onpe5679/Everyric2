@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import Row, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from everyric2.server.db.models import (
@@ -142,11 +142,17 @@ class SyncRepository:
         )
         return list(result.scalars().all())
 
-    async def list_titled(self, limit: int = 500) -> list[SyncResult]:
+    async def list_titled(self, limit: int = 500) -> list[Row[tuple[str, str | None, str | None]]]:
         """title이 채워진 싱크를 영상별 1건(최신)으로 — 링크 후보 전수 스캔용.
 
         created_at이 초 단위 문자열이라 같은 초에 만들어진 동일 영상 행이 둘 다 걸릴 수
-        있어 파이썬에서 한 번 더 dedupe한다."""
+        있어 파이썬에서 한 번 더 dedupe한다.
+
+        호출부(server/api/sync.py의 find_link_candidates)는 video_id/title/artist 세
+        속성만 쓴다 — ORM 엔티티 전체(특히 대형 JSON `timestamps` 컬럼)를 끌어와 매 요청
+        수백MB를 역직렬화하며 이벤트루프를 통째로 블로킹하던 문제(실측 5~7초)가 있어
+        필요한 세 컬럼만 select한다. 다중 컬럼 select라 `.scalars()`를 걸면 0번째 컬럼만
+        남으므로 반드시 `.all()`을 그대로 쓴다 — Row는 속성 접근이 되어 호출부는 그대로다."""
         subquery = (
             select(SyncResult.video_id, func.max(SyncResult.created_at).label("max_created"))
             .where(SyncResult.title.is_not(None))
@@ -154,7 +160,7 @@ class SyncRepository:
             .subquery()
         )
         result = await self.session.execute(
-            select(SyncResult)
+            select(SyncResult.video_id, SyncResult.title, SyncResult.artist)
             .join(
                 subquery,
                 (SyncResult.video_id == subquery.c.video_id)
@@ -165,8 +171,8 @@ class SyncRepository:
             .limit(limit * 2)
         )
         seen: set[str] = set()
-        rows: list[SyncResult] = []
-        for row in result.scalars().all():
+        rows: list[Row[tuple[str, str | None, str | None]]] = []
+        for row in result.all():
             if row.video_id in seen:
                 continue
             seen.add(row.video_id)
