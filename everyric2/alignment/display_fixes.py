@@ -109,8 +109,16 @@ def dominance_activity_from_waveforms(
             vocals_waveform, accomp_waveform, sample_rate,
             smooth_sec=smooth_sec, hop_sec=hop_sec,
         )
-    except Exception:
-        logger.warning("우세도 계산 실패 — 표시 보정층을 건너뛴다", exc_info=True)
+    except (ValueError, TypeError) as exc:
+        # 이 함수는 파일 I/O도 임포트도 안 한다 — 남는 실패 경로는 파형 배열 자체가
+        # 기대한 모양/타입이 아닌 경우뿐이다(``vocal_presence_from_stems``/``frame_rms``는
+        # 순수 numpy 산술). 그 밖의 예외(예: 진짜 버그)는 여기서 "우세도 계산 실패"로
+        # 위장되지 않고 그대로 올라간다 — 부수 기능(표시 보정층)의 정상적 가용성 부재와
+        # 코드 결함을 같은 로그 한 줄로 구분 못 하게 만들면 안 된다(운영자 지시).
+        logger.warning(
+            "우세도 계산 실패(%s: %s) — 표시 보정층을 건너뛴다",
+            type(exc).__name__, exc, exc_info=True,
+        )
         return None
     if made is None:
         return None
