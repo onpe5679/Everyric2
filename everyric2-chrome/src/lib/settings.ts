@@ -39,6 +39,8 @@ export const DEFAULT_SETTINGS: Settings = {
   pitchF0Opacity: 1,
   vocalGlow: true,
   pipChromaKey: 'off',
+  videoCaptions: false,
+  modNextUp: false,
   pitchPronPosition: 'note',
   lowConfWarning: true,
   notifyOnComplete: true,

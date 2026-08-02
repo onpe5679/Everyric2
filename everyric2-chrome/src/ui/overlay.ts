@@ -145,6 +145,7 @@ export class LyricsOverlay {
   private feedbackPop: HTMLDivElement;
   /** 보컬 글로우 현재 상태 — 매 tick classList 쓰기를 피하기 위한 캐시 */
   private vocalGlowOn = false;
+  private nextUpEl: HTMLDivElement;
   private collapseBtn: HTMLButtonElement;
   private settingsSheet: HTMLDivElement | null = null;
   private settingsDot: HTMLSpanElement | null = null;
@@ -411,9 +412,13 @@ export class LyricsOverlay {
     this.debugPanelEl = h('div', { className: 'ey-debug-panel-wrap' });
     this.debugPanelEl.style.display = 'none';
 
+    // 다음 영상 정보 모듈 (설정 modNextUp) — content가 setNextUp으로 채운다
+    this.nextUpEl = h('div', { className: 'ey-nextup' });
+    this.nextUpEl.style.display = 'none';
+
     this.panel = h('div', { className: 'ey-panel' },
       this.header, this.langChipsRow, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
-      this.warnBar, this.translationPendingBar, this.body, this.resumeChip, this.footer, this.debugStrip, this.debugPanelEl,
+      this.warnBar, this.translationPendingBar, this.body, this.resumeChip, this.nextUpEl, this.footer, this.debugStrip, this.debugPanelEl,
     );
     // 패널 안 타이핑(검색창·가사 붙여넣기)이 유튜브 전역 단축키(스페이스=재생/정지,
     // 방향키=시킹 등)로 새지 않도록 키 이벤트를 패널에서 끊는다
@@ -1256,6 +1261,16 @@ export class LyricsOverlay {
 
   /** 곡 단위 정렬 진단(자막 스캐폴드 등) — 디버그 패널 머리 요약줄이 이걸 읽는다.
    *  content가 아직 이 메서드를 안 부르면 null로 남고, 패널은 요약줄만 생략한 채 동작한다. */
+  /** 다음 영상 정보 모듈 — null이면 숨김 (설정 modNextUp이 꺼져 있어도 content가 null을 준다) */
+  setNextUp(title: string | null): void {
+    if (title) {
+      this.nextUpEl.textContent = t('overlay.nextUp.prefix', [title]);
+      this.nextUpEl.style.display = '';
+    } else {
+      this.nextUpEl.style.display = 'none';
+    }
+  }
+
   setDebugMeta(meta: SyncDebugMeta | null): void {
     this.debugMeta = meta;
     if (this.debugPanelOpen) this.renderDebugPanel(); // 열려 있으면 요약줄도 즉시 갱신
@@ -1859,6 +1874,17 @@ export class LyricsOverlay {
     vocalGlow.addEventListener('change', () =>
       this.callbacks.onSettingsChange({ vocalGlow: vocalGlow.checked }));
 
+    // 표시 모듈 — 패널과 독립적으로 켜고 끄는 부가 표시들
+    const videoCaptions = h('input', { attrs: { type: 'checkbox' } });
+    videoCaptions.checked = this.settings.videoCaptions;
+    videoCaptions.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ videoCaptions: videoCaptions.checked }));
+
+    const modNextUp = h('input', { attrs: { type: 'checkbox' } });
+    modNextUp.checked = this.settings.modNextUp;
+    modNextUp.addEventListener('change', () =>
+      this.callbacks.onSettingsChange({ modNextUp: modNextUp.checked }));
+
     const serverInput = h('input', { className: 'ey-input' });
     serverInput.value = this.settings.serverUrl;
     serverInput.addEventListener('change', () => {
@@ -1956,6 +1982,8 @@ export class LyricsOverlay {
       h('div', { className: 'ey-settings-row' },
         h('label', { text: t('overlay.settings.row.notifyOnComplete'), attrs: { title: t('overlay.settings.row.notifyOnCompleteTitle') } }), notifyOnComplete),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.vocalGlow'), attrs: { title: t('overlay.settings.row.vocalGlowTitle') } }), vocalGlow),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.videoCaptions'), attrs: { title: t('overlay.settings.row.videoCaptionsTitle') } }), videoCaptions),
+      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.modNextUp'), attrs: { title: t('overlay.settings.row.modNextUpTitle') } }), modNextUp),
       h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.debugInfo') }), debugInfo),
       h('div', { className: 'ey-settings-note', text: t('overlay.settings.serverRequiredNote') }),
       h('button', { className: 'ey-secondary-btn', text: t('overlay.settings.closeButton'), on: { click: () => this.closeSettings() } }),

@@ -338,6 +338,8 @@ export class PipController {
   private trEl: HTMLDivElement | null = null;
   private nextEl: HTMLDivElement | null = null;
   private titleEl: HTMLDivElement | null = null;
+  /** 다음 영상 정보 모듈 (설정 modNextUp) — content가 setNextUp으로 채운다 */
+  private nextUpEl: HTMLDivElement | null = null;
   private footerEl: HTMLDivElement | null = null;
   private progressEl: HTMLDivElement | null = null;
   private playBtn: HTMLButtonElement | null = null;
@@ -735,8 +737,12 @@ export class PipController {
     this.serverBarEl = h('div', { className: 'ey-server-bar-slot ey-pip-server-bar' });
     this.serverBarEl.style.display = 'none';
 
+    this.nextUpEl = h('div', { className: 'ey-pip-nextup' });
+    this.nextUpEl.style.display = 'none';
+
     this.footerEl = h('div', { className: 'ey-pip-footer' },
       this.titleEl,
+      this.nextUpEl,
       h('div', { className: 'ey-pip-controls' },
         this.prevBtn, this.playBtn, this.nextBtn, this.playlistBtn,
         this.muteBtn, this.melodyBtn, this.metroBtn,
@@ -922,6 +928,18 @@ export class PipController {
     this.lastSong = title || artist ? { title, artist } : null;
     if (this.titleEl) {
       this.titleEl.textContent = artist ? `${title} — ${artist}` : title;
+      this.setNextUp(null); // 곡이 바뀌면 이전 곡 기준 "다음 영상"은 낡은 정보다
+    }
+  }
+
+  /** 다음 영상 정보 모듈 — null이면 숨김 (설정 modNextUp이 꺼져 있으면 content가 null을 준다) */
+  setNextUp(title: string | null): void {
+    if (!this.nextUpEl) return;
+    if (title) {
+      this.nextUpEl.textContent = t('pip.nextUp', [title]);
+      this.nextUpEl.style.display = '';
+    } else {
+      this.nextUpEl.style.display = 'none';
     }
   }
 

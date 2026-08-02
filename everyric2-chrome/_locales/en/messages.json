@@ -981,6 +981,24 @@
   "overlay_settings_row_vocalGlowTitle": {
     "message": "The panel softly glows while vocals are present (only for syncs with server vocal analysis)"
   },
+  "overlay_settings_row_videoCaptions": {
+    "message": "[Module] On-video captions"
+  },
+  "overlay_settings_row_videoCaptionsTitle": {
+    "message": "Shows the current lyric line as captions on the YouTube player itself (with pronunciation/translation). YouTube's own captions are hidden while on"
+  },
+  "overlay_settings_row_modNextUp": {
+    "message": "[Module] Next video info"
+  },
+  "overlay_settings_row_modNextUpTitle": {
+    "message": "Shows the upcoming video's title in the panel and PiP (playlist and autoplay)"
+  },
+  "overlay_nextUp_prefix": {
+    "message": "Next ▸ $P1$"
+  },
+  "pip_nextUp": {
+    "message": "Next ▸ $P1$"
+  },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "Pitch curve brightness"
   },

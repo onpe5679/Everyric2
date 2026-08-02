@@ -981,6 +981,24 @@
   "overlay_settings_row_vocalGlowTitle": {
     "message": "ボーカルが聞こえる区間で歌詞パネルがほのかに明るくなります（サーバーの発声分析があるシンクのみ）"
   },
+  "overlay_settings_row_videoCaptions": {
+    "message": "[モジュール] 画面上字幕"
+  },
+  "overlay_settings_row_videoCaptionsTitle": {
+    "message": "YouTubeプレイヤー画面自体に現在の歌詞行を字幕のように表示します（発音・翻訳付き）。オンの間はYouTube自体の字幕は隠れます"
+  },
+  "overlay_settings_row_modNextUp": {
+    "message": "[モジュール] 次の動画情報"
+  },
+  "overlay_settings_row_modNextUpTitle": {
+    "message": "パネルとPiPに次に再生される動画のタイトルを表示します（再生リスト・自動再生共通）"
+  },
+  "overlay_nextUp_prefix": {
+    "message": "次 ▸ $P1$"
+  },
+  "pip_nextUp": {
+    "message": "次 ▸ $P1$"
+  },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "音程カーブの明るさ"
   },

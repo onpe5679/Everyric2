@@ -981,6 +981,24 @@
   "overlay_settings_row_vocalGlowTitle": {
     "message": "보컬이 들리는 구간에서 가사창 테두리가 은은하게 밝아져요 (서버 발성 분석이 있는 싱크에서만)"
   },
+  "overlay_settings_row_videoCaptions": {
+    "message": "[모듈] 영상 자막"
+  },
+  "overlay_settings_row_videoCaptionsTitle": {
+    "message": "유튜브 화면 자체에 현재 가사 줄을 자막처럼 띄워요 (발음·번역 포함). 켜져 있는 동안 유튜브 자체 자막은 숨겨져요"
+  },
+  "overlay_settings_row_modNextUp": {
+    "message": "[모듈] 다음 영상 정보"
+  },
+  "overlay_settings_row_modNextUpTitle": {
+    "message": "가사창·PIP에 다음 재생될 영상 제목을 표시해요 (재생목록·자동재생 공통)"
+  },
+  "overlay_nextUp_prefix": {
+    "message": "다음 ▸ $P1$"
+  },
+  "pip_nextUp": {
+    "message": "다음 ▸ $P1$"
+  },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "음정 곡선 밝기"
   },

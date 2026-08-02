@@ -501,6 +501,11 @@ export interface Settings {
   vocalGlow: boolean;
   /** PIP 크로마키 스트리밍 모드 — 'off'가 아니면 PIP 배경을 단색 키 컬러로 (OBS 키잉용) */
   pipChromaKey: 'off' | 'green' | 'blue' | 'magenta';
+  /** [모듈] 영상 자막 — 플레이어 화면 자체에 현재 줄을 자막처럼 표시 (Language Reactor식).
+   *  켜져 있는 동안 유튜브 자체 자막은 숨긴다. */
+  videoCaptions: boolean;
+  /** [모듈] 다음 영상 정보 — 메인 패널·PIP에 다음 재생 영상 제목 표시 */
+  modNextUp: boolean;
   /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
   pitchPronPosition: 'note' | 'bottom' | 'both';
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */

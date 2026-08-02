@@ -9,6 +9,7 @@ import { matchWikiLinesToSegments, resolveScript, resolvedPronunciation } from '
 import { setUiLanguage, t } from './lib/i18n';
 import { LyricsOverlay } from './ui/overlay';
 import { PipController } from './ui/pip';
+import { VideoCaption } from './ui/video-caption';
 import {
   captionSourceLabel,
   getCaptionTracks,
@@ -54,6 +55,8 @@ let initialGeometry: PanelGeometry | null = null;
 let overlay: LyricsOverlay | null = null;
 const pip = new PipController();
 const engine = new SyncEngine();
+// 영상 자막 모듈 (Language Reactor식) — 플레이어 화면 자체에 현재 줄을 자막처럼 띄운다
+const videoCaption = new VideoCaption();
 const karaokeAudio = new KaraokeAudio(() => engine.getVideo() ?? getVideoElement());
 const micPitch = new MicPitch();
 
@@ -117,6 +120,8 @@ const pendingTranslate = new Map<string, Promise<TranslatedLine[] | undefined>>(
 async function init(): Promise<void> {
   settings = await getSettings();
   setUiLanguage(settings.uiLanguage); // 이 콘텐츠 스크립트가 실제로 t()를 쓰는 유일한 곳 — 세션 시작 시 한 번 맞춘다
+  videoCaption.applyDisplay(resolveScript(settings), settings.showPronunciation, settings.showTranslation);
+  videoCaption.setEnabled(settings.videoCaptions);
   [cssText, initialGeometry] = await Promise.all([loadCss(), getGeometry()]);
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
   await restoreActiveJobs();
@@ -520,6 +525,7 @@ function cleanupForPage(): void {
   }
   karaokeAudio.setNotes([]);
   karaokeAudio.setTempo(null);
+  videoCaption.setLines([]); // 이전 곡 자막이 새 영상 위에 남으면 안 된다
   overlay?.setVisible(false);
 }
 
@@ -870,6 +876,23 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
   if (patch.pronunciationScript !== undefined || patch.translationLanguage !== undefined) {
     pip.setPronScript(resolveScript(settings));
     overlay?.refreshTranslations();
+  }
+
+  // 영상 자막 모듈 — 켜고 끄기 + 표시 방식(표기/발음/번역) 즉시 반영
+  if (patch.videoCaptions !== undefined) {
+    videoCaption.setEnabled(patch.videoCaptions);
+  }
+  // 다음 영상 정보 모듈 — 토글 즉시 반영(끄면 즉시 숨김, 켜면 즉시 조회)
+  if (patch.modNextUp !== undefined) {
+    refreshNextUp(true);
+  }
+  if (
+    patch.pronunciationScript !== undefined || patch.translationLanguage !== undefined
+    || patch.showPronunciation !== undefined || patch.showTranslation !== undefined
+  ) {
+    videoCaption.applyDisplay(
+      resolveScript(settings), settings.showPronunciation, settings.showTranslation,
+    );
   }
 
   // 디버그 토글 → 레인 신뢰도 색상도 함께
@@ -2263,11 +2286,33 @@ function prefillTranslationCacheFromServer(data: LyricsData): void {
   }
 }
 
+/** 다음 영상 정보 모듈 — 유튜브 다음 버튼 툴팁에서 제목을 읽는다(재생목록·자동재생 공용).
+ *  DOM 조회는 5초 스로틀 — onTick마다 querySelector를 돌릴 만큼 자주 바뀌는 값이 아니다. */
+let lastNextUpPush = 0;
+function refreshNextUp(force = false): void {
+  if (!settings.modNextUp) {
+    if (force) {
+      overlay?.setNextUp(null);
+      pip.setNextUp(null);
+    }
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - lastNextUpPush < 5000) return;
+  lastNextUpPush = now;
+  const title = document.querySelector('a.ytp-next-button')?.getAttribute('data-tooltip-text') ?? null;
+  overlay?.setNextUp(title);
+  if (pip.isOpen()) pip.setNextUp(title);
+}
+
 function applyLyricsData(data: LyricsData | null): void {
   const panel = ensureOverlay();
   currentData = data;
   lastLineIndex = -1;
   engine.stop();
+  // 영상 자막 모듈 — 싱크가 있으면 같은 라인 배열을 공유한다(번역이 늦게 라인 객체에
+  // 붙어도 다음 렌더에 자연 반영). 없으면 비운다.
+  videoCaption.setLines(data?.synced ? data.lines : []);
   // 영상별 저장 오프셋 복원 (서버에 저장된 값, 없으면 0) — UI 라벨도 함께
   videoOffset = data?.userOffset ?? 0;
   panel.setOffsetValue(videoOffset);
@@ -2382,6 +2427,8 @@ function makeEngineHandlers(): SyncHandlers {
     },
     onTick: time => {
       overlay?.updateTime(time);
+      videoCaption.updateTime(time);
+      refreshNextUp();
       pip.tick(time, engine.getDuration(), engine.isPaused());
       const video = engine.getVideo();
       if (video) {
