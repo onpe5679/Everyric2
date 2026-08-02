@@ -11,6 +11,10 @@
   ③ timestamps가 완전히 같은 재저장은 스냅샷을 만들지 않는다(무의미한 diff 방지).
   ④ GET /api/sync/{video_id}/previous 응답 모양 — found/timestamps/language/
      quality_score/created_at/replaced_at, 없으면 404가 아니라 found=false.
+  ⑤ 초기화(delete_by_video, DELETE /api/sync/{video_id})는 sync_results뿐 아니라
+     그 video_id의 sync_result_versions 스냅샷도 같은 트랜잭션에서 지운다 — 안 그러면
+     사용자가 "완전히 새로 시작"을 눌러도 previous 조회가 지우라고 한 옛 내용을 계속
+     돌려주는 고아 스냅샷이 남는다. 반환값(삭제된 sync_results 행 수)의 의미는 그대로다.
 """
 
 import asyncio
@@ -241,5 +245,84 @@ def test_previous_endpoint_shape_after_a_replacement():
             # 두 시각은 서로 다른 의미의 필드다(원래 생성 vs 교체) — 형식만 검증
             datetime_fields = (resp.created_at, resp.replaced_at)
             assert all(isinstance(v, str) and "T" in v for v in datetime_fields)
+
+    asyncio.run(body())
+
+
+# ── ⑤ 초기화(delete_by_video)가 스냅샷을 고아로 남기지 않는다 ────────
+
+
+async def _count_sync_results(sm, video_id=VIDEO) -> int:
+    from everyric2.server.db.models import SyncResult
+
+    async with sm() as s:
+        result = await s.execute(select(SyncResult).where(SyncResult.video_id == video_id))
+        return len(result.scalars().all())
+
+
+def test_delete_by_video_removes_the_orphaned_snapshot_too():
+    """초기화 전 스냅샷이 있었다면, 초기화 뒤에는 previous 조회가 found=false여야 한다 —
+    사용자가 "완전히 새로 시작"을 눌렀는데 이전 버전 API가 지운 내용을 계속 돌려주면
+    안 된다."""
+
+    async def body():
+        async with _env() as sm:
+            await _create(sm, lyrics_hash="h1", segments=SEGMENTS_V1)
+            await _create(sm, lyrics_hash="h2", segments=SEGMENTS_V2)
+            assert await _get_version(sm) is not None  # 전제: 스냅샷이 실제로 있다
+
+            async with sm() as s:
+                removed = await SyncRepository(s).delete_by_video(VIDEO)
+                await s.commit()
+
+            assert removed == 2  # 반환값 의미(삭제된 sync_results 행 수)는 그대로
+            assert await _count_sync_results(sm) == 0
+            assert await _get_version(sm) is None  # 고아 스냅샷이 남지 않는다
+            assert await _version_count(sm) == 0
+
+            resp = await get_previous_sync_version(VIDEO)
+            assert resp.found is False
+
+    asyncio.run(body())
+
+
+def test_delete_by_video_without_a_snapshot_still_reports_removed_syncs_correctly():
+    """스냅샷이 아예 없었던 경우(최초 생성뿐)에도 반환값·정리 동작이 그대로여야 한다 —
+    스냅샷 삭제 쿼리가 0건을 지우는 것도 정상 경로다."""
+
+    async def body():
+        async with _env() as sm:
+            await _create(sm, lyrics_hash="h1", segments=SEGMENTS_V1)
+            assert await _get_version(sm) is None  # 전제: 스냅샷 없음
+
+            async with sm() as s:
+                removed = await SyncRepository(s).delete_by_video(VIDEO)
+                await s.commit()
+
+            assert removed == 1
+            assert await _count_sync_results(sm) == 0
+            assert await _get_version(sm) is None
+
+    asyncio.run(body())
+
+
+def test_delete_by_video_does_not_touch_other_videos_snapshot():
+    """초기화는 그 video_id 하나만 지운다 — 다른 영상의 스냅샷은 그대로 남는다."""
+
+    async def body():
+        async with _env() as sm:
+            other = "OTHERVIDEO2"
+            await _create(sm, video_id=VIDEO, lyrics_hash="h1", segments=SEGMENTS_V1)
+            await _create(sm, video_id=VIDEO, lyrics_hash="h2", segments=SEGMENTS_V2)
+            await _create(sm, video_id=other, lyrics_hash="h1", segments=SEGMENTS_V1)
+            await _create(sm, video_id=other, lyrics_hash="h2", segments=SEGMENTS_V2)
+            assert await _get_version(sm, other) is not None
+
+            async with sm() as s:
+                await SyncRepository(s).delete_by_video(VIDEO)
+                await s.commit()
+
+            assert await _get_version(sm, VIDEO) is None
+            assert await _get_version(sm, other) is not None  # 건드리지 않았다
 
     asyncio.run(body())
