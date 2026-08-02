@@ -849,6 +849,115 @@ class AlignmentSettings(BaseSettings):
         "multilingual lyrics by text alone, so it is now left to the aligner.",
     )
 
+    # ── 2패스 정렬(everyric2.alignment.refine_window) ──
+    #
+    # 앵커(무거운 모델)가 라인 경계를 잡고, 그 창 안에서만 경량 CTC 모델이 음절을 다시
+    # 잡는다. 문턱값은 scripts/bench_adapters/two_pass.py의 실측을 그대로 옮긴 것이라
+    # 기본값을 바꾸면 안 된다 — 특히 two_pass_seg_voiced_level(0.12)은 ja 7곡 스윕에서
+    # 유일하게 UST 축이 회귀하지 않은 값이다(주석은 그 필드에). 배선(팩토리·워커 연결)은
+    # 이 설정 추가와 별개 작업이라 two_pass_enabled 기본값은 False다 — 켜기 전까지는
+    # 기존 동작이 완전히 그대로다.
+    two_pass_enabled: bool = Field(
+        default=False,
+        description="Enable the 2-pass refiner (heavy anchor for line boundaries + light CTC "
+        "for syllable-level resync inside each line window). OFF by default — wiring this into "
+        "the alignment factory/worker is separate work from adding the module and its settings; "
+        "flipping this alone does nothing until that wiring exists.",
+    )
+    two_pass_window_pad_sec: float = Field(
+        default=0.2,
+        description="Padding (seconds) added on both sides of the anchor's line window before "
+        "the 2nd-pass forced-align runs inside it. Measured basis: pinning the window exactly to "
+        "the anchor's line boundary crops real singing that starts/ends slightly outside it — the "
+        "anchor's own line-start error is itself measured against a <=0.15s bar, so the pad sits "
+        "at the same order of magnitude (scripts/bench_adapters/two_pass.py WINDOW_PAD_SEC).",
+    )
+    two_pass_seg_hold_max_sec: float = Field(
+        default=1.5,
+        description="Upper bound (seconds) on how far a syllable segment's END may be stretched "
+        "toward the next segment's start (karaoke highlight-hold convention). Measured on 15,503 "
+        "UST notes: the 99.5th percentile gap is 1.111s and gaps over 1.5s are only 0.29% of the "
+        "corpus, so anything longer is treated as a rest, not a held note.",
+    )
+    two_pass_seg_hold_max_held_sec: float = Field(
+        default=3.0,
+        description="Relaxed hold cap used only when the extend gate's dominance signal confirms "
+        "the singer is still audibly holding the note (ExtendGate.held) — the 1.5s default is "
+        "reasoned without listening to the audio, so it should not apply where the audio itself "
+        "says the note is still sustained. Only takes effect when the full extend_gate mode is "
+        "wired in; the shipped two_pass_extend_voiced_only path does not use it (see that field).",
+    )
+    two_pass_seg_voiced_level: float = Field(
+        default=0.12,
+        description="ADOPTED THRESHOLD — do not change without re-measuring. Vocal-dominance "
+        "floor gating whether the gap BETWEEN two syllable segments may be stretched through "
+        "(two_pass_extend_voiced_only). Swept on 7 ja songs (clamped, bench "
+        "2pass-owsm-mixed-* family, 2026-08-02): off leaves 104.2s of segments lit over silence "
+        "with span-IoU 49.84/coverage 60.70%; 0.30 (the interlude-vs-singing threshold) cuts "
+        "sustained notes in songs with long held tones (Kikuo/toast, -2.1..-2.7 IoU); 0.20 is "
+        "intermediate (58.9s, 49.66 IoU); 0.12 is the ONLY point where the UST axis does not "
+        "regress (70.5s lit-over-silence, IoU 49.89, coverage 60.16% — span-IoU actually rose "
+        "slightly, syllable accuracy was exactly flat across every threshold tested since this "
+        "axis never touches segment START, only END).",
+    )
+    two_pass_line_tail_max_sec: float = Field(
+        default=2.0,
+        description="Upper bound (seconds) on how far a LINE's final segment end may be pushed "
+        "past the anchor's line end while vocal dominance keeps indicating the singer is still "
+        "holding the last note (two_pass_extend_line_tails). UST note lengths' 99.5th percentile "
+        "is 1.111s (see two_pass_seg_hold_max_sec); 2s comfortably covers genuine held tails while "
+        "dominance itself cuts off anything that overruns further.",
+    )
+    two_pass_line_tail_quiet_sec: float = Field(
+        default=0.12,
+        description="Minimum silence run (seconds) in the dominance curve before a line-tail "
+        "extension is considered to have hit a real gap and stops. Shorter dips are mid-note "
+        "vibrato/breath, not a genuine break — stopping on those truncates real held tails.",
+    )
+    two_pass_line_tail_deep: bool = Field(
+        default=True,
+        description="ADOPTED (2026-08-02). Also stop a line-tail extension on a SHORT but DEEP "
+        "dominance dip (below a lower floor than two_pass_seg_voiced_level), not just a "
+        "sufficiently LONG one. Length-only gating let an 0.08s deep re-attack dip pass through "
+        "and the tail stretched 2s across an ad-lib; adding the depth axis recovered those cases "
+        "while UST metrics stayed neutral (span-IoU 49.93 -> 49.90, syllable axis unchanged).",
+    )
+    two_pass_extend_segments: bool = Field(
+        default=True,
+        description="Stretch each syllable segment's end to the next segment's start (karaoke "
+        "highlight-hold display convention) instead of leaving raw CTC pin-point spans (measured "
+        "median span length ~20ms, far shorter than UST notes' 116-219ms). Production's "
+        "character-mode segmentation already does this; the bench harness had been missing it.",
+    )
+    two_pass_extend_voiced_only: bool = Field(
+        default=True,
+        description="Gate the between-segment stretch (two_pass_extend_segments) on vocal "
+        "dominance staying above two_pass_seg_voiced_level, instead of stretching by raw seconds "
+        "alone. See two_pass_seg_voiced_level for the threshold sweep that adopted this.",
+    )
+    two_pass_extend_line_tails: bool = Field(
+        default=True,
+        description="ADOPTED (2026-08-02, paired 7 songs / 3,837 segments): extend only the LAST "
+        "segment of each line toward the next line's start while dominance says the singer keeps "
+        "holding — never truncates, so no song can regress from this alone. Measured: span-IoU "
+        "50.28 -> 51.15, coverage 60.66% -> 62.09%, syllable axis unchanged (75.29 -> 75.32, "
+        "confirming it never touches segment start). All 7 songs improved, none regressed.",
+    )
+    two_pass_spread_piles: bool = Field(
+        default=True,
+        description="Spread syllable segments that CTC collapsed onto the same timestamp (measured "
+        "8.7% of segments on one song) across the voiced span before the next real segment, "
+        "weighted by frame-level vocal presence rather than evenly — an even split can land a "
+        "syllable on silence if a rest sits inside the collapsed span.",
+    )
+    two_pass_respace_repeats: bool = Field(
+        default=True,
+        description="When a lyric line repeats 3+ times in a row (a chorus hook), detect a gap "
+        "far above the run's median inter-line spacing (a skipped rendition pulling every later "
+        "sibling forward by a full beat) and pull the excess back — only the anomalous gap, "
+        "leaving already-correct siblings untouched.",
+    )
+
 
 class TranslationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_TRANSLATE_")
