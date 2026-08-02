@@ -92,6 +92,42 @@ class TestNewStackGate:
 
 
 # ---------------------------------------------------------------------------
+# _warn_ignored_legacy_settings — 새 스택 + 안 배선된 레거시 스위치 켜짐 -> 경고 로그
+# ---------------------------------------------------------------------------
+
+
+class _FakeAlignmentSettings:
+    def __init__(self, **flags: bool) -> None:
+        self.engine = "owsm"
+        self.caption_anchors = flags.get("caption_anchors", False)
+        self.caption_scaffold = flags.get("caption_scaffold", False)
+        self.star_prior = flags.get("star_prior", False)
+        self.star_tokens = flags.get("star_tokens", False)
+
+
+class TestWarnIgnoredLegacySettings:
+    def test_no_warning_when_all_switches_off(self, caplog):
+        settings = SimpleNamespace(alignment=_FakeAlignmentSettings())
+        with caplog.at_level("WARNING"):
+            worker._warn_ignored_legacy_settings(settings)
+        assert caplog.records == []
+
+    def test_warns_once_listing_every_ignored_switch(self, caplog):
+        settings = SimpleNamespace(
+            alignment=_FakeAlignmentSettings(caption_anchors=True, star_tokens=True)
+        )
+        with caplog.at_level("WARNING"):
+            worker._warn_ignored_legacy_settings(settings)
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "caption_anchors" in message
+        assert "star_tokens" in message
+        # 안 켠 스위치는 언급하지 않는다
+        assert "caption_scaffold(" not in message
+        assert "star_prior(" not in message
+
+
+# ---------------------------------------------------------------------------
 # 라우팅 점수 — scripts/bench_adapters/routed.py::line_log_conf_median 이식
 # ---------------------------------------------------------------------------
 

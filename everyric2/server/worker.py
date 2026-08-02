@@ -3806,6 +3806,42 @@ def _new_stack_enabled(settings) -> bool:
     return settings.alignment.engine in ("owsm", "omniasr")
 
 
+# 새 스택 경로에 배선되지 않은 레거시 전용 기능 스위치 — 켜져 있어도 아무 효과가 없다.
+# (설정명, 사람이 읽을 설명) 튜플. 조용히 무시하면 운영자가 "왜 캡션 앵커를 켰는데
+# 효과가 없지"로 시간을 버리므로, 새 스택이 켜진 채 이 스위치들도 켜져 있으면 기동/요청
+# 시점에 경고 로그를 한 번 남긴다(코디네이터 지시, 2026-08-03 정정 ①의 두 번째 자리).
+_IGNORED_LEGACY_SWITCHES: tuple[tuple[str, str], ...] = (
+    ("caption_anchors", "사람 자막 시각을 강제정렬 제약으로 넣는 캡션 앵커"),
+    ("caption_scaffold", "붕괴 곡 줄 시작을 자막 시각으로 고정하는 자막 스캐폴드"),
+    ("star_prior", "star 채널 가격을 보컬 우세도로 성형하는 star 성형"),
+    ("star_tokens", "가사 밖 가창을 흡수하는 star 와일드카드 토큰"),
+)
+
+
+def _warn_ignored_legacy_settings(settings: Any) -> None:
+    """새 스택이 켜졌는데 레거시 전용 기능 스위치도 켜져 있으면 경고 로그 한 줄.
+
+    이 스위치들(caption_anchors/caption_scaffold/star_prior/star_tokens)은 전부 구스택
+    CTC 엔진의 특정 실패 모드(균일 posterior 등)에 맞춰진 장치라 새 앵커/2패스 경로에는
+    전제가 안 맞아 배선하지 않았다(``_run_new_stack_alignment`` docstring) — 그 판단
+    자체는 유효하지만, 설정이 켜져 있는데 조용히 아무 효과가 없으면 운영자가 원인을 못
+    찾고 시간을 버린다. 실패가 아니므로 예외는 안 던진다 — 로그만 남긴다.
+    """
+    ignored = [
+        (name, desc)
+        for name, desc in _IGNORED_LEGACY_SWITCHES
+        if getattr(settings.alignment, name, False)
+    ]
+    if ignored:
+        logger.warning(
+            "New alignment stack is active (alignment.engine=%r) but the following legacy-only "
+            "switches are also on and have NO effect on this request — they are not wired into "
+            "the new anchor/2-pass path: %s",
+            settings.alignment.engine,
+            ", ".join(f"{name}({desc})" for name, desc in ignored),
+        )
+
+
 # ── 난이도 라우팅 상수 (scripts/bench_adapters/routed.py 이식, 전곡 74곡 감사로 확정 —
 #    바꾸지 마라) ──
 _ROUTE_THRESHOLD = -11.0
@@ -4457,6 +4493,8 @@ def _run_alignment(
         # 웜업하지 않는다(안 쓸 모델을 GPU에 올려 둘 이유가 없다). 이 값 하나로 아래
         # 두 지점(엔진 웜업 스킵, 앵커/구스택 이중정렬 분기)이 갈린다.
         new_stack_active = _new_stack_enabled(settings)
+        if new_stack_active:
+            _warn_ignored_legacy_settings(settings)
 
         engine = None
         if not new_stack_active:
