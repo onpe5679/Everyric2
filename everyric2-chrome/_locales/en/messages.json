@@ -495,6 +495,39 @@
   "overlay_depth_confirm": {
     "message": "Re-analyze one depth deeper? (takes tens of seconds)"
   },
+  "overlay_feedback_title": {
+    "message": "Rate this song's alignment / report an issue"
+  },
+  "overlay_feedback_catNone": {
+    "message": "Issue type (optional)"
+  },
+  "overlay_feedback_catTiming": {
+    "message": "Timing drift"
+  },
+  "overlay_feedback_catPron": {
+    "message": "Pronunciation error"
+  },
+  "overlay_feedback_catLyrics": {
+    "message": "Lyrics error"
+  },
+  "overlay_feedback_catOther": {
+    "message": "Other"
+  },
+  "overlay_feedback_commentPh": {
+    "message": "Anything to add (optional)"
+  },
+  "overlay_feedback_send": {
+    "message": "Send"
+  },
+  "overlay_feedback_needRating": {
+    "message": "Pick a star rating first"
+  },
+  "overlay_feedback_thanks": {
+    "message": "Thanks! This helps improve quality"
+  },
+  "overlay_feedback_failed": {
+    "message": "Failed to send — please try again later"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "Run AI transcription"
   },

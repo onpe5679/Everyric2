@@ -15,7 +15,7 @@ from everyric2.server import media_cache, song_link, title_match
 # 임포트하지 않으므로 순환이 없다 — 요청마다 함수 내 임포트를 반복하지 않게 최상위로 둔다.
 from everyric2.server.api.worker import reclaim_expired_leases
 from everyric2.server.db.connection import get_session
-from everyric2.server.db.models import SyncResult
+from everyric2.server.db.models import SyncFeedback, SyncResult
 from everyric2.server.db.repository import (
     ActionLogRepository,
     JobRepository,
@@ -414,6 +414,16 @@ class CopySyncRequest(BaseModel):
     source_video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
     target_video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
     lyrics: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    """정렬 품질 별점 + 선택 오류 제보 (확장 별점 UI, 2026-08-03). 수집 전용 — 응답에
+    영향을 주지 않는다."""
+
+    video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
+    rating: int = Field(ge=1, le=5)
+    category: str | None = Field(default=None, pattern="^(timing|pronunciation|lyrics|other)$")
+    comment: str | None = Field(default=None, max_length=1000)
 
 
 class RegenerateRequest(BaseModel):
@@ -1516,6 +1526,30 @@ async def get_previous_sync_version(video_id: str):
             engine_variant=version.engine_variant,
             engine_version=version.engine_version,
         )
+
+
+@router.post("/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """정렬 품질 별점(1~5) + 선택 오류 제보 수집 (확장 별점 UI, 2026-08-03).
+
+    제출 시점의 최신 싱크 sync_id·engine_version을 함께 새겨 세대별 품질 집계의 재료로
+    남긴다(재생성되면 같은 영상도 다른 세대). 싱크가 없어도 받는다(sync_id=None) —
+    "싱크가 안 만들어져요" 류 제보도 유효하다. 수집 전용이라 응답은 ok 하나뿐."""
+    async with get_session() as session:
+        syncs = await SyncRepository(session).get_by_video(request.video_id)
+        latest = syncs[0] if syncs else None
+        session.add(
+            SyncFeedback(
+                video_id=request.video_id,
+                sync_id=latest.id if latest else None,
+                rating=request.rating,
+                category=request.category,
+                comment=request.comment,
+                engine_version=getattr(latest, "engine_version", None) if latest else None,
+            )
+        )
+        # 커밋은 get_session 컨텍스트가 수행한다 (이 모듈의 다른 쓰기 경로와 동일)
+    return {"ok": True}
 
 
 @router.post("/{video_id}/translations", response_model=SaveTranslationLayerResponse)

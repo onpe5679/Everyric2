@@ -495,6 +495,39 @@
   "overlay_depth_confirm": {
     "message": "解析深度を一段上げて再解析しますか？（数十秒）"
   },
+  "overlay_feedback_title": {
+    "message": "この曲の整列品質を評価・不具合を報告"
+  },
+  "overlay_feedback_catNone": {
+    "message": "不具合の種類（任意）"
+  },
+  "overlay_feedback_catTiming": {
+    "message": "タイミングのずれ"
+  },
+  "overlay_feedback_catPron": {
+    "message": "発音表記の誤り"
+  },
+  "overlay_feedback_catLyrics": {
+    "message": "歌詞の誤り"
+  },
+  "overlay_feedback_catOther": {
+    "message": "その他"
+  },
+  "overlay_feedback_commentPh": {
+    "message": "ひとこと（任意）"
+  },
+  "overlay_feedback_send": {
+    "message": "送信"
+  },
+  "overlay_feedback_needRating": {
+    "message": "先に星を選んでください"
+  },
+  "overlay_feedback_thanks": {
+    "message": "ありがとうございます！品質改善に使います"
+  },
+  "overlay_feedback_failed": {
+    "message": "送信失敗 — 後でもう一度お試しください"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI転写を実行"
   },

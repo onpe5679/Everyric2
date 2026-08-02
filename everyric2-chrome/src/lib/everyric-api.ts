@@ -207,6 +207,19 @@ export function lookupSync(
   );
 }
 
+/** 정렬 품질 별점(1~5) + 선택 오류 제보 — 수집 전용, 응답은 {ok: true} */
+export function submitFeedback(
+  server: ServerConfig,
+  payload: { video_id: string; rating: number; category?: string; comment?: string },
+  sink?: FailureSink,
+): Promise<{ ok: boolean } | null> {
+  return request<{ ok: boolean }>(server, '/api/sync/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }, 8000, sink);
+}
+
 /**
  * 이 영상 자기 싱크의 직전(재처리로 덮어써지기 전) 세대 — 디버그 패널의 A/B 고스트
  * 비교용. 이력이 없으면 서버가 found=false를 준다(404가 아니다 — 조회 관례 동일).

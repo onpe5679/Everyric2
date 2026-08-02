@@ -558,6 +558,14 @@ function ensureOverlay(): LyricsOverlay {
     onSettingsChange: patch => void handleSettingsChange(patch),
     onRegenerate: () => void handleRegenerate(),
     onDepthUpgrade: minDepth => void handleRegenerate(minDepth),
+    onSubmitFeedback: async (rating, category, comment) => {
+      const videoId = currentVideoId;
+      if (!videoId) return false;
+      const res = await sendToBackground<{ ok: boolean }>({
+        type: 'SYNC_FEEDBACK', payload: { videoId, rating, category, comment },
+      });
+      return Boolean(res.data?.ok);
+    },
     onPipToggle: () => void handlePipToggle(),
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),

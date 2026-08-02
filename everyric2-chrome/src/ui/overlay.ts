@@ -60,6 +60,8 @@ export interface OverlayCallbacks {
   onLoadPreviousSync: () => Promise<SyncPreviousVersion | null>;
   /** 분석 깊이 올리기/구세대 업그레이드 — minDepth 없으면 일반 재생성(=신 스택 자동 라우팅) */
   onDepthUpgrade: (minDepth?: 'medium' | 'heavy') => void;
+  /** 정렬 품질 별점(1~5) + 선택 오류 제보 전송 — 성공 여부를 돌려준다 */
+  onSubmitFeedback: (rating: number, category?: string, comment?: string) => Promise<boolean>;
   /** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사에서 새로 시작 */
   onResetSync: () => void;
   /** 검색 시트에서 원래 보던 가사 화면으로 복귀 (실수로 검색을 연 경우 탈출구) */
@@ -139,6 +141,8 @@ export class LyricsOverlay {
   private depthBtn: HTMLButtonElement;
   /** depthBtn 클릭 시 동작 — 상태(깊이/구세대/최대)에 따라 updateDepthButton이 바꾼다 */
   private depthAction: (() => void) | null = null;
+  private feedbackBtn: HTMLButtonElement;
+  private feedbackPop: HTMLDivElement;
   private collapseBtn: HTMLButtonElement;
   private settingsSheet: HTMLDivElement | null = null;
   private settingsDot: HTMLSpanElement | null = null;
@@ -362,8 +366,21 @@ export class LyricsOverlay {
     });
     this.trStatusEl = h('span', { className: 'ey-tr-status' });
     this.offsetLabel = h('span', { className: 'ey-offset-value', text: '0.0s' });
+    // 별점·오류 제보 — everyric 싱크에서만 보인다 (showSyncedLyrics에서 표시 결정)
+    this.feedbackBtn = h('button', {
+      className: 'ey-feedback-btn',
+      text: '★',
+      title: t('overlay.feedback.title'),
+      attrs: { type: 'button' },
+      on: { click: () => this.toggleFeedbackPop() },
+    });
+    this.feedbackBtn.style.display = 'none';
+    this.feedbackPop = h('div', { className: 'ey-feedback-pop' });
+    this.feedbackPop.style.display = 'none';
     this.footer = h('div', { className: 'ey-footer' },
       this.sourceBadge,
+      this.feedbackBtn,
+      this.feedbackPop,
       this.trStatusEl,
       h('div', { className: 'ey-offset' },
         h('span', { className: 'ey-offset-caption', text: t('overlay.footer.syncCaption') }),
@@ -531,6 +548,8 @@ export class LyricsOverlay {
     this.regenBtn.style.display = source === 'everyric' ? '' : 'none';
     // 깊이 버튼도 여기서 갱신 — 구세대 싱크면 재생성 버튼을 업그레이드 버튼이 대신한다
     this.updateDepthButton();
+    // 별점·오류 제보도 everyric 싱크에서만 — 평가 대상이 서버 정렬이다
+    this.feedbackBtn.style.display = source === 'everyric' ? '' : 'none';
   }
 
   showPlainLyrics(lines: LyricLine[], source: LyricsSource, plainText: string): void {
@@ -1275,6 +1294,71 @@ export class LyricsOverlay {
     return h('button', { className: 'ey-btn', title, on: { click: onClick } }, icon(svg));
   }
 
+  private toggleFeedbackPop(): void {
+    if (this.feedbackPop.style.display !== 'none') {
+      this.feedbackPop.style.display = 'none';
+      return;
+    }
+    this.renderFeedbackPop();
+    this.feedbackPop.style.display = '';
+  }
+
+  /** 별점(1~5) + 오류 유형·코멘트 팝오버 — 열 때마다 초기 상태로 다시 그린다 */
+  private renderFeedbackPop(): void {
+    let rating = 0;
+    const stars: HTMLButtonElement[] = [];
+    const paint = () => stars.forEach((s, i) => s.classList.toggle('on', i < rating));
+    const starRow = h('div', { className: 'ey-feedback-stars' });
+    for (let i = 1; i <= 5; i++) {
+      const s = h('button', {
+        className: 'ey-feedback-star', text: '★', attrs: { type: 'button' },
+        on: { click: () => { rating = i; paint(); } },
+      });
+      stars.push(s);
+      starRow.append(s);
+    }
+    const category = h('select', { className: 'ey-select' }, ...([
+      ['', t('overlay.feedback.catNone')],
+      ['timing', t('overlay.feedback.catTiming')],
+      ['pronunciation', t('overlay.feedback.catPron')],
+      ['lyrics', t('overlay.feedback.catLyrics')],
+      ['other', t('overlay.feedback.catOther')],
+    ] as [string, string][]).map(([v, label]) => h('option', { text: label, attrs: { value: v } })));
+    const comment = h('input', {
+      className: 'ey-input',
+      attrs: { placeholder: t('overlay.feedback.commentPh'), maxlength: '500' },
+    });
+    const status = h('span', { className: 'ey-feedback-status' });
+    const send = h('button', {
+      className: 'ey-btn', text: t('overlay.feedback.send'), attrs: { type: 'button' },
+      on: {
+        click: () => {
+          if (rating === 0) {
+            status.textContent = t('overlay.feedback.needRating');
+            return;
+          }
+          send.disabled = true;
+          void this.callbacks
+            .onSubmitFeedback(rating, category.value || undefined, comment.value.trim() || undefined)
+            .then(ok => {
+              status.textContent = ok ? t('overlay.feedback.thanks') : t('overlay.feedback.failed');
+              if (ok) {
+                window.setTimeout(() => { this.feedbackPop.style.display = 'none'; }, 1200);
+              } else {
+                send.disabled = false; // 실패 — 입력을 남긴 채 재시도 가능
+              }
+            });
+        },
+      },
+    }) as HTMLButtonElement;
+    this.feedbackPop.replaceChildren(
+      h('div', { className: 'ey-feedback-row' }, starRow),
+      h('div', { className: 'ey-feedback-row' }, category),
+      h('div', { className: 'ey-feedback-row' }, comment),
+      h('div', { className: 'ey-feedback-row' }, send, status),
+    );
+  }
+
   /**
    * 분석 깊이 버튼 — 헤더에서 현재 싱크의 분석 깊이(1=무분리 ASR, 2=분리+ASR,
    * 3=분리+ASR+OWSM 앵커)를 화살표 나눔선·배지 숫자로 보여주고, 클릭하면 한 단계
@@ -1353,6 +1437,8 @@ export class LyricsOverlay {
     this.regenBtn.style.display = 'none';
     this.depthBtn.style.display = 'none';
     this.depthAction = null;
+    this.feedbackBtn.style.display = 'none';
+    this.feedbackPop.style.display = 'none';
     // 번역 출처 병기(U2)·번역 대기 표시(U3-b)는 곡 단위 상태다 — 이전 곡 것이 새 곡
     // 화면에 남으면 안 된다. content가 setLangPending(null)/setAvailableLangs를 곡
     // 전환마다 다시 부르긴 하지만, 여기서도 방어적으로 지운다(resetBody는 모든 show*

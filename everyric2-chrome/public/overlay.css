@@ -808,6 +808,27 @@
 /* 유튜브 자막 표시 상태 — Everyric 싱크가 아님을 색으로 구분 (overlay.ts captionPreSync 배너와 짝) */
 .ey-source.caption { background: rgba(62, 166, 255, 0.14); color: var(--ey-primary); }
 
+/* 별점·오류 제보 (overlay.ts renderFeedbackPop) — 푸터 위로 뜨는 컴팩트 팝오버 */
+.ey-footer { position: relative; }
+.ey-feedback-btn {
+  border: none; background: none; cursor: pointer;
+  color: var(--ey-text-faint); font-size: 13px; padding: 0 2px; line-height: 1;
+}
+.ey-feedback-btn:hover { color: var(--ey-accent); }
+.ey-feedback-pop {
+  position: absolute; bottom: 30px; left: 8px; z-index: 5;
+  background: var(--ey-bg-solid); border: 1px solid var(--ey-border);
+  border-radius: 10px; padding: 8px 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  display: flex; flex-direction: column; gap: 6px; min-width: 200px;
+}
+.ey-feedback-row { display: flex; align-items: center; gap: 6px; }
+.ey-feedback-star {
+  border: none; background: none; cursor: pointer;
+  color: var(--ey-text-faint); font-size: 18px; padding: 0 1px; line-height: 1;
+}
+.ey-feedback-star.on { color: var(--ey-accent); }
+.ey-feedback-status { color: var(--ey-text-dim); font-size: 11px; }
+
 /* 출처 링크가 있는 배지 (보카로 위키 등) */
 .ey-source.link { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .ey-source.link:hover { color: var(--ey-text); }

@@ -643,6 +643,8 @@ export type BgRequest =
   | { type: 'SYNC_LIST' }
   /** 이 영상 싱크의 직전 세대 조회 — 디버그 패널의 A/B 고스트 비교용 */
   | { type: 'SYNC_PREVIOUS'; payload: { videoId: string } }
+  /** 정렬 품질 별점 + 오류 제보 (수집 전용) */
+  | { type: 'SYNC_FEEDBACK'; payload: { videoId: string; rating: number; category?: string; comment?: string } }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'JOB_CANCEL'; payload: { jobId: string } }
   | { type: 'NOTIFY'; payload: { id?: string; title: string; message: string } }

@@ -2,7 +2,17 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -148,6 +158,26 @@ class ActionLog(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     action: Mapped[str] = mapped_column(String(16), index=True)
     video_id: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SyncFeedback(Base):
+    """사용자 정렬 품질 피드백 — 별점(1~5) + 선택 오류 제보 (확장 별점 UI, 2026-08-03).
+
+    영상 단위가 아니라 **싱크 세대 단위**로 쌓는다: 같은 영상도 재생성되면 새 세대에 대한
+    평가가 따로 의미가 있으므로, 제출 시점의 sync_id·engine_version을 함께 새겨 세대별
+    품질 집계의 재료로 쓴다. 집계·대시보드는 범위 밖 — 여기는 수집만."""
+
+    __tablename__ = "sync_feedback"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    video_id: Mapped[str] = mapped_column(String(32), index=True)
+    sync_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    rating: Mapped[int] = mapped_column(Integer)
+    # 오류 유형: timing(타이밍 밀림)|pronunciation(발음 오류)|lyrics(가사 오류)|other
+    category: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    comment: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    engine_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

@@ -495,6 +495,39 @@
   "overlay_depth_confirm": {
     "message": "분석 깊이를 한 단계 올려 다시 분석할까요? (수십 초)"
   },
+  "overlay_feedback_title": {
+    "message": "이 곡의 정렬 품질 평가·오류 제보"
+  },
+  "overlay_feedback_catNone": {
+    "message": "오류 유형 (선택)"
+  },
+  "overlay_feedback_catTiming": {
+    "message": "타이밍 밀림"
+  },
+  "overlay_feedback_catPron": {
+    "message": "발음 표기 오류"
+  },
+  "overlay_feedback_catLyrics": {
+    "message": "가사 오류"
+  },
+  "overlay_feedback_catOther": {
+    "message": "기타"
+  },
+  "overlay_feedback_commentPh": {
+    "message": "남기고 싶은 말 (선택)"
+  },
+  "overlay_feedback_send": {
+    "message": "보내기"
+  },
+  "overlay_feedback_needRating": {
+    "message": "별점을 먼저 골라 주세요"
+  },
+  "overlay_feedback_thanks": {
+    "message": "고마워요! 품질 개선에 쓸게요"
+  },
+  "overlay_feedback_failed": {
+    "message": "전송 실패 — 잠시 후 다시 시도해 주세요"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI 전사 생성"
   },
