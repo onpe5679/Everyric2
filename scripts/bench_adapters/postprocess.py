@@ -357,6 +357,13 @@ def _pull_disconnected_tails(lines: list[dict[str, Any]], regions: list) -> int:
                 continue
             if _silent_run(regions, body_end, tail_start) < 1.0:
                 continue
+            # 꼬리는 최대 2세그만 — 확정 결함 5건(rookie 「boo」「ing」·butcher 「라」「입」·
+            # Madeon 「두」)은 전부 1~2세그였다. 소절 반쪽(10세그+)이 무음 뒤에 있으면 그건
+            # 잔해가 아니라 **긴 휴지 뒤의 진짜 뒷소절**이다 — ロキ 「はあ… 寝言は寝て言え
+            # ベイビー」(2:36.8 뒤 8초 쉬고 2:45.8부터 가창)를 당겼다가 진짜 가사 자리가
+            # 통째로 비어 추임새 띠로 둔갑했다(사용자 청취, 2026-08-02). 오검출 1호.
+            if len(segs) - (k + 1) > 2:
+                continue
             cut = k
             break
         if cut is None:
@@ -373,47 +380,6 @@ def _pull_disconnected_tails(lines: list[dict[str, Any]], regions: list) -> int:
         line.setdefault("meta", {})["postprocessed"] = True
         pulled += 1
     return pulled
-
-
-def _pull_stranded_into_gap(lines: list[dict[str, Any]], regions: list) -> int:
-    """통째로 무음 위에 앉은 라인을 직전 갭의 **미설명 발성** 위로 되당긴다.
-
-    butcher(en) 라인50 「EUCHARIST」가 원형이다. UST 2:01.4·PROD 2:01.54가 진실인데 en
-    앵커(polarformer×omniasr)가 2:09.12(브레이크 무음 한가운데, 커버 0.00)에 0.41초로
-    구겨 앉혔다. 직전 라인 끝(2:02.84)과의 6.3초 갭 안에는 **어느 라인도 설명하지 않는
-    발성 1.8초**가 남아 있다 — 그 발성이 바로 이 라인(과 후속 블록)의 진짜 자리다.
-
-    판정(14곡 스캔 1건 — 정확히 이 자리, 오검출 0, 2026-08-02): 직전 갭 ≥ 3초 ·
-    갭 안 발성 ≥ 1.5초 · 라인 커버리지 < 0.2. 라인을 갭의 첫 발성 온셋으로 강체 이동한다
-    (지속·세그 리듬 유지). 후속 라인 51~53도 4~9초 지각이지만 **다음 절의 발성 위에**
-    앉아 있어 우세도 단독으로는 못 가른다 — owsm 앵커는 전 분리기에서 이 블록을 맞추므로
-    (레인 전수 스캔, 9차) 교차 판정이 원리적 경로이나 발동 표본 1곡이라 보류.
-    """
-    moved = 0
-    for index in range(1, len(lines)):
-        prev, line = lines[index - 1], lines[index]
-        gap0, gap1 = float(prev["end"]), float(line["start"])
-        if gap1 - gap0 < 3.0:
-            continue
-        start, end = float(line["start"]), float(line["end"])
-        if _coverage(regions, start, end) >= 0.2:
-            continue
-        inside = [
-            reg for reg in regions if reg.end > gap0 + 0.05 and reg.start < gap1 - 0.05
-        ]
-        voiced = sum(min(reg.end, gap1) - max(reg.start, gap0) for reg in inside)
-        if voiced < 1.5:
-            continue
-        onset = max(gap0 + 0.05, min(max(reg.start, gap0) for reg in inside))
-        shift = round(onset - start, 3)
-        line["start"] = round(start + shift, 3)
-        line["end"] = round(min(end + shift, gap1 - 0.05), 3)
-        for seg in line.get("segs") or []:
-            seg["start"] = round(float(seg["start"]) + shift, 3)
-            seg["end"] = round(min(float(seg["end"]) + shift, float(line["end"])), 3)
-        line.setdefault("meta", {})["postprocessed"] = True
-        moved += 1
-    return moved
 
 
 def _snap_silent_heads(lines: list[dict[str, Any]], activity) -> int:
@@ -590,12 +556,16 @@ class PostProcessedAligner(AlignerAdapter):
         # 좌초 보정 두 장치 — 둘 다 우세도 위에서만 판정한다(분리 스템에서 VAD가 죽는 것이
         # 이 층의 교훈이었다). 접기를 먼저 돌린다: 좌초 라인이 제자리로 가면 그 안의 끊긴
         # 꼬리는 함께 사라지므로, 순서를 바꾸면 접힐 라인의 꼬리를 먼저 뭉개 버린다.
-        folded = pulled = snapped_heads = gap_pulled = 0
+        # 갭 되당김(`_pull_stranded_into_gap` — butcher L50을 간주 무음에서 직전 갭의
+        # 미설명 발성으로 옮기는 장치)은 청취로 기각(2026-08-02): 유일 발동지 butcher에서
+        # 2:07~2:12가 통째로 비어 2:11 「The slaughter's on」 시작이 앵커 단독보다 더
+        # 어긋나 보였다. 블록 지각 곡은 손대지 않는 것이 낫다 — 잔해 이동은 이동한 라인만
+        # 보면 이득이어도 «비워진 자리»가 새 증상이 된다.
+        folded = pulled = snapped_heads = 0
         if self.config.clamp_only and activity_source == "dominance":
             folded = _fold_stranded_repeats(lines, activity.regions)
             pulled = _pull_disconnected_tails(lines, activity.regions)
             snapped_heads = _snap_silent_heads(lines, activity)
-            gap_pulled = _pull_stranded_into_gap(lines, activity.regions)
 
         return {
             "applied": True,
@@ -610,7 +580,6 @@ class PostProcessedAligner(AlignerAdapter):
             "folded_lines": folded,
             "pulled_tails": pulled,
             "snapped_heads": snapped_heads,
-            "gap_pulled": gap_pulled,
             "total_lines": len(lines),
             "elapsed_sec": round(time.perf_counter() - started, 3),
         }
