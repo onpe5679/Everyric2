@@ -68,12 +68,17 @@ uv pip install torch torchaudio torchvision --index-url https://download.pytorch
    - 자산 URL·조달 절차는 `scripts/bench_adapters/separators_quality.py`의
      `BS_POLARFORMER` 정의를 참고한다. **서버는 이 자산을 절대 자동으로 내려받지
      않는다** — 없으면 기동이 아니라 그 백엔드를 실제로 쓰는 요청 시점에 실패한다.
-2. **`audio-separator` 파이썬 패키지** — `uv sync --extra separator`(위 명령)로 설치.
-   `onnxruntime`(CPU 빌드)을 같이 끌고 온다 — `audio_separator.separator` 패키지의
-   임포트 체인이 무조건 요구하지만, 이 코드 경로는 그걸 실제 추론에는 안 쓴다(로더를
-   몽키패치로 갈아끼운다 — `polarformer_separator.py` 모듈 docstring 참고). 기존
-   torch/numpy/scipy/transformers를 재설치·강등하지 않는다(2026-08-04 `uv lock` 실측
-   확인, `pyproject.toml`의 `separator` extra 주석 참고).
+2. **`audio-separator` + `PoPE-pytorch` 파이썬 패키지** — 둘 다 `uv sync --extra
+   separator`(위 명령)로 설치. `audio-separator`는 `onnxruntime`(CPU 빌드)을 같이
+   끌고 온다 — `audio_separator.separator` 패키지의 임포트 체인이 무조건 요구하지만,
+   이 코드 경로는 그걸 실제 추론에는 안 쓴다(로더를 몽키패치로 갈아끼운다 —
+   `polarformer_separator.py` 모듈 docstring 참고). `PoPE-pytorch`는 MSST 벤더 소스
+   (`bs_roformer.py`)가 극좌표 위치 임베딩(PoPE, arXiv 2509.10534) 사용 여부를 조건부
+   import로 가르는데, 없으면 자산 검사는 통과해도 첫 요청의 forward 시점에
+   `AssertionError`로 죽는다(실곡 검증 2026-08-04 — 그래서 `polarformer_separator.
+   _missing_reasons`가 이 패키지도 사전 검사한다). 기존 torch/numpy/scipy/transformers를
+   재설치·강등하지 않는다(2026-08-04 `uv lock` 실측 확인, `pyproject.toml`의
+   `separator` extra 주석 참고).
 3. **OWSM 전용 격리 venv** — ESPnet이 메인 venv의 torch/transformers 버전과 충돌해
    별도 venv가 필요하다(`everyric2/alignment/owsm_engine.py` 모듈 docstring). 기본
    경로는 `<repo_root>/.venv-owsm`, 다른 경로면 `.env`에

@@ -85,6 +85,16 @@ separator = [
     # .venv 대상 해석 확인, 2026-08-04: 기존 torch/numpy/scipy/transformers 어느 것도
     # 재설치·강등 없이 16개 신규 패키지만 추가된다).
     "onnxruntime>=1.17",
+    # MSST 벤더 소스(models/bs_roformer/bs_roformer.py, 위 audio-separator 항목 참고)가
+    # PoPE(극좌표 위치 임베딩, arXiv 2509.10534) 사용 여부를 `try: from PoPE_pytorch import
+    # PoPE, flash_attn_with_pope` 조건부 import로 갈라 `_HAS_POPE` 플래그로 기억해 둔다 —
+    # 실제 forward 시점(use_pope=True 모델 생성)에 그 플래그가 False면 AssertionError로
+    # 죽는다(실곡 검증 2026-08-04: "PoPE requested but PoPE_pytorch is not installed").
+    # audio-separator 자신의 선언된 의존성엔 없다 — 벤치 실측 버전(benchmark/.venv-sep)에
+    # 정확히 고정한다(같은 재현성 근거, audio-separator 항목 참고). PoPE_pytorch 자체의
+    # 전이 의존성(einx·torch-einops-utils)은 별도로 선언하지 않는다 — 일반적인 하한
+    # 표기라 resolver가 알아서 끌어온다(2026-08-04 dry-run 확인, 충돌 없음).
+    "PoPE-pytorch==0.2.1",
 ]
 bench = [
     # scripts/align_bench.py — MIREX 표준 정렬 지표(AAE/PCO/지각 지표)를 재구현하지

@@ -1312,6 +1312,26 @@ wheels = [
 ]
 
 [[package]]
+name = "einx"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "frozendict" },
+    { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.13'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or python_full_version >= '3.13'" },
+    { name = "sympy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/84/96/df2cfa7418b175dddcf30a88711d01b79a32c3ac4d64b379ed89a3de2c08/einx-0.4.3.tar.gz", hash = "sha256:be7d81ea1908b9f00e4a467840998fc483c33aa32aaaaa3ada6c8386f693edf9", size = 120087, upload-time = "2026-04-01T09:50:41.473Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/28/6768d342b2b888f9facdddbd430daf015cab936e2598281ab436b1be1b4a/einx-0.4.3-py3-none-any.whl", hash = "sha256:47ce54a0144f6dffcfacdd8fe2cc9e2e5e6485dda2471330ab75ee747dd22f39", size = 163766, upload-time = "2026-04-01T09:50:40.165Z" },
+]
+
+[package.optional-dependencies]
+torch = [
+    { name = "torch" },
+]
+
+[[package]]
 name = "email-validator"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1374,6 +1394,7 @@ all = [
     { name = "numba" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.28.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pope-pytorch" },
     { name = "praatio" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1402,6 +1423,7 @@ separator = [
     { name = "demucs" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.28.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pope-pytorch" },
 ]
 sofa = [
     { name = "einops" },
@@ -1437,6 +1459,7 @@ requires-dist = [
     { name = "numba", marker = "extra == 'sofa'", specifier = ">=0.57.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "onnxruntime", marker = "extra == 'separator'", specifier = ">=1.17" },
+    { name = "pope-pytorch", marker = "extra == 'separator'", specifier = "==0.2.1" },
     { name = "praatio", marker = "extra == 'mfa'", specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
@@ -4205,6 +4228,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c6/77/b3d3e00c696c16cf99af81ef7b1f5fe73bd2a307abca41bd7605429fe6e5/pooch-1.8.2.tar.gz", hash = "sha256:76561f0de68a01da4df6af38e9955c4c9d1a5c90da73f7e40276a5728ec83d10", size = 59353, upload-time = "2024-06-06T16:53:46.224Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a8/87/77cc11c7a9ea9fd05503def69e3d18605852cd0d4b0d3b8f15bbeb3ef1d1/pooch-1.8.2-py3-none-any.whl", hash = "sha256:3529a57096f7198778a5ceefd5ac3ef0e4d06a6ddaf9fc2d609b806f25302c47", size = 64574, upload-time = "2024-06-06T16:53:44.343Z" },
+]
+
+[[package]]
+name = "pope-pytorch"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "einx", extra = ["torch"] },
+    { name = "torch" },
+    { name = "torch-einops-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/30/2a8f6b7e94fee71cf135052d8ab5588d2fd67a8f744d16b4324f282c836c/pope_pytorch-0.2.1.tar.gz", hash = "sha256:5655aa25aa72523b49ed03f9c5ce26e0faa082017abfa641529445edbd26f823", size = 17256, upload-time = "2026-06-21T16:44:19.309Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/72/e61cf723799a3d02a6cda894f0f9f50069691d344413fd37168a3aaee3d0/pope_pytorch-0.2.1-py3-none-any.whl", hash = "sha256:b9dc493c190aa80d1ee9a4ff7343d9f9b5cbdfaace3bbf3c8b10b22d2c5c9e1f", size = 19461, upload-time = "2026-06-21T16:44:18.31Z" },
 ]
 
 [[package]]

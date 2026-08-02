@@ -130,6 +130,16 @@ def _missing_reasons(models_dir: Path) -> list[str]:
         import audio_separator  # noqa: F401
     except ImportError as exc:
         reasons.append(f"'audio-separator' package not importable: {exc}")
+    try:
+        import PoPE_pytorch  # noqa: F401
+    except ImportError as exc:
+        # MSST 벤더 소스(_build_pope_model이 얹는 models/bs_roformer/bs_roformer.py)가 이
+        # 패키지를 `try: from PoPE_pytorch import ... except Exception: _HAS_POPE = False`로
+        # 조건부 임포트한다 — 없어도 임포트 자체는 안 죽고 조용히 넘어가다가, use_pope=True
+        # 모델을 실제로 만드는 시점(forward 진입 직전)에야 AssertionError로 죽는다(실곡
+        # 검증 2026-08-04에서 실측). 그 뒤늦은 실패를 여기 사전 검사로 앞당긴다 — "자산
+        # 검사 통과 = 구원 경로 실행 가능"이라는 이 함수의 계약을 지키기 위해서다.
+        reasons.append(f"'PoPE-pytorch' package not importable: {exc}")
     return reasons
 
 
