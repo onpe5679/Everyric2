@@ -75,6 +75,29 @@ def native_units(source: str) -> LineUnits:
     return LineUnits(source, {"native": list(source)})
 
 
+def join_display(owners: list[str], word_end: list[bool]) -> str:
+    """``owners`` 배열(표기 하나의 문자 단위 소유자) → 표시 문자열.
+
+    ``word_end``가 걸린 자리 뒤에 공백 하나를 넣고, 공백뿐인 소유자(낱말 사이 원문
+    공백의 패스스루 — 모듈 docstring)는 건너뛴다 — 그대로 이으면 word_end가 넣는
+    공백과 겹쳐 낱말 사이가 두 칸으로 벌어진다.
+
+    요점은 **파생 전체**를 잇는다는 것이다(정렬된 세그에서 조립하지 않는다). 세그
+    기준으로 조립하면 리파이너 vocab에 없어 정렬이 안 된 문자(ranges=None)가 표시
+    문자열에서도 통째로 사라진다 — 심판 꺼짐 경로에서 사전 기본 발음의 連濁 음절
+    (「스키즈키」의 ず)이 빠져 「스키키」로 나온 실측 결함(2026-08-03). 표시는 파생
+    전체를 보이고, 세그는 정렬된 문자만 갖는 것이 계약이다 — 세그 없는 표시 문자는
+    폴백 경로(pron만 있고 pron_segs 없음)가 이미 성립시킨 상태다.
+    """
+    parts: list[str] = []
+    for index, owner in enumerate(owners):
+        if owner.strip():
+            parts.append(owner)
+        if index < len(word_end) and word_end[index]:
+            parts.append(" ")
+    return "".join(parts).strip()
+
+
 # ---------------------------------------------------------------------------
 # en: IPA 정렬 + {hangul, kana, romaji, en} 동시 표시
 # ---------------------------------------------------------------------------

@@ -93,8 +93,9 @@ class SyllableRefiner(Protocol):
 #
 # ``word_end``는 이 계약에 없는 **추가** 필드다 — wire가 additive라(필드 추가는 구버전
 # 확장이 무시) 안전하다. en 표기(라틴 낱말)만 쓴다: 원문 공백이 CTC 어휘에 없어 정렬 후
-# 세그에서 사라지므로, 세그 자체가 아니라 이 플래그로 낱말 경계를 옮긴다(``_join_pron``
-# 참조). ja 표기는 이미 원문 공백이 소유자에 실려 있어 이 플래그가 항상 False다.
+# 세그에서 사라지므로, 세그 자체가 아니라 이 플래그로 낱말 경계를 옮긴다
+# (``align_target.join_display`` 참조). ja 표기는 이미 원문 공백이 소유자에 실려 있어
+# 이 플래그가 항상 False다.
 @dataclass
 class PronSegmentSpan:
     """``PronSegment``(wire) 한 칸. ``word_end``는 서버 내부용 — 프런트에 그대로 나간다."""
@@ -516,18 +517,8 @@ def _build_segments(
     return segs
 
 
-def _join_pron(segs: list[dict[str, Any]]) -> str:
-    """세그 목록 → 표기 전체 문자열. ``word_end``가 걸린 세그 뒤에 공백 하나를 넣는다.
-
-    리터럴 공백 문자(라틴 낱말 사이 통과분)에 기대지 않는다 — 그 문자는 리파이너 vocab에
-    없으면 세그 자체가 안 생겨 정보가 사라진다. ``word_end`` 플래그가 유일한 근거다.
-    """
-    parts: list[str] = []
-    for seg in segs:
-        parts.append(seg["t"])
-        if seg.get("word_end"):
-            parts.append(" ")
-    return "".join(parts).strip()
+# 표기 전체 문자열은 세그가 아니라 owners에서 잇는다 — ``align_target.join_display``.
+# (예전 ``_join_pron``은 세그 기준이라 vocab 미포함 문자가 표시에서도 사라졌다.)
 
 
 # ---------------------------------------------------------------------------
@@ -982,6 +973,8 @@ def refine_lines(
                 line.referee = referee_debug
 
         offset = first * frame_sec
+        from everyric2.text.align_target import join_display
+
         for key, owners in units.owners.items():
             segs = _build_segments(owners, ranges, spans, offset, frame_sec, units.word_end)
             if not segs:
@@ -1005,7 +998,9 @@ def refine_lines(
                 for s in segs
             ]
             line.pron_segs[key] = spans_out
-            line.pron[key] = _join_pron(segs)
+            # 세그(_join_pron식 조립)가 아니라 owners 전체에서 잇는다 — vocab 미포함
+            # 문자가 표시에서 사라지면 안 된다(join_display docstring의 連濁 실측).
+            line.pron[key] = join_display(owners, units.word_end)
         line.refined = bool(line.pron_segs)
 
     if resolved_config.respace_repeats:

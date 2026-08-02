@@ -29,13 +29,13 @@ from everyric2.alignment.refine_window import (
     _build_segments,
     _enforce_monotonic,
     _extend_segments,
-    _join_pron,
     _respace_repeated_lines,
     _shift_line,
     _spread_piled_segments,
     _tokenize_target,
     refine_lines,
 )
+from everyric2.text.align_target import join_display
 from everyric2.inference.prompt import SyncResult
 
 FRAME_SEC = 0.02  # 20ms 프레임 규약(기존 스위트와 동일)
@@ -169,21 +169,22 @@ def test_build_segments_carries_word_end_flag_through_orphan():
 
 
 # ---------------------------------------------------------------------------
-# _join_pron — 낱말 경계 공백
+# join_display — 표시 문자열은 owners 전체에서 잇는다 (낱말 경계 공백 포함)
 # ---------------------------------------------------------------------------
 
 
-def test_join_pron_inserts_single_space_at_word_end():
-    segs = [
-        {"t": "킵", "word_end": True},
-        {"t": "잇", "word_end": False},
-    ]
-    assert _join_pron(segs) == "킵 잇"
+def test_join_display_inserts_single_space_at_word_end():
+    assert join_display(["킵", "잇"], [True, False]) == "킵 잇"
 
 
-def test_join_pron_no_trailing_space_at_line_end():
-    segs = [{"t": "킵", "word_end": True}]
-    assert _join_pron(segs) == "킵"
+def test_join_display_no_trailing_space_at_line_end():
+    assert join_display(["킵"], [True]) == "킵"
+
+
+def test_join_display_skips_blank_owner_but_keeps_its_word_end():
+    # 낱말 사이 원문 공백 패스스루(" ")는 건너뛰되, 그 자리에 word_end가 걸려 있으면
+    # 공백은 하나만 들어가야 한다.
+    assert join_display(["킵", " ", "잇"], [True, False, False]) == "킵 잇"
 
 
 # ---------------------------------------------------------------------------
