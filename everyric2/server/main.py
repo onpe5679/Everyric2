@@ -46,6 +46,10 @@ async def lifespan(app: FastAPI):
     # 만료 리스 주기 스윕을 여기서만 띄운다 — 임포트 시점에 뜨면 실행 중인 루프가 없고,
     # 앱을 띄우지 않는 테스트에 태스크가 남는다 (api/worker.start_lease_sweeper 주석 참고).
     from everyric2.server.api.worker import start_lease_sweeper, stop_lease_sweeper
+    # 고아 잡 TTL 리퍼도 같은 이유로 lifespan에서만 띄운다 — 리스 스위퍼는 원격 워커
+    # 리스가 있는 잡만 커버하고, 인프로세스 워커·번역 대기 구간은 별도 안전망이 필요하다
+    # (db/orphan_reaper.py 모듈 docstring 참고).
+    from everyric2.server.db.orphan_reaper import start_orphan_sweeper, stop_orphan_sweeper
 
     await init_db()
     _gpu_available()  # 기동 시 프리웜 — 첫 /health가 2초 페널티를 물지 않게
@@ -69,10 +73,12 @@ async def lifespan(app: FastAPI):
 
     await anyio.to_thread.run_sync(_warm_reading_engine)
     start_lease_sweeper()
+    start_orphan_sweeper()
     try:
         yield
     finally:
         # 예외로 끝나는 종료에서도 태스크를 반드시 회수한다 (누수 금지)
+        await stop_orphan_sweeper()
         await stop_lease_sweeper()
         await close_db()
 
