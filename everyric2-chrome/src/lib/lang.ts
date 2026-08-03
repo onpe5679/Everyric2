@@ -218,5 +218,26 @@ export function matchWikiLinesToSegments(
     }
   }
 
+  // 반복 원문 재사용(감사 후속, 熱異常 실측) — 위 순차 2포인터는 앞으로만 나아가서,
+  // 위키가 반복되는 원문 줄을 딱 한 번만 적어 두면 두 번째 이후 등장은 대응할 위키
+  // 줄이 이미 지나가 버려 영영 undefined로 남는다("どこに送るあてもなく" 사례). 이번
+  // 패스에서 이미 성공 매칭된 세그들을 정규화 텍스트→번역 맵으로 한 번만 인덱싱해,
+  // 아직 undefined인 세그의 원문이 그 맵에 있으면 같은 번역을 재사용한다("같은 문장은
+  // 같은 번역"). 위키가 반복을 전부 적어 둔 경우(黒い星が 8회류)는 순차 매칭이 이미
+  // 각자 제 위키 줄에 대응시키므로 이 보강이 나설 일이 없다 — 반대로 진짜 위키 결측
+  // (그 원문이 매칭된 적 자체가 없음)은 맵에도 없으니 그대로 undefined로 남는다(번역을
+  // 지어내지 않는다).
+  const byText = new Map<string, string | undefined>();
+  for (let k = 0; k < segs.length; k++) {
+    if (translations[k] !== undefined && !byText.has(segNorm[k])) {
+      byText.set(segNorm[k], translations[k]);
+    }
+  }
+  for (let k = 0; k < segs.length; k++) {
+    if (translations[k] === undefined && byText.has(segNorm[k])) {
+      translations[k] = byText.get(segNorm[k]);
+    }
+  }
+
   return translations;
 }
