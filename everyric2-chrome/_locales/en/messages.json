@@ -2132,4 +2132,13 @@
         "content": "$1"
       }
     }
-  }}
+  },
+  "content_translation_tooLong": {
+    "message": "Lyrics are too long for translation/pronunciation (max $P1$ lines)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  }
+}

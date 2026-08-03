@@ -1636,6 +1636,23 @@ async function tryServerLayerRefresh(
  */
 let translationLoadSeq = 0;
 
+/** 서버 /api/translate의 거절 조건과 **같은 값**(translate.py:152). 두 곳이 갈리면
+ *  클라이언트가 통과시킨 요청이 서버에서 400으로 죽으므로, 값을 바꿀 땐 함께 바꾼다. */
+const TRANSLATE_MAX_LINES = 400;
+const TRANSLATE_MAX_CHARS = 15000;
+const TRANSLATE_MAX_LINE_CHARS = 1000;
+
+/** 번역 상한 초과 여부 — 초과한 첫 기준과 그 한도를 돌려준다(사용자에게 숫자를 보여 준다) */
+function translationLimitExceeded(lines: string[]): { kind: 'lines' | 'chars' | 'line'; limit: number } | null {
+  if (lines.length > TRANSLATE_MAX_LINES) return { kind: 'lines', limit: TRANSLATE_MAX_LINES };
+  const total = lines.reduce((n, ln) => n + ln.length, 0);
+  if (total > TRANSLATE_MAX_CHARS) return { kind: 'chars', limit: TRANSLATE_MAX_CHARS };
+  if (lines.some(ln => ln.length > TRANSLATE_MAX_LINE_CHARS)) {
+    return { kind: 'line', limit: TRANSLATE_MAX_LINE_CHARS };
+  }
+  return null;
+}
+
 async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promise<void> {
   const data = currentData;
   const videoId = currentVideoId;
@@ -1647,6 +1664,15 @@ async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promis
     || currentVideoId !== videoId || !settings.showTranslation;
   const srcLines = data.lines.map(l => l.text);
   const lang = settings.translationLanguage;
+  // 서버 번역 상한을 **미리** 잰다(/api/translate:152와 같은 값). 생성 상한은 500줄인데
+  // 번역 상한은 400줄이라 401~500줄 곡은 싱크만 만들어지고 번역·발음이 영영 비는데,
+  // 실패 사유가 일반 문구로 뭉개져 원인을 알 수 없었고 **영상을 열 때마다 같은 400을
+  // 다시 쐈다**(캐시에 아무것도 안 남으므로). 여기서 끊으면 헛호출도 사라진다.
+  const tooLong = translationLimitExceeded(srcLines);
+  if (tooLong) {
+    overlay?.setTranslationStatus(t('content.translation.tooLong', [String(tooLong.limit)]));
+    return;
+  }
   // 대각선(J3) — 곡 원문 스크립트가 내 번역 언어와 같으면 서버는 번역을 만들지 않는다
   // (expectsPronunciation의 `script === lang` 분기와 같은 사실을 여기서도 재사용할 뿐,
   // 그 매트릭스 자체는 건드리지 않는다). 이전에는 이 사실을 모른 채 매 로딩마다 요청을

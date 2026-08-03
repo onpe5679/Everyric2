@@ -2132,4 +2132,13 @@
         "content": "$1"
       }
     }
-  }}
+  },
+  "content_translation_tooLong": {
+    "message": "가사가 너무 길어 번역·발음을 만들 수 없어요 (최대 $P1$줄)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  }
+}

@@ -1,4 +1,8 @@
-import type { LyricLine, SearchCandidate, ServerLogEntry, ServerStatus, SongInfo } from '../types';
+import type {
+  BgRequest, ContribEntry, LimitsResponse, LyricLine, MessageResponse, NoticesResponse,
+  SearchCandidate, ServerLogEntry, ServerNotice, ServerStatus, SongInfo, ViewStatsResponse,
+} from '../types';
+import { CONTRIB_STORAGE_KEY } from '../types';
 import { t } from '../lib/i18n';
 import { describeRemoved, stripPartMarkers } from '../lib/lyrics-clean';
 import { formatLogEntry, needsHostPermission, serverBlockedTip, serverKnownBad, serverUsable, statusLine } from '../lib/server-status';
@@ -215,9 +219,16 @@ export interface SearchFormRefs {
  * 제목·아티스트 입력 + 실행 버튼.
  * submitOnEnter는 호출부마다 다르다 — 빈 상태 폼은 예전부터 Enter를 처리하지 않았고
  * 검색 시트만 처리했다. 추출하면서 동작이 바뀌지 않도록 옵션으로 유지한다.
+ *
+ * **initial.title은 이미 정리된 제목이다**(【】·MV·feat·업로더 접두 등이 걷힌 것) — 검색은
+ * 그 형태에서 가장 잘 맞으므로 기본값을 바꾸지 않는다. 다만 화면에는 그게 "정리된 값"이라는
+ * 사실이 어디에도 없어서, 사용자는 영상 제목을 통째로 다시 쳐야 하는 줄 알고 매번 지웠다
+ * 썼다 했다(제보). 그래서 두 가지를 명시한다: 무엇을 넣어야 하는지(안내 한 줄)와, 정리가
+ * 과했을 때 원본으로 되돌아가는 길(rawTitle 버튼). rawTitle이 정리본과 같으면 버튼은
+ * 나오지 않는다 — 눌러도 아무 일도 없는 버튼은 없느니만 못하다.
  */
 export function buildSearchForm(
-  initial: { title: string; artist: string },
+  initial: { title: string; artist: string; rawTitle?: string },
   opts: { buttonLabel: string; submitOnEnter: boolean; onSubmit: (q: { title: string; artist: string }) => void },
 ): SearchFormRefs {
   const titleInput = h('input', { className: 'ey-input', attrs: { placeholder: t('panels.search.titlePlaceholder') } });
@@ -235,8 +246,26 @@ export function buildSearchForm(
     artistInput.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   }
 
+  const raw = initial.rawTitle?.trim() ?? '';
+  const rawBtn = raw && raw !== initial.title.trim()
+    ? h('button', {
+      className: 'ey-secondary-btn ey-search-raw-btn',
+      text: t('panels.search.useRawTitle'),
+      attrs: { type: 'button', title: t('panels.search.useRawTitleTitle', [raw]) },
+      on: {
+        click: () => {
+          titleInput.value = raw;
+          titleInput.focus();
+          titleInput.select(); // 원본을 넣자마자 손보고 싶은 경우가 많다
+        },
+      },
+    })
+    : null;
+
   const el = h('div', { className: 'ey-search-form' },
+    h('div', { className: 'ey-search-hint', text: t('panels.search.titleHint') }),
     titleInput,
+    rawBtn,
     artistInput,
     h('button', { className: 'ey-primary-btn', text: opts.buttonLabel, on: { click: submit } }),
   );
@@ -565,4 +594,874 @@ export function renderCandidateList(
     btn.title = isWiki ? c.url : label;
     return btn;
   }));
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  2026-08 UI 개편 조각들 — 설정 / 평가 · 제보 / 공지 / 기여.
+//  공통 원칙은 파일 머리말과 같다: 상태를 호스트 필드에 쓰지 않고 콜백과 값을 받아
+//  엘리먼트를 돌려준다. 그래야 메인 패널과 PiP가 같은 조각을 동시에 띄울 수 있다.
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * 백그라운드에 직접 묻는 최소 통로 (debug-panel.ts의 sendMessageDirect와 같은 규약).
+ *
+ * 공지·한도·조회수는 **지금 보는 가사와 무관한 조회**라서 overlay·content에 콜백을 새로
+ * 뚫을 이유가 없다 — 여기서 바로 묻는다. 확장이 리로드된 뒤 남은 content script(orphan)
+ * 에서 sendMessage를 부르면 예외가 터지므로 `chrome.runtime?.id` 가드를 먼저 통과한다.
+ * 실패는 전부 `{error}`로 평평해지고 호출부는 그 기능만 조용히 숨긴다 — 이 셋은 구버전
+ * 서버에 아예 없는 엔드포인트라 404가 비정상이 아니라 **정상 경로**다.
+ */
+async function sendPanelMessage<T>(message: BgRequest): Promise<MessageResponse<T>> {
+  if (!chrome.runtime?.id) return { error: 'extension context invalidated' };
+  try {
+    return await chrome.runtime.sendMessage(message) as MessageResponse<T>;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** 분석 깊이의 사람 말 이름 — 제보 안내와 기여 목록 배지가 같은 낱말을 써야 한다 */
+function depthLabel(depth: 'fast' | 'medium' | 'heavy'): string {
+  if (depth === 'fast') return t('panels.depth.fast');
+  if (depth === 'medium') return t('panels.depth.medium');
+  return t('panels.depth.heavy');
+}
+
+/**
+ * "오늘 / 어제 / N일 전 / 날짜".
+ * 일수는 **자정 경계**로 센다(경과 시간이 아니라) — 23시에 만든 것이 다음 날 1시에
+ * "0일 전"으로 보이면 어제 한 일이 오늘 것처럼 읽힌다.
+ */
+function relativeDate(ms: number): string {
+  if (!Number.isFinite(ms)) return '';
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(new Date(ms))) / 86_400_000);
+  if (days <= 0) return t('panels.date.today');
+  if (days === 1) return t('panels.date.yesterday');
+  if (days < 7) return t('panels.date.daysAgo', [String(days)]);
+  return new Date(ms).toLocaleDateString();
+}
+
+/** 시트 공통 머리(뒤로 + 제목) — 공지·기여가 같은 골격을 쓴다 */
+function buildSheetHead(title: string, onBack?: () => void): HTMLDivElement {
+  return h('div', { className: 'ey-sheet-head' },
+    onBack
+      ? h('button', {
+        className: 'ey-secondary-btn ey-sheet-back',
+        text: t('panels.sheet.back'),
+        attrs: { type: 'button' },
+        on: { click: () => onBack() },
+      })
+      : null,
+    h('div', { className: 'ey-sheet-title', text: title }),
+  );
+}
+
+// ── 설정 시트 (범주 + 검색) ──────────────────────────────────────
+
+interface SettingRowBase {
+  /**
+   * 설정 키 — DOM id가 아니라 **검색 대상**이다. 라벨을 모른 채 'serverUrl'·'pitchF0'로
+   * 찾는 사람이 실제로 있고(문서·제보 따라 하기), 라벨만 훑으면 그 경로가 막힌다.
+   */
+  key: string;
+  label?: string;
+  /** 툴팁 — 라벨에 붙고 검색 대상에도 들어간다(설명 문구로 찾는 경우) */
+  title?: string;
+  /** 라벨 오른쪽 표식(서버 상태 점 등). 호출부가 참조를 계속 들고 있어야 해서 받는다 */
+  labelSuffix?: HTMLElement;
+  /** 'col'이면 라벨 아래로 컨트롤을 내린다 — 긴 입력칸(서버 주소·API 키) */
+  layout?: 'row' | 'col';
+  /** 검색에 추가로 걸리게 할 낱말들 (예: '폰트 글씨 크기') */
+  keywords?: string;
+}
+
+export interface SettingCheckboxRow extends SettingRowBase {
+  kind: 'checkbox';
+  label: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+  /** 체크박스 왼쪽에 함께 놓이는 슬라이더 — 멜로디·메트로놈은 예전부터 '볼륨+켜기' 한 줄이었다 */
+  range?: { value: number; min?: number; max?: number; step?: number; onChange: (v: number) => void };
+}
+
+export interface SettingSelectRow extends SettingRowBase {
+  kind: 'select';
+  label: string;
+  value: string;
+  options: [string, string][];
+  onChange: (v: string) => void;
+}
+
+export interface SettingRangeRow extends SettingRowBase {
+  kind: 'range';
+  label: string;
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  /** 슬라이더 옆 현재값 표시 — 없으면 숫자를 내지 않는다(볼륨류는 수치가 무의미하다) */
+  format?: (v: number) => string;
+  onChange: (v: number) => void;
+}
+
+export interface SettingTextRow extends SettingRowBase {
+  kind: 'text';
+  label: string;
+  value: string;
+  placeholder?: string;
+  password?: boolean;
+  /** 저장 직전 다듬기 — 빈 문자열을 돌려주면 **저장하지 않고 되돌린다**(서버 주소를 비우는 사고 방지) */
+  sanitize?: (v: string) => string;
+  onChange: (v: string) => void;
+}
+
+export interface SettingNoteRow extends SettingRowBase {
+  kind: 'note';
+  text: string;
+  tone?: 'normal' | 'bad';
+}
+
+export interface SettingButtonRow extends SettingRowBase {
+  kind: 'button';
+  label: string;
+  /** 눌린 버튼을 넘겨준다 — '초기화했어요'처럼 그 자리에서 결과를 말해야 하는 경우가 있다 */
+  onClick: (btn: HTMLButtonElement) => void;
+}
+
+/**
+ * 호출부가 이미 만들어 둔 컨트롤을 그대로 꽂는 자리.
+ *
+ * 오디오 기기 목록처럼 **비동기로 채워지는 select**나 서버 상태에 따라 보였다 숨었다 하는
+ * 버튼은 호출부가 참조를 들고 있어야 한다. 그것까지 선언형으로 감싸면 참조를 되돌려 주는
+ * 또 다른 장치가 필요해지므로 그 경우만 예외로 남긴다.
+ */
+export interface SettingCustomRow extends SettingRowBase {
+  kind: 'custom';
+  control: HTMLElement;
+}
+
+export type SettingRow =
+  | SettingCheckboxRow | SettingSelectRow | SettingRangeRow | SettingTextRow
+  | SettingNoteRow | SettingButtonRow | SettingCustomRow;
+
+export interface SettingsSection {
+  id: string;
+  title: string;
+  /** 머리에 붙는 이모지 한 자 (선택) */
+  icon?: string;
+  rows: SettingRow[];
+}
+
+export interface SettingsSheetSpec {
+  sections: SettingsSection[];
+  onClose: () => void;
+}
+
+export interface SettingsSheetRefs {
+  el: HTMLDivElement;
+  /** 검색칸으로 포커스 */
+  focusFilter: () => void;
+}
+
+/**
+ * 섹션 펼침 상태 — **세션 기억**(모듈 수명 = 탭 수명)이다.
+ *
+ * 설정을 열 때마다 시트를 새로 그리므로 어딘가 남기지 않으면 방금 펼쳐 둔 자리가 매번
+ * 접힌 채 돌아온다(설정은 고치고 확인하고 또 고치느라 연달아 연다). 그렇다고 storage에
+ * 남길 값은 아니다: 취향이 아니라 "지금 뭘 만지는 중인가"라 다음 날까지 살아 있을 이유가
+ * 없고, 토글 하나에 저장소 쓰기를 늘릴 값어치도 없다.
+ */
+const settingsSectionOpen = new Map<string, boolean>();
+
+function settingRowHaystack(row: SettingRow): string {
+  const parts = [row.key, row.label ?? '', row.title ?? '', row.keywords ?? ''];
+  if (row.kind === 'note') parts.push(row.text);
+  if (row.kind === 'select') parts.push(...row.options.map(([, label]) => label));
+  return parts.join(' ').toLowerCase();
+}
+
+function buildSettingRange(
+  spec: { value: number; min?: number; max?: number; step?: number; onChange: (v: number) => void },
+): HTMLInputElement {
+  const range = h('input', {
+    className: 'ey-settings-range',
+    attrs: {
+      type: 'range',
+      min: String(spec.min ?? 0),
+      max: String(spec.max ?? 1),
+      step: String(spec.step ?? 0.01),
+      value: String(spec.value),
+    },
+  });
+  // change(놓는 순간)로만 저장한다 — 드래그 중 input마다 저장하면 저장 체인이 수십 번 돈다
+  range.addEventListener('change', () => spec.onChange(Number(range.value)));
+  return range;
+}
+
+function buildSettingControl(row: SettingRow): HTMLElement {
+  switch (row.kind) {
+    case 'checkbox': {
+      const box = h('input', { attrs: { type: 'checkbox' } });
+      box.checked = row.value;
+      box.addEventListener('change', () => row.onChange(box.checked));
+      if (!row.range) return box;
+      return h('span', { className: 'ey-settings-inline' }, buildSettingRange(row.range), box);
+    }
+    case 'select': {
+      const select = h('select', { className: 'ey-select' });
+      for (const [value, label] of row.options) select.append(h('option', { text: label, attrs: { value } }));
+      select.value = row.value;
+      select.addEventListener('change', () => row.onChange(select.value));
+      return select;
+    }
+    case 'range': {
+      const slider = buildSettingRange(row);
+      const format = row.format;
+      if (!format) return slider;
+      // 값이 뜻을 갖는 슬라이더(너비 px·배율)는 숫자가 없으면 조준할 수 없다
+      const readout = h('span', { className: 'ey-settings-range-val', text: format(row.value) });
+      slider.addEventListener('input', () => { readout.textContent = format(Number(slider.value)); });
+      return h('span', { className: 'ey-settings-inline' }, slider, readout);
+    }
+    case 'text': {
+      const input = h('input', {
+        className: 'ey-input',
+        attrs: {
+          placeholder: row.placeholder ?? '',
+          ...(row.password ? { type: 'password' } : {}),
+        },
+      });
+      input.value = row.value;
+      input.addEventListener('change', () => {
+        const value = row.sanitize ? row.sanitize(input.value) : input.value.trim();
+        if (row.sanitize && !value) {
+          input.value = row.value; // 다듬어서 빈 값이 되면 저장하지 않고 원래 값으로 되돌린다
+          return;
+        }
+        row.onChange(value);
+      });
+      return input;
+    }
+    case 'button': {
+      const btn = h('button', {
+        className: 'ey-secondary-btn ey-settings-action',
+        text: row.label,
+        attrs: { type: 'button', ...(row.title ? { title: row.title } : {}) },
+      });
+      btn.addEventListener('click', () => row.onClick(btn));
+      return btn;
+    }
+    case 'custom':
+      return row.control;
+    case 'note':
+      return h('div', { className: `ey-settings-note${row.tone === 'bad' ? ' bad' : ''}`, text: row.text });
+  }
+}
+
+/** 한 줄 그리기 — note와 라벨 없는 button·custom은 라벨 칸 없이 통째로 놓는다(권한 버튼 등) */
+function buildSettingRowEl(row: SettingRow): HTMLElement {
+  const control = buildSettingControl(row);
+  if (row.kind === 'note') return control;
+  if (row.kind === 'button' || !row.label) {
+    return h('div', { className: 'ey-settings-row ey-settings-bare' }, control);
+  }
+  const label = h('label', { text: row.label, ...(row.title ? { attrs: { title: row.title } } : {}) });
+  if (row.labelSuffix) label.append(row.labelSuffix);
+  return h('div', {
+    className: `ey-settings-row${row.layout === 'col' ? ' ey-settings-col' : ''}`,
+  }, label, control);
+}
+
+/**
+ * 범주별로 접히는 설정 시트 + 맨 위 검색칸.
+ *
+ * 예전에는 40줄 넘는 형제 div가 한 줄로 늘어서 있었다 — 찾는 설정이 어디쯤인지 알 방법이
+ * 스크롤뿐이라, **이름을 아는 설정조차** 못 찾는 상태였다. 고치는 길은 둘이고 둘 다 있어야
+ * 한다: 분류(짐작으로 도달)와 검색(이름만 알 때 직행).
+ *
+ * 기본 펼침은 "첫 섹션만"이다. 전부 펼치면 지금의 40줄 벽이 제목 몇 개 낀 채 그대로
+ * 돌아와 분류가 아무것도 해결하지 못한다. 대신 발견성은 검색이 맡는다 — 검색어가 있으면
+ * 걸린 섹션이 **자동으로 펼쳐지고** 안 걸린 섹션은 통째로 사라진다. 검색어를 지우면
+ * 사용자가 직접 정해 둔 펼침 상태로 정확히 되돌아온다(검색 중 강제 펼침은 기억하지 않는다).
+ */
+export function buildSettingsSheet(spec: SettingsSheetSpec): SettingsSheetRefs {
+  interface RowEntry { el: HTMLElement; haystack: string }
+  interface SectionEntry { id: string; details: HTMLDetailsElement; count: HTMLElement; rows: RowEntry[] }
+
+  const sections: SectionEntry[] = [];
+  /** 검색 중에는 강제로 펼치므로 그 사이의 toggle을 사용자 의도로 기억하면 안 된다 */
+  let filtering = false;
+
+  const filter = h('input', {
+    className: 'ey-input ey-settings-filter',
+    attrs: { type: 'search', placeholder: t('panels.settings.filterPlaceholder') },
+  });
+  const noMatch = h('div', { className: 'ey-settings-empty' });
+  noMatch.style.display = 'none';
+  const expandAll = h('button', {
+    className: 'ey-settings-expand-all',
+    text: t('panels.settings.expandAll'),
+    attrs: { type: 'button' },
+  });
+  const body = h('div', { className: 'ey-settings-sections' });
+
+  spec.sections.forEach((section, index) => {
+    const count = h('span', { className: 'ey-settings-section-count' });
+    const summary = h('summary', { className: 'ey-settings-section-head' },
+      section.icon ? h('span', { className: 'ey-settings-section-icon', text: section.icon }) : null,
+      h('span', { className: 'ey-settings-section-title', text: section.title }),
+      count,
+    );
+    const rowsWrap = h('div', { className: 'ey-settings-section-body' });
+    const details = h('details', { className: 'ey-settings-section' }, summary, rowsWrap);
+    details.open = settingsSectionOpen.get(section.id) ?? index === 0;
+    // 기본값도 **반드시** 기억에 심는다 — 검색이 강제로 펼친 섹션을 검색어를 지울 때
+    // 되돌리는 근거가 이 Map뿐이라, 비어 있으면 "펼쳐진 채로 남는" 상태가 굳는다
+    settingsSectionOpen.set(section.id, details.open);
+
+    const entry: SectionEntry = { id: section.id, details, count, rows: [] };
+    details.addEventListener('toggle', () => {
+      if (!filtering) settingsSectionOpen.set(entry.id, details.open);
+    });
+    for (const row of section.rows) {
+      const el = buildSettingRowEl(row);
+      // 범주 이름도 각 행의 검색 대상에 넣는다 — "가라오케"를 친 사람이 원하는 것은
+      // 그 범주의 설정들이지 "결과 없음"이 아니다(행 라벨에는 범주명이 안 들어 있다)
+      entry.rows.push({ el, haystack: `${settingRowHaystack(row)} ${section.title.toLowerCase()}` });
+      rowsWrap.append(el);
+    }
+    sections.push(entry);
+    body.append(details);
+  });
+
+  const applyFilter = () => {
+    const raw = filter.value.trim();
+    const query = raw.toLowerCase();
+    filtering = query.length > 0;
+    let total = 0;
+    for (const section of sections) {
+      let hit = 0;
+      for (const row of section.rows) {
+        const match = !query || row.haystack.includes(query);
+        row.el.style.display = match ? '' : 'none';
+        if (match) hit++;
+      }
+      total += hit;
+      section.details.style.display = query && hit === 0 ? 'none' : '';
+      section.count.textContent = query ? String(hit) : '';
+      section.details.open = query ? hit > 0 : (settingsSectionOpen.get(section.id) ?? section.details.open);
+    }
+    noMatch.textContent = t('panels.settings.noMatch', [raw]);
+    noMatch.style.display = query && total === 0 ? '' : 'none';
+    expandAll.style.display = query ? 'none' : '';
+  };
+  filter.addEventListener('input', applyFilter);
+
+  expandAll.addEventListener('click', () => {
+    // 하나라도 접혀 있으면 "모두 펼치기", 전부 펼쳐져 있으면 "모두 접기"
+    const open = sections.some(s => !s.details.open);
+    for (const section of sections) {
+      section.details.open = open;
+      settingsSectionOpen.set(section.id, open);
+    }
+    expandAll.textContent = open ? t('panels.settings.collapseAll') : t('panels.settings.expandAll');
+  });
+
+  const el = h('div', { className: 'ey-settings' },
+    h('div', { className: 'ey-settings-toolbar' }, filter, expandAll),
+    noMatch,
+    body,
+    h('button', {
+      className: 'ey-secondary-btn',
+      text: t('overlay.settings.closeButton'),
+      on: { click: () => spec.onClose() },
+    }),
+  );
+  return { el, focusFilter: () => filter.focus() };
+}
+
+// ── 별점 · 제보 ──────────────────────────────────────────────────
+
+export interface RatingPopOpts {
+  /** 지금 보고 있는 싱크의 분석 깊이 — 제보 화면이 "더 좋아질 수 있다"고 말할 근거 */
+  depth?: 'fast' | 'medium' | 'heavy' | null;
+  /** 별 하나 = 곧바로 전송. 성공 여부를 돌려준다 */
+  onSubmitRating: (rating: number) => Promise<boolean>;
+  onSubmitReport: (category: string | undefined, comment: string | undefined) => Promise<boolean>;
+  /** 분석 깊이 올리기 — 없으면 제보 화면의 '깊이 올리기' 버튼을 내지 않는다 */
+  onDepthUpgrade?: () => void;
+  /** 다 끝났으니 팝오버를 닫아 달라 — 표시 여부는 호스트가 관리한다 */
+  onClose?: () => void;
+}
+
+/**
+ * 별점 팝오버 — **별만 있고, 한 번 누르면 그대로 전송된다.**
+ *
+ * 예전 팝오버는 별·오류 유형·코멘트·전송 버튼이 한 화면에 있었다. 그래서 "괜찮았다"는
+ * 한마디를 남기려던 사람도 유형을 고를지 말지 생각한 뒤 전송까지 눌러야 했고, 결과적으로
+ * 가장 흔한 행동(그냥 별점)이 가장 번거로웠다. 지금은 반대다: 별점은 클릭 한 번으로 끝나고,
+ * 자세한 제보는 **다른 버튼**으로 갈라져 확인 단계까지 거친다(오발송 방지).
+ */
+export function buildRatingPop(opts: RatingPopOpts): { el: HTMLDivElement } {
+  const el = h('div', { className: 'ey-rating-pop' });
+
+  const renderStars = () => {
+    let sent = false;
+    const stars: HTMLButtonElement[] = [];
+    const paint = (upto: number) => stars.forEach((s, i) => s.classList.toggle('on', i < upto));
+    const status = h('div', { className: 'ey-rating-status' });
+    const starRow = h('div', { className: 'ey-rating-stars' });
+
+    for (let i = 1; i <= 5; i++) {
+      const star = h('button', {
+        className: 'ey-rating-star',
+        text: '★',
+        attrs: { type: 'button', title: t('panels.rating.starTitle', [String(i)]) },
+        on: {
+          mouseenter: () => { if (!sent) paint(i); },
+          mouseleave: () => { if (!sent) paint(0); },
+          click: () => {
+            if (sent) return;
+            sent = true;
+            paint(i);
+            status.textContent = t('panels.rating.sending');
+            void opts.onSubmitRating(i).then(ok => {
+              status.textContent = ok ? t('panels.rating.thanks') : t('panels.rating.failed');
+              if (ok) window.setTimeout(() => opts.onClose?.(), 1200);
+              else sent = false; // 실패하면 다시 누를 수 있어야 한다
+            });
+          },
+        },
+      });
+      stars.push(star);
+      starRow.append(star);
+    }
+
+    el.replaceChildren(
+      h('div', { className: 'ey-rating-title', text: t('panels.rating.title') }),
+      starRow,
+      h('div', { className: 'ey-rating-actions' },
+        h('button', {
+          className: 'ey-rating-report-btn',
+          text: t('panels.rating.report'),
+          attrs: { type: 'button', title: t('panels.rating.reportTitle') },
+          on: {
+            click: () => {
+              const sheet = buildReportSheet({
+                depth: opts.depth,
+                onSubmit: opts.onSubmitReport,
+                onDepthUpgrade: opts.onDepthUpgrade,
+                onCancel: renderStars, // 제보를 그만두면 별점 화면으로 되돌아간다
+                onDone: () => opts.onClose?.(),
+              });
+              el.replaceChildren(sheet.el);
+            },
+          },
+        }),
+      ),
+      status,
+    );
+  };
+
+  renderStars();
+  return { el };
+}
+
+export interface ReportSheetOpts {
+  depth?: 'fast' | 'medium' | 'heavy' | null;
+  onSubmit: (category: string | undefined, comment: string | undefined) => Promise<boolean>;
+  /** 제보를 그만둔다 — 호출부가 원래 화면으로 되돌린다 */
+  onCancel: () => void;
+  onDepthUpgrade?: () => void;
+  /** 전송(또는 깊이 올리기)이 끝나고 잠시 뒤 */
+  onDone?: () => void;
+}
+
+/**
+ * 오류 제보 — 유형 + 코멘트 + **확인 단계**.
+ *
+ * 확인을 넣은 이유는 하나다: 제보는 되돌릴 수 없다. 예전에는 버튼 한 번에 그대로 나갔고
+ * 오매칭 제보는 확인조차 없이 클릭 즉시 전송이었다 — 눌러 보고 무슨 버튼인지 알아보려던
+ * 사람이 제보를 보내게 된다. 그래서 마지막에 "제보하시겠어요?"를 한 번 세운다. 취소하면
+ * 입력이 그대로 남은 폼으로 돌아온다 — 확인을 무르는 대가로 다시 쓰게 만들지 않는다.
+ *
+ * 깊이가 fast·medium이면 **제보 전에 먼저** 말한다: 이 결과는 빠른 설정으로 만든 것이고
+ * 깊이를 올리면 나아질 수 있다고. 품질 불만의 상당수가 거기서 끝나는데도 화면이 그 사실을
+ * 알려 주지 않으면, 고칠 수 있는 문제가 제보로만 쌓인다.
+ */
+export function buildReportSheet(opts: ReportSheetOpts): { el: HTMLDivElement } {
+  const el = h('div', { className: 'ey-report-sheet' });
+
+  // 폼 컨트롤은 단계가 바뀌어도 **같은 노드를 다시 붙인다** — 확인 단계에서 취소해 돌아왔을 때
+  // 입력이 남아 있어야 한다(새로 만들면 매번 빈 칸이 된다)
+  const category = h('select', { className: 'ey-select' }, ...([
+    ['', t('overlay.feedback.catNone')],
+    ['timing', t('overlay.feedback.catTiming')],
+    ['pronunciation', t('overlay.feedback.catPron')],
+    ['lyrics', t('overlay.feedback.catLyrics')],
+    ['other', t('overlay.feedback.catOther')],
+  ] as [string, string][]).map(([value, label]) => h('option', { text: label, attrs: { value } })));
+  const comment = h('input', {
+    className: 'ey-input',
+    attrs: { placeholder: t('panels.report.commentPh'), maxlength: '500' },
+  });
+  const status = h('div', { className: 'ey-report-status' });
+
+  const renderForm = () => {
+    el.replaceChildren(
+      h('div', { className: 'ey-report-title', text: t('panels.report.title') }),
+      h('div', { className: 'ey-report-row' }, category),
+      h('div', { className: 'ey-report-row' }, comment),
+      h('div', { className: 'ey-report-actions' },
+        h('button', {
+          className: 'ey-secondary-btn', text: t('panels.report.cancel'),
+          attrs: { type: 'button' }, on: { click: () => opts.onCancel() },
+        }),
+        h('button', {
+          className: 'ey-primary-btn ey-report-danger', text: t('panels.report.send'),
+          attrs: { type: 'button' }, on: { click: () => renderConfirm() },
+        }),
+      ),
+      status,
+    );
+  };
+
+  const renderConfirm = () => {
+    const send = h('button', {
+      className: 'ey-primary-btn ey-report-danger',
+      text: t('panels.report.confirmSend'),
+      attrs: { type: 'button' },
+    });
+    send.addEventListener('click', () => {
+      send.disabled = true;
+      status.textContent = t('panels.rating.sending');
+      void opts.onSubmit(category.value || undefined, comment.value.trim() || undefined).then(ok => {
+        if (ok) {
+          status.textContent = t('panels.report.thanks');
+          window.setTimeout(() => opts.onDone?.(), 1400);
+          return;
+        }
+        // 실패 — 입력을 살린 채 폼으로. status는 같은 노드라 다시 그려도 사유가 남는다
+        renderForm();
+        status.textContent = t('panels.report.failed');
+      });
+    });
+    el.replaceChildren(
+      h('div', { className: 'ey-report-confirm' },
+        h('div', { className: 'ey-report-title', text: t('panels.report.confirmTitle') }),
+        h('div', { className: 'ey-report-confirm-body', text: t('panels.report.confirmBody') }),
+        h('div', { className: 'ey-report-actions' },
+          h('button', {
+            className: 'ey-secondary-btn', text: t('panels.report.cancel'),
+            attrs: { type: 'button' }, on: { click: () => renderForm() },
+          }),
+          send,
+        ),
+      ),
+      status,
+    );
+  };
+
+  const renderDepthHint = (depth: 'fast' | 'medium') => {
+    el.replaceChildren(
+      h('div', { className: 'ey-report-hint' },
+        h('div', { className: 'ey-report-hint-text', text: t('panels.report.depthHint', [depthLabel(depth)]) }),
+        h('div', { className: 'ey-report-hint-actions' },
+          opts.onDepthUpgrade
+            ? h('button', {
+              className: 'ey-primary-btn', text: t('panels.report.depthUpgrade'),
+              attrs: { type: 'button' },
+              on: { click: () => { opts.onDepthUpgrade?.(); opts.onDone?.(); } },
+            })
+            : null,
+          h('button', {
+            className: 'ey-secondary-btn', text: t('panels.report.depthAnyway'),
+            attrs: { type: 'button' }, on: { click: () => renderForm() },
+          }),
+        ),
+      ),
+    );
+  };
+
+  if (opts.depth === 'fast' || opts.depth === 'medium') renderDepthHint(opts.depth);
+  else renderForm();
+  return { el };
+}
+
+export interface WrongLyricsConfirmOpts {
+  /** 지금 붙어 있는 가사의 제목 — 무엇을 제보하는지 눈으로 확인시킨다 */
+  matchedTitle?: string | null;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+/**
+ * "이 가사가 아니에요" 확인 팝오버.
+ *
+ * 이 버튼은 가사 바로 위에 상시 떠 있어 오클릭 거리가 가장 짧은데도 확인이 없었다 —
+ * 누르는 즉시 제보가 나갔다. 흐름의 목적은 제보 자체가 아니라 **올바른 가사를 찾는 것**
+ * 이므로, 확인을 한 단계 넣어도 사용자가 잃는 것은 없다.
+ */
+export function buildWrongLyricsConfirm(opts: WrongLyricsConfirmOpts): { el: HTMLDivElement } {
+  const title = opts.matchedTitle?.trim();
+  const el = h('div', { className: 'ey-confirm-pop' },
+    h('div', { className: 'ey-confirm-text', text: t('panels.wrongLyrics.title') }),
+    title ? h('div', { className: 'ey-confirm-target', text: t('panels.wrongLyrics.matched', [title]) }) : null,
+    h('div', { className: 'ey-confirm-body', text: t('panels.wrongLyrics.body') }),
+    h('div', { className: 'ey-confirm-actions' },
+      h('button', {
+        className: 'ey-secondary-btn', text: t('panels.wrongLyrics.cancel'),
+        attrs: { type: 'button' }, on: { click: () => opts.onCancel() },
+      }),
+      h('button', {
+        className: 'ey-primary-btn ey-report-danger', text: t('panels.wrongLyrics.confirm'),
+        attrs: { type: 'button' }, on: { click: () => opts.onConfirm() },
+      }),
+    ),
+  );
+  return { el };
+}
+
+// ── 공지 시트 ────────────────────────────────────────────────────
+
+/** 마지막으로 본 공지 id — 판정 규칙은 probeNotices 주석 참고 */
+const NOTICES_SEEN_KEY = 'ey_notices_seen';
+
+export interface NoticesProbe {
+  /** 이 서버가 공지 기능을 갖고 있는가 — false면 호출부는 **진입점 자체를 숨긴다** */
+  available: boolean;
+  unread: boolean;
+  count: number;
+}
+
+async function readSeenNoticeId(): Promise<string> {
+  try {
+    const stored = await chrome.storage.local.get(NOTICES_SEEN_KEY);
+    const value = stored[NOTICES_SEEN_KEY] as unknown;
+    return typeof value === 'string' ? value : '';
+  } catch {
+    return '';
+  }
+}
+
+async function markNoticesSeen(notices: ServerNotice[]): Promise<void> {
+  if (notices.length === 0) return;
+  try {
+    await chrome.storage.local.set({ [NOTICES_SEEN_KEY]: notices[0].id });
+  } catch { /* 표시용 상태다 — 못 적으면 점이 한 번 더 뜰 뿐이다 */ }
+}
+
+/**
+ * 공지가 있는지 + 안 읽은 것이 있는지.
+ *
+ * "안 읽음"은 **최신 공지 id 하나**를 마지막으로 본 것과 비교해 판정한다. id가 문자열이라
+ * 크기 비교(더 큰 id = 더 새것)가 성립하지 않으므로 "맨 위 공지가 지난번 본 것과 다른가"만
+ * 본다 — 서버가 최신순으로 준다는 전제 위에서만 맞다. 서버가 순서를 바꾸면 이미 읽은
+ * 공지에 점이 한 번 더 뜰 수 있는데, 그건 점 하나를 잘못 켜는 비용이고 반대(새 공지를
+ * 놓치는 것)보다 훨씬 싸다.
+ *
+ * 실패·구버전 서버는 available=false다 — 호출부는 **오류를 보여주지 말고** 진입점을 통째로
+ * 숨긴다(없는 기능을 고장난 기능처럼 보이게 하지 않는다).
+ */
+export async function probeNotices(): Promise<NoticesProbe> {
+  const res = await sendPanelMessage<NoticesResponse>({ type: 'NOTICES_GET' });
+  const notices = res.data?.notices;
+  if (res.error || !Array.isArray(notices)) return { available: false, unread: false, count: 0 };
+  if (notices.length === 0) return { available: true, unread: false, count: 0 };
+  const seen = await readSeenNoticeId();
+  return { available: true, unread: notices[0].id !== seen, count: notices.length };
+}
+
+export interface NoticesSheetOpts {
+  onBack?: () => void;
+  /** 목록을 '본 것'으로 표시한 직후 — 호스트가 안 읽음 점을 끄는 자리 */
+  onSeen?: () => void;
+}
+
+/** 등급 이름 — 색만으로는 등급을 읽을 수 없는 사람이 있다 */
+function noticeLevelLabel(level: ServerNotice['level']): string {
+  if (level === 'critical') return t('panels.notices.levelCritical');
+  if (level === 'warning') return t('panels.notices.levelWarning');
+  return t('panels.notices.levelInfo');
+}
+
+/**
+ * 서버 공지함 — 등급색 왼쪽 띠 + 제목 + 본문(줄바꿈 보존) + 상대 날짜.
+ * 본문은 서버가 준 평문이라 textContent로만 넣는다(HTML을 심을 자리가 아니다).
+ */
+export function buildNoticesSheet(opts: NoticesSheetOpts = {}): { el: HTMLDivElement } {
+  const list = h('div', { className: 'ey-notices-list' },
+    h('div', { className: 'ey-state-sub', text: t('panels.notices.loading') }));
+  const el = h('div', { className: 'ey-state ey-notices' },
+    buildSheetHead(t('panels.notices.title'), opts.onBack),
+    list,
+  );
+
+  void sendPanelMessage<NoticesResponse>({ type: 'NOTICES_GET' }).then(res => {
+    const notices = res.data?.notices;
+    if (res.error || !Array.isArray(notices)) {
+      // 여기까지 들어온 사용자에게는 말 없는 빈 화면이 더 나쁘다. 다만 서버 오류 문구를
+      // 그대로 옮기지는 않는다 — 대부분 '이 서버엔 그 기능이 없다'는 뜻이다
+      list.replaceChildren(h('div', { className: 'ey-state-sub', text: t('panels.notices.unavailable') }));
+      return;
+    }
+    if (notices.length === 0) {
+      list.replaceChildren(h('div', { className: 'ey-state-sub', text: t('panels.notices.empty') }));
+      return;
+    }
+    list.replaceChildren(...notices.map(notice => {
+      const at = Date.parse(notice.created_at);
+      return h('div', { className: `ey-notice-item ey-notice-${notice.level}` },
+        h('div', { className: 'ey-notice-head' },
+          h('span', { className: 'ey-notice-level', text: noticeLevelLabel(notice.level) }),
+          h('span', { className: 'ey-notice-title', text: notice.title }),
+          Number.isFinite(at) ? h('span', { className: 'ey-notice-date', text: relativeDate(at) }) : null,
+        ),
+        // 줄바꿈은 CSS(white-space: pre-wrap)가 살린다 — 서버가 넣은 개행이 곧 문단 구분이다
+        h('div', { className: 'ey-notice-body', text: notice.body }),
+      );
+    }));
+    void markNoticesSeen(notices).then(() => opts.onSeen?.());
+  });
+
+  return { el };
+}
+
+// ── 기여 · 쿼터 시트 ─────────────────────────────────────────────
+
+export interface ContributionSheetOpts {
+  /** 지금 보고 있는 영상 — 남은 한도는 영상 기준 조회라 없으면 한도 블록을 건너뛴다 */
+  videoId?: string | null;
+  /** 목록 한 줄을 눌렀을 때. 실제 이동 방법(새 탭·같은 탭)은 호스트가 정한다 */
+  onOpenVideo?: (videoId: string) => void;
+  onBack?: () => void;
+}
+
+/** STATS_VIEWS 한 번에 보낼 수 있는 최대 건수 — 서버 계약 */
+const VIEWS_CHUNK = 100;
+
+async function readContributions(): Promise<ContribEntry[]> {
+  try {
+    const stored = await chrome.storage.local.get(CONTRIB_STORAGE_KEY);
+    const list = stored[CONTRIB_STORAGE_KEY] as ContribEntry[] | undefined;
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * "내가 만든 N곡을 M명이 봤어요" + 오늘 남은 횟수 + 기여 목록.
+ *
+ * 세 조각의 출처가 서로 다르다는 것이 이 화면의 전부다: 기여 목록은 **이 브라우저에만**
+ * 있고(서버엔 계정이 없어 '누가 만들었나'가 없다), 조회수와 남은 한도는 서버에만 있다.
+ * 그래서 목록은 즉시 그리고 서버 값은 도착하는 대로 채운다 — 서버가 없거나 낡아 못 주면
+ * 그 블록만 사라지고 나머지는 그대로 쓸 수 있다.
+ *
+ * 같은 영상을 여러 번 재생성하면 항목이 여럿 쌓인다 — "N곡"은 **영상 단위로** 세고(중복
+ * 제거) 조회수도 영상당 한 번만 더한다. 아니면 재생성이 기여를 부풀린다.
+ */
+export function buildContributionSheet(opts: ContributionSheetOpts = {}): { el: HTMLDivElement } {
+  const quota = h('div', { className: 'ey-contrib-quota' });
+  quota.style.display = 'none'; // 서버가 한도를 강제하는 배포에서만 나타난다
+  const headline = h('div', { className: 'ey-contrib-headline' });
+  const list = h('div', { className: 'ey-contrib-list' },
+    h('div', { className: 'ey-state-sub', text: t('panels.contrib.loading') }));
+
+  const el = h('div', { className: 'ey-state ey-contrib' },
+    buildSheetHead(t('panels.contrib.title'), opts.onBack),
+    quota,
+    headline,
+    list,
+    // 흐릿하게 두지 않는다 — 로컬 전용이라는 사실이 이 화면의 약속 그 자체다
+    h('div', { className: 'ey-contrib-privacy', text: t('panels.contrib.privacy') }),
+  );
+
+  void (async () => {
+    const entries = await readContributions();
+    // 최신이 뒤에 쌓이므로(ContribEntry 규약) 뒤에서부터 훑어 영상당 최신 한 건만 남긴다
+    const latest = new Map<string, ContribEntry>();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (!latest.has(entry.videoId)) latest.set(entry.videoId, entry);
+    }
+    const unique = [...latest.values()].sort((a, b) => b.completedAt - a.completedAt);
+
+    if (unique.length === 0) {
+      list.replaceChildren(h('div', { className: 'ey-state-sub', text: t('panels.contrib.empty') }));
+    } else {
+      // 조회수가 오기 전에도 곡 수는 이미 안다 — 먼저 말하고 나중에 사람 수를 덧붙인다
+      headline.textContent = t('panels.contrib.headlineNoViews', [String(unique.length)]);
+      const metaEls = new Map<string, HTMLElement>();
+      list.replaceChildren(...unique.map(entry => {
+        const meta = h('span', { className: 'ey-contrib-item-meta', text: relativeDate(entry.completedAt) });
+        const row = h('button', {
+          className: 'ey-contrib-item',
+          attrs: { type: 'button', title: t('panels.contrib.openTitle') },
+          on: { click: () => opts.onOpenVideo?.(entry.videoId) },
+        },
+          h('span', { className: 'ey-contrib-item-title', text: entry.title || entry.videoId }),
+          meta,
+          entry.depth
+            ? h('span', { className: `ey-contrib-depth ${entry.depth}`, text: depthLabel(entry.depth) })
+            : null,
+        );
+        if (!opts.onOpenVideo) row.disabled = true; // 이동할 방법이 없으면 눌리는 척하지 않는다
+        metaEls.set(entry.videoId, meta);
+        return row;
+      }));
+
+      // 조회수 — 100건씩 끊어 묻는다(서버 계약). 일부 청크만 실패해도 받은 만큼은 보여준다
+      const ids = unique.map(e => e.videoId);
+      const views: Record<string, number> = {};
+      let gotAny = false;
+      for (let i = 0; i < ids.length; i += VIEWS_CHUNK) {
+        const res = await sendPanelMessage<ViewStatsResponse>({
+          type: 'STATS_VIEWS', payload: { videoIds: ids.slice(i, i + VIEWS_CHUNK) },
+        });
+        const chunk = res.data?.views;
+        if (!chunk) continue;
+        gotAny = true;
+        Object.assign(views, chunk);
+      }
+      if (gotAny) {
+        const total = ids.reduce((sum, id) => sum + (views[id] ?? 0), 0);
+        headline.textContent = t('panels.contrib.headline', [String(unique.length), String(total)]);
+        for (const [videoId, meta] of metaEls) {
+          const count = views[videoId];
+          if (count === undefined) continue;
+          meta.textContent = `${meta.textContent} · ${t('panels.contrib.rowViews', [String(count)])}`;
+        }
+      }
+    }
+
+    // 남은 한도 — 영상이 있어야 물을 수 있고, 강제하지 않는 배포에선 숫자에 뜻이 없다
+    if (!opts.videoId) return;
+    const res = await sendPanelMessage<LimitsResponse>({
+      type: 'LIMITS_GET', payload: { videoId: opts.videoId },
+    });
+    const limits = res.data;
+    if (!limits?.enforced) return;
+    const bucket = (label: string, remaining: number, limit: number) =>
+      h('div', { className: 'ey-contrib-quota-row' },
+        h('span', { text: label }),
+        h('span', {
+          className: `ey-contrib-quota-val${remaining === 0 ? ' out' : ''}`,
+          text: t('panels.contrib.quotaValue', [String(remaining), String(limit)]),
+        }),
+      );
+    quota.replaceChildren(
+      h('div', { className: 'ey-contrib-quota-title', text: t('panels.contrib.quotaTitle') }),
+      bucket(t('panels.contrib.quotaGenerate'), limits.generate.remaining, limits.generate.limit),
+      bucket(t('panels.contrib.quotaDestructive'), limits.destructive.remaining, limits.destructive.limit),
+      h('div', {
+        className: 'ey-settings-note',
+        text: t('panels.contrib.quotaWindow', [String(limits.window_hours)]),
+      }),
+    );
+    quota.style.display = '';
+  })();
+
+  return { el };
 }

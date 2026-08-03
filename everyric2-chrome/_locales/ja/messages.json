@@ -2132,4 +2132,13 @@
         "content": "$1"
       }
     }
-  }}
+  },
+  "content_translation_tooLong": {
+    "message": "歌詞が長すぎて翻訳・読みを作れません (最大 $P1$ 行)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  }
+}
