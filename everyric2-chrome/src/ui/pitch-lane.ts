@@ -200,6 +200,9 @@ interface PitchColors {
   accent: string;
   /** 가사·현재 노트 테두리 */
   text: string;
+  /** 스트리밍용 글자 외곽선 색 (설정 streamTextOutline) — 다크는 검정, 라이트는 흰색.
+   *  DOM 글자의 text-shadow 링과 **같은 CSS 변수**에서 온다(색 정책은 CSS 한 곳). */
+  outline: string;
 }
 
 /** 마지막 렌더 뷰포트 — 클릭·드래그의 좌표→시간 역변환용 */
@@ -238,6 +241,11 @@ export interface PitchLaneOptions {
   pronPosition: 'off' | 'bottom' | 'both' | 'center';
   /** 발음 표기 방식(hangul/romaji/kana/…) — 호출부가 lib/lang.resolveScript로 해석해 넘긴다 */
   pronScript: PronScript;
+  /** 스트리밍용 글자 외곽선(설정 streamTextOutline) — 켜면 캔버스 글자에 테를 두른다.
+   *  DOM 글자는 CSS text-shadow가 맡지만 **캔버스에는 CSS가 원리상 닿지 않아서**
+   *  같은 설정을 여기까지 배선해 strokeText로 직접 그린다(운영자 실사용 제보:
+   *  크로마키+외곽선을 켰는데 PiP 레인 글자에 테가 없다). */
+  textOutline: boolean;
   /** RAW f0 곡선 상시 표시 (설정 pitchF0Curve) — 디버그 언더레이와 독립 */
   showF0: boolean;
   /** 디버그: 글자별 CTC 신뢰도 색 + 진단 레이어(VAD 스트립·타이밍 레인·헤더) */
@@ -283,6 +291,7 @@ const DEFAULT_OPTIONS: PitchLaneOptions = {
   f0Opacity: 1,
   pronPosition: 'off',
   pronScript: 'hangul',
+  textOutline: false,
   showF0: true,
   showConfidence: false,
   countdown: true,
@@ -583,7 +592,7 @@ export class PitchLaneRenderer {
       const pc = ((m % 12) + 12) % 12;
       if (semiPx < 9 && (semiPx >= 5 ? BLACK_KEYS.has(pc) : pc !== 0)) continue;
       ctx.fillStyle = pc === 0 ? colors.text : colors.dim;
-      ctx.fillText(`${PITCH_NAMES_EN[pc]}${Math.floor(m / 12) - 1}`, sidebarW - 3, y(m));
+      this.inkText(ctx, `${PITCH_NAMES_EN[pc]}${Math.floor(m / 12) - 1}`, sidebarW - 3, y(m));
     }
     ctx.textAlign = 'center';
     // 세로 눈금: 템포가 있으면 첫 비트에 정렬된 비트(옅게)/마디(진하게) 격자,
@@ -665,14 +674,14 @@ export class PitchLaneRenderer {
       if (w >= 14) {
         ctx.font = `bold ${namePx}px system-ui, sans-serif`;
         ctx.fillStyle = isCurrent ? colors.text : colors.dim;
-        ctx.fillText(noteLabel(n.midi, this.opts.solfege), lx, Math.max(namePx * 0.7, top - namePx * 0.7));
+        this.inkText(ctx, noteLabel(n.midi, this.opts.solfege), lx, Math.max(namePx * 0.7, top - namePx * 0.7));
       }
       // 노트 위 음절 — 계이름처럼 노트 바로 아래에 부착. **설정과 무관하게 항상 그린다**
       // (위 pronPos 주석: 이 텍스트는 이중표시 줄 설정에서 분리됐다).
       if (n.pron) {
         ctx.font = `${pronPx}px system-ui, sans-serif`;
         ctx.fillStyle = n.start <= now ? colors.accent : colors.dim;
-        ctx.fillText(n.pron, lx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
+        this.inkText(ctx, n.pron, lx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
       }
       ctx.textAlign = 'center';
     }
@@ -731,7 +740,7 @@ export class PitchLaneRenderer {
           ctx.font = `bold ${Math.round(staffH * 0.5)}px system-ui, sans-serif`;
           ctx.fillStyle = colors.accent;
           ctx.globalAlpha = 0.9;
-          ctx.fillText(String(num), nx, padTop + staffH / 2);
+          this.inkText(ctx, String(num), nx, padTop + staffH / 2);
           ctx.globalAlpha = 1;
         }
       }
@@ -769,7 +778,7 @@ export class PitchLaneRenderer {
           color = confBucketColor(it.w.confidence);
         }
         ctx.fillStyle = color;
-        ctx.fillText(it.w.word, xs[i], ty + lyricH * 0.55);
+        this.inkText(ctx, it.w.word, xs[i], ty + lyricH * 0.55);
       });
     }
     ty += lyricH;
@@ -814,7 +823,7 @@ export class PitchLaneRenderer {
         ctx.font = `${Math.max(9, Math.floor(trPx * maxW / tw))}px system-ui, sans-serif`;
       }
       ctx.fillStyle = colors.dim;
-      ctx.fillText(tr, cw / 2, ty + trH * 0.5, maxW);
+      this.inkText(ctx, tr, cw / 2, ty + trH * 0.5, maxW);
     }
 
     // ── 곡 키·BPM 라벨 (좌상단) — 서버 멜로디 분석이 추정한 키
@@ -829,7 +838,7 @@ export class PitchLaneRenderer {
       // 레인이 창 상단에 붙어 있으면(영상·스테이지 없음) 좌상단 미니 버튼과 겹치지
       // 않게 라벨을 오른쪽으로 민다 (강제 레이아웃 방지를 위해 캐시된 판정을 쓴다)
       const labelX = this.cachedLabelNearTop ? 62 : 4;
-      ctx.fillText(parts.join(' · '), labelX, padTop + 7);
+      this.inkText(ctx, parts.join(' · '), labelX, padTop + 7);
       ctx.globalAlpha = 1;
       ctx.textAlign = 'center';
     }
@@ -849,6 +858,37 @@ export class PitchLaneRenderer {
     ctx.lineTo(playheadX, padTop + 6);
     ctx.closePath();
     ctx.fill();
+  }
+
+  /**
+   * 캔버스 글자 그리기 — 외곽선 설정이 켜져 있으면 **채움 전에** 테를 두른다.
+   *
+   * DOM 글자는 overlay.css의 text-shadow 링이 맡지만 캔버스에는 CSS가 닿지 않는다.
+   * 그래서 레인의 «읽는 글자»(가사·노트 음절·계이름·이중표시·미리보기·번역·카운트다운)는
+   * 전부 이 함수를 거친다 — fillText를 직접 부르면 그 글자만 조용히 테 없이 남는다.
+   * 디버그 레인(타이밍 진단)은 일부러 제외한다: 방송용 화면이 아니고, 색으로 정보를 주는
+   * 표시라 테를 두르면 오히려 읽기 어려워진다.
+   *
+   * stroke는 경로 **중앙**에 그려지므로 절반이 글자 안쪽을 먹는다 — 그래서 먼저 두르고
+   * 그 위에 채워 «바깥쪽만 남은» 테를 만든다(CSS 링과 같은 모양). 두께는 글자 크기에
+   * 비례해야 큰 글자에서 실처럼 얇아지지 않는다.
+   */
+  private inkText(
+    ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW?: number,
+  ): void {
+    if (this.opts.textOutline && this.colors) {
+      const px = parseFloat(/([\d.]+)px/.exec(ctx.font)?.[1] ?? '') || 12;
+      ctx.save();
+      ctx.strokeStyle = this.colors.outline;
+      ctx.lineWidth = Math.max(2, px * 0.16);
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      if (maxW === undefined) ctx.strokeText(text, x, y);
+      else ctx.strokeText(text, x, y, maxW);
+      ctx.restore();
+    }
+    if (maxW === undefined) ctx.fillText(text, x, y);
+    else ctx.fillText(text, x, y, maxW);
   }
 
   /**
@@ -1184,7 +1224,7 @@ export class PitchLaneRenderer {
     ctx.textBaseline = 'middle';
     const maxW = cw - 16;
     ctx.fillStyle = colors.dim;
-    ctx.fillText(pron, cw / 2, py, maxW);
+    this.inkText(ctx, pron, cw / 2, py, maxW);
 
     const fullW = ctx.measureText(pron).width;
     const textW = Math.min(fullW, maxW);
@@ -1210,7 +1250,7 @@ export class PitchLaneRenderer {
     ctx.rect(x0, py - fontPx, sungW, fontPx * 2);
     ctx.clip();
     ctx.fillStyle = colors.accent;
-    ctx.fillText(pron, cw / 2, py, maxW);
+    this.inkText(ctx, pron, cw / 2, py, maxW);
     ctx.restore();
   }
 
@@ -1242,7 +1282,7 @@ export class PitchLaneRenderer {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = colors.dim;
     ctx.globalAlpha *= 0.55;
-    ctx.fillText(pron, cw / 2, py, cw - 16);
+    this.inkText(ctx, pron, cw / 2, py, cw - 16);
     ctx.restore();
   }
 }
@@ -1543,5 +1583,6 @@ function readPitchColors(win: Window, source: Element): PitchColors {
     dim: pick('--ey-text-dim', 'rgba(241, 241, 242, 0.58)'),
     accent: pick('--ey-accent', '#ffb02e'),
     text: pick('--ey-text', '#f1f1f2'),
+    outline: pick('--ey-outline', 'rgba(0, 0, 0, 0.85)'),
   };
 }

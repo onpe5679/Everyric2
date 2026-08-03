@@ -110,11 +110,15 @@ try {
       `pitchPronPosition='${pos}' 에서도 노트 영역에 글자가 그려짐`, m);
   }
 
+  // 판정 기준은 커밋본(lane-note-text-check.mjs)과 **같은 것**을 쓴다 — 근거·문턱의
+  // 실측 출처는 그쪽 주석에 있다(요약: 'both'는 발음 줄이 세로 공간을 먹어 가사 줄이
+  // 측정 밴드로 밀려 올라오므로 비교 상대가 못 된다. 'center'는 레이아웃이 off와 같다).
   const a = results.off?.noteInk ?? 0;
-  const b = results.both?.noteInk ?? 0;
-  const ratio = a > 0 ? b / a : 0;
-  check(ratio > 0.6 && ratio < 1.7,
-    "노트 영역 잉크가 설정값에 좌우되지 않음('off' 대비 'both')", { off: a, both: b, ratio: +ratio.toFixed(2) });
+  const c = results.center?.noteInk ?? 0;
+  const ratio = c > 0 ? a / c : 0;
+  check(ratio >= 0.72,
+    "노트 영역 잉크가 설정값에 좌우되지 않음('off'가 'center' 대비 안 줄어듦)",
+    { off: a, center: c, ratio: +ratio.toFixed(3) });
 
   await page.screenshot({ path: resolve(__dirname, '../lane-note-text-check-iso.png') });
   console.log('screenshot: lane-note-text-check-iso.png');

@@ -1614,6 +1614,9 @@ export class LyricsOverlay {
       this.shortEl = h('div', { className: 'ey-pip-stage' },
         this.shortPrevEl, this.shortCurrentEl, this.shortNextEl);
     }
+    // 외곽선은 «지금 설정»을 따라간다 — 이 뷰는 PiP를 열 때 생기므로 그 전에 지나간
+    // applySettings가 못 걸어 준다(applySettings도 shortEl이 있으면 함께 갱신한다).
+    this.shortEl.classList.toggle('ey-text-outline', this.settings.streamTextOutline);
     container.append(this.shortEl);
     this.renderShortView();
   }
@@ -2787,6 +2790,10 @@ export class LyricsOverlay {
     // 않도록 CSS가 text-shadow 링을 두른다(설정 streamTextOutline)
     this.panel.classList.toggle('ey-text-outline', settings.streamTextOutline);
     this.attachPanel.classList.toggle('ey-text-outline', settings.streamTextOutline);
+    // 단축 표시는 **PiP 문서의 light DOM**이라 위 두 줄(패널·부착 패널)이 안 덮는다 —
+    // 빠뜨리면 PiP에서 제일 크게 보이는 줄만 테 없이 남는다(운영자 제보로 실측된 결함).
+    // shortEl은 PiP를 열 때 생기므로 attachShortView에서도 같은 클래스를 건다.
+    this.shortEl?.classList.toggle('ey-text-outline', settings.streamTextOutline);
     // 테마 판정은 lib/theme.ts 한 곳에서만 — PiP도 content가 같은 값을 받아 칠한다.
     // attachPanel은 this.panel의 형제라 CSS 변수를 :host에서 상속받지만, 라이트 테마
     // 오버라이드(.ey-panel.ey-light)는 클래스 스코프라 자신도 같은 클래스를 받아야 한다.
@@ -2815,6 +2822,9 @@ export class LyricsOverlay {
       f0Opacity: settings.pitchF0Opacity,
       pronPosition: settings.pitchPronPosition,
       pronScript: resolveScript(settings),
+      // 캔버스 글자에는 CSS text-shadow가 안 닿는다 — 같은 설정을 레인까지 배선해
+      // strokeText로 직접 두르게 한다(pitch-lane.ts inkText).
+      textOutline: settings.streamTextOutline,
       showF0: settings.pitchF0Curve,
       showConfidence: settings.debugInfo,
       metronomeBeat: settings.metronomeBeat,
