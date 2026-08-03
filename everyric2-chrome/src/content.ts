@@ -744,7 +744,10 @@ function overlayCallbacks(): OverlayCallbacks {
       updateGenChip();
     },
     onSettingsChange: patch => void handleSettingsChange(patch),
-    onRegenerate: () => void handleRegenerate(),
+    // onRegenerate(가사 보존한 채 다시 정렬만)는 더 이상 없다 — 헤더 버튼이 onResetSync로
+    // 바뀌면서(overlay.ts resetSyncBtn) 이 콜백을 부르는 곳이 사라졌다. handleRegenerate
+    // 자체는 살아 있다 — onDepthUpgrade(깊이 올리기)가 여전히 이 함수로 REGENERATE_SYNC를
+    // 부른다(가사를 지우지 않는 진짜 "재생성"이라 이름을 그대로 둔다).
     onDepthUpgrade: minDepth => void handleRegenerate(minDepth),
     onSubmitFeedback: async (rating, category, comment) => {
       const videoId = currentVideoId;
@@ -3428,7 +3431,11 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
   }
 }
 
-/** 재생성: 현재 everyric 싱크의 가사·발음·출처 그대로 서버 캐시를 무시하고 다시 정렬 */
+/** 재생성: 현재 everyric 싱크의 가사·발음·출처 그대로 서버 캐시를 무시하고 다시 정렬.
+ *  **UI명은 지금도 "재생성"이다** — 헤더의 "초기화"(resetSyncBtn→handleResetSync, 삭제 후
+ *  재검색)와는 다른 동작이라 이름을 안 바꿨다: 이쪽은 가사·발음·번역을 지우지 않고 서버
+ *  정렬만 다시 돌린다(깊이 올리기 onDepthUpgrade가 부르는 경로). 와이어(REGENERATE_SYNC)도
+ *  그대로 "regenerate" 계약 — 이름이 클라이언트·서버·와이어 세 층 모두 일치한다. */
 async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
   const videoId = currentVideoId;
   const data = currentData;
@@ -3539,7 +3546,10 @@ async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
   }
 }
 
-/** 이 영상의 서버 싱크 전부 삭제(초기화) 후 처음부터 다시 검색 — 잘못 붙여넣은 가사 복구용 */
+/** 이 영상의 서버 싱크 전부 삭제(초기화) 후 처음부터 다시 검색 — 잘못 붙여넣은 가사 복구용.
+ *  **UI명은 "초기화"** — 헤더 버튼(overlay.ts resetSyncBtn)이 이 함수를 부른다. 와이어는
+ *  그대로 SYNC_RESET(프로토콜이라 안 바꾼다) — 그 이름이 원래부터 "reset"이라 이 함수와
+ *  이미 일치했었다(개명이 필요했던 건 헤더 버튼·라벨·onRegenerate 콜백 쪽이었다). */
 async function handleResetSync(): Promise<void> {
   const videoId = currentVideoId;
   if (!videoId) return;
@@ -3565,6 +3575,20 @@ async function handleResetSync(): Promise<void> {
   }
   removeJob(videoId);
   updateGenChip();
+  // 확장 쪽 표시 상태도 이 영상 것만 함께 초기화한다(운영자 지시 2026-08-04) — 전역
+  // 설정(settings)은 안 건드린다. 번역·발음·배지는 이미 위 캐시 비우기 + 아래 searchLyrics
+  // 재조회(→applyLyricsData)가 자연히 새 상태로 덮어써 준다. 오프셋과 저신뢰 경고 억제는
+  // **그 재조회로도 안 지워진다** — video_offsets·warnDismiss 저장은 sync_results와
+  // 별개 테이블/키라 SYNC_RESET이 안 건드린다. 그대로 두면 재생성 뒤에도 옛 오프셋이나
+  // "이 곡에서 다시 보지 않기"가 되살아나므로 여기서 직접 민다.
+  videoOffset = 0;
+  clearTimeout(offsetSaveTimer);
+  void sendToBackground({ type: 'SYNC_OFFSET', payload: { videoId, offsetSec: 0 } });
+  broadcast('setOffsetValue', 0);
+  warnDismissedVideos.delete(videoId);
+  try {
+    await chrome.storage.local.remove(`${WARN_DISMISS_PREFIX}${videoId}`);
+  } catch { /* 저장 삭제 실패는 무시 — 메모리 값은 이미 지워졌고, 다음 경고 판정은 그걸 본다 */ }
   void searchLyrics();
 }
 

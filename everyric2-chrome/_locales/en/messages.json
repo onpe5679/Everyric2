@@ -476,10 +476,10 @@
   "overlay_header_pip": {
     "message": "View in Picture-in-Picture"
   },
-  "overlay_header_regen": {
+  "overlay_header_resetSync": {
     "message": "Reset sync — deletes the server save and starts over from scratch"
   },
-  "overlay_header_regenConfirm": {
+  "overlay_header_resetSyncConfirm": {
     "message": "Delete the server sync and start over from scratch?\nAutomatic search runs again right after. Use this if the lyrics were pasted wrong to begin with."
   },
   "overlay_header_search": {

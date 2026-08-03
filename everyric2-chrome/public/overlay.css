@@ -947,6 +947,14 @@
   color: var(--ey-text-faint); font-size: 13px; padding: 0 2px; line-height: 1;
 }
 .ey-feedback-btn:hover { color: var(--ey-accent); }
+/* 싱크 초기화 버튼 — 별점(feedbackBtn) 바로 오른쪽. headerButton()이 준 28px 헤더
+   스타일(.ey-btn) 대신 풋터 아이콘 줄에 맞는 크기·색으로 다시 정의한다. */
+.ey-reset-sync-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: none; cursor: pointer;
+  color: var(--ey-text-faint); padding: 0 2px; line-height: 1;
+}
+.ey-reset-sync-btn:hover { color: var(--ey-accent); }
 .ey-feedback-pop {
   position: absolute; bottom: 30px; left: 8px; z-index: 5;
   background: var(--ey-bg-solid); border: 1px solid var(--ey-border);

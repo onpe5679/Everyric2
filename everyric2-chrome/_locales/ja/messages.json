@@ -476,10 +476,10 @@
   "overlay_header_pip": {
     "message": "ピクチャーインピクチャーで表示"
   },
-  "overlay_header_regen": {
+  "overlay_header_resetSync": {
     "message": "同期を初期化 — サーバー保存分を削除して最初から作り直す"
   },
-  "overlay_header_regenConfirm": {
+  "overlay_header_resetSyncConfirm": {
     "message": "サーバーの同期データを削除して最初から作り直しますか?\n削除後は自動的に再検索します。歌詞を貼り間違えたときはここからやり直せます。"
   },
   "overlay_header_search": {

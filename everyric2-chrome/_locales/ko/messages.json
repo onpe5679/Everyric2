@@ -476,10 +476,10 @@
   "overlay_header_pip": {
     "message": "PiP 창으로 보기"
   },
-  "overlay_header_regen": {
+  "overlay_header_resetSync": {
     "message": "싱크 초기화 — 서버 저장을 지우고 처음부터 다시 만들어요"
   },
-  "overlay_header_regenConfirm": {
+  "overlay_header_resetSyncConfirm": {
     "message": "서버에 저장된 싱크를 지우고 처음부터 다시 만들까요?\n삭제 후 자동으로 다시 검색해요. 가사를 잘못 입력했을 때 여기서 새로 시작할 수 있어요."
   },
   "overlay_header_search": {

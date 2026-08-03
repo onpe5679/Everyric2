@@ -138,8 +138,6 @@ export interface OverlayCallbacks {
   onRetrySearch: (query?: { title: string; artist: string }) => void;
   onOffsetChange: (offsetSec: number) => void;
   onSettingsChange: (patch: Partial<Settings>) => void;
-  /** 현재 everyric 싱크의 강제 재생성 (서버 캐시 무시) */
-  onRegenerate: () => void;
   onPipToggle: () => void;
   onGeometryChange: (geometry: PanelGeometry) => void;
   /** 수동 검색: 후보 리스트 요청 — 결과는 showSearchResults로 되돌아온다 */
@@ -302,7 +300,14 @@ export class LyricsOverlay {
    *  덕분에 어떤 화면(가사·검색·생성 중·오류)에서도 사유 한 줄이 반드시 보인다. */
   private serverBar: HTMLDivElement;
   private pipBtn: HTMLButtonElement;
-  private regenBtn: HTMLButtonElement;
+  /** 이 영상의 서버 싱크를 통째로 지우고 새로 시작 — UI명은 "초기화"다(운영자 결정,
+   *  2026-08-04). 와이어(SYNC_RESET/handleResetSync)는 원래부터 "reset" 계약이라 이름이
+   *  이미 일치한다 — 바뀐 것은 이 버튼이 예전에 onRegenerate(다시 정렬만, 가사 보존)를
+   *  불렀다가 지금은 onResetSync(삭제 후 재검색)를 부른다는 점이다. "재생성"이라는
+   *  말 자체가 남아있는 진짜 재생성 경로는 depthBtn(깊이 올리기, onDepthUpgrade →
+   *  handleRegenerate → REGENERATE_SYNC)뿐이다 — 그쪽은 가사를 지우지 않고 다시
+   *  분석만 하므로 이름을 그대로 둔다. */
+  private resetSyncBtn: HTMLButtonElement;
   private depthBtn: HTMLButtonElement;
   /** depthBtn 클릭 시 동작 — 상태(깊이/구세대/최대)에 따라 updateDepthButton이 바꾼다 */
   private depthAction: (() => void) | null = null;
@@ -588,15 +593,16 @@ export class LyricsOverlay {
 
     this.pipBtn = this.headerButton(ICONS.pip, t('overlay.header.pip'), () => this.callbacks.onPipToggle());
     this.pipBtn.style.display = 'none';
-    // 운영자 결정: 가사 오입력 상황을 감안해 '재생성' 개념을 '싱크 초기화'로 통일한다.
-    // 서버 저장을 지우고 처음부터 다시 만드는 onResetSync를 부른다(깊이 올리기는 별개
-    // 경로 — depthBtn/updateDepthButton이 여전히 onDepthUpgrade로 재생성 API를 쓴다).
-    this.regenBtn = this.headerButton(ICONS.refresh, t('overlay.header.regen'), () => {
-      if (this.confirmTwice(this.regenBtn, t('overlay.header.regenConfirm'))) {
+    // 헤더가 아니라 풋터(별점 아이콘 오른쪽)에 붙는다 — 아래 this.footer 조립부에서 넣는다.
+    this.resetSyncBtn = this.headerButton(ICONS.refresh, t('overlay.header.resetSync'), () => {
+      if (this.confirmTwice(this.resetSyncBtn, t('overlay.header.resetSyncConfirm'))) {
         this.callbacks.onResetSync();
       }
     });
-    this.regenBtn.style.display = 'none';
+    // headerButton()은 헤더의 28px 아이콘 버튼 스타일(.ey-btn)을 준다 — 풋터의 작은
+    // 아이콘 줄(★ 옆)에 맞게 .ey-reset-sync-btn으로 크기·색을 다시 정의한다(overlay.css).
+    this.resetSyncBtn.classList.add('ey-reset-sync-btn');
+    this.resetSyncBtn.style.display = 'none';
     // 분석 깊이 버튼 — 내용(아이콘·배지·툴팁·동작)은 updateDepthButton이 상태에 따라 채운다
     this.depthBtn = h('button', {
       className: 'ey-btn ey-depth-btn',
@@ -632,7 +638,7 @@ export class LyricsOverlay {
         h('div', { className: 'ey-song' }, this.songTitleEl, this.songArtistEl),
       ),
       h('div', { className: 'ey-actions' },
-        this.pipBtn, this.depthBtn, this.regenBtn, searchBtn,
+        this.pipBtn, this.depthBtn, searchBtn,
         this.noticesBtn, this.contribBtn, gearBtn, this.collapseBtn, closeBtn),
     );
 
@@ -739,6 +745,8 @@ export class LyricsOverlay {
     this.footer = h('div', { className: 'ey-footer' },
       this.sourceBadge,
       this.feedbackBtn,
+      // 별점(feedbackBtn) 바로 오른쪽 — 운영자 지시(2026-08-04), 헤더에서 옮겨왔다
+      this.resetSyncBtn,
       this.feedbackPop,
       this.trStatusEl,
       h('div', { className: 'ey-offset' },
@@ -1100,9 +1108,9 @@ export class LyricsOverlay {
     this.footer.classList.remove('no-offset');
     this.footer.style.display = '';
     this.pipBtn.style.display = this.pipEnabled ? '' : 'none';
-    // 재생성은 서버(everyric) 싱크에서만 의미가 있다
-    this.regenBtn.style.display = source === 'everyric' ? '' : 'none';
-    // 깊이 버튼도 여기서 갱신 — 구세대 싱크면 재생성 버튼을 업그레이드 버튼이 대신한다
+    // 싱크 초기화는 서버(everyric) 싱크에서만 의미가 있다
+    this.resetSyncBtn.style.display = source === 'everyric' ? '' : 'none';
+    // 깊이 버튼도 여기서 갱신 — 구세대 싱크면 초기화 버튼을 업그레이드 버튼이 대신한다
     this.updateDepthButton();
     // 별점·오류 제보도 everyric 싱크에서만 — 평가 대상이 서버 정렬이다
     this.feedbackBtn.style.display = source === 'everyric' ? '' : 'none';
@@ -2286,7 +2294,7 @@ export class LyricsOverlay {
     this.serverStatus = status;
     this.generateButtons = this.generateButtons.filter(btn => btn.isConnected);
     for (const btn of this.generateButtons) applyServerGate(btn, status);
-    this.applyRegenGate();
+    this.applyResetSyncGate();
     this.renderServerBar();
 
     if (this.settingsDot) {
@@ -2314,8 +2322,8 @@ export class LyricsOverlay {
   }
 
   /** 서버가 필요한 헤더 버튼(재생성) 잠금 — 표시 여부는 기존 로직 그대로 */
-  private applyRegenGate(): void {
-    applyServerGate(this.regenBtn, this.serverStatus, t('overlay.header.regen'));
+  private applyResetSyncGate(): void {
+    applyServerGate(this.resetSyncBtn, this.serverStatus, t('overlay.header.resetSync'));
   }
 
   private renderServerBar(): void {
@@ -2915,8 +2923,8 @@ export class LyricsOverlay {
    * 3=분리+ASR+OWSM 앵커)를 화살표 나눔선·배지 숫자로 보여주고, 클릭하면 한 단계
    * 깊은 재분석(regenerate min_depth)을 요청한다. 최대 깊이(3)는 빨간 배지 + 비활성 +
    * "가사 입력 상태를 확인하세요" 툴팁. 구세대 싱크(engine_version 스탬프 없음/구서버)는
-   * 노란 업그레이드 버튼이 되고 **재생성 버튼을 대신한다**(운영자 지시 — 그 경우 일반
-   * 재생성 자체가 곧 새 엔진 업그레이드다).
+   * 노란 업그레이드 버튼이 되고 **초기화 버튼(resetSyncBtn)을 대신한다**(운영자 지시 —
+   * 그 경우 일반 재분석 자체가 곧 새 엔진 업그레이드다).
    */
   private updateDepthButton(): void {
     const meta = this.debugMeta;
@@ -2940,7 +2948,7 @@ export class LyricsOverlay {
         }
       };
       this.depthBtn.style.display = '';
-      this.regenBtn.style.display = 'none'; // 업그레이드 버튼이 재생성 버튼을 대신한다
+      this.resetSyncBtn.style.display = 'none'; // 업그레이드 버튼이 초기화 버튼을 대신한다
       return;
     }
     const route = meta.routing?.route;
@@ -2993,7 +3001,7 @@ export class LyricsOverlay {
     this.footer.style.display = 'none';
     this.resumeChip.style.display = 'none';
     this.pipBtn.style.display = 'none';
-    this.regenBtn.style.display = 'none';
+    this.resetSyncBtn.style.display = 'none';
     this.depthBtn.style.display = 'none';
     this.depthAction = null;
     this.feedbackBtn.style.display = 'none';
