@@ -234,6 +234,9 @@
   "debugPanel_compareVersionsFailed": {
     "message": "Couldn't load the version list"
   },
+  "debugPanel_versionsHint": {
+    "message": "Clicking a row only shows the time difference (Δ) between the current screen and that version — nothing actually changes. There's no preview or revert yet."
+  },
   "debugPanel_compareVersionLoaded": {
     "message": "Version $P1$ · depth=$P2$ · $P3$/$P4$ lines matched (Δ = current − version)",
     "placeholders": {
@@ -256,6 +259,32 @@
   },
   "debugPanel_compareVersionRowTitle": {
     "message": "Click to compare with this version (click again to clear)"
+  },
+  "debugPanel_depth_fast": {
+    "message": "Fast"
+  },
+  "debugPanel_depth_medium": {
+    "message": "Medium"
+  },
+  "debugPanel_depth_heavy": {
+    "message": "Deep"
+  },
+  "debugPanel_depth_unknown": {
+    "message": "Unknown"
+  },
+  "debugPanel_depthBadgeTitle": {
+    "message": "The analysis depth the server used to make this version — Fast < Medium < Deep take longer but can give better results"
+  },
+  "debugPanel_qualityLabel": {
+    "message": "Alignment confidence $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "debugPanel_currentVersionTag": {
+    "message": "Currently viewing"
   },
   "debugPanel_heardPrefix": {
     "message": "Heard: $P1$",
@@ -945,7 +974,7 @@
     "message": "Pronunciation script"
   },
   "overlay_settings_row_showPronunciation": {
-    "message": "Show pronunciation (when available)"
+    "message": "Show pronunciation below lyrics"
   },
   "overlay_settings_row_hidePronForEnglish": {
     "message": "Hide pronunciation for English lyrics"
@@ -1065,7 +1094,7 @@
     "message": "On notes + bottom"
   },
   "overlay_settings_row_pipChromaKey": {
-    "message": "PiP chroma key (streaming)"
+    "message": "PiP chroma key — solid color for stream background removal"
   },
   "overlay_settings_row_pipChromaKeyTitle": {
     "message": "Turns the PiP window background into a solid key color — key it out in OBS to overlay lyrics on your stream"
@@ -1086,25 +1115,25 @@
     "message": "The panel softly glows while vocals are present (only for syncs with server vocal analysis)"
   },
   "overlay_settings_row_videoCaptions": {
-    "message": "[Module] On-video captions"
+    "message": "On-video captions — shows lyrics as captions on the player"
   },
   "overlay_settings_row_videoCaptionsTitle": {
     "message": "Shows the current lyric line as captions on the YouTube player itself (with pronunciation/translation). YouTube's own captions are hidden while on"
   },
   "overlay_settings_row_captionFontScale": {
-    "message": "Caption font size"
+    "message": "On-video caption font size"
   },
   "overlay_settings_row_captionBgOpacity": {
-    "message": "Caption background opacity"
+    "message": "On-video caption background opacity"
   },
   "overlay_settings_row_modPlaylist": {
-    "message": "[Module] Playlist panel"
+    "message": "Playlist panel — attached list with next/prev navigation"
   },
   "overlay_settings_row_modPlaylistTitle": {
     "message": "Attaches the full YouTube playlist next to the lyrics panel — previous/next navigation, click to jump, and a server-sync badge per item. On videos without a playlist, shows a next-video card instead"
   },
   "overlay_settings_row_modMainLane": {
-    "message": "[Module] Karaoke lane"
+    "message": "Karaoke lane — pitch view (piano roll) below the lyrics"
   },
   "overlay_settings_row_modMainLaneTitle": {
     "message": "Shows the pitch lane (piano roll) — until now PiP-only — below the lyrics panel too. Appears only on syncs that have pitch notes, and follows the same settings as PiP (bar window, text size, and so on)"
@@ -1992,7 +2021,7 @@
     "message": "Karaoke lane"
   },
   "panels_settings_section_modules": {
-    "message": "Modules"
+    "message": "Add-ons"
   },
   "panels_settings_section_pip": {
     "message": "PIP"
@@ -2025,7 +2054,7 @@
     "message": "Bottom"
   },
   "panels_settings_row_pitchLaneHeight": {
-    "message": "Lane height"
+    "message": "PiP pitch lane height"
   },
   "panels_settings_reset_karaokeNotice": {
     "message": "Show the karaoke timing notice again"
@@ -2202,7 +2231,7 @@
     "message": "Your contribution history is stored only in this browser and the server cannot track it. Clearing browser data may erase it."
   },
   "panels_contrib_quotaTitle": {
-    "message": "Remaining today"
+    "message": "Remaining"
   },
   "panels_contrib_quotaGenerate": {
     "message": "Sync creation"
@@ -2222,7 +2251,15 @@
     }
   },
   "panels_contrib_quotaWindow": {
-    "message": "Per $P1$ hours",
+    "message": "Based on usage in the last $P1$ hours — each use recovers on its own (not a daily reset)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_quotaNextReset": {
+    "message": "Next recovery: $P1$",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -2259,7 +2296,7 @@
     "message": "Attached lane width"
   },
   "overlay_settings_row_pipLyricsList": {
-    "message": "PiP lyrics list column"
+    "message": "PiP lyrics list — adds a scrollable list on the right"
   },
   "overlay_settings_row_pipLyricsListTitle": {
     "message": "Show a scrollable lyrics list next to the PiP window. Turning it on widens the window's max width."

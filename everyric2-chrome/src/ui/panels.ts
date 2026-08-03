@@ -1,5 +1,5 @@
 import type {
-  BgRequest, ContribEntry, LimitsResponse, LyricLine, MessageResponse, NoticesResponse,
+  BgRequest, ContribEntry, LimitBucket, LimitsResponse, LyricLine, MessageResponse, NoticesResponse,
   SearchCandidate, ServerLogEntry, ServerNotice, ServerStatus, SongInfo, ViewStatsResponse,
 } from '../types';
 import { CONTRIB_STORAGE_KEY } from '../types';
@@ -1335,6 +1335,26 @@ export function buildNoticesSheet(opts: NoticesSheetOpts = {}): { el: HTMLDivEle
   return { el };
 }
 
+/**
+ * 서버가 이미 LimitBucket에 next_reset_at(UTC ISO, additive — 이 한도를 마지막으로 쓴
+ * 시점 + window_hours, null=아직 한 번도 안 씀)을 내려주지만 클라이언트 타입(LimitBucket,
+ * types.ts)엔 아직 선언이 없다 — types.ts는 이번 라운드 수정 금지 대상이라 여기서는
+ * 런타임 안전 캐스트로만 읽는다(타입 정식 추가는 후속 필요, 보고 참고). 구서버는 필드
+ * 자체가 없으므로 undefined → null로 접어 "회복 안내 생략" 신호로 통일한다.
+ */
+function additiveNextResetAt(bucket: LimitBucket): string | null {
+  const raw = (bucket as unknown as { next_reset_at?: string | null }).next_reset_at;
+  return raw ?? null;
+}
+
+/** next_reset_at(UTC ISO)을 사용자 로컬 시각 HH:MM으로 — debug-panel.ts formatHHMM과
+ *  같은 표기 규칙(로컬 타임존, 24시간제 아님 — 브라우저 로케일에 맡긴다). */
+function formatResetTime(isoUtc: string): string {
+  const d = new Date(isoUtc);
+  if (Number.isNaN(d.getTime())) return isoUtc;
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 // ── 기여 · 쿼터 시트 ─────────────────────────────────────────────
 
 export interface ContributionSheetOpts {
@@ -1450,18 +1470,28 @@ export function buildContributionSheet(opts: ContributionSheetOpts = {}): { el: 
     });
     const limits = res.data;
     if (!limits?.enforced) return;
-    const bucket = (label: string, remaining: number, limit: number) =>
-      h('div', { className: 'ey-contrib-quota-row' },
+    // 각 버킷은 행 하나(라벨+남은/전체) + 있으면 회복 안내 한 줄(작게)을 낸다 — 회복 안내는
+    // next_reset_at이 null(이 한도를 세션 내 아직 안 씀)이면 통째로 생략한다(팀 지시).
+    const bucket = (label: string, data: LimitBucket): HTMLElement[] => {
+      const row = h('div', { className: 'ey-contrib-quota-row' },
         h('span', { text: label }),
         h('span', {
-          className: `ey-contrib-quota-val${remaining === 0 ? ' out' : ''}`,
-          text: t('panels.contrib.quotaValue', [String(remaining), String(limit)]),
+          className: `ey-contrib-quota-val${data.remaining === 0 ? ' out' : ''}`,
+          text: t('panels.contrib.quotaValue', [String(data.remaining), String(data.limit)]),
         }),
       );
+      const nextResetAt = additiveNextResetAt(data);
+      if (!nextResetAt) return [row];
+      const note = h('div', {
+        className: 'ey-settings-note',
+        text: t('panels.contrib.quotaNextReset', [formatResetTime(nextResetAt)]),
+      });
+      return [row, note];
+    };
     quota.replaceChildren(
       h('div', { className: 'ey-contrib-quota-title', text: t('panels.contrib.quotaTitle') }),
-      bucket(t('panels.contrib.quotaGenerate'), limits.generate.remaining, limits.generate.limit),
-      bucket(t('panels.contrib.quotaDestructive'), limits.destructive.remaining, limits.destructive.limit),
+      ...bucket(t('panels.contrib.quotaGenerate'), limits.generate),
+      ...bucket(t('panels.contrib.quotaDestructive'), limits.destructive),
       h('div', {
         className: 'ey-settings-note',
         text: t('panels.contrib.quotaWindow', [String(limits.window_hours)]),

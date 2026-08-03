@@ -101,16 +101,42 @@ function clearGhostDeltas(deltaEls: HTMLSpanElement[]): void {
   deltaEls.forEach(el => { el.textContent = ''; el.classList.remove('big'); });
 }
 
-/** 서버가 준 원본 문자열(타임존 표기 없는 UTC)을 로컬 HH:MM으로 — content.ts
- *  formatSyncCreated와 같은 UTC 판정 규칙(Z·오프셋이 없으면 UTC로 간주)을 쓴다. */
-function formatHHMM(raw: string | null | undefined): string {
-  if (!raw) return '-';
+/** 서버가 준 원본 문자열(타임존 표기 없는 UTC)을 Date로 — content.ts formatSyncCreated와
+ *  같은 UTC 판정 규칙(Z·오프셋이 없으면 UTC로 간주)을 쓴다. */
+function parseServerUtc(raw: string): Date | null {
   const text = raw.trim();
   const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(text);
   const at = new Date(hasZone ? text : `${text.replace(' ', 'T')}Z`);
-  if (Number.isNaN(at.getTime())) return '-';
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+/** 로컬 HH:MM만 — 라인 목록 등 같은 날짜 안에서만 의미가 있는 자리에 쓴다. */
+function formatHHMM(raw: string | null | undefined): string {
+  if (!raw) return '-';
+  const at = parseServerUtc(raw);
+  if (!at) return '-';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+/** 버전 목록 항목의 생성 시각 — HH:MM만으론 여러 날에 걸친 재생성을 구분할 수 없다
+ *  (운영자 지적: "디버그 비교 기능 직관적이지 않다" — 목록 항목이 뭔지 한눈에 안 들어옴).
+ *  월/일을 앞에 붙여 날짜 모호성을 없앤다. */
+function formatVersionWhen(raw: string | null | undefined): string {
+  if (!raw) return '-';
+  const at = parseServerUtc(raw);
+  if (!at) return '-';
+  return `${at.getMonth() + 1}/${at.getDate()} ${formatHHMM(raw)}`;
+}
+
+/** 버전 목록의 깊이 배지 — 서버 라벨(fast/medium/heavy)을 안내 없이 그대로 노출하면
+ *  뜻을 알 수 없다(같은 운영자 지적). 모르는 값(null/undefined, 구세대 버전)은 '미상'으로
+ *  — 지어내지 않는다. */
+function depthBadgeLabel(depth: 'fast' | 'medium' | 'heavy' | null | undefined): string {
+  if (depth === 'fast') return t('debugPanel.depth.fast');
+  if (depth === 'medium') return t('debugPanel.depth.medium');
+  if (depth === 'heavy') return t('debugPanel.depth.heavy');
+  return t('debugPanel.depth.unknown');
 }
 
 /**
@@ -252,6 +278,9 @@ export function buildDebugPanel(
       const renderVersionRows = (versions: SyncVersionSummary[]): void => {
         versionRowEls.clear();
         list.replaceChildren();
+        // 이 기능이 "미리보기·되돌리기"로 오해되지 않게 항상 보이는 안내를 먼저 둔다
+        // (툴팁 하나에만 의존하면 안 읽힌다 — 운영자 지적: "디버그 비교 기능 직관적이지 않다").
+        list.append(h('div', { className: 'ey-debug-panel-empty', text: t('debugPanel.versionsHint') }));
         if (versions.length === 0) {
           list.append(h('div', {
             className: 'ey-debug-panel-empty', text: t('debugPanel.compareVersionsEmpty'),
@@ -259,19 +288,29 @@ export function buildDebugPanel(
           return;
         }
         for (const v of versions) {
-          const qualityText = v.quality_score != null ? ` · q=${v.quality_score.toFixed(3)}` : '';
+          // 지금 화면이 이 버전과 같은 스택으로 만들어졌는지 — engine_version 일치로만
+          // 판정한다(서버가 버전별 고유 id를 debugMeta에 안 실어 주므로 이게 가진 최선의
+          // 신호다. 같은 스택으로 여러 번 재생성했으면 여러 항목이 동시에 "지금 보는
+          // 버전"으로 표시될 수 있다 — 완전 정확한 식별은 아니라는 한계를 인지하고 쓴다).
+          const isCurrent = Boolean(debugMeta?.engine_version) && debugMeta?.engine_version === v.engine_version;
+          const qualityText = v.quality_score != null
+            ? t('debugPanel.qualityLabel', [v.quality_score.toFixed(3)])
+            : null;
+          const textCol = h('div', { className: 'ey-debug-row-text' },
+            h('div', { className: 'ey-debug-row-orig', text: v.engine_version ?? t('debugPanel.engineLegacy') }));
+          if (qualityText) textCol.append(h('div', { className: 'ey-debug-row-heard', text: qualityText }));
+          if (isCurrent) textCol.append(h('div', { className: 'ey-debug-row-labels', text: t('debugPanel.currentVersionTag') }));
           const rowEl = h('button', {
             className: 'ey-debug-row',
             attrs: { type: 'button' },
             title: t('debugPanel.compareVersionRowTitle'),
           },
-            h('span', { className: 'ey-debug-row-time', text: formatHHMM(v.created_at) }),
-            h('span', { className: 'ey-debug-row-chip', text: v.depth ?? '?' }),
-            h('div', { className: 'ey-debug-row-text' },
-              h('div', {
-                className: 'ey-debug-row-orig',
-                text: `${v.engine_version ?? t('debugPanel.engineLegacy')}${qualityText}`,
-              })),
+            h('span', { className: 'ey-debug-row-time', text: formatVersionWhen(v.created_at) }),
+            h('span', {
+              className: 'ey-debug-row-chip', text: depthBadgeLabel(v.depth),
+              title: t('debugPanel.depthBadgeTitle'),
+            }),
+            textCol,
           ) as HTMLButtonElement;
           rowEl.addEventListener('click', () => {
             if (activeKey === v.id) { clearComparison(); return; }

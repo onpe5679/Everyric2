@@ -234,6 +234,9 @@
   "debugPanel_compareVersionsFailed": {
     "message": "バージョン一覧を読み込めませんでした"
   },
+  "debugPanel_versionsHint": {
+    "message": "行をクリックすると今の画面とそのバージョンの行の時刻差(Δ)だけを表示します — 実際には切り替わりません。プレビューや復元機能はまだありません。"
+  },
   "debugPanel_compareVersionLoaded": {
     "message": "バージョン $P1$ · 深度=$P2$ · 対応 $P3$/$P4$行 (Δ = 現在 − バージョン)",
     "placeholders": {
@@ -256,6 +259,32 @@
   },
   "debugPanel_compareVersionRowTitle": {
     "message": "クリックしてこのバージョンと比較(もう一度クリックで解除)"
+  },
+  "debugPanel_depth_fast": {
+    "message": "高速"
+  },
+  "debugPanel_depth_medium": {
+    "message": "標準"
+  },
+  "debugPanel_depth_heavy": {
+    "message": "精密"
+  },
+  "debugPanel_depth_unknown": {
+    "message": "不明"
+  },
+  "debugPanel_depthBadgeTitle": {
+    "message": "このバージョンを作る際にサーバーが使った解析深度です — 高速 < 標準 < 精密の順で時間はかかりますが結果が良くなることがあります"
+  },
+  "debugPanel_qualityLabel": {
+    "message": "整列信頼度 $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "debugPanel_currentVersionTag": {
+    "message": "今見ているバージョン"
   },
   "debugPanel_heardPrefix": {
     "message": "認識: $P1$",
@@ -945,7 +974,7 @@
     "message": "発音表記方式"
   },
   "overlay_settings_row_showPronunciation": {
-    "message": "発音表記を表示(ある場合)"
+    "message": "歌詞の下に発音表記を表示"
   },
   "overlay_settings_row_hidePronForEnglish": {
     "message": "英語の歌詞は発音表記を非表示"
@@ -1065,7 +1094,7 @@
     "message": "ノート付着＋下部同時"
   },
   "overlay_settings_row_pipChromaKey": {
-    "message": "PiPクロマキー（配信用）"
+    "message": "PiPクロマキー — 配信の背景除去用に単色化"
   },
   "overlay_settings_row_pipChromaKeyTitle": {
     "message": "PiPウィンドウの背景を単色キーカラーにします — OBSなどでクロマキー合成し、配信画面に歌詞を重ねられます"
@@ -1086,25 +1115,25 @@
     "message": "ボーカルが聞こえる区間で歌詞パネルがほのかに明るくなります（サーバーの発声分析があるシンクのみ）"
   },
   "overlay_settings_row_videoCaptions": {
-    "message": "[モジュール] 画面上字幕"
+    "message": "画面上字幕 — 歌詞を字幕のように動画に表示"
   },
   "overlay_settings_row_videoCaptionsTitle": {
     "message": "YouTubeプレイヤー画面自体に現在の歌詞行を字幕のように表示します（発音・翻訳付き）。オンの間はYouTube自体の字幕は隠れます"
   },
   "overlay_settings_row_captionFontScale": {
-    "message": "字幕の文字サイズ"
+    "message": "画面上字幕の文字サイズ"
   },
   "overlay_settings_row_captionBgOpacity": {
-    "message": "字幕背景の不透明度"
+    "message": "画面上字幕の背景不透明度"
   },
   "overlay_settings_row_modPlaylist": {
-    "message": "[モジュール] 再生リストパネル"
+    "message": "再生リストパネル — 横に付く一覧・次の曲へ移動"
   },
   "overlay_settings_row_modPlaylistTitle": {
     "message": "歌詞パネルの横にYouTubeの再生リスト全体を表示します — 前後移動・項目クリックでの移動・サーバー同期バッジ付き。再生リストのない動画では次の動画カードを代わりに表示します"
   },
   "overlay_settings_row_modMainLane": {
-    "message": "[モジュール] カラオケレーン"
+    "message": "カラオケレーン — 歌詞の下に音程を表示(ピアノロール)"
   },
   "overlay_settings_row_modMainLaneTitle": {
     "message": "PiPウィンドウだけにあった音程レーン（ピアノロール）を歌詞パネルの下にも表示します。音程ノートがある同期でのみ表示され、小節幅や文字サイズなどの設定はPiPと同じ値を使います"
@@ -1992,7 +2021,7 @@
     "message": "カラオケレーン"
   },
   "panels_settings_section_modules": {
-    "message": "モジュール"
+    "message": "追加機能"
   },
   "panels_settings_section_pip": {
     "message": "PIP"
@@ -2025,7 +2054,7 @@
     "message": "下"
   },
   "panels_settings_row_pitchLaneHeight": {
-    "message": "レーンの高さ"
+    "message": "PiP音程レーンの高さ"
   },
   "panels_settings_reset_karaokeNotice": {
     "message": "カラオケタイミングの案内を再表示"
@@ -2202,7 +2231,7 @@
     "message": "貢献履歴はこのブラウザーにのみ保存され、サーバーは追跡できません。ブラウザーのデータを消すと失われることがあります。"
   },
   "panels_contrib_quotaTitle": {
-    "message": "本日の残り回数"
+    "message": "残り回数"
   },
   "panels_contrib_quotaGenerate": {
     "message": "同期の作成"
@@ -2222,7 +2251,15 @@
     }
   },
   "panels_contrib_quotaWindow": {
-    "message": "$P1$時間あたり",
+    "message": "直近$P1$時間の使用量基準 — 使用ごとに個別に回復します(深夜に一斉リセットではありません)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_quotaNextReset": {
+    "message": "次回復: $P1$",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -2259,7 +2296,7 @@
     "message": "アタッチレーン幅"
   },
   "overlay_settings_row_pipLyricsList": {
-    "message": "PiP歌詞リスト列"
+    "message": "PiP歌詞リスト — 右側にスクロール一覧を追加"
   },
   "overlay_settings_row_pipLyricsListTitle": {
     "message": "PiPウィンドウの右にスクロール可能な歌詞リストを表示します。オンにするとウィンドウの最大幅が広がります。"

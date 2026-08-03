@@ -234,6 +234,9 @@
   "debugPanel_compareVersionsFailed": {
     "message": "버전 목록을 불러오지 못했어요"
   },
+  "debugPanel_versionsHint": {
+    "message": "행을 누르면 지금 화면과 그 버전의 줄 시각 차이(Δ)만 보여줘요 — 실제로 바뀌진 않아요. 미리보기·되돌리기는 아직 없어요."
+  },
   "debugPanel_compareVersionLoaded": {
     "message": "버전 $P1$ · 깊이=$P2$ · 대응 $P3$/$P4$줄 (Δ = 현재 − 버전)",
     "placeholders": {
@@ -256,6 +259,32 @@
   },
   "debugPanel_compareVersionRowTitle": {
     "message": "클릭해서 이 버전과 비교 (다시 클릭하면 해제)"
+  },
+  "debugPanel_depth_fast": {
+    "message": "빠름"
+  },
+  "debugPanel_depth_medium": {
+    "message": "보통"
+  },
+  "debugPanel_depth_heavy": {
+    "message": "정밀"
+  },
+  "debugPanel_depth_unknown": {
+    "message": "미상"
+  },
+  "debugPanel_depthBadgeTitle": {
+    "message": "이 버전을 만들 때 서버가 쓴 분석 깊이예요 — 빠름 < 보통 < 정밀 순으로 시간이 더 들지만 결과가 나아질 수 있어요"
+  },
+  "debugPanel_qualityLabel": {
+    "message": "정렬 신뢰도 $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "debugPanel_currentVersionTag": {
+    "message": "지금 보는 버전"
   },
   "debugPanel_heardPrefix": {
     "message": "들림: $P1$",
@@ -945,7 +974,7 @@
     "message": "발음 표기 방식"
   },
   "overlay_settings_row_showPronunciation": {
-    "message": "발음 표기 표시 (있을 때)"
+    "message": "원문 아래 발음 표기 표시"
   },
   "overlay_settings_row_hidePronForEnglish": {
     "message": "영어 가사는 발음 표기 끄기"
@@ -1065,7 +1094,7 @@
     "message": "노트 부착 + 하단 동시"
   },
   "overlay_settings_row_pipChromaKey": {
-    "message": "PIP 크로마키 (방송용)"
+    "message": "PIP 크로마키 — 방송 배경 제거용 단색화"
   },
   "overlay_settings_row_pipChromaKeyTitle": {
     "message": "PIP 창 배경을 단색 키 컬러로 바꿔요 — OBS 등에서 크로마키 필터로 배경만 떼어내 방송 화면에 가사를 얹을 수 있어요"
@@ -1086,25 +1115,25 @@
     "message": "보컬이 들리는 구간에서 가사창 테두리가 은은하게 밝아져요 (서버 발성 분석이 있는 싱크에서만)"
   },
   "overlay_settings_row_videoCaptions": {
-    "message": "[모듈] 영상 자막"
+    "message": "영상 자막 — 화면에 가사를 자막처럼 표시"
   },
   "overlay_settings_row_videoCaptionsTitle": {
     "message": "유튜브 화면 자체에 현재 가사 줄을 자막처럼 띄워요 (발음·번역 포함). 켜져 있는 동안 유튜브 자체 자막은 숨겨져요"
   },
   "overlay_settings_row_captionFontScale": {
-    "message": "자막 글자 크기"
+    "message": "영상 자막 글자 크기"
   },
   "overlay_settings_row_captionBgOpacity": {
-    "message": "자막 배경 불투명도"
+    "message": "영상 자막 배경 불투명도"
   },
   "overlay_settings_row_modPlaylist": {
-    "message": "[모듈] 재생목록 패널"
+    "message": "재생목록 패널 — 옆에 붙는 목록·다음 곡 이동"
   },
   "overlay_settings_row_modPlaylistTitle": {
     "message": "가사창 옆에 유튜브 재생목록 전체를 붙여 보여줘요 — 이전/다음 이동, 항목 클릭 이동, 서버 싱크 존재 배지 포함. 재생목록이 없는 영상에서는 다음 영상 카드로 대신 보여줘요"
   },
   "overlay_settings_row_modMainLane": {
-    "message": "[모듈] 가라오케 레인"
+    "message": "가라오케 레인 — 가사 아래 음정 보기(피아노롤)"
   },
   "overlay_settings_row_modMainLaneTitle": {
     "message": "PIP 창에만 있던 음정 레인(피아노롤)을 가사창 아래에도 띄워요. 음정 노트가 있는 싱크에서만 보이고, 마디 창·글자 크기 같은 설정은 PIP와 같은 값을 써요"
@@ -1992,7 +2021,7 @@
     "message": "가라오케 레인"
   },
   "panels_settings_section_modules": {
-    "message": "모듈"
+    "message": "부가 기능"
   },
   "panels_settings_section_pip": {
     "message": "PIP"
@@ -2025,7 +2054,7 @@
     "message": "아래"
   },
   "panels_settings_row_pitchLaneHeight": {
-    "message": "레인 높이"
+    "message": "PIP 음정 레인 높이"
   },
   "panels_settings_reset_karaokeNotice": {
     "message": "가라오케 타이밍 안내 다시 보기"
@@ -2202,7 +2231,7 @@
     "message": "기여 이력은 오직 이 브라우저에만 저장되며 서버는 추적할 수 없어요. 브라우저 데이터를 지우면 사라질 수 있어요."
   },
   "panels_contrib_quotaTitle": {
-    "message": "오늘 남은 횟수"
+    "message": "남은 횟수"
   },
   "panels_contrib_quotaGenerate": {
     "message": "싱크 생성"
@@ -2222,7 +2251,15 @@
     }
   },
   "panels_contrib_quotaWindow": {
-    "message": "$P1$시간 기준",
+    "message": "최근 $P1$시간 사용량 기준 — 사용마다 개별로 회복돼요(자정에 한꺼번에 리셋되지 않아요)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_quotaNextReset": {
+    "message": "다음 회복: $P1$",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -2259,7 +2296,7 @@
     "message": "부착 레인 너비"
   },
   "overlay_settings_row_pipLyricsList": {
-    "message": "PiP 가사 목록 컬럼"
+    "message": "PIP 가사 목록 — 창 오른쪽에 스크롤 목록 추가"
   },
   "overlay_settings_row_pipLyricsListTitle": {
     "message": "PiP 창 오른쪽에 스크롤 가능한 가사 목록을 함께 표시합니다. 켜면 창 최대 폭이 넓어집니다."
