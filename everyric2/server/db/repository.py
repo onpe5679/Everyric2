@@ -558,6 +558,21 @@ class ActionLogRepository:
         )
         return int(result.scalar_one())
 
+    async def oldest_recent(self, action: str, video_id: str, hours: int = 24) -> datetime | None:
+        """count_recent와 같은 창(hours) 안에서 가장 오래된 기록의 created_at — 그 기록이
+        창 밖으로 나가는 시각(+hours)이 이 (action, video_id) 카운트가 다음으로 줄어드는
+        진짜 순간이다(GET /api/limits의 next_reset_at 산출용). 창 안에 기록이 없으면
+        None — count_recent가 0을 주는 경우와 정확히 짝을 이룬다."""
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+        result = await self.session.execute(
+            select(func.min(ActionLog.created_at)).where(
+                ActionLog.action == action,
+                ActionLog.video_id == video_id,
+                ActionLog.created_at >= since,
+            )
+        )
+        return result.scalar_one_or_none()
+
 
 class SyncLinkRepository:
     """싱크 링크 CRUD (video_id 고유 → PK 기반 upsert)."""
