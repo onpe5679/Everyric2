@@ -147,6 +147,49 @@ def test_unmatched_hint_falls_back_to_first_table():
     assert [ln.text for ln in lines] == ["げんきょく"]
 
 
+# ── 언어 간 버전 동의어 (긴/짧은 버전 ↔ long/short ver) ─────────────
+
+# 실측(2026-08-04, qXkkhP0d_iM «秋の未確認生物(long ver) / 音街ウナ» →
+# /cryptid-of-autumn): 위키 헤딩은 한국어("짧은 버전"/"긴 버전")인데 유튜브 제목의
+# 버전 표기는 영어("long ver")뿐이라 순수 부분열 포함으로는 절대 못 만난다.
+_LONG_SHORT_VERSION_HTML = (
+    "<h1>가사</h1>"
+    "<h2>짧은 버전</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>みじかい</td></tr><tr><td>mijikai</td></tr><tr><td>짧다</td></tr>"
+    "</tbody></table>"
+    "<h2>긴 버전</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>ながい</td></tr><tr><td>nagai</td></tr><tr><td>길다</td></tr>"
+    "</tbody></table>"
+)
+
+
+def test_variant_hint_matches_cross_language_long_version():
+    """영어 "(long ver)" 힌트가 한국어 "긴 버전" 헤딩 표를 고른다 (실사용 사고 재현)."""
+    _title, lines = vocaro.parse_song_page(
+        _LONG_SHORT_VERSION_HTML, "秋の未確認生物(long ver) / 音街ウナ"
+    )
+
+    assert [ln.text for ln in lines] == ["ながい"]
+
+
+def test_variant_hint_matches_cross_language_short_version():
+    """대칭: 영어 "(short ver)" 힌트는 한국어 "짧은 버전" 헤딩 표를 고른다."""
+    _title, lines = vocaro.parse_song_page(
+        _LONG_SHORT_VERSION_HTML, "Aki no Mikakunin Seibutsu (short ver.)"
+    )
+
+    assert [ln.text for ln in lines] == ["みじかい"]
+
+
+def test_variant_synonym_does_not_false_positive_on_coincidental_substring():
+    """"Longing"처럼 "long"을 우연히 포함해도 "longver" 토큰이 없으면 안 걸린다."""
+    _title, lines = vocaro.parse_song_page(_LONG_SHORT_VERSION_HTML, "Longing feat. 初音ミク")
+
+    assert [ln.text for ln in lines] == ["みじかい"]  # 매칭 없음 → 첫 표 그대로
+
+
 def test_single_table_page_ignores_hint():
     _title, lines = vocaro.parse_song_page(_fixture("vocaro_song_3row.html"), "무슨 힌트든")
 

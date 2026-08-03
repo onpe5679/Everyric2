@@ -72,13 +72,46 @@ def _normalize_variant(s: str) -> str:
     return "".join(ch for ch in unicodedata.normalize("NFKC", s).casefold() if ch.isalnum())
 
 
+#: 흔한 버전 표기의 언어 간 동의어 묶음 — 정규화 후 값(공백·괄호 제거)으로 적는다.
+#: 실측(2026-08-04, qXkkhP0d_iM «秋の未確認生物(long ver) / 音街ウナ» →
+#: /cryptid-of-autumn): 위키 헤딩은 한국어("긴 버전"/"짧은 버전")인데 유튜브 제목의
+#: 버전 표기는 영어("long ver")뿐이라 순수 부분열 포함(label in hint)이 절대 못
+#: 만난다 — 문자 자체가 다른 언어라 "포함"이라는 개념이 성립하지 않는다. 헤딩이
+#: 밴드명·리믹서명처럼 고유명사면(예: "Best Friend Remix") 원래 로직대로 원문
+#: 그대로 힌트에 실리므로 이 동의어 묶음은 흔한 버전 낱말에만 좁게 잡는다 — 넓게
+#: 잡으면(예: "long" 단독) 우연 포함(곡명에 "Longing" 등)의 오탐 위험이 커진다.
+_VARIANT_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"longver", "긴버전", "롱버전"}),
+    frozenset({"shortver", "짧은버전", "숏버전", "쇼트버전"}),
+    frozenset({"fullver", "풀버전"}),
+    frozenset({"tvsize", "tvver", "tv사이즈", "tv버전", "티비사이즈", "티비버전"}),
+    frozenset({"inst", "instrumental", "인스트", "반주"}),
+    frozenset({"originalver", "오리지널", "원곡", "본편"}),
+)
+
+
+def _synonym_hint_match(label: str, hint: str) -> bool:
+    """라벨이 흔한 버전 낱말이면, 힌트 쪽에 실린 다른 언어 동의어로도 대응을 확인한다.
+
+    label 자체가 어느 동의어 묶음의 원소일 때만 동작 — 밴드명 등 그 외 라벨은
+    기존 부분열 포함 검사만 탄다(이 함수는 항상 False).
+    """
+    for group in _VARIANT_SYNONYM_GROUPS:
+        if label in group:
+            return any(token != label and token in hint for token in group)
+    return False
+
+
 def _pick_table(page_html: str, variant_hint: str | None) -> str:
     """가사 표가 여러 개인 페이지에서 힌트(영상 제목)에 맞는 버전의 표를 고른다.
 
-    한 페이지에 원곡과 리믹스 가사가 h2 헤딩("오리지널"/"Best Friend Remix" 등)으로
-    나뉘어 실리는 경우가 있다(실측: /monitoring). 예전 코드는 무조건 첫 표를 집어
-    리믹스 영상에 원곡 가사를 붙였다. 각 표의 **직전 헤딩**을 정규화해 힌트에
-    통째로 포함되는 것을 고르고(여럿이면 가장 긴 헤딩), 없으면 첫 표 — 표가 하나인
+    한 페이지에 원곡과 리믹스 가사가 헤딩("오리지널"/"Best Friend Remix",
+    "긴 버전"/"짧은 버전" 등)으로 나뉘어 실리는 경우가 있다(실측: /monitoring,
+    /cryptid-of-autumn — 헤딩 레벨은 h1·h2 등 제각각이라 _HEADING_RE는 h1~h6을
+    다 본다). 예전 코드는 무조건 첫 표를 집어 롱버전 영상에 짧은 버전 가사를
+    붙였다. 각 표의 **직전 헤딩**을 정규화해 힌트에 통째로 포함되거나(고유명사
+    헤딩) 언어 간 버전 동의어가 대응되면(_synonym_hint_match — "긴 버전" ↔
+    "long ver") 고르고(여럿이면 가장 긴 헤딩), 없으면 첫 표 — 표가 하나인
     대다수 페이지와 힌트 없는 구버전 호출은 동작이 그대로다.
 
     호출 전제: page_html에 표가 최소 1개 있다 (parse_song_page가 먼저 검사).
@@ -98,7 +131,10 @@ def _pick_table(page_html: str, variant_hint: str | None) -> str:
             continue  # 직전 표와 사이에 헤딩이 없으면 같은 버전의 연속 표 — 후보 아님
         label = _normalize_variant(re.sub(r"<[^>]+>", "", headings[-1][1]))
         # 2자 미만 라벨은 우연 포함이 너무 쉽다 (예: "2")
-        if len(label) >= 2 and label in hint and (best is None or len(label) > best[0]):
+        if len(label) < 2:
+            continue
+        matched = label in hint or _synonym_hint_match(label, hint)
+        if matched and (best is None or len(label) > best[0]):
             best = (len(label), m.group(1))
     return best[1] if best else tables[0].group(1)
 
