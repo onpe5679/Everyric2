@@ -281,6 +281,21 @@ def test_chinese_with_latin_majority_still_covers_han():
     assert MMS_LANG_CODES[lang] == "cmn-script_simplified"
 
 
+def test_english_song_with_trace_ja_bridge_resolves_to_en():
+    """영어 곡의 일본어 브리지 4줄(가나 2%)이 ja 판정을 뒤집으면 안 된다.
+
+    UgK6n1KKUxY([English GUMI] About Me, 영어 56줄 + 일본어 4줄) 실측 회귀 —
+    jpn vocab이 라틴까지 덮는다는 이유로 ja가 되면 fast 라우팅으로 새고, en 강제
+    medium이 무산돼 첫 줄이 35초 앞으로 끌려갔다. 지목 스크립트(가나)가 흔적
+    수준이면 후보에서 빠져야 한다(_NATIVE_SHARE_FLOOR).
+    """
+    text = (EN_PURE + "\n") * 20 + "気付いた時には終わりを告げ\n君を思い出すよ"
+    counts = script_census(text)
+    assert (counts["kana"] + counts["han"]) / sum(counts.values()) < 0.05
+    lang, multi = detect_language_from_text(text)
+    assert (lang, multi) == ("en", True)
+
+
 # --------------------------------------------------------------------------
 # 동점 처리
 # --------------------------------------------------------------------------
