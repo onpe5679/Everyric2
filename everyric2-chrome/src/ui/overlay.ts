@@ -1762,6 +1762,13 @@ export class LyricsOverlay {
     this.lane.setLines(this.lines);
     this.lane.setIndex(this.currentIndex);
     this.applyLaneVisibility();
+    // 활성 줄의 .ey-line-pron을 방금 통째로 새로 지었다 — highlightLine이 만들어 둔
+    // activeWordEls는 이제 DOM에서 떨어져 나간 옛 스팬을 가리킨다. 재수집하지 않으면
+    // 언어 전환 직후 활성 줄의 카라오케 채움(sung)이 다음 줄 전환까지 한 줄 비어
+    // 보인다(감사 C8c).
+    if (this.currentIndex >= 0 && this.lineEls[this.currentIndex]) {
+      this.activeWordEls = collectFillTargets(this.lineEls[this.currentIndex]);
+    }
   }
 
   setTranslationStatus(text: string | null): void {
@@ -2655,7 +2662,6 @@ export class LyricsOverlay {
           ['hangul', t('overlay.settings.pronScript.hangul')],
           ['romaji', t('overlay.settings.pronScript.romaji')],
           ['kana', t('overlay.settings.pronScript.kana')],
-          ['ipa', t('overlay.settings.pronScript.ipa')],
         ],
         onChange: v => set({ pronunciationScript: v as Settings['pronunciationScript'] }),
       },

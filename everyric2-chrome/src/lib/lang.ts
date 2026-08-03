@@ -57,17 +57,31 @@ export function resolvedPronSegments(line: LyricLine, script: PronScript): PronS
   return line.pronSegsByScript?.[script] ?? (script === 'hangul' ? line.pronSegments : undefined);
 }
 
+/** 공백을 한 칸으로 접고 대소문자를 무시한 비교용 정규화 — shouldShowPron의 "원문과
+ *  발음이 사실상 같은 문자열인가" 판정에 쓴다. */
+function normalizeForPronCompare(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
 /**
  * 발음 줄을 이 줄에서 보여줄지 — 전체 끔(showPronunciation)과 영어만 끔
  * (hidePronForEnglish)을 한 판정으로 합친다. 레인(pitch-lane.ts)의 노트 부착 발음은
  * 이 함수를 거치지 않는다 — PIP·레인 노트의 발음 표시는 운영자 제약으로 항상 유지된다.
+ *
+ * resolvedPron을 함께 주면(감사 C4) 원문과 정규화 비교(공백·대소문자 무시)로 사실상
+ * 같을 때 발음 줄 자체를 숨긴다 — en 곡×en 사용자는 romaji가 원문 철자 그대로라서,
+ * 이 게이트가 없으면 원문 줄 바로 아래 같은 글자가 한 번 더 뜬다.
  */
 export function shouldShowPron(
   lineText: string,
   settings: Pick<Settings, 'showPronunciation' | 'hidePronForEnglish'>,
+  resolvedPron?: string,
 ): boolean {
   if (!settings.showPronunciation) return false;
   if (settings.hidePronForEnglish && isLatinDominant(lineText)) return false;
+  if (resolvedPron !== undefined && normalizeForPronCompare(resolvedPron) === normalizeForPronCompare(lineText)) {
+    return false;
+  }
   return true;
 }
 

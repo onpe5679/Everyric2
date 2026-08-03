@@ -1211,9 +1211,6 @@
   "overlay_settings_row_pitchF0OpacityTitle": {
     "message": "음정 보는 선(f0 곡선)의 밝기예요 — 노트 막대 밝기와 별개로 조절돼요. 1보다 크게 하면 기본보다 밝고 굵게 보여요"
   },
-  "overlay_settings_pronScript_ipa": {
-    "message": "IPA(발음기호)"
-  },
   "overlay_settings_serverRequiredNote": {
     "message": "싱크 생성·번역은 Everyric 서버가 필요해요"
   },

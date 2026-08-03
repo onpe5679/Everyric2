@@ -650,9 +650,13 @@ export interface VocaroMatchResponse {
 /** 일본어 원제 등 클라이언트 독음 인덱스로 못 찾는 제목을 서버 원제 인덱스에 묻는다.
  *  타임아웃 6s — 예전 2.5s는 서버가 생성·정렬로 순간 눌린 사이 쉽게 초과했고, 그 한 번의
  *  미스로 곡이 자막 폴백으로 생성되면 vocaroRef가 영영 비어 위키 발음·번역을 잃었다
- *  (실측: 踊っチャイナ). 매칭은 곡 로드당 1회라 넉넉해도 비용이 없다. */
+ *  (실측: 踊っチャイナ). 매칭은 곡 로드당 1회라 넉넉해도 비용이 없다.
+ *
+ *  hint(원 영상 제목)는 배선만 미리 받아 둔다(감사 C8d) — 서버 /api/vocaro/match가 아직
+ *  hint를 받지 않으므로 쿼리에는 싣지 않는다. 다중 버전 페이지 선택은 이 매칭이 반환한
+ *  slug로 이어지는 vocaroPage 호출의 hint가 실제로 담당한다. */
 export function vocaroMatch(
-  server: ServerConfig, title: string, sink?: FailureSink,
+  server: ServerConfig, title: string, sink?: FailureSink, _hint?: string,
 ): Promise<VocaroMatchResponse | null> {
   return request<VocaroMatchResponse>(
     server, `/api/vocaro/match?title=${encodeURIComponent(title)}`, undefined, 6000, sink,

@@ -140,6 +140,14 @@ export interface LyricsData {
    *  로컬에서 한 번 직접 받아온 뒤에야 캐시가 생겨 두 번째 전환부터만 그랬다).
    *  값이 없는 인덱스(그 세그에 번역 없음)는 undefined. */
   translationsByLang?: Record<string, (string | undefined)[]>;
+  /** 지금 실린 translation의 실제 출처(additive, 서버 동시 배포 중) — EveryricSyncResponse.
+   *  translation_origin을 그대로 옮긴 값. content.applyLyricsData가 있으면 배지에
+   *  반영하고, tryServerLayerRefresh의 origin 'server'(출처 불명) 특례를 이 값으로
+   *  대체한다. 구서버는 undefined — 그 경우 기존 동작(배지 숨김) 그대로. */
+  translationOrigin?: 'wiki' | 'caption' | 'llm' | null;
+  /** translationOrigin==='wiki'일 때의 위키 출처 표기 — EveryricSyncResponse.
+   *  translation_attribution을 그대로 옮긴 값. */
+  translationAttribution?: SourceAttribution;
 }
 
 export interface LRCLibTrack {
@@ -356,6 +364,13 @@ export interface EveryricSyncResponse {
    *  스택으로 만든 싱크에는 이 필드가 없다(undefined). 구버전 확장은 필드 자체를 모르니
    *  무시하면 그만이다. */
   adlib?: [number, number][] | null;
+  /** 지금 실린 translation의 실제 출처(additive, 서버 동시 배포 중) — 클라이언트가
+   *  tryServerLayerRefresh 등에서 출처를 몰라 'server'(배지 숨김)로 뭉개던 것을 실제
+   *  값으로 대체한다. 구서버는 필드 자체가 없다(undefined) — 그 경우 기존 동작 그대로. */
+  translation_origin?: 'wiki' | 'caption' | 'llm' | null;
+  /** translation_origin==='wiki'일 때의 위키 출처 표기 — attribution과 같은 모양이지만
+   *  가사 원출처(attribution)와는 별개다(그 번역이 실제로 어디서 왔는지). */
+  translation_attribution?: SourceAttribution | null;
 }
 
 /** GET /api/sync/list 항목 — 링크 후보 선택용 */
@@ -825,7 +840,10 @@ export type BgRequest =
   | { type: 'VOCARO_LOOKUP'; payload: { title: string; hint?: string } }
   /** 서버 원제 인덱스에 제목 하나를 묻는다(가사 본문 없이 slug/표기만) — 일본어 원제처럼
    *  클라이언트 초성 인덱스가 구조적으로 못 찾는 제목의 유일한 경로다. */
-  | { type: 'VOCARO_MATCH'; payload: { title: string } }
+  // hint(원 영상 제목)는 서버 /api/vocaro/match가 아직 안 받는다 — background/
+  // everyric-api.vocaroMatch까지는 배선을 관통시키되 쿼리에는 안 싣는다(감사 C8d,
+  // 장래 서버 지원 대비 plumbing). 실제 hint 사용처는 뒤이은 VOCARO_PAGE 호출이다.
+  | { type: 'VOCARO_MATCH'; payload: { title: string; hint?: string } }
   | { type: 'VOCARO_PAGE'; payload: { slug: string; hint?: string } }
   /** 서버 공지 목록 — 없는 서버(404)면 조용히 기능만 꺼진다 */
   | { type: 'NOTICES_GET' }

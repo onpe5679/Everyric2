@@ -42,9 +42,9 @@ export function buildPronEl(
   settings: LineRenderSettings,
   fillTargets?: FillTarget[],
 ): HTMLDivElement | null {
-  if (!shouldShowPron(line.text, settings)) return null;
   const pron = resolvedPronunciation(line, pronScript);
   if (!pron) return null;
+  if (!shouldShowPron(line.text, settings, pron)) return null;
   const segs = resolvedPronSegments(line, pronScript);
   const pronEl = h('div', { className: 'ey-line-pron', attrs: { dir: 'auto' } });
   const mapped = segs && segs.length > 0

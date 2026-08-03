@@ -292,7 +292,8 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     // 가사 본문 없이 원제 매칭만 — 제목 확인·후보 표시 경로가 페이지 조회 없이 쓴다
     case 'VOCARO_MATCH': {
       const server = await getServerConfig();
-      return call('vocaro_match_failed', sink => vocaroMatch(server, message.payload.title, sink));
+      return call('vocaro_match_failed', sink =>
+        vocaroMatch(server, message.payload.title, sink, message.payload.hint));
     }
 
     case 'MIRAHEZE_LOOKUP': {
@@ -504,6 +505,10 @@ async function fetchLyricsChain(
           engine_variant: sync.engine_variant ?? null,
         },
         attribution: fromWireAttribution(sync.attribution),
+        // 번역 출처(additive, 서버 동시 배포 중) — 구서버는 필드 자체가 없어 undefined,
+        // content.applyLyricsData가 있을 때만 배지에 반영한다(없으면 기존 동작 그대로).
+        translationOrigin: sync.translation_origin ?? undefined,
+        translationAttribution: fromWireAttribution(sync.translation_attribution),
         tempo: sync.tempo ?? undefined,
         key: sync.key ?? undefined,
         qualityScore: sync.quality_score ?? undefined,

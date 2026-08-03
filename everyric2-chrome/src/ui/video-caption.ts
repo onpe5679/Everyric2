@@ -241,10 +241,11 @@ export class VideoCaption {
 
     // 발음 줄 — 음절 세그(script별)가 있으면 카라오케 span, 없으면 통짜 텍스트로 폴백
     this.pronEl.replaceChildren();
+    const rawPronText = line ? resolvedPronunciation(line, this.pronScript) : undefined;
     const pronVisible = line
-      ? shouldShowPron(line.text, { showPronunciation: this.showPron, hidePronForEnglish: this.hidePronForEnglish })
+      ? shouldShowPron(line.text, { showPronunciation: this.showPron, hidePronForEnglish: this.hidePronForEnglish }, rawPronText)
       : false;
-    const pronText = pronVisible && line ? resolvedPronunciation(line, this.pronScript) : undefined;
+    const pronText = pronVisible ? rawPronText : undefined;
     if (pronText) {
       this.pronEl.style.display = 'inline-block';
       const segs = line ? resolvedPronSegments(line, this.pronScript) : undefined;

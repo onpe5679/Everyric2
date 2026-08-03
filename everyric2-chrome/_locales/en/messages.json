@@ -1211,9 +1211,6 @@
   "overlay_settings_row_pitchF0OpacityTitle": {
     "message": "Brightness of the pitch guide line (f0 curve) — separate from the note-bar fader. Above 1 renders brighter and thicker than default"
   },
-  "overlay_settings_pronScript_ipa": {
-    "message": "IPA (phonetic)"
-  },
   "overlay_settings_serverRequiredNote": {
     "message": "Generating sync and translating requires the Everyric server"
   },

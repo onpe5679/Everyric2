@@ -1916,10 +1916,11 @@ export class PipController {
     // 음절 span을 wordEls에 합류시켜 프레임 렌더(renderFrame)의 sung 토글을 그대로 태운다
     if (this.pronEl) {
       this.pronEl.replaceChildren();
+      const rawPron = current ? resolvedPronunciation(current, this.pronScript) : undefined;
       const pronOk = current
-        ? shouldShowPron(current.text, { showPronunciation: this.showPronunciation, hidePronForEnglish: this.hidePronForEnglish })
+        ? shouldShowPron(current.text, { showPronunciation: this.showPronunciation, hidePronForEnglish: this.hidePronForEnglish }, rawPron)
         : false;
-      const pron = (pronOk && current && resolvedPronunciation(current, this.pronScript)) || '';
+      const pron = (pronOk && rawPron) || '';
       const segs = pronOk && current ? resolvedPronSegments(current, this.pronScript) : undefined;
       const mapped = current && pron && segs && segs.length > 0
         ? appendTimedSpans(this.pronEl, pron, segs, s => s.text, seg => {

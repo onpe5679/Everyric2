@@ -1081,8 +1081,14 @@ export class PitchLaneRenderer {
 }
 
 /** 발음 세그의 최소 표시 폭(초) — 이보다 짧으면 노트 겹침 판정(overlap>0)을 통과하지
- *  못해 음절이 통째로 안 그려진다(코덱스 감사 b2NTglk9tvI: 1119개 중 132개가 길이 0). */
+ *  못해 음절이 통째로 안 그려진다(코덱스 감사 b2NTglk9tvI: 1119개 중 132개가 길이 0).
+ *  widenZeroLengthSegs가 "길이 0" 세그에 부여할 값이다. */
 const MIN_SEG_WIDTH = 0.06;
+
+/** "길이 0"으로 간주할 문턱(초) — 부동소수 오차를 흡수할 뿐인 값이다. 예전엔 이 문턱이
+ *  MIN_SEG_WIDTH(0.06)와 같아서, 정상적으로 존재하는 50ms 음절·40ms 촉음까지 "길이 0"
+ *  취급해 옮겼다(감사 C5) — overlap>0은 이미 통과하는 세그까지 건드릴 이유가 없다. */
+const ZERO_SEG_EPS = 1e-3;
 
 /**
  * 길이 0(또는 극단적으로 짧은) 발음 세그에 최소 표시 폭을 부여한다. 같은 시각에 여럿이
@@ -1090,17 +1096,23 @@ const MIN_SEG_WIDTH = 0.06;
  * 배분할 공간조차 없으면 최소폭은 지키되 살짝 어긋나게 겹친다(이웃 폴백보다 침묵이 낫다).
  * 원본 배열은 바꾸지 않고 복제본을 반환한다 — 디버그 타이밍 레인(renderTimingLanes)은
  * 이 함수를 거치지 않은 원본 세그를 그대로 써서 실제 정렬 결함이 계속 보이게 둔다.
+ *
+ * 배치는 항상 원래 시각(point)에서 시작해 가용 구간 [prevBound, nextBound] 안에만
+ * clamp한다(감사 C5) — 예전엔 여유 공간이 있으면 그 구간 **중앙**으로 밀었는데, 간주
+ * (무음) 뒤에 이어지는 0길이 세그는 prevBound가 훨씬 전(직전 실제 세그의 끝)이고
+ * nextBound가 한참 뒤(다음 실제 세그의 시작)라 그 넓은 구간의 중앙이 실제 시각에서
+ * 최대 +180ms까지 벗어났다.
  */
 function widenZeroLengthSegs(segs: PronSegment[]): PronSegment[] {
   if (segs.length === 0) return segs;
   const out = segs.map(s => ({ ...s }));
   let i = 0;
   while (i < out.length) {
-    if (out[i].end - out[i].start >= MIN_SEG_WIDTH) { i++; continue; }
-    // 뒤이어 같은 시각(1ms 오차)에 몰린 짧은 세그들을 한 무리로 묶는다
+    if (out[i].end - out[i].start >= ZERO_SEG_EPS) { i++; continue; }
+    // 뒤이어 같은 시각(1ms 오차)에 몰린 길이 0 세그들을 한 무리로 묶는다
     let j = i;
     while (j + 1 < out.length
-      && out[j + 1].end - out[j + 1].start < MIN_SEG_WIDTH
+      && out[j + 1].end - out[j + 1].start < ZERO_SEG_EPS
       && Math.abs(out[j + 1].start - out[i].start) < 1e-3) j++;
     const n = j - i + 1;
     const point = out[i].start;
@@ -1108,9 +1120,11 @@ function widenZeroLengthSegs(segs: PronSegment[]): PronSegment[] {
     const nextBound = j + 1 < out.length ? out[j + 1].start : point + MIN_SEG_WIDTH * n;
     const wanted = MIN_SEG_WIDTH * n;
     const avail = Math.max(0, nextBound - prevBound);
+    // point에서 시작하고 [prevBound, nextBound] 안에만 담기도록 clamp — 공간이
+    // 부족하면(avail < wanted) 상한이 하한보다 낮아져 그대로 살짝 앞 이웃을 침범한다
+    // (기존 폴백 분기와 같은 타협: 침묵보다는 살짝 겹침이 낫다).
+    const slotStart = Math.min(Math.max(point, prevBound), nextBound - wanted);
     if (avail >= wanted) {
-      // 이웃을 침범하지 않는 균등 배분 — 무리를 [prevBound, nextBound] 구간 중앙에 맞춘다
-      const slotStart = prevBound + (avail - wanted) / 2;
       for (let k = 0; k < n; k++) {
         out[i + k].start = slotStart + MIN_SEG_WIDTH * k;
         out[i + k].end = slotStart + MIN_SEG_WIDTH * (k + 1);
@@ -1118,9 +1132,8 @@ function widenZeroLengthSegs(segs: PronSegment[]): PronSegment[] {
     } else {
       // 공간이 없다 — 최소폭은 지키되 겹치도록 촘촘히 어긋나게 편다(이웃을 살짝 침범 허용)
       const step = n > 1 ? avail / n : 0;
-      const start0 = point - wanted / 2;
       for (let k = 0; k < n; k++) {
-        out[i + k].start = start0 + step * k;
+        out[i + k].start = slotStart + step * k;
         out[i + k].end = out[i + k].start + MIN_SEG_WIDTH;
       }
     }

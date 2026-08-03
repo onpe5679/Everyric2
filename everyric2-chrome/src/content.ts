@@ -700,14 +700,17 @@ function ensureOverlay(): LyricsOverlay {
       // 사용자가 그 자리에서 올바른 가사를 고를 수 있게 한다.
       const videoId = currentVideoId;
       if (!videoId) return;
-      const matched = currentData?.matchedTitle ?? '';
+      // 서버 싱크(생성 완료분)에서는 matchedTitle이 없다 — 조달 출처(attribution)가
+      // 매칭 근거다 (applyLyricsData의 matchedLabel과 같은 규칙)
+      const matched = currentData?.matchedTitle ?? currentData?.attribution?.name ?? '';
+      const url = currentSourceUrl ?? currentData?.attribution?.url ?? '';
       void sendToBackground({
         type: 'SYNC_FEEDBACK',
         payload: {
           videoId,
           rating: 1,
           category: 'lyrics',
-          comment: `[오매칭] matched=${matched} url=${currentSourceUrl ?? ''}`,
+          comment: `[오매칭] matched=${matched} url=${url}`,
         },
       });
       showNotice(t('content.wrongLyrics.thanks'), 6000);
@@ -882,7 +885,10 @@ async function handleLinkSync(sourceVideoId: string, offsetSec: number, rate: nu
       return;
     }
     for (const key of [...translationCache.keys()]) {
-      if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+      if (key.startsWith(`${videoId}:`)) {
+        translationCache.delete(key);
+        translationOriginCache.delete(key);
+      }
     }
   }
   const res = await sendToBackground<Record<string, unknown>>({
@@ -1054,6 +1060,29 @@ function applySettingsPatch(patch: Partial<Settings>): void {
   if (patch.theme !== undefined) pip.setTheme(resolveTheme(settings));
 
   if (patch.translationLanguage && settings.showTranslation) {
+    // 승격(감사 C1 P1): 새 언어가 currentData의 고정 언어 위키 출처(miraheze=en·vocaro=ko)와
+    // 같으면, wikiTranslation에 언어 무관하게 보존해 둔 사람 번역을 translation으로
+    // 끌어올린다 — LLM을 다시 부르기 전에 이미 손에 든 정답을 먼저 쓴다. clearTranslations
+    // **앞에** 둬야 한다: 승격 직후 data.translationLang을 새 언어로 맞추면 곧바로 아래
+    // hasMatchingHumanTranslation 보호 대상이 되어 clearTranslations·loadTranslations
+    // 둘 다 조기 반환하고, 승격된 값이 그대로 화면에 남는다.
+    if (currentData) {
+      const fixedLang = fixedSourceLang(currentData);
+      if (fixedLang && patch.translationLanguage === fixedLang) {
+        let promoted = false;
+        for (const line of currentData.lines) {
+          if (!line.translation && line.wikiTranslation) {
+            line.translation = line.wikiTranslation;
+            promoted = true;
+          }
+        }
+        if (promoted) {
+          currentData.translationLang = fixedLang;
+          overlay?.refreshTranslations();
+          pip.refresh();
+        }
+      }
+    }
     // 언어를 바꿨으면 **이미 실린 번역을 먼저 비운다.** loadTranslations의 조기 반환은
     // "모든 줄에 번역이 있으면 끝"이라 어느 언어의 번역인지 보지 않는다 — 비우지 않으면
     // ko→en으로 바꿔도 재요청이 일어나지 않고 한국어 번역이 그대로 남는다(브라우저 검증에서
@@ -1331,11 +1360,18 @@ function lineConfSummary(): {
 /**
  * 서버 싱크(everyric) 라인에 보카로 위키의 발음/사람 번역을 텍스트 매칭으로 입힌다.
  * 싱크가 위키 가사로 생성됐다면 라인 텍스트가 그대로 보존되므로 대부분 1:1로 매칭된다.
+ *
+ * 반환값은 "번역을 1줄이라도 병합했는가" — 발음만 병합됐거나 아무것도 못 붙였으면 false.
+ * 호출부(searchLyrics)가 applyLyricsData 이후 이 값으로 번역 출처 배지(U2)를 세운다
+ * (감사 C2b) — 이 함수 안에서 직접 overlay를 건드리면 안 된다: 이 시점엔 아직
+ * applyLyricsData가 안 돌아 overlay가 **이전 곡**을 보여주고 있고, 뒤이은
+ * applyLyricsData의 showSyncedLyrics/showPlainLyrics가 resetBody로 배지를 곧바로
+ * 지워 버린다.
  */
 /** 늦은 재매칭을 이미 시도한 영상 — 세션당 한 번만 (미스가 확정인 곡에 매 로드 요청 방지) */
 const vocaroRematchTried = new Set<string>();
 
-async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void> {
+async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<boolean> {
   let lines: VocaroLine[] | null = lastVocaro?.videoId === videoId ? lastVocaro.lines : null;
   if (!lines) {
     let slug: string | null = null;
@@ -1345,6 +1381,11 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
       const raw = stored[`vocaroRef:${videoId}`] as string | { slug?: string } | undefined;
       slug = typeof raw === 'string' ? raw : raw?.slug ?? null;
     } catch { /* storage 실패 → 병합 생략 */ }
+    // 재매칭으로 새로 얻은 슬러그 — VOCARO_PAGE가 실제 줄을 돌려준 뒤에야 storage에
+    // 영구 저장한다(감사 C8d). 미리 저장하면 이 슬러그가 실은 빈손이었을 때도
+    // vocaroRef에 박혀, 다음부터는 위 조회가 "slug 있음"으로 성공해 재매칭
+    // 자체를 다시 타지 않는 영구 미스로 굳는다.
+    let rematchedSlug: string | null = null;
     if (!slug && currentSong && videoId === currentVideoId && !vocaroRematchTried.has(videoId)) {
       // 원 조회가 무산된 채 생성된 싱크(예: 서버 순간 부하로 매칭 타임아웃 → 자막 폴백)는
       // vocaroRef가 영영 비어 위키 발음·번역 병합이 시작조차 안 됐다(실측: 踊っチャイナ —
@@ -1352,17 +1393,18 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
       // 재매칭을 한 번 시도해 스스로 치유한다.
       vocaroRematchTried.add(videoId);
       const m = await sendToBackground<{ found: boolean; slug?: string | null } | null>({
-        type: 'VOCARO_MATCH', payload: { title: currentSong.title },
+        // hint(rawTitle)는 서버 /api/vocaro/match가 아직 안 받는다 — vocaroMatch에는
+        // 배선만 관통시키고(장래 지원 대비) 쿼리에는 안 싣는다. 이 재매칭이 만든 slug로
+        // 곧바로 이어지는 VOCARO_PAGE 조회가 실제 hint 사용처다(아래).
+        type: 'VOCARO_MATCH', payload: { title: currentSong.title, hint: currentSong.rawTitle },
       });
-      if (videoId !== currentVideoId) return;
+      if (videoId !== currentVideoId) return false;
       if (m.data?.found && m.data.slug) {
         slug = m.data.slug;
-        try {
-          await chrome.storage.local.set({ [`vocaroRef:${videoId}`]: { slug, t: Date.now() } });
-        } catch { /* 저장 실패해도 이번 병합은 진행 */ }
+        rematchedSlug = m.data.slug;
       }
     }
-    if (!slug) return;
+    if (!slug) return false;
     // hint는 이 videoId가 아직 현재 영상일 때만 — SPA 이동 뒤 늦게 도는 병합에 다른
     // 영상의 제목을 힌트로 주면 버전 선택이 엉뚱한 표로 튈 수 있다
     const hint = videoId === currentVideoId ? currentSong?.rawTitle : undefined;
@@ -1370,15 +1412,23 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
       type: 'VOCARO_PAGE', payload: { slug, hint },
     });
     lines = res.data?.lines ?? null;
-    if (lines) lastVocaro = { videoId, lines };
+    if (lines) {
+      lastVocaro = { videoId, lines };
+      if (rematchedSlug) {
+        try {
+          await chrome.storage.local.set({ [`vocaroRef:${videoId}`]: { slug: rematchedSlug, t: Date.now() } });
+        } catch { /* 저장 실패해도 이번 병합은 진행 — 세션 내 캐시로도 동작 */ }
+      }
+    }
   }
-  if (!lines) return;
+  if (!lines) return false;
 
   const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
   const byText = new Map<string, VocaroLine>();
   for (const l of lines) {
     if (l.text && !byText.has(norm(l.text))) byText.set(norm(l.text), l);
   }
+  let translationMerged = false;
   for (const line of data.lines) {
     const v = byText.get(norm(line.text));
     if (!v) continue;
@@ -1394,25 +1444,49 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
       line.translation = v.translation;
       data.humanTranslated = true;
       data.translationLang = settings.translationLanguage;
+      translationMerged = true;
     }
   }
+  return translationMerged;
+}
+
+/**
+ * 이 데이터가 고정 언어 위키 출처(miraheze=en, vocaro=ko)라면 그 언어를, 아니면 null을
+ * 반환한다 — hasMatchingHumanTranslation과 언어 전환 승격 패스(applySettingsPatch)가
+ * 공유한다. sourceId로 실제 출처를 가르되, 구데이터(vocaro 직접 채택분은 attribution
+ * 자체가 없다 — adoptVocaroResult 참고)는 source==='vocaro' 폴백을 유지한다.
+ */
+function fixedSourceLang(data: LyricsData): 'en' | 'ko' | null {
+  const sourceId = data.attribution?.sourceId;
+  if (sourceId === 'miraheze') return 'en';
+  if (sourceId === 'vocaro') return 'ko';
+  if (!sourceId && data.source === 'vocaro') return 'ko';
+  return null;
 }
 
 /**
  * 이 데이터의 사람 번역이 지금 보는 번역 언어와 같은 언어인가 — 같으면 지우지도, LLM으로
  * 다시 받지도 않는다(clearTranslations·loadTranslations가 공유하는 가드).
  *
- * vocaro는 한국어 전용, miraheze는 영어 전용이다 — attribution.sourceId로 실제 출처를
- * 가른다(구데이터 vocaro 채택분은 attribution이 없으므로 source==='vocaro' 폴백을
- * 유지한다 — adoptVocaroResult는 손대지 않았다). 이 둘은 단일 언어 소스라 언어 자체가
- * 고정이지만, 그 밖의 humanTranslated(서버 sync의 wiki 병합분·유튜브 수동 자막 등)는
- * **임의 언어**일 수 있으므로 data.translationLang(그 번역이 실제로 실린 언어)이 내
- * 번역 언어와 같을 때만 보호한다 — 예전엔 여기도 한국어로 고정돼 있어서 en/ja 타깃에
- * 실제로 자막 병합이 있어도 매번 지우고 LLM을 다시 불렀다.
+ * 고정 언어 출처(miraheze/vocaro)는 **실적재**까지 확인한다(감사 C1) — sourceId만으로
+ * "그 출처에서 온 싱크"라고 판정하면, enrichFromVocaro가 miraheze 출처 싱크에 ko 번역을
+ * 병합한 뒤 en으로 전환했을 때도 "미라헤즈=en이니 이미 맞다"로 잘못 참이 나서 한국어
+ * 번역이 지워지지도 en이 재요청되지도 않고 영구 잔류했다. 내 번역 언어가 고정 언어와
+ * 같고, 실제로 번역이 실린 줄이 있고, translationLang 도장(있다면)도 고정 언어와 같을
+ * 때만 보호한다.
+ *
+ * 그 밖의 humanTranslated(서버 sync의 wiki 병합분·유튜브 수동 자막 등)는 **임의 언어**일
+ * 수 있으므로 data.translationLang(그 번역이 실제로 실린 언어)이 내 번역 언어와 같을
+ * 때만 보호한다 — 예전엔 여기도 한국어로 고정돼 있어서 en/ja 타깃에 실제로 자막 병합이
+ * 있어도 매번 지우고 LLM을 다시 불렀다.
  */
 function hasMatchingHumanTranslation(data: LyricsData): boolean {
-  if (data.attribution?.sourceId === 'miraheze') return settings.translationLanguage === 'en';
-  if (data.source === 'vocaro') return settings.translationLanguage === 'ko';
+  const fixedLang = fixedSourceLang(data);
+  if (fixedLang) {
+    return settings.translationLanguage === fixedLang
+      && data.lines.some(l => l.translation)
+      && (data.translationLang ?? fixedLang) === fixedLang;
+  }
   return Boolean(data.humanTranslated) && data.translationLang === settings.translationLanguage;
 }
 
@@ -1422,6 +1496,9 @@ function clearTranslations(): void {
   // 사람 번역(위키 등)은 가사 자체의 일부 — 지우지 않는다(내 번역 언어와 같은 위키일 때만).
   if (hasMatchingHumanTranslation(currentData)) return;
   for (const line of currentData.lines) delete line.translation;
+  // 실제로 지우는 경로에서만 배지도 내린다 — 위 보호 반환 경로는 기존 출처 표기를
+  // 그대로 유지해야 한다(감사 C2a).
+  overlay?.setTranslationSource(null);
   overlay?.refreshTranslations();
   pip.refresh();
 }
@@ -1698,7 +1775,11 @@ async function tryServerLayerRefresh(
   // 경로와 동일하게 맞아떨어진다. 발음도 서버가 준 값을 그대로 실어 보낸다(fetchLlmLineMeta
   // 경로와 달리 이건 서버 자신이 만든 값이라 문자 체계 재검증이 필요 없다).
   const translated = fresh.lines.map(l => ({ original: l.text, translation: l.translation ?? '', pronunciation: l.pronunciation }));
-  applyTranslations(data, translated, { kind: 'server' });
+  // 서버가 translation_origin을 함께 내려주면(additive) 'server'(출처 불명, 배지 숨김)
+  // 특례 대신 실제 출처를 쓴다 — 구서버는 필드가 없어 기존 동작(숨김) 그대로다(감사 C2c).
+  applyTranslations(data, translated, fresh.translationOrigin
+    ? { kind: fresh.translationOrigin, wikiName: fresh.translationAttribution?.name }
+    : { kind: 'server' });
   // 세션 캐시에도 남긴다(V2) — 서버가 이미 갖고 있던 레이어라도 캐시에 없으면 언어를
   // 다시 바꿨다 되돌아올 때 또 서버를 두드린다. setTranslationCache 문서 참고.
   setTranslationCache(translationKey(videoId, lang, data.lines.map(l => l.text)), translated, { kind: 'server' });
@@ -2148,10 +2229,17 @@ function safeHangulPronunciation(raw: string | undefined): string | undefined {
 
 /** LLM 번역·한글 독음을 받아 line_meta로 변환 — 캐시 우선, 실패 시 undefined(원문 정렬 폴백).
  *  LLM이 echo한 original 대신 넘겨받은 원문으로 인덱스 매핑한다 (서버 병합은 텍스트 매칭이라
- *  원문이 정확해야 하고, 서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치). */
+ *  원문이 정확해야 하고, 서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치).
+ *
+ *  반환에 lang을 함께 싣는다(감사 C6) — 이 함수 내부의 실제 번역은 **진입 시점**의
+ *  settings.translationLanguage로 만들어진다. requestTranslation의 await 도중 사용자가
+ *  언어를 또 바꾸면, 호출부가 그 뒤에 settings.translationLanguage를 다시 읽어
+ *  lineMetaLang으로 찍는 것은(생성 경로) 방금 만든 meta의 실제 언어와 어긋나고, 호출
+ *  전에 미리 읽어 둔 값을 쓰는 것도(재생성 경로) 같은 이유로 어긋날 수 있다 — 어느
+ *  방향이든 호출부가 이 반환값의 lang을 그대로 도장으로 써야 내용과 표기가 일치한다. */
 async function fetchLlmLineMeta(
   videoId: string, srcLines: string[],
-): Promise<{ text: string; pronunciation?: string; translation?: string }[] | undefined> {
+): Promise<{ meta: LineMeta[]; lang: string } | undefined> {
   const lang = settings.translationLanguage;
   try {
     overlay?.setTranslationStatus(t('content.translation.aiGenerating'));
@@ -2167,13 +2255,14 @@ async function fetchLlmLineMeta(
       translated = await requestTranslation(videoId, srcLines);
     }
     if (translated && translated.length > 0) {
-      return srcLines
+      const meta = srcLines
         .map((t, i) => ({
           text: t,
           pronunciation: safeHangulPronunciation(translated![i]?.pronunciation?.trim() || undefined),
           translation: translated![i]?.translation?.trim() || undefined,
         }))
         .filter(m => m.pronunciation || m.translation);
+      return { meta, lang };
     }
   } catch { /* 번역 실패 — 메타 없이 진행 */ } finally {
     if (videoId === currentVideoId) overlay?.setTranslationStatus(null);
@@ -2293,8 +2382,9 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     data = lr.data ?? null;
   }
   // 서버 싱크(위키 가사로 생성된 것)에 위키의 발음/사람 번역을 텍스트 매칭으로 병합
+  let vocaroTranslationMerged = false;
   if (data && data.source === 'everyric' && data.synced) {
-    await enrichFromVocaro(videoId, data);
+    vocaroTranslationMerged = await enrichFromVocaro(videoId, data);
     if (seq !== searchSeq || videoId !== currentVideoId) return;
   }
   // 초기화 직후라면 방금 지운 가사를 자막보다 **먼저** 되돌린다 — 정확한 원문이 이미
@@ -2306,6 +2396,13 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     if (seq !== searchSeq || videoId !== currentVideoId) return;
   }
   applyLyricsData(data);
+  // enrichFromVocaro가 번역을 병합했으면 배지에 반영 — applyLyricsData **뒤**여야 한다
+  // (그 안의 showSyncedLyrics/showPlainLyrics가 resetBody로 배지를 지운 뒤라야 남는다,
+  // 위 enrichFromVocaro 문서 참고). currentData===data 확인은 이 사이 await이 없어
+  // 사실상 항상 참이지만, 다른 호출부와 같은 방어를 맞춘다.
+  if (vocaroTranslationMerged && currentData === data) {
+    overlay?.setTranslationSource('wiki', t('overlay.source.vocaro'));
+  }
 
   // 서버 싱크가 없는 영상(=조회가 found:false였던 경우)에서만 같은 곡 후보를 물어본다.
   // 이미 싱크가 있는 다수 케이스에는 요청이 아예 나가지 않아 지연이 없다. 화면을 먼저
@@ -2592,7 +2689,10 @@ async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
   // 이미 막히지만, 갈아탄 원문의 캐시를 들고 있을 이유가 없다(다시 쓸 일이 없는 항목이
   // LRU 자리만 차지한다). 후보 교체는 "이 가사가 아니었다"는 사용자의 선언이다.
   for (const key of [...translationCache.keys()]) {
-    if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+    if (key.startsWith(`${videoId}:`)) {
+      translationCache.delete(key);
+      translationOriginCache.delete(key);
+    }
   }
   updateGenChip();
   engine.stop();
@@ -2648,8 +2748,14 @@ function prefillTranslationCacheFromServer(data: LyricsData): void {
   for (const [lang, arr] of Object.entries(data.translationsByLang)) {
     if (arr.length !== data.lines.length) continue; // 인덱스 정합 불확실 — 안전하게 건너뜀
     if (!arr.some(Boolean)) continue; // 이 언어는 사실상 빈 레이어 — 캐시할 게 없다
+    const key = translationKey(videoId, lang, srcLines);
+    // 이미 이 키로 사람 번역(자막·위키)이 캐시돼 있으면 이 벌크 선채움(항상 origin=
+    // 'server', 출처 불명 취급)으로 덮지 않는다 — 세션 안에서 이미 확보한 더 정확한
+    // 출처 표기를 잃을 이유가 없다(감사 C8b).
+    const existingOrigin = translationOriginCache.get(key)?.kind;
+    if (existingOrigin === 'wiki' || existingOrigin === 'caption') continue;
     const translated = data.lines.map((line, i) => ({ original: line.text, translation: arr[i] ?? '' }));
-    setTranslationCache(translationKey(videoId, lang, srcLines), translated, { kind: 'server' });
+    setTranslationCache(key, translated, { kind: 'server' });
     if (!data.availableLangs?.includes(lang)) {
       data.availableLangs = [...(data.availableLangs ?? []), lang];
     }
@@ -2747,8 +2853,18 @@ function applyLyricsData(data: LyricsData | null): void {
   // 영상 자막 모듈 — 싱크가 있으면 같은 라인 배열을 공유한다(번역이 늦게 라인 객체에
   // 붙어도 다음 렌더에 자연 반영). 없으면 비운다.
   videoCaption.setLines(data?.synced ? data.lines : []);
-  // 자동 매칭 표시줄 — 위키가 고른 곡 제목(서버 싱크·매칭 없음이면 숨김)
-  panel.setMatchedSource(data?.matchedTitle ?? null);
+  // 자동 매칭 표시줄 — 위키가 고른 곡 제목(매칭 단계에서는 항상), 또는 **자동 조달
+  // 가사로 생성된 서버 싱크가 품질 붕괴 상태일 때만** 출처명. 후자가 없으면 잘못
+  // 생성된 싱크(자막 오채택 등)에서 "이 가사가 아니에요"에 닿을 길이 없다(실사용
+  // 질문으로 발견). 단 자동 조달의 다수는 정답이므로 멀쩡한 싱크에까지 매번 띄우면
+  // 소음이다(운영자 지적) — 저신뢰 경고와 같은 임계(<0.001)로만 연다. 출처 자체는
+  // 푸터에 항상 병기되므로 정보 손실은 없다. 수동 붙여넣기 생성은 attribution이 없어
+  // 기존처럼 숨는다.
+  const qualityCollapsed = data?.qualityScore != null && data.qualityScore < 0.001;
+  const matchedLabel = data?.matchedTitle
+    ?? (data?.source === 'everyric' && data.attribution?.name && qualityCollapsed
+      ? data.attribution.name : null);
+  panel.setMatchedSource(matchedLabel);
   // 영상별 저장 오프셋 복원 (서버에 저장된 값, 없으면 0) — UI 라벨도 함께
   videoOffset = data?.userOffset ?? 0;
   panel.setOffsetValue(videoOffset);
@@ -2852,6 +2968,14 @@ function applyLyricsData(data: LyricsData | null): void {
     }
     refreshPipMirror();
     panel.showPlainLyrics(data.lines, data.source, data.plainText);
+  }
+  // 서버가 번역 출처를 함께 내려주면(additive, 서버 동시 배포 중) 배지에 반영한다 —
+  // tryServerLayerRefresh의 origin 'server' 특례(출처 불명이라 배지를 숨기던 것)를 이
+  // 값이 있는 응답부터는 실제 출처로 대체하는 첫 지점이다. 위 show*가 이미 resetBody로
+  // 배지를 지운 **뒤**라야 이 설정이 남는다 — enrichFromVocaro의 같은 이유(감사 C2b)와
+  // 동일한 순서 제약. 필드가 없으면(구서버) 아무 것도 하지 않는다(기존 동작 그대로).
+  if (data.translationOrigin) {
+    overlay?.setTranslationSource(data.translationOrigin, data.translationAttribution?.name ?? null);
   }
   if (settings.showTranslation) void loadTranslations();
   pushDebug(null);
@@ -3175,8 +3299,16 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
       // 실패해도 **빈 배열로 반드시 한 번 보낸다** — 안 보내면 서버가 정렬 직전에 이 메타를
       // 대기 상한까지 기다려 잡이 헛되게 서 있다(빈 배열 = "붙일 것 없음" 확정 신호).
       let meta: LineMeta[] = [];
+      // fetchLlmLineMeta가 실제로 번역을 만든(진입 시점) 언어로 도장 찍는다 — await 도중
+      // 사용자가 언어를 또 바꾸면 여기서 settings.translationLanguage를 다시 읽는 것은
+      // 더 최신 값이라 방금 만든 meta의 실제 언어와 어긋난다(감사 C6).
+      let lineMetaLang = settings.translationLanguage;
       try {
-        meta = (await fetchLlmLineMeta(videoId, srcLines)) ?? [];
+        const result = await fetchLlmLineMeta(videoId, srcLines);
+        if (result) {
+          meta = result.meta;
+          lineMetaLang = result.lang;
+        }
       } catch {
         meta = []; // 번역 실패 — 서버는 원문 정렬로 폴백한다
       }
@@ -3188,8 +3320,7 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
           attribution,
           title: currentSong?.title,
           artist: currentSong?.artist ?? undefined,
-          // 지연 첨부 번역은 내 언어로 만든 것 — 서버가 그 언어 레이어에 넣는다
-          lineMetaLang: settings.translationLanguage,
+          lineMetaLang,
         },
       });
     }
@@ -3263,10 +3394,19 @@ async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
     if (lineMeta.length === 0 && expectsPronunciation(texts)) {
       // 세션 번역 캐시도 비운다 — 안 비우면 이 영상의 낡은 응답이 그대로 다시 실린다
       for (const key of [...translationCache.keys()]) {
-        if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+        if (key.startsWith(`${videoId}:`)) {
+          translationCache.delete(key);
+          translationOriginCache.delete(key);
+        }
       }
       const fetched = await fetchLlmLineMeta(videoId, texts);
-      if (fetched && fetched.length > 0) lineMeta = fetched;
+      // fetchLlmLineMeta가 실제로 사용한(진입 시점) 언어로 lineMetaLang을 다시 찍는다 —
+      // 위에서 미리 잡아 둔 값은 이 await 이전 시점 것이라 그 사이 언어가 바뀌면
+      // 어긋난다(감사 C6, 재생성 경로는 생성 경로와 반대 방향으로 어긋났었다).
+      if (fetched && fetched.meta.length > 0) {
+        lineMeta = fetched.meta;
+        lineMetaLang = fetched.lang;
+      }
     }
 
     const res = await sendToBackground<GenerateResponse>({
@@ -3327,7 +3467,10 @@ async function handleResetSync(): Promise<void> {
     : null;
   // 세션 캐시(언어별 번역·발음)와 진행 중 잡 추적도 함께 비워 완전히 처음부터
   for (const key of [...translationCache.keys()]) {
-    if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+    if (key.startsWith(`${videoId}:`)) {
+      translationCache.delete(key);
+      translationOriginCache.delete(key);
+    }
   }
   removeJob(videoId);
   updateGenChip();
@@ -3385,6 +3528,10 @@ function withoutTiming(data: LyricsData): LyricsData {
       endTime: null,
       text: l.text,
       pronunciation: l.pronunciation,
+      // 표기별 발음(en·ja 사용자가 실제로 보는 값)도 남긴다 — 레거시 pronunciation(한글)만
+      // 남기던 예전엔 en·ja 사용자만 초기화 후 발음을 통째로 잃는 비대칭이 있었다(감사 C7).
+      pron: l.pron,
+      pronSegsByScript: l.pronSegsByScript,
       translation: l.translation,
       wikiTranslation: l.wikiTranslation,
     })),
