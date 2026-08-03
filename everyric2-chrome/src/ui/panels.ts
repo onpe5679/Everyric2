@@ -1335,18 +1335,6 @@ export function buildNoticesSheet(opts: NoticesSheetOpts = {}): { el: HTMLDivEle
   return { el };
 }
 
-/**
- * 서버가 이미 LimitBucket에 next_reset_at(UTC ISO, additive — 이 한도를 마지막으로 쓴
- * 시점 + window_hours, null=아직 한 번도 안 씀)을 내려주지만 클라이언트 타입(LimitBucket,
- * types.ts)엔 아직 선언이 없다 — types.ts는 이번 라운드 수정 금지 대상이라 여기서는
- * 런타임 안전 캐스트로만 읽는다(타입 정식 추가는 후속 필요, 보고 참고). 구서버는 필드
- * 자체가 없으므로 undefined → null로 접어 "회복 안내 생략" 신호로 통일한다.
- */
-function additiveNextResetAt(bucket: LimitBucket): string | null {
-  const raw = (bucket as unknown as { next_reset_at?: string | null }).next_reset_at;
-  return raw ?? null;
-}
-
 /** next_reset_at(UTC ISO)을 사용자 로컬 시각 HH:MM으로 — debug-panel.ts formatHHMM과
  *  같은 표기 규칙(로컬 타임존, 24시간제 아님 — 브라우저 로케일에 맡긴다). */
 function formatResetTime(isoUtc: string): string {
@@ -1463,24 +1451,28 @@ export function buildContributionSheet(opts: ContributionSheetOpts = {}): { el: 
       }
     }
 
-    // 남은 한도 — 영상이 있어야 물을 수 있고, 강제하지 않는 배포에선 숫자에 뜻이 없다
+    // 남은 한도 — 영상이 있어야 물을 수 있다. 강제하지 않는 배포도 블록은 띄우고
+    // "무제한 (사용 N회)"로 표시한다 — 숨기면 사용자는 기능이 고장난 줄 안다(운영자
+    // 지시 2026-08-04: "무제한이어도 무제한이라고 뜨게 해야지").
     if (!opts.videoId) return;
     const res = await sendPanelMessage<LimitsResponse>({
       type: 'LIMITS_GET', payload: { videoId: opts.videoId },
     });
     const limits = res.data;
-    if (!limits?.enforced) return;
+    if (!limits) return;
     // 각 버킷은 행 하나(라벨+남은/전체) + 있으면 회복 안내 한 줄(작게)을 낸다 — 회복 안내는
     // next_reset_at이 null(이 한도를 세션 내 아직 안 씀)이면 통째로 생략한다(팀 지시).
     const bucket = (label: string, data: LimitBucket): HTMLElement[] => {
       const row = h('div', { className: 'ey-contrib-quota-row' },
         h('span', { text: label }),
         h('span', {
-          className: `ey-contrib-quota-val${data.remaining === 0 ? ' out' : ''}`,
-          text: t('panels.contrib.quotaValue', [String(data.remaining), String(data.limit)]),
+          className: `ey-contrib-quota-val${limits.enforced && data.remaining === 0 ? ' out' : ''}`,
+          text: limits.enforced
+            ? t('panels.contrib.quotaValue', [String(data.remaining), String(data.limit)])
+            : t('panels.contrib.quotaUnlimited', [String(data.used)]),
         }),
       );
-      const nextResetAt = additiveNextResetAt(data);
+      const nextResetAt = data.next_reset_at ?? null;
       if (!nextResetAt) return [row];
       const note = h('div', {
         className: 'ey-settings-note',
