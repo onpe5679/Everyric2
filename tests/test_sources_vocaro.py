@@ -105,6 +105,62 @@ def test_empty_original_lines_are_dropped():
     assert [ln.text for ln in lines] == ["いち"]
 
 
+# ── 다중 버전 페이지 (원곡/리믹스가 한 페이지에) ────────────────────
+
+# /monitoring 실측 구조: h1 "가사" 아래 h2 버전 헤딩("오리지널"/"Best Friend Remix")이
+# 각 표 앞에 붙는다. 힌트 없으면(구버전 확장) 첫 표 = 기존 동작.
+_MULTI_VERSION_HTML = (
+    "<h1>가사</h1>"
+    "<h2>오리지널</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>げんきょく</td></tr><tr><td>genkyoku</td></tr><tr><td>원곡</td></tr>"
+    "</tbody></table>"
+    "<h2>Best Friend Remix</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>りみっくす</td></tr><tr><td>rimikkusu</td></tr><tr><td>리믹스</td></tr>"
+    "</tbody></table>"
+)
+
+
+def test_variant_hint_picks_the_matching_version_table():
+    """리믹스 영상 제목을 힌트로 주면 리믹스 표를 고른다 (실측: /monitoring 오리지널 오집)."""
+    _title, lines = vocaro.parse_song_page(
+        _MULTI_VERSION_HTML, "DECO*27 - モニタリング (Best Friend Remix) feat. 初音ミク"
+    )
+
+    assert [ln.text for ln in lines] == ["りみっくす"]
+    assert lines[0].translation == "리믹스"
+
+
+def test_no_hint_keeps_first_table_for_old_callers():
+    _title, lines = vocaro.parse_song_page(_MULTI_VERSION_HTML)
+
+    assert [ln.text for ln in lines] == ["げんきょく"]
+
+
+def test_unmatched_hint_falls_back_to_first_table():
+    """어느 버전 헤딩도 힌트에 없으면 첫 표 — 오리지널 영상 제목이 바로 이 경우다."""
+    _title, lines = vocaro.parse_song_page(
+        _MULTI_VERSION_HTML, "DECO*27 - モニタリング feat. 初音ミク"
+    )
+
+    assert [ln.text for ln in lines] == ["げんきょく"]
+
+
+def test_single_table_page_ignores_hint():
+    _title, lines = vocaro.parse_song_page(_fixture("vocaro_song_3row.html"), "무슨 힌트든")
+
+    assert len(lines) == 3
+
+
+def test_fetch_song_threads_variant_hint():
+    fetcher = _StubFetcher(_MULTI_VERSION_HTML)
+
+    song = vocaro.fetch_song("monitoring", fetcher, "モニタリング (Best Friend Remix)")
+
+    assert [ln.text for ln in song.lines] == ["りみっくす"]
+
+
 # ── 조회 + 파생 계약 ───────────────────────────────────────────────
 
 

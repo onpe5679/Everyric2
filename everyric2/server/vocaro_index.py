@@ -72,6 +72,42 @@ _candidate_queries = title_match.candidate_queries
 _normalize_title = title_match.normalize_title
 
 
+# 잘 알려진 보컬로이드/음성합성 보컬명 — 유튜브 영상 제목의 "곡명 / 보컬명" 관례에서
+# 보컬명 자체가 위키에 실재하는 곡 제목과 우연히 같아 오매칭되는 것을 막는 재료다
+# (2026-08-03 실측: `match('depresso. / 初音ミク')`가 depresso.(색인에 없음) 대신
+# ryo의 곡 「初音ミク」에 매칭됐다 — 보컬명이 곡 후보 조각으로 쪼개져 정확 일치했다).
+# 대소문자·전각은 _normalize_title이 흡수하므로 한 표기만 있어도 되지만, 로마자 표기가
+# 흔한 것들은 함께 적어 둔다.
+_KNOWN_VOCAL_NAMES = (
+    "初音ミク", "Hatsune Miku",
+    "鏡音リン", "Kagamine Rin",
+    "鏡音レン", "Kagamine Len",
+    "巡音ルカ", "Megurine Luka",
+    "GUMI", "グミ",
+    "IA",
+    "KAITO", "カイト",
+    "MEIKO", "メイコ",
+    "重音テト", "Kasane Teto",
+    "可不", "Kafu",
+    "flower", "v_flower", "v flower",
+    "歌愛ユキ", "Kaai Yuki",
+    "星界", "Seikai",
+    "裏命",
+    "知声", "Chise",
+)
+_KNOWN_VOCAL_KEYS = frozenset(_normalize_title(name) for name in _KNOWN_VOCAL_NAMES)
+
+
+def _is_vocal_only_fragment(q: str, full_norm: str) -> bool:
+    """``q``가 잘 알려진 보컬명이고, 쿼리 전체가 그 보컬명만은 아닌가.
+
+    참이면 이 후보는 "그 보컬이 부른 어떤 곡"이 아니라 "쿼리 속 보컬명이 위키의 다른
+    곡 제목과 우연히 같다"는 뜻이다. 쿼리 전체가 보컬명뿐이면(``q == full_norm`` —
+    진짜 그 곡을 찾는 경우) False라 정상적으로 매칭을 허용한다.
+    """
+    return q in _KNOWN_VOCAL_KEYS and q != full_norm
+
+
 def match(title: str) -> SongEntry | None:
     """제목(원제 또는 한국어 독음 어느 쪽이든)으로 위키 곡 항목을 찾는다.
 
@@ -88,7 +124,15 @@ def match(title: str) -> SongEntry | None:
     if not queries:
         return None
 
+    # 포함 매칭의 아티스트 토큰 가드 재료이자(기존) 보컬명 가드 재료(신규) — 풀 쿼리
+    # 정규화본. 이 위치로 옮겼다 — 두 매칭 단계(정확 일치·포함) 모두 이 값이 필요하다.
+    full_norm = _normalize_title(title)
+
     for q in queries:
+        if _is_vocal_only_fragment(q, full_norm):
+            # 쿼리 속 보컬명(初音ミク 등)이 위키의 다른 곡 제목과 우연히 같다 — 쿼리에
+            # 남은 다른 토큰(depresso. 등)이 진짜 찾는 곡이다. _KNOWN_VOCAL_KEYS 문서 참고.
+            continue
         hits: list[SongEntry] = []
         for entry in entries:
             # 슬러그가 3순위 별칭인 이유(2026-08-03 실측): 인덱스는 ko/ja 제목만 갖는데
@@ -117,11 +161,12 @@ def match(title: str) -> SongEntry | None:
 
         return max(hits, key=_artist_bonus)
 
-    # 포함 매칭의 아티스트 토큰 가드 재료 — 풀 쿼리 정규화본. q ⊂ n 방향에서 n의
-    # 나머지(제목부)가 풀 쿼리 어디에도 없으면, 겹친 것은 아티스트 이름뿐이라는 뜻이다.
-    full_norm = _normalize_title(title)
-
+    # full_norm은 위에서 이미 계산했다(정확 일치 패스의 보컬명 가드와 공유) — q ⊂ n
+    # 방향에서 n의 나머지(제목부)가 풀 쿼리 어디에도 없으면, 겹친 것은 아티스트 이름뿐
+    # 이라는 뜻이다(아래 아티스트 토큰 가드).
     for q in queries:
+        if _is_vocal_only_fragment(q, full_norm):
+            continue
         best: tuple[int, SongEntry] | None = None
         for entry in entries:
             # 슬러그 별칭은 **정확 일치 패스에만** 둔다. 포함 매칭에 넣으면 동명이곡
@@ -134,6 +179,11 @@ def match(title: str) -> SongEntry | None:
                     continue
                 n = _normalize_title(field)
                 if len(n) < 2:
+                    continue
+                if _is_vocal_only_fragment(n, full_norm):
+                    # q 자체가 아니라 **항목 필드**가 보컬명뿐인 경우 — 쿼리가 그 보컬명을
+                    # 포함하는 더 긴 문자열(q == full_norm, 위쪽 q 레벨 가드는 안 걸림)이면
+                    # 여기서 걸린다("어떤곡 / 鏡音リン" 같은 실측 2호, 2026-08-03).
                     continue
                 ratio = min(len(q), len(n)) / max(len(q), len(n))
                 if not ((q in n or n in q) and ratio >= 0.5):

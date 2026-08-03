@@ -237,3 +237,44 @@ def test_slug_alias_does_not_bypass_artist_token_guard():
     # 무관하게 적용되는지 고정.
     _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
     assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
+
+
+# ── 보컬로이드 보컬명 오매칭 가드 (2026-08-03 실측: depresso. → hatsune-miku-song) ──
+
+
+def test_vocal_name_fragment_does_not_shadow_the_real_song():
+    # 실측: match('depresso. / 初音ミク') → ryo의 곡 「初音ミク」(색인에 실재)로 오매칭.
+    # depresso.는 색인에 없다 — 쿼리 속 보컬명이 우연히 다른 곡 제목과 같아서 생긴 사고.
+    _set_entries([SongEntry(slug="hatsune-miku-song", ko="하츠네 미쿠", ja="初音ミク")])
+    assert vi.match("depresso. / 初音ミク") is None
+
+
+def test_vocal_name_fragment_guard_applies_to_containment_pass_too():
+    # 정확 일치가 아니라 포함 매칭으로도 같은 오탐이 날 수 있다 — 위키 항목 제목이
+    # 보컬명을 포함하는 더 긴 표기("初音ミクの唄" 등)여도 가드가 적용돼야 한다.
+    _set_entries([SongEntry(slug="hatsune-miku-no-uta", ko="하츠네 미쿠의 노래", ja="初音ミクの唄")])
+    assert vi.match("depresso. / 初音ミク") is None
+
+
+def test_whole_query_being_just_the_vocal_name_is_a_legitimate_search():
+    # 쿼리 전체가 보컬명뿐이면(진짜 그 곡을 찾는 경우) 가드가 걸리지 않는다
+    _set_entries([SongEntry(slug="hatsune-miku-song", ko="하츠네 미쿠", ja="初音ミク")])
+    result = vi.match("初音ミク")
+    assert result is not None
+    assert result.slug == "hatsune-miku-song"
+
+
+def test_vocal_name_guard_does_not_affect_unrelated_matches():
+    # 보컬명이 쿼리에 아예 없으면 가드가 개입할 이유가 없다 — 기존 동작 그대로.
+    _set_entries([SongEntry(slug="roki", ko="로키", ja="ロキ")])
+    result = vi.match("ロキ / 초저녁")
+    assert result is not None
+    assert result.slug == "roki"
+
+
+def test_multiple_known_vocal_names_are_all_guarded():
+    _set_entries([SongEntry(slug="rin-song", ko="린 노래", ja="鏡音リン")])
+    assert vi.match("어떤곡 / 鏡音リン") is None
+    # 로마자 표기도 같은 정규화 키로 걸린다
+    _set_entries([SongEntry(slug="kaito-song", ko="카이토 노래", ja="KAITO")])
+    assert vi.match("어떤곡 / KAITO") is None

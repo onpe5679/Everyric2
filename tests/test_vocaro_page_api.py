@@ -31,7 +31,9 @@ def _song() -> VocaroSong:
 
 
 def test_page_maps_song_one_to_one(monkeypatch):
-    monkeypatch.setattr(vocaro_api.vocaro_source, "fetch_song", lambda slug: _song())
+    monkeypatch.setattr(
+        vocaro_api.vocaro_source, "fetch_song", lambda slug, fetcher=None, hint=None: _song()
+    )
     resp = asyncio.run(song_page(slug="roki"))
     assert resp.found is True
     assert resp.slug == "roki"
@@ -44,7 +46,7 @@ def test_page_maps_song_one_to_one(monkeypatch):
 
 
 def test_page_rejects_bad_slug_before_fetch(monkeypatch):
-    def _boom(slug):
+    def _boom(slug, fetcher=None, hint=None):
         raise AssertionError("검증 실패 슬러그로 위키 조회가 나가면 안 된다")
 
     monkeypatch.setattr(vocaro_api.vocaro_source, "fetch_song", _boom)
@@ -54,10 +56,27 @@ def test_page_rejects_bad_slug_before_fetch(monkeypatch):
 
 
 def test_page_fetch_failure_is_found_false(monkeypatch):
-    monkeypatch.setattr(vocaro_api.vocaro_source, "fetch_song", lambda slug: None)
+    monkeypatch.setattr(
+        vocaro_api.vocaro_source, "fetch_song", lambda slug, fetcher=None, hint=None: None
+    )
     resp = asyncio.run(song_page(slug="no-such-song"))
     assert resp.found is False
     assert resp.lines == []
+
+
+def test_page_passes_variant_hint_through(monkeypatch):
+    """hint(영상 제목)는 다중 버전 페이지의 표 선택용으로 fetch_song까지 전달돼야 한다."""
+    seen: list[str | None] = []
+
+    def _capture(slug, fetcher=None, hint=None):
+        seen.append(hint)
+        return _song()
+
+    monkeypatch.setattr(vocaro_api.vocaro_source, "fetch_song", _capture)
+    asyncio.run(song_page(slug="monitoring", hint="DECO*27 - モニタリング (Best Friend Remix)"))
+    # 직접 코루틴 호출은 FastAPI 기본값 해석을 안 거친다 — None을 명시해 미전달 경로를 확인
+    asyncio.run(song_page(slug="monitoring", hint=None))
+    assert seen == ["DECO*27 - モニタリング (Best Friend Remix)", None]
 
 
 # ── /index ────────────────────────────────────────────────────────
