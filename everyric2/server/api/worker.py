@@ -78,6 +78,7 @@ def _require_lease(lease_key: str, worker_id: str | None) -> None:
 def _pop_stashes(job_id: str) -> None:
     """잡별 인메모리 스태시(발음/번역 메타·출처·강제·대기 예고) 정리 — 완료/실패/취소 시 (멱등)."""
     from everyric2.server.worker import (
+        _JOB_PROCESSING_START,
         _PENDING_ATTRIBUTION,
         _PENDING_FORCE,
         _PENDING_LINE_META,
@@ -96,6 +97,11 @@ def _pop_stashes(job_id: str) -> None:
     _PENDING_MIN_DEPTH.pop(job_id, None)
     # 대기 예고는 claim이 peek로 실어 보내므로(재클레임 대비) 터미널 지점에서만 비운다
     _PENDING_META_WAIT.discard(job_id)
+    # 처리 시작 스탬프 — submit_result는 JobMetric 기록에 pop_processing_duration으로 이미
+    # 소비했을 수 있다(dict.pop 기본값이라 중복은 무해). fail/cache-check-완결/과길이 거절
+    # 경로는 duration을 안 재므로 여기서만 비운다 — 안 그러면 재클레임되지 않는 종결 잡의
+    # 스탬프가 프로세스 수명 동안 계속 남는다.
+    _JOB_PROCESSING_START.pop(job_id, None)
 
 
 def _peek_line_meta(job_id: str) -> list[dict[str, Any]] | None:
@@ -415,6 +421,13 @@ async def claim_job(request: ClaimRequest, x_worker_key: str | None = Header(def
             job = await repo.get_oldest_queued()
             if job:
                 await repo.update_status(job.id, "processing", progress=0, stage="워커 할당")
+                # 처리 시작 스탬프 — JobMetric.duration_sec/ETA 재료(worker.stash_processing_
+                # start 독스트링 참고). 재클레임(만료 리스 회수 후 다른/같은 워커가 다시 물어도)
+                # 이 시각을 최신 시도 기준으로 덮어써 정직하다 — 이전 시도의 소요는 완주하지
+                # 못했으므로 duration에 섞이면 안 된다.
+                from everyric2.server.worker import stash_processing_start
+
+                stash_processing_start(job.id)
                 sync_payload = WorkerJob(
                     job_id=job.id,
                     video_id=job.video_id,
@@ -599,6 +612,7 @@ async def submit_result(
             layer_origin,
             peek_attribution,
             peek_title,
+            pop_processing_duration,
             record_translation_layer,
             resolve_layer_lang,
             translation_layer_lines,
@@ -641,6 +655,17 @@ async def submit_result(
         await job_repo.update_status(
             job_id, "completed", progress=100, result_id=sync_result.id
         )
+
+        # ETA 재료 기록 — 인프로세스 성공 경로(worker._process_job_inner)와 같은 규약.
+        # 프로덕션은 이 원격 워커 경로가 주 경로라 여기 없으면 JobMetric이 사실상 안 쌓인다.
+        duration = pop_processing_duration(job_id)
+        if duration is not None:
+            depth = ((request.extra or {}).get("debug") or {}).get("routing", {}).get("route")
+            from everyric2.server.db.repository import JobMetricRepository
+
+            await JobMetricRepository(session).record(
+                job_id=job_id, video_id=job.video_id, depth=depth, duration_sec=duration
+            )
     _LEASES.pop(job_id, None)
     _cleanup_worker_audio(job_id)
     _pop_stashes(job_id)

@@ -23,6 +23,7 @@ from everyric2.server.db.repository import (
     SyncLinkRepository,
     SyncRepository,
     SyncResultVersionRepository,
+    SyncViewRepository,
     TranslationLayerRepository,
     VideoOffsetRepository,
     hash_lyrics,
@@ -424,6 +425,12 @@ class FeedbackRequest(BaseModel):
     rating: int = Field(ge=1, le=5)
     category: str | None = Field(default=None, pattern="^(timing|pronunciation|lyrics|other)$")
     comment: str | None = Field(default=None, max_length=1000)
+    # 제출 시점 화면에 떠 있던 싱크의 분석 깊이(fast/medium/heavy) — 확장이 조회 응답의
+    # debug.routing.route(또는 진행 중이었다면 job의 depth 배지)를 그대로 실어 보낸다.
+    # 서버가 sync_id로 역산하지 않는 이유: 제출 시점과 조회 시점 사이에 재생성이 끼면
+    # latest sync가 바뀌어 사용자가 실제로 본 세대와 어긋난다 — 확인 UI 쪽이 아는 값이
+    # 더 정확하다. additive — 안 싣는 구버전 확장은 None.
+    depth: str | None = Field(default=None, pattern="^(fast|medium|heavy)$")
 
 
 class RegenerateRequest(BaseModel):
@@ -624,6 +631,16 @@ def _build_sync_response(
         adlib=timestamps.get("adlib"),
         linked=linked,
     )
+
+
+async def _bump_sync_views(session, video_id: str) -> None:
+    """조회수 증가 — 실패해도 조회 자체(get_sync의 응답)는 절대 막지 않는다. 카운터는
+    "내가 만든 N곡을 M명이 봤어요" 기여 이력용 부가 정보지, 싱크 조회의 핵심 계약이
+    아니다(SyncView.__doc__ 참고)."""
+    try:
+        await SyncViewRepository(session).increment(video_id)
+    except Exception:
+        logger.exception("Failed to bump sync view count for video %s", video_id)
 
 
 async def _persist_legacy_ko_layer(
@@ -1457,6 +1474,7 @@ async def get_sync(
             result = await repo.get_by_video_and_hash(video_id, lyrics_hash)
             if result:
                 await repo.set_title_if_missing(result, title, artist)
+                await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(result, result.timestamps)
                 resp.user_offset = user_offset
                 resp = await _apply_translation_lang(session, video_id, resp, lang, background_tasks)
@@ -1468,6 +1486,7 @@ async def get_sync(
             results = await repo.get_by_video(video_id)
             if results:
                 await repo.set_title_if_missing(results[0], title, artist)
+                await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(results[0], results[0].timestamps)
                 resp.user_offset = user_offset
                 resp = await _apply_translation_lang(session, video_id, resp, lang, background_tasks)
@@ -1482,6 +1501,9 @@ async def get_sync(
                 src = source_syncs[0]
                 link_rate = getattr(link, "rate", 1.0) or 1.0
                 shifted = _shift_sync_timestamps(src.timestamps, link.offset_sec, link_rate)
+                # 보는 영상(video_id) 기준 — 원곡(source_video_id)이 아니라 이 링크로 실제
+                # 보고 있는 영상의 조회수를 늘린다(레이어 조회의 video_id 관례와 동일).
+                await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(
                     src,
                     shifted,
@@ -1539,6 +1561,92 @@ async def get_previous_sync_version(video_id: str):
         )
 
 
+def _depth_of(result: "SyncResult") -> str | None:
+    """sync_results 한 행의 timestamps.debug.routing.route — null-safe 추출. 새 정렬
+    스택(라우팅 판정)이 만든 행만 채워진다 — 레거시 스택·라우팅 판정 자체가 없던 행은
+    debug나 routing 키가 아예 없어 그대로 None으로 떨어진다."""
+    debug = (result.timestamps or {}).get("debug") or {}
+    routing = debug.get("routing") or {}
+    return routing.get("route")
+
+
+class SyncVersionSummary(BaseModel):
+    """디버그 패널의 신구/깊이별 비교용 — sync_results 한 행의 요약(무거운 timestamps
+    본문은 뺀다, 목록 하나가 최대 10건이라도 세그 전체를 다 실으면 무거워진다)."""
+
+    id: str
+    engine: str
+    engine_variant: str | None = None
+    engine_version: str | None = None
+    language: str | None = None
+    quality_score: float | None = None
+    created_at: str | None = None
+    # fast|medium|heavy — 새 스택 라우팅 판정(_depth_of). 레거시 행은 None.
+    depth: str | None = None
+
+
+class SyncVersionListResponse(BaseModel):
+    versions: list[SyncVersionSummary]
+
+
+@router.get("/{video_id}/versions", response_model=SyncVersionListResponse)
+async def list_sync_versions(video_id: str):
+    """이 영상의 sync_results 행 목록 — 최신순 최대 10건. SyncResult는 재생성마다 새 행을
+    쌓는(UPDATE가 아니라 INSERT-only, models.SyncResult 독스트링) 이력이라, 이 목록이
+    디버그 패널의 신구/깊이별(fast/medium/heavy) 비교 후보 전체다."""
+    _validate_video_id(video_id)
+    async with get_session() as session:
+        results = await SyncRepository(session).get_by_video(video_id)
+        return SyncVersionListResponse(
+            versions=[
+                SyncVersionSummary(
+                    id=r.id,
+                    engine=r.engine,
+                    engine_variant=r.engine_variant,
+                    engine_version=r.engine_version,
+                    language=r.language,
+                    quality_score=r.quality_score,
+                    created_at=r.created_at.isoformat() if r.created_at else None,
+                    depth=_depth_of(r),
+                )
+                for r in results[:10]
+            ]
+        )
+
+
+class SyncVersionDetailResponse(BaseModel):
+    """한 세대(sync_results 행 하나)의 전체 내용 — 목록에서 고른 두 세대를 실제로 그려
+    비교하는 데 쓴다."""
+
+    id: str
+    timestamps: list[dict[str, Any]]
+    language: str | None = None
+    quality_score: float | None = None
+    created_at: str | None = None
+    engine_version: str | None = None
+    depth: str | None = None
+
+
+@router.get("/{video_id}/versions/{result_id}", response_model=SyncVersionDetailResponse)
+async def get_sync_version_detail(video_id: str, result_id: str):
+    """한 세대의 전체 timestamps(segments) — video_id가 그 행의 실제 소유자가 아니면
+    404(다른 영상의 id로 남의 싱크 본문을 엿보는 것을 막는다)."""
+    _validate_video_id(video_id)
+    async with get_session() as session:
+        result = await SyncRepository(session).get_by_id(result_id)
+        if result is None or result.video_id != video_id:
+            raise HTTPException(status_code=404, detail="해당 세대를 찾을 수 없어요")
+        return SyncVersionDetailResponse(
+            id=result.id,
+            timestamps=(result.timestamps or {}).get("segments", []),
+            language=result.language,
+            quality_score=result.quality_score,
+            created_at=result.created_at.isoformat() if result.created_at else None,
+            engine_version=result.engine_version,
+            depth=_depth_of(result),
+        )
+
+
 @router.post("/feedback")
 async def submit_feedback(request: FeedbackRequest):
     """정렬 품질 별점(1~5) + 선택 오류 제보 수집 (확장 별점 UI, 2026-08-03).
@@ -1557,6 +1665,7 @@ async def submit_feedback(request: FeedbackRequest):
                 category=request.category,
                 comment=request.comment,
                 engine_version=getattr(latest, "engine_version", None) if latest else None,
+                depth=request.depth,
             )
         )
         # 커밋은 get_session 컨텍스트가 수행한다 (이 모듈의 다른 쓰기 경로와 동일)

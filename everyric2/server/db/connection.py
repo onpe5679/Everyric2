@@ -94,6 +94,18 @@ async def init_db():
                 await conn.execute(
                     text("ALTER TABLE sync_results ADD COLUMN engine_version VARCHAR(32)")
                 )
+            # sync_feedback은 2026-08-03에 create_all로 처음 생겼다 — 그 뒤 depth 컬럼이
+            # additive로 붙었으므로(2026-08-04) 이미 그 사이에 만들어진 배포 DB는 create_all이
+            # 손대지 않는다(기존 테이블에 컬럼을 추가하지 않는다는 이 함수 전체의 전제).
+            # 테이블 자체가 없는 완전 신규 DB는 위 create_all이 이미 depth 포함 스키마로
+            # 만들었으므로 아래 ALTER는 멱등하게 스킵된다(테이블 없으면 PRAGMA가 빈 집합).
+            feedback_cols = {
+                row[1] for row in await conn.execute(text("PRAGMA table_info(sync_feedback)"))
+            }
+            if feedback_cols and "depth" not in feedback_cols:
+                await conn.execute(
+                    text("ALTER TABLE sync_feedback ADD COLUMN depth VARCHAR(16)")
+                )
         # 서버가 죽으며 남긴 좀비 잡(pending/processing) 정리 — 방치하면 같은 영상의
         # 생성 요청이 죽은 잡에 합류해 영구 "전사 중"에 갇힌다
         from sqlalchemy import text as _text

@@ -172,6 +172,52 @@ def stash_min_depth(job_id: str, depth: str | None) -> None:
         _PENDING_MIN_DEPTH[job_id] = depth
 
 
+# 진행 중 잡의 현재 분석 깊이(fast/medium/heavy) — GET /api/job/{id}가 additive 필드
+# depth로 노출한다(확장의 "지금 heavy로 돌고 있어요" 진행 배지 재료). stage_holder와
+# 같은 인프로세스 관례: 정렬 스레드(run_in_executor)가 라우팅이 결정되는 즉시
+# (_run_new_stack_alignment) 쓰고, en 좌초 heavy 승급 때 다시 쓴다. DB에 쌓지 않는 이유는
+# stage_holder와 동일 — 2초마다 바뀔 수 있는 진행 중 상태를 매번 커밋하면 낭비다(완료
+# 후에는 JobMetric.depth가 영구 기록을 대신 진다).
+#
+# 원격 워커가 처리한 잡은 이 서버 프로세스 안에서 정렬이 돌지 않으므로 이 값이 절대
+# 채워지지 않는다 — 진행 중 조회는 항상 None(원격 배포의 라이브 깊이 노출은 스코프 밖).
+_JOB_DEPTH: dict[str, str] = {}
+
+
+def peek_job_depth(job_id: str) -> str | None:
+    return _JOB_DEPTH.get(job_id)
+
+
+# 잡 실제 처리 시작 시각(monotonic) — JobMetric.duration_sec/ETA(peek_processing_elapsed)의
+# 재료. jobs.updated_at은 진행률 보고마다 onupdate로 갱신되므로 완료 시점엔 이미 "지금"에
+# 수렴해 있어 시작 시각의 근사조차 못 된다(JobMetric.__doc__ 참고) — 그래서 인프로세스
+# 스탬프를 따로 둔다. 인프로세스 워커는 슬롯을 잡는 순간(_process_job_inner 진입), 원격
+# 워커는 claim이 processing을 확정하는 순간(api/worker.claim_job)에 새긴다 — 둘 다 이
+# 서버 프로세스 안에서 시작-종료가 왕복하므로(원격도 claim↔submit_result가 같은 서버
+# 인스턴스를 오간다) 유효하다. 다른 _PENDING_* 스태시와 같은 관례: 터미널 지점에서
+# 반드시 비운다(그 지점이 여럿이라 pop_processing_duration이 1회성으로 스스로 비운다).
+_JOB_PROCESSING_START: dict[str, float] = {}
+
+
+def stash_processing_start(job_id: str) -> None:
+    _JOB_PROCESSING_START[job_id] = time.monotonic()
+
+
+def peek_processing_elapsed(job_id: str) -> float | None:
+    """지금까지 경과한 처리 시간(초) — 비파괴 조회(GET /api/job/{id}의 eta_sec 산출용,
+    같은 잡에 여러 번 부를 수 있다). 시작 스탬프가 없으면(서버 재기동으로 유실 등) None."""
+    start = _JOB_PROCESSING_START.get(job_id)
+    return None if start is None else max(0.0, time.monotonic() - start)
+
+
+def pop_processing_duration(job_id: str) -> float | None:
+    """완료까지 걸린 총 시간(초) — 1회성(팝). JobMetric 기록 지점(인프로세스 성공 경로,
+    원격 워커 submit_result)이 부른다. 스탬프가 없으면 None — 호출부는 JobMetric 기록을
+    건너뛴다(수집 실패가 생성 자체를 막으면 안 된다)."""
+    start = _JOB_PROCESSING_START.pop(job_id, None)
+    return None if start is None else max(0.0, time.monotonic() - start)
+
+
 # 잡별 영상 제목/아티스트 — 완성된 싱크에 함께 저장돼 커버 링크 후보 탐색의 단서가 된다.
 # Job 테이블에 컬럼을 더하지 않고 라인 메타·출처와 같은 인메모리 스태시 관례를 따른다
 # (인프로세스·원격 워커 두 경로 모두 저장은 서버 프로세스에서 일어난다).
@@ -1498,6 +1544,13 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
     # stage_holder에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 보고한다
     stage_holder: dict[str, str] = {"stage": "보컬 분리"}
     monitor = asyncio.create_task(_stage_monitor(hooks.report, stage_holder, start=36))
+
+    def _on_depth(depth: str) -> None:
+        # 라우팅이 결정한 분석 깊이를 인프로세스 전역(_JOB_DEPTH)에 새긴다 — GET
+        # /api/job/{id}가 진행 중 배지로 읽어간다(peek_job_depth). job.job_id를 여기서
+        # 캡처하는 이유: 정렬은 별도 스레드(run_in_executor)에서 돌아 job_id를 모른다.
+        _JOB_DEPTH[job.job_id] = depth
+
     try:
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -1511,6 +1564,7 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
             # 자막 앵커 조달용 — 가사 출처와 무관하게 «이 영상»의 사람 자막 시각을 본다
             job.video_id,
             job.min_depth,
+            _on_depth,
         )
     except JobCancelled:
         # line_meta 대기 중 취소 — 오디오는 _run_alignment의 finally가 이미 지웠다.
@@ -1554,7 +1608,16 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
 async def _process_job_inner(job_id: str, job) -> None:
     from everyric2.config.settings import get_settings as _get_settings
     from everyric2.server.db.connection import get_session
-    from everyric2.server.db.repository import JobRepository, SyncRepository, hash_lyrics
+    from everyric2.server.db.repository import (
+        JobMetricRepository,
+        JobRepository,
+        SyncRepository,
+        hash_lyrics,
+    )
+
+    # 이 잡이 실제로 처리 슬롯을 잡은 순간 — JobMetric.duration_sec/ETA 산출의 시작
+    # 스탬프(jobs.updated_at은 진행률 보고마다 갱신되므로 못 쓴다, JobMetric.__doc__ 참고).
+    stash_processing_start(job_id)
 
     # 스태시(발음/번역 메타·출처·강제)를 peek해 코어 입력을 만든다. 정상 완료/실패 시
     # 아래에서 pop한다 (캐시 완결 경로는 _complete_from_cache_db가 이미 pop). force는
@@ -1649,6 +1712,16 @@ async def _process_job_inner(job_id: str, job) -> None:
                 job_id, "completed", progress=100, result_id=sync_result.id
             )
             logger.info(f"Job completed: {job_id}")
+
+            # ETA 재료 기록 — 실패 잡은 안 남긴다(완주 못 한 시간을 섞으면 왜곡된다).
+            # depth는 라우팅이 남긴 debug.routing.route를 그대로 옮긴다(레거시 스택이면
+            # 그 키 자체가 없어 None — all-depth 폴백 집계에는 여전히 들어간다).
+            duration = pop_processing_duration(job_id)
+            if duration is not None:
+                depth = ((result.extra or {}).get("debug") or {}).get("routing", {}).get("route")
+                await JobMetricRepository(session).record(
+                    job_id=job_id, video_id=job.video_id, depth=depth, duration_sec=duration
+                )
         _PENDING_LINE_META.pop(job_id, None)
         _PENDING_LINE_META_LANG.pop(job_id, None)
         _PENDING_ATTRIBUTION.pop(job_id, None)
@@ -1678,6 +1751,12 @@ async def _process_job_inner(job_id: str, job) -> None:
             )
 
     finally:
+        # 라이브 깊이 배지·처리 시작 스탬프 정리 — 모든 종료 경로(성공/취소/캐시완결/실패)
+        # 공통. 성공 경로는 이미 pop_processing_duration으로 스탬프를 소비했을 수 있지만
+        # dict.pop(기본값 있음)이라 중복 호출은 무해하다(다른 _PENDING_* 정리와 같은 관례).
+        _JOB_DEPTH.pop(job_id, None)
+        _JOB_PROCESSING_START.pop(job_id, None)
+
         # 잡 경계 VRAM 위생 (인프로세스 워커 경로) — 앨로케이터가 사재기한 활성 스파이크
         # 예약을 반환한다. 원격 워커는 cli._worker_loop가 같은 훅을 부른다.
         from everyric2.gpu_mem import reclaim_after_job
@@ -4375,6 +4454,7 @@ def _run_new_stack_alignment(
     settings: Any,
     report: Any,
     min_depth: str | None = None,
+    on_depth: Any | None = None,
 ) -> "_NewStackResult":
     """새 정렬 스택 본체 — 3단계 라우팅(``scripts/bench_adapters/routed.py``의
     routed-2mode-lang 구성 재현, 코디네이터 확정 2026-08-03/04 정정). 어휘는 **깊이**
@@ -4418,6 +4498,18 @@ def _run_new_stack_alignment(
             "from lyrics script census"
         )
 
+    # 라이브 진행 중 깊이 배지(worker._JOB_DEPTH) 통지 채널 — report(stage)와 별개다.
+    # report는 이 함수 밖의 테스트가 ``list.append`` 등 1-인자 콜러블을 그대로 넘겨받는
+    # 계약(tests/test_new_stack_wiring.py TestStageReporting)이라 시그니처를 못 건드리므로,
+    # 깊이는 완전히 별도의 선택적 콜백으로 얹는다 — on_depth가 없으면(구 호출부·테스트)
+    # 조용히 무동작이라 회귀가 없다.
+    def _notify_depth(depth: str) -> None:
+        if on_depth is not None:
+            try:
+                on_depth(depth)
+            except Exception:
+                pass
+
     if min_depth in (_DEPTH_MEDIUM, _DEPTH_HEAVY):
         # 분석 깊이 하한 요청(확장의 "분석 깊이 올리기" 버튼, 2026-08-03) — 라우팅
         # 판정을 건너뛰고 요청 깊이에서 바로 시작한다. en 좌초 heavy 자동 승급은 안
@@ -4425,6 +4517,7 @@ def _run_new_stack_alignment(
         # 일치해야 한다), 더 필요하면 사용자가 한 단계 더 올리면 된다.
         logger.info(f"New-stack routing: min_depth={min_depth!r} requested -> skipping router")
         report("보컬 분리")
+        _notify_depth(min_depth)
         deep = _run_deep_stage(
             audio, sep_result, lyric_lines, lang, settings, report, min_depth
         )
@@ -4445,6 +4538,7 @@ def _run_new_stack_alignment(
         # 단계명은 기존 어휘("전사 정렬")로 통일 — 위 두 번째 report와 같은 이유
         # (STAGE_WINDOWS 미등록·확장 1.5.5 한국어 노출, 아래 report들도 전부 동일).
         report("전사 정렬")
+        _notify_depth(_DEPTH_FAST)
         fast = _run_fast_stage(audio, lyric_lines, lang, settings)
         score = _line_log_conf_median(fast.results)
         fast.routing_meta = {
@@ -4479,6 +4573,7 @@ def _run_new_stack_alignment(
     # 승급 재호출은 이미 분리된 스템(deep.sep_result)을 재사용하므로 다시 안 낸다.
     report("보컬 분리")
     initial_depth = _DEPTH_MEDIUM if starts_at_medium else _DEPTH_HEAVY
+    _notify_depth(initial_depth)
     deep = _run_deep_stage(
         audio, sep_result, lyric_lines, lang, settings, report, initial_depth
     )
@@ -4508,6 +4603,7 @@ def _run_new_stack_alignment(
                     f"Heavy-depth escalation adopted: {stranded_before} -> {stranded_after} "
                     "stranded sites"
                 )
+                _notify_depth(_DEPTH_HEAVY)
                 escalated.alignment_text += "-escalated"
                 escalated.routing_meta = {
                     **deep.routing_meta,
@@ -4539,6 +4635,7 @@ def _finish_new_stack_alignment(
     f0_future: Any,
     f0_executor: Any,
     min_depth: str | None = None,
+    on_depth: Any | None = None,
 ) -> dict[str, Any]:
     """새 스택 정렬을 실행하고 ``_run_alignment``과 같은 모양의 응답 dict를 조립한다.
 
@@ -4556,7 +4653,8 @@ def _finish_new_stack_alignment(
     레거시 응답의 "기능이 꺼져 있어 없음"과 달리 "이 스택엔 그 개념이 없음"이다.
     """
     stack = _run_new_stack_alignment(
-        audio, sep_result, lyric_lines, language, settings, report, min_depth=min_depth
+        audio, sep_result, lyric_lines, language, settings, report,
+        min_depth=min_depth, on_depth=on_depth,
     )
     results = stack.results
     pron_data = stack.pron_data
@@ -4716,6 +4814,7 @@ def _run_alignment(
     line_meta_resolver: Any | None = None,
     video_id: str | None = None,
     min_depth: str | None = None,
+    on_depth: Any | None = None,
 ) -> dict:
     """정렬 본체. line_meta_resolver를 주면 **보컬 분리·f0 착수 뒤, CTC 진입 직전에** 한 번
     불러 line_meta를 늦게 받아온다 (번역·독음을 클라이언트가 병렬로 만드는 경로).
@@ -4723,7 +4822,12 @@ def _run_alignment(
 
     video_id를 주고 ``caption_anchors``가 켜져 있으면 사람이 만든 유튜브 자막의 타임스탬프에서
     «가사 줄이 놓일 수 없는 구간»을 뽑아 정렬에 제약으로 넣는다 (``_caption_forbidden_spans``).
-    가사 출처와 무관한 별개 신호이므로 자막으로 만든 싱크가 아니어도 동작한다."""
+    가사 출처와 무관한 별개 신호이므로 자막으로 만든 싱크가 아니어도 동작한다.
+
+    on_depth: 새 스택 라우팅이 결정한 분석 깊이(fast/medium/heavy)를 실어 보내는 선택
+    콜백(2026-08-04) — on_stage와 별개 채널이다(``_run_new_stack_alignment``의
+    ``_notify_depth`` 주석 참고: on_stage/report는 테스트가 1-인자 콜러블로 직접 넘겨받는
+    계약이라 시그니처를 못 바꾼다)."""
     from everyric2.audio.loader import AudioLoader
     from everyric2.config.settings import get_settings
     from everyric2.inference.prompt import LyricLine
@@ -4925,6 +5029,7 @@ def _run_alignment(
                 f0_future,
                 f0_executor,
                 min_depth=min_depth,
+                on_depth=on_depth,
             )
         # 독음(ko) 정렬 경로: 커버리지가 충분하면 한국어 발음 텍스트+kor adapter로 정렬하고
         # 원문 라인에 역매핑한다. 미달/실패 시 원문 정렬로 폴백 (회귀 0).

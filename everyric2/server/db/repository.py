@@ -10,10 +10,13 @@ from everyric2.server.db.models import (
     ENGINE_VERSION,
     ActionLog,
     Job,
+    JobMetric,
     LinkJob,
+    Notice,
     SyncLink,
     SyncResult,
     SyncResultVersion,
+    SyncView,
     TranslationLayer,
     VideoOffset,
 )
@@ -809,3 +812,94 @@ class LinkJobRepository:
             .where(LinkJob.id == link_job_id)
             .values(status="declined", error=error)
         )
+
+
+class NoticeRepository:
+    """운영 공지 CRUD — 목록은 활성분만, 생성·비활성화는 어드민 전용(api/notices.py가 키를 검사)."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def list_active(self, limit: int = 20) -> list[Notice]:
+        """활성(active=True) + 아직 안 끝난(ends_at NULL 또는 미래) 공지, 최신순."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = await self.session.execute(
+            select(Notice)
+            .where(Notice.active.is_(True), or_(Notice.ends_at.is_(None), Notice.ends_at > now))
+            .order_by(Notice.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id(self, notice_id: int) -> Notice | None:
+        result = await self.session.execute(select(Notice).where(Notice.id == notice_id))
+        return result.scalar_one_or_none()
+
+    async def create(
+        self, title: str, body: str, level: str, ends_at: datetime | None = None
+    ) -> Notice:
+        notice = Notice(title=title, body=body, level=level, ends_at=ends_at)
+        self.session.add(notice)
+        await self.session.flush()
+        return notice
+
+    async def deactivate(self, notice_id: int) -> bool:
+        notice = await self.get_by_id(notice_id)
+        if notice is None:
+            return False
+        notice.active = False
+        await self.session.flush()
+        return True
+
+
+class SyncViewRepository:
+    """영상별 조회수 카운터 — video_id가 PK라 upsert(있으면 +1, 없으면 1로 생성)."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def increment(self, video_id: str) -> None:
+        result = await self.session.execute(select(SyncView).where(SyncView.video_id == video_id))
+        row = result.scalar_one_or_none()
+        if row:
+            row.views += 1
+        else:
+            self.session.add(SyncView(video_id=video_id, views=1))
+        await self.session.flush()
+
+    async def get_many(self, video_ids: list[str]) -> dict[str, int]:
+        """요청받은 video_id 중 실제로 조회수가 있는 것만 dict로 — 없는 건 응답 조립부가 0으로
+        채운다(SyncView 행이 아예 없는 영상은 여기 안 잡힌다)."""
+        if not video_ids:
+            return {}
+        result = await self.session.execute(
+            select(SyncView.video_id, SyncView.views).where(SyncView.video_id.in_(video_ids))
+        )
+        return {row.video_id: row.views for row in result.all()}
+
+
+class JobMetricRepository:
+    """완료된 잡의 처리 시간·깊이 이력 — ETA 산출(GET /api/job/{id})의 유일한 재료.
+
+    실패한 잡은 여기 안 온다(호출부가 성공 경로에서만 record를 부른다) — 완주 못 한
+    소요 시간을 섞으면 ETA가 낙관적으로 왜곡된다(models.JobMetric 독스트링 참고)."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def record(
+        self, job_id: str, video_id: str, depth: str | None, duration_sec: float
+    ) -> None:
+        self.session.add(
+            JobMetric(job_id=job_id, video_id=video_id, depth=depth, duration_sec=duration_sec)
+        )
+        await self.session.flush()
+
+    async def recent_durations(self, depth: str | None, limit: int = 20) -> list[float]:
+        """최근 limit건의 duration_sec — depth를 주면 그 깊이만(라우팅이 결정한 깊이별
+        ETA), None이면 전체(깊이 미상·큐 대기열 ETA의 all-depth 폴백)."""
+        stmt = select(JobMetric.duration_sec).order_by(JobMetric.created_at.desc()).limit(limit)
+        if depth is not None:
+            stmt = stmt.where(JobMetric.depth == depth)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

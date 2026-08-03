@@ -178,6 +178,11 @@ class SyncFeedback(Base):
     category: Mapped[str | None] = mapped_column(String(24), nullable=True)
     comment: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     engine_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 제출 시점 이 sync_id가 어느 분석 깊이(fast/medium/heavy)로 만들어졌는지 — engine_version
+    # 만으로는 "같은 스택 안에서도 라우팅이 어느 깊이로 끝났는지"를 구분 못 한다(2026-08-04
+    # 3단계 라우팅 도입). 별점이 낮은 제보가 fast(무분리)에 몰리는지 heavy에도 나오는지를
+    # 갈라 봐야 라우팅 문턱 튜닝의 근거가 된다. additive — 안 싣는 구버전 확장은 None.
+    depth: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -322,3 +327,69 @@ class SyncResultVersion(Base):
     replaced_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class Notice(Base):
+    """운영 공지 — 확장이 GET /api/notices로 조회해 배너·모달로 띄운다 (2026-08-04).
+
+    active와 ends_at을 함께 둔 이유: active=False는 운영자가 즉시 내리는 수동 종료
+    (POST /notices/{id}/deactivate), ends_at은 "이 시각까지만 유효"한 예약 만료(예:
+    점검 공지) — 둘 다 필요하다. 목록(GET)은 이 둘을 AND로 걸러 활성 공지만 낸다.
+    level은 확장이 표시 방식(배너 색·강제 모달 여부 등)을 고르는 데 쓰는 힌트일 뿐,
+    서버는 값을 해석하지 않는다(자유도는 확장에 둔다)."""
+
+    __tablename__ = "notices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text)
+    level: Mapped[str] = mapped_column(String(16), default="info", server_default="info")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SyncView(Base):
+    """영상별 조회수 카운터 — GET /api/sync/{video_id}가 싱크를 찾을 때마다(자기 싱크·링크
+    빌림 공통) 기회적으로 1 늘린다. video_id를 PK로 써서 영상당 누적치 하나만 유지한다
+    (VideoOffset·SyncLink와 같은 upsert 관례). 이 카운터를 모아 확인하는 경로가
+    POST /api/stats/views — 확장의 로컬 기여 이력("내가 만든 N곡을 M명이 봤어요")이
+    자기가 만든 video_id 목록을 배치로 물어보는 데 쓴다. 증가 실패는 조회 자체를 막지
+    않는다(sync.py의 호출부가 try/except로 감싼다) — 카운터는 부가 정보지 핵심 기능이
+    아니다."""
+
+    __tablename__ = "sync_views"
+
+    video_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    views: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class JobMetric(Base):
+    """완료된 생성 잡의 처리 시간·분석 깊이 — GET /api/job/{id}의 eta_sec/queue_eta_sec
+    산출 재료(최근 N건의 rolling median). 실패·취소 잡은 기록하지 않는다 — 완주하지
+    못한 소요 시간을 예측 재료에 섞으면 중간에 실패로 짧게 끝난 잡들이 ETA를 실제보다
+    낙관적으로 왜곡한다.
+
+    duration_sec은 jobs.updated_at으로 셈하지 않는다 — 그 컬럼은 진행률 보고마다
+    onupdate로 갱신되므로 완료 시점엔 이미 "지금"에 수렴해 있어 시작 시각의 근사조차
+    못 된다. 대신 인프로세스 시작 스탬프(worker.stash_processing_start/
+    pop_processing_duration)로 잰다 — 인프로세스 워커는 슬롯을 잡는 순간
+    (_process_job_inner 진입), 원격 워커는 claim이 processing을 확정하는 순간
+    (api/worker.claim_job)에 새긴다. 둘 다 이 서버 프로세스 안에서 시작-종료가
+    왕복하므로(원격도 claim↔submit_result가 같은 서버 인스턴스를 오간다) 유효하다.
+
+    depth는 fast/medium/heavy(새 정렬 스택의 라우팅 판정, debug.routing.route를 그대로
+    옮긴다) — 레거시 스택(새 스택 비활성 배포)이나 판정 자체가 없었으면 None. None도
+    all-depth 폴백 집계에는 그대로 들어간다(깊이 무관 median 계산에서는 전부 쓴다)."""
+
+    __tablename__ = "job_metrics"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    job_id: Mapped[str] = mapped_column(String(36), index=True)
+    video_id: Mapped[str] = mapped_column(String(32), index=True)
+    depth: Mapped[str | None] = mapped_column(String(16), index=True)
+    duration_sec: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True, server_default=func.now())

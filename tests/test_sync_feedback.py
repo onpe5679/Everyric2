@@ -95,3 +95,36 @@ def test_rating_and_category_are_schema_validated():
         FeedbackRequest(video_id=VIDEO, rating=6)
     with pytest.raises(ValidationError):
         FeedbackRequest(video_id=VIDEO, rating=3, category="nonsense")
+
+
+# ── depth 스탬프 (2026-08-04, 디버그 패널 깊이별 비교 재료) ─────────────
+
+
+def test_depth_is_optional_and_defaults_to_none():
+    async def body():
+        async with _env():
+            out = await submit_feedback(FeedbackRequest(video_id=VIDEO, rating=5))
+            assert out == {"ok": True}
+            async with db_conn.async_session() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.depth is None
+
+    asyncio.run(body())
+
+
+def test_depth_is_stored_when_the_client_sends_it():
+    async def body():
+        async with _env() as sm:
+            await submit_feedback(
+                FeedbackRequest(video_id=VIDEO, rating=1, depth="heavy")
+            )
+            async with sm() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.depth == "heavy"
+
+    asyncio.run(body())
+
+
+def test_depth_is_schema_validated():
+    with pytest.raises(ValidationError):
+        FeedbackRequest(video_id=VIDEO, rating=3, depth="turbo")

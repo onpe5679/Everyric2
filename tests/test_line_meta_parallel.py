@@ -91,7 +91,7 @@ def _fake_alignment(captured: dict, audio_file):
 
     def fake(
         audio_path, lyrics, language, line_meta=None, on_stage=None, resolver=None,
-        video_id=None, min_depth=None,
+        video_id=None, min_depth=None, on_depth=None,
     ):
         try:
             if on_stage is not None:

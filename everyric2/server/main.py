@@ -9,7 +9,10 @@ from everyric2 import __version__
 from everyric2.server.api.captions import router as captions_router
 from everyric2.server.api.cookies import router as cookies_router
 from everyric2.server.api.job import router as job_router
+from everyric2.server.api.limits import router as limits_router
 from everyric2.server.api.link_jobs import router as link_jobs_router
+from everyric2.server.api.notices import router as notices_router
+from everyric2.server.api.stats import router as stats_router
 from everyric2.server.api.sync import router as sync_router
 from everyric2.server.api.translate import router as translate_router
 from everyric2.server.api.vocaro import router as vocaro_router
@@ -163,6 +166,9 @@ app.include_router(cookies_router)
 app.include_router(vocaro_router)
 app.include_router(captions_router)
 app.include_router(worker_router)
+app.include_router(notices_router)
+app.include_router(limits_router)
+app.include_router(stats_router)
 
 
 class HealthResponse(BaseModel):
