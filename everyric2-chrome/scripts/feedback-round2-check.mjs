@@ -14,14 +14,24 @@
 import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
-import { mkdtempSync, cpSync } from 'fs';
+import { mkdtempSync, mkdirSync, cpSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distSrc = resolve(__dirname, '../dist');
-const distDir = join(mkdtempSync(join(tmpdir(), 'ey-dist-')), 'dist');
+// dist를 직접 로드하지 않고 스냅샷을 거치는 이유는 그대로다(다른 에이전트의 npm run
+// build와 겹치면 manifest.json이 갈리는 중이라 크롬이 "매니페스트 없음" 모달을 띄우고
+// Playwright 연결을 영영 막는다) — 다만 목적지 자체는 이제 **고정** 경로다: 무작위
+// mkdtempSync는 로드 경로가 매번 달라 크롬이 매번 새 확장 ID를 매기고, 그러면 userDataDir을
+// 고정해도 host permission이 그 확장 ID에 안 남아 매번 권한 버블이 다시 뜬다(2026-08-04
+// 실측 — userDataDir만 고정했더니 재현됐다). 고정 목적지에 매번 새로 복사(덮어쓰기)하면
+// 최신 빌드도 반영되고 확장 ID도 안정된다.
+const distDir = process.env.EVERYRIC_E2E_DIST_DIR
+  ?? join(tmpdir(), 'everyric-e2e-profiles', 'exec-pron-round2-dist');
+mkdirSync(distDir, { recursive: true });
 cpSync(distSrc, distDir, { recursive: true });
+JSON.parse(readFileSync(join(distDir, 'manifest.json'), 'utf8')); // 깨진 스냅샷이면 여기서 즉사(display-values-check.mjs와 같은 가드)
 
 const SERVER = 'http://127.0.0.1:8000';
 const VIDEO = process.argv[2] ?? 'b2NTglk9tvI';
@@ -41,7 +51,13 @@ const notices = await (await fetch(`${SERVER}/api/notices`, { signal: AbortSigna
 const hasNotice = Array.isArray(notices?.notices) && notices.notices.length > 0;
 info('서버 공지 수', notices?.notices?.length ?? null);
 
-const userDataDir = mkdtempSync(join(tmpdir(), 'ey-r2-'));
+// 병렬 검수 공지(2026-08-04, team-lead): 무작위 임시 프로필은 매번 host permission
+// 버블을 다시 띄우고, 그걸 지우려던 taskkill //IM chrome.exe가 다른 에이전트 브라우저까지
+// 죽인 실사고가 있었다 — 에이전트 고유의 **고정** user-data-dir을 재사용하면 확장 ID가
+// 유지돼 permission이 그대로 살아있고, 버블 자체가 다시 뜨지 않아 taskkill이 필요 없다.
+const userDataDir = process.env.EVERYRIC_E2E_PROFILE_DIR
+  ?? join(tmpdir(), 'everyric-e2e-profiles', 'exec-pron-round2-check');
+mkdirSync(userDataDir, { recursive: true });
 const ctx = await chromium.launchPersistentContext(userDataDir, {
   ignoreDefaultArgs: ['--disable-extensions'],
   headless: false,

@@ -9,7 +9,7 @@
 import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, mkdirSync, cpSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,7 +17,17 @@ import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-perm
 import { readPipPanel } from './lib/pip-panel.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const distDir = resolve(__dirname, '../dist');
+const distSrc = resolve(__dirname, '../dist');
+// 2026-08-04 갱신: 예전엔 ../dist를 직접 로드했다 — 다른 에이전트의 npm run build와
+// 겹치면 manifest.json이 갈리는 중이라 크롬이 "매니페스트 없음" 모달을 띄우고 Playwright
+// 연결을 영영 막는 위험이 있었다(display-values-check.mjs가 이미 봉인한 함정). 고정
+// 목적지에 스냅샷하면 그 위험도 막고, 확장 ID도 고정 userDataDir과 짝이 맞아 host
+// permission이 재사용된다(무작위 경로였다면 매번 새 확장 ID라 권한 버블이 되살아난다).
+const distDir = process.env.EVERYRIC_E2E_DIST_DIR
+  ?? join(tmpdir(), 'everyric-e2e-profiles', 'exec-pron-fresh-profile-dist');
+mkdirSync(distDir, { recursive: true });
+cpSync(distSrc, distDir, { recursive: true });
+JSON.parse(readFileSync(join(distDir, 'manifest.json'), 'utf8')); // 깨진 스냅샷이면 여기서 즉사
 const DB_PATH = resolve(__dirname, '../../everyric2.db');
 
 // 조건: 발음 40줄↑ + 번역(세그 내장) 40줄↑ + tempo 있음(PiP 음정 바 렌더 전제) —
@@ -55,7 +65,16 @@ if (!videoUrl) {
   console.log(`INFO: 자동 선택된 실곡 = ${JSON.stringify(pickedSong)}`);
   videoUrl = `https://www.youtube.com/watch?v=${pickedSong.videoId}`;
 }
-const userDataDir = mkdtempSync(join(tmpdir(), 'everyric-fresh-'));
+// 병렬 검수 공지(2026-08-04, team-lead): 무작위 임시 프로필은 매번 host permission
+// 버블을 다시 띄우고, 그걸 지우려던 taskkill //IM chrome.exe가 다른 에이전트 브라우저까지
+// 죽인 실사고가 있었다 — 에이전트 고유의 **고정** user-data-dir을 재사용하면 확장 ID가
+// 유지돼 permission이 그대로 살아있고, 버블 자체가 다시 뜨지 않아 taskkill이 필요 없다.
+// ("새 프로필" 시나리오 자체는 디스크상 pristine 여부가 아니라 이 videoId의 vocaro
+// 이력이 없는 상태를 재현하는 게 목적이라 — 매 실행이 필요한 settings를 명시적으로
+// 덮어쓰므로 프로필 재사용과 충돌하지 않는다.)
+const userDataDir = process.env.EVERYRIC_E2E_PROFILE_DIR
+  ?? join(tmpdir(), 'everyric-e2e-profiles', 'exec-pron-fresh-profile-check');
+mkdirSync(userDataDir, { recursive: true });
 
 let failed = false;
 function check(ok, label, detail) {
