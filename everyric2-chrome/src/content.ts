@@ -1491,12 +1491,26 @@ function fixedSourceLang(data: LyricsData): 'en' | 'ko' | null {
  * 수 있으므로 data.translationLang(그 번역이 실제로 실린 언어)이 내 번역 언어와 같을
  * 때만 보호한다 — 예전엔 여기도 한국어로 고정돼 있어서 en/ja 타깃에 실제로 자막 병합이
  * 있어도 매번 지우고 LLM을 다시 불렀다.
+ *
+ * **실적재 확인은 every여야 한다(#45-1, 2026-08-04 실증)** — .some()이었을 때는
+ * enrichFromVocaro의 텍스트 매칭(byText.get(norm(line.text)), 완전 일치만 인정)이
+ * CTC 정렬이 만든 줄과 위키 페이지의 줄 나눔이 갈리는 지점에서 일부 줄만 우연히
+ * 맞아도 그 한 줄만으로 "이미 다 있음"이 참이 됐다. 그러면 loadTranslations이 여기서
+ * 조기 반환해, 결합 매칭(matchWikiLinesToSegments, 쪼갬·합침·재동기화까지 다루는 더
+ * 정확한 매처)을 쓰는 tryWikiTranslationLayer로 넘어가지 못하고 나머지 줄은 영영
+ * 비어 있었다(실사용 제보: 생성 직후 번역 대부분 미표시, 새로고침해야 보임 — 새로고침은
+ * harvestTranslations가 그 사이 서버에 조용히 저장해 둔 완전한 매칭 결과를 새로 받아온
+ * 것뿐, 화면 쪽 조기 반환 자체는 안 고쳐진다). every로 바꾸면 부분 매칭은 "아직
+ * 부족함"으로 정확히 판정돼 loadTranslations가 계속 진행하고, applyTranslations의
+ * "사람 번역 우선"(!line.translation) 규칙 덕에 enrichFromVocaro가 이미 맞춘 줄은
+ * 유지된 채 나머지만 채워진다. loadTranslations 자신의 "이미 다 있음" 게이트(위,
+ * data.lines.every(l => l.translation))와도 이제 기준이 일치한다.
  */
 function hasMatchingHumanTranslation(data: LyricsData): boolean {
   const fixedLang = fixedSourceLang(data);
   if (fixedLang) {
     return settings.translationLanguage === fixedLang
-      && data.lines.some(l => l.translation)
+      && data.lines.every(l => l.translation)
       && (data.translationLang ?? fixedLang) === fixedLang;
   }
   return Boolean(data.humanTranslated) && data.translationLang === settings.translationLanguage;
