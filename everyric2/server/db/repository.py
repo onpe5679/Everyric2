@@ -212,10 +212,23 @@ class SyncRepository:
         사용자가 지우라고 한 옛 내용을 계속 돌려준다(재생성 후에도 create()는 지워진
         video_id에 "기존 행 없음=최초 생성"으로 보아 새 스냅샷을 안 만드므로, 고아
         스냅샷은 재처리로도 자연 정리되지 않고 영구 잔류한다). 이 삭제는 video_id 하나의
-        PK 행 하나만 건드리므로(SyncResultVersion.video_id가 PK) 전체 스캔이 아니다."""
+        PK 행 하나만 건드리므로(SyncResultVersion.video_id가 PK) 전체 스캔이 아니다.
+
+        번역 레이어와 사용자 오프셋도 같은 논리로 함께 지운다(엣지 감사 4.1, 실측: 로컬
+        DB에 싱크 없는 고아 레이어 1건). 레이어 키가 (video_id, **지문**, lang)이라,
+        초기화 뒤 같은 가사로 다시 만들면 지문이 그대로 맞아 **지우라고 한 옛 번역이
+        되살아난다** — 오염된 번역이 저장된 경우 초기화로 복구할 수 없는 상태가 된다.
+        오프셋도 지워진 싱크의 타이밍에 맞춘 값이라 새 싱크에 적용하면 어긋난다.
+
+        피드백·잡·행위 로그는 **남긴다** — 운영자에게 간 제보와 쿼터 계산의 재료라
+        사용자 콘텐츠가 아니고, 지우면 초기화가 일일 한도 우회 수단이 된다."""
         await self.session.execute(
             delete(SyncResultVersion).where(SyncResultVersion.video_id == video_id)
         )
+        await self.session.execute(
+            delete(TranslationLayer).where(TranslationLayer.video_id == video_id)
+        )
+        await self.session.execute(delete(VideoOffset).where(VideoOffset.video_id == video_id))
         result = await self.session.execute(
             delete(SyncResult).where(SyncResult.video_id == video_id)
         )

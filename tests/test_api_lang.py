@@ -515,10 +515,14 @@ def test_ko_lookup_backfills_layer_and_survives_regeneration_without_legacy_segm
                     {"text": "둘째 줄", "translation": "레거시 번역 2"},
                 ]
 
-            # (2) en 유저의 재생성을 흉내 — 같은 가사지만 새 싱크의 세그엔 ko 번역이 없다
+            # (2) en 유저의 재생성을 흉내 — 같은 가사지만 새 싱크의 세그엔 ko 번역이 없다.
+            # **delete_by_video로 흉내 내면 안 된다**: sync_results는 INSERT 전용에
+            # 최신 우선이라 재생성은 행을 지우지 않고 새로 쌓을 뿐이고, delete_by_video는
+            # 사용자의 "초기화"(번역 레이어·오프셋까지 함께 버린다)라 의미가 정반대다.
+            # 예전엔 이 자리에서 delete를 불러, 초기화가 레이어를 남기던 결함(엣지 감사
+            # 4.1)이 고쳐지자 이 테스트가 깨졌다 — 깨진 쪽은 흉내 방식이었다.
             async with sm() as s:
                 repo = SyncRepository(s)
-                await repo.delete_by_video(VIDEO)
                 await repo.create(
                     video_id=VIDEO, lyrics_hash="h1", timestamps=_seed_segments(["", ""])
                 )

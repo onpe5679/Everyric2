@@ -434,3 +434,78 @@ def test_snapshot_engine_identity_survives_second_replacement():
             assert snap.engine_version == "mms-htdemucs-1"
 
     asyncio.run(body())
+
+
+# ── ⑥ 초기화가 번역 레이어·오프셋도 지운다 (엣지 감사 4.1) ──────────
+
+
+async def _seed_layer_and_offset(sm, video_id=VIDEO, *, fingerprint="fp1", lang="ko"):
+    from everyric2.server.db.models import TranslationLayer, VideoOffset
+
+    async with sm() as s:
+        s.add(TranslationLayer(
+            video_id=video_id, fingerprint=fingerprint, target_lang=lang,
+            lines=[{"text": "원문", "translation": "번역"}], origin="llm",
+        ))
+        s.add(VideoOffset(video_id=video_id, offset_sec=1.5))
+        await s.commit()
+
+
+async def _count_layers(sm, video_id=VIDEO) -> int:
+    from everyric2.server.db.models import TranslationLayer
+
+    async with sm() as s:
+        result = await s.execute(
+            select(TranslationLayer).where(TranslationLayer.video_id == video_id)
+        )
+        return len(result.scalars().all())
+
+
+async def _count_offsets(sm, video_id=VIDEO) -> int:
+    from everyric2.server.db.models import VideoOffset
+
+    async with sm() as s:
+        result = await s.execute(select(VideoOffset).where(VideoOffset.video_id == video_id))
+        return len(result.scalars().all())
+
+
+def test_delete_by_video_also_clears_translation_layers_and_offset():
+    """레이어 키가 (video_id, 지문, lang)이라, 초기화 뒤 같은 가사로 다시 만들면 지문이
+    그대로 맞아 지우라고 한 옛 번역이 되살아난다 — 오염된 번역이 저장된 경우 초기화로
+    복구할 수 없는 상태가 됐다(실측: 로컬 DB에 싱크 없는 고아 레이어 1건)."""
+
+    async def body():
+        async with _env() as sm:
+            await _create(sm, lyrics_hash="h1", segments=SEGMENTS_V1)
+            await _seed_layer_and_offset(sm)
+            assert await _count_layers(sm) == 1  # 전제
+            assert await _count_offsets(sm) == 1
+
+            async with sm() as s:
+                await SyncRepository(s).delete_by_video(VIDEO)
+                await s.commit()
+
+            assert await _count_layers(sm) == 0, "초기화 뒤에도 번역 레이어가 남았다"
+            assert await _count_offsets(sm) == 0, "초기화 뒤에도 사용자 오프셋이 남았다"
+
+    asyncio.run(body())
+
+
+def test_delete_by_video_keeps_other_videos_layers():
+    """초기화는 그 영상 하나만 — 다른 영상의 번역 레이어·오프셋은 건드리지 않는다."""
+
+    async def body():
+        async with _env() as sm:
+            await _create(sm, lyrics_hash="h1", segments=SEGMENTS_V1)
+            await _seed_layer_and_offset(sm)
+            await _seed_layer_and_offset(sm, video_id="otherVideo1")
+
+            async with sm() as s:
+                await SyncRepository(s).delete_by_video(VIDEO)
+                await s.commit()
+
+            assert await _count_layers(sm) == 0
+            assert await _count_layers(sm, "otherVideo1") == 1
+            assert await _count_offsets(sm, "otherVideo1") == 1
+
+    asyncio.run(body())
