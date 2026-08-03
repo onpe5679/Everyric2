@@ -331,6 +331,15 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       return call('unlink_failed', sink => unlinkSync(server, message.payload.videoId, sink));
     }
 
+    // 확장 자신의 잡 완료 경로(content.ts pollJobs)가 부른다 — onMessageExternal의
+    // SYNC_COMPLETE와 같은 목적(existsCache 무효화)을 내부 채널로 재현한다. 그 핸들러가
+    // 웹사이트발 완료만 알아, 확장이 직접 생성한 잡은 최대 EXISTS_TTL_MISS_MS(2분)까지
+    // 재생목록 배지가 "없음"으로 낡아 있었다(감사 A3 실측).
+    case 'SYNC_CREATED': {
+      existsCache.delete(message.payload.videoId);
+      return { data: { ok: true } };
+    }
+
     case 'SYNC_RESET': {
       const server = await getServerConfig();
       return call('sync_reset_failed', sink => resetSync(server, message.payload.videoId, sink));

@@ -3718,6 +3718,12 @@ async function pollJobs(): Promise<void> {
 
     if (status.status === 'completed') {
       removeJob(videoId);
+      // 재생목록 존재 배지 캐시(background.ts existsCache)가 이 영상을 "없음"으로 들고
+      // 있었을 수 있다 — 웹사이트발 완료(SYNC_COMPLETE)는 이미 무효화하지만 확장 자신의
+      // 완료 경로는 그 채널을 안 타서 최대 2분(EXISTS_TTL_MISS_MS)까지 배지가 낡아
+      // 있었다(감사 A3). 어느 영상을 보고 있든(다른 탭 잡이어도) 서버엔 방금 생겼으므로
+      // 무조건 지운다.
+      void sendToBackground({ type: 'SYNC_CREATED', payload: { videoId } });
       const label = job.title ?? videoId;
       // 이 브라우저의 기여 이력에 적는다 — 서버엔 "누가 만들었나"가 없다(ContribEntry 문서)
       void recordContribution({
