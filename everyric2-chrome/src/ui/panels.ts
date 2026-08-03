@@ -524,7 +524,9 @@ export interface SearchSheetRefs {
  */
 export function buildSearchSheet(
   ctx: PanelContext,
-  state: { title: string; artist: string },
+  // rawTitle은 그대로 buildSearchForm으로 흘려보낸다 — 시트가 쓰는 값이 아니라
+  // 폼의 '영상 제목 그대로' 탈출구가 쓰는 값이라, 여기서 해석하지 않고 통과만 시킨다
+  state: { title: string; artist: string; rawTitle?: string },
   opts: { onBack: () => void; extras?: (Node | null)[] },
 ): SearchSheetRefs {
   const results = h('div', { className: 'ey-result-list' });

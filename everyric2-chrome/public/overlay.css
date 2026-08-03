@@ -2105,3 +2105,19 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   font-size: 11px;
   padding: 4px 10px;
 }
+
+/* ── 헤더 공지 진입점 + 오매칭 확인 자리 (overlay.ts 배선분) ────── */
+
+/* .ey-unread-dot이 절대 배치라 기준 상자가 필요하다 — .ey-btn은 기본이 static이라
+   기준을 못 잡으면 점이 패널 좌상단으로 튄다(.ey-depth-btn과 같은 사정) */
+.ey-notices-btn { position: relative; }
+
+/* "이 가사가 아니에요" 확인 — 매칭 표시줄 바로 아래 칸을 차지한다.
+   절대 배치 팝오버가 아닌 이유: 패널이 좁으면 오른쪽으로 넘쳐 확인/취소 버튼이
+   화면 밖으로 나가고, 그러면 열어 놓고 닫지도 못한다. */
+.ey-confirm-slot {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ey-border);
+  background: var(--ey-elev);
+  flex-shrink: 0;
+}

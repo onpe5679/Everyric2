@@ -1865,7 +1865,7 @@
     "message": "빠름"
   },
   "panels_depth_medium": {
-    "message": "보통"
+    "message": "표준"
   },
   "panels_depth_heavy": {
     "message": "정밀"
@@ -2140,5 +2140,11 @@
         "content": "$1"
       }
     }
+  },
+  "overlay_header_notices": {
+    "message": "공지사항"
+  },
+  "overlay_header_contrib": {
+    "message": "내 기여 · 남은 횟수"
   }
 }

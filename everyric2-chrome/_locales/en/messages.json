@@ -2140,5 +2140,11 @@
         "content": "$1"
       }
     }
+  },
+  "overlay_header_notices": {
+    "message": "Notices"
+  },
+  "overlay_header_contrib": {
+    "message": "My contributions & remaining quota"
   }
 }

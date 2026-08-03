@@ -2140,5 +2140,11 @@
         "content": "$1"
       }
     }
+  },
+  "overlay_header_notices": {
+    "message": "お知らせ"
+  },
+  "overlay_header_contrib": {
+    "message": "自分の貢献・残り回数"
   }
 }

@@ -9,17 +9,25 @@ import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
 import { PitchLaneRenderer } from './pitch-lane';
 import {
   applyServerGate,
+  buildContributionSheet,
   buildEmptyState,
   buildErrorState,
   buildGeneratingState,
   buildLoadingState,
+  buildNoticesSheet,
   buildPlainLines,
+  buildRatingPop,
   buildSearchSheet,
   buildServerStatusSlot,
+  buildSettingsSheet,
+  buildWrongLyricsConfirm,
   createGenerateButton,
+  probeNotices,
   renderCandidateList,
   setListStatus,
   type PanelContext,
+  type SettingRow,
+  type SettingsSection,
 } from './panels';
 
 /**
@@ -41,6 +49,12 @@ const MINI_NEXT_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="cur
 /** 레인 배치 토글 — 왼쪽 열(좁은 세로 막대 + 본문) / 아래 띠(본문 + 가로 막대) */
 const MINI_POS_LEFT_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="4" width="6" height="16" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
 const MINI_POS_BOTTOM_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="14" width="18" height="6" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
+/**
+ * 헤더 공지·기여 버튼 도안 — ICONS(dom.ts)에 넣지 않은 이유는 그 집합이 패널·PiP가
+ * 함께 쓰는 최소 공용 아이콘이기 때문이다. 이 둘은 메인 패널 헤더에만 있다.
+ */
+const HEADER_BELL_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>';
+const HEADER_CONTRIB_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20V10"/><path d="M9 20V4"/><path d="M15 20v-7"/><path d="M21 20v-11"/></svg>';
 
 /**
  * 다음 재생 영상 정보 — 제목만 있던 문자열 API의 확대판.
@@ -115,7 +129,9 @@ export interface OverlayCallbacks {
   loadServerLog: () => Promise<ServerLogEntry[]>;
 }
 
-type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search';
+/** 'sheet' = 공지·기여처럼 본문 자리를 통째로 빌린 화면 — 가사가 없으므로 하이라이트·
+ *  레인·오프셋 계열이 전부 스스로 꺼진다(각 메서드의 stateKind 가드) */
+type StateKind = 'loading' | 'synced' | 'plain' | 'empty' | 'generating' | 'error' | 'pip' | 'search' | 'sheet';
 
 /** confidence(CTC 확률 기하평균, 0~1)를 e표기 없이 10진수로 — 아주 작은 값도 첫 유효숫자까지 */
 function fmtConf(v: number): string {
@@ -200,6 +216,11 @@ export class LyricsOverlay {
   private depthAction: (() => void) | null = null;
   private feedbackBtn: HTMLButtonElement;
   private feedbackPop: HTMLDivElement;
+  /** 공지 진입점 — probeNotices가 available=false를 주면 통째로 숨는다(구서버엔 없는 기능) */
+  private noticesBtn: HTMLButtonElement;
+  /** 공지 버튼 우상단 안 읽음 점 — 목록을 한 번 열면(onSeen) 꺼진다 */
+  private noticesDot: HTMLSpanElement;
+  private contribBtn: HTMLButtonElement;
   /** 보컬 글로우 현재 상태 — 매 tick classList 쓰기를 피하기 위한 캐시 */
   private vocalGlowOn = false;
   /** 마지막으로 받은 재생 시각·정지 여부 — 레인을 tick 밖에서 즉시 다시 그릴 때 쓴다 */
@@ -214,6 +235,10 @@ export class LyricsOverlay {
   private playlistItems: PlaylistItem[] = [];
   private matchedBar: HTMLDivElement;
   private matchedTitleEl: HTMLSpanElement;
+  /** "이 가사가 아니에요" 확인 자리 — 매칭 표시줄 바로 아래에 접혀 있다가 펼쳐진다.
+   *  절대 배치 팝오버로 띄우지 않는 이유: 패널이 좁아 오른쪽으로 넘치면 확인 버튼이
+   *  화면 밖으로 나간다(확인을 못 하면 취소도 못 한다). */
+  private wrongLyricsPop: HTMLDivElement;
   /**
    * [모듈] 가라오케 레인 (설정 modMainLane) — PiP 창의 음정 레인을 메인 패널에도 띄운다.
    * 그리는 코드는 PiP와 **완전히 같은** PitchLaneRenderer 하나뿐이라 둘이 갈라질 수 없다.
@@ -364,6 +389,15 @@ export class LyricsOverlay {
     });
     this.depthBtn.style.display = 'none';
     const searchBtn = this.headerButton(ICONS.search, t('overlay.header.search'), () => this.openSearch());
+    // 공지는 **응답 전까지 없는 셈 친다** — 구서버에서 잠깐 떴다 사라지는 버튼은
+    // "고장난 기능"으로 읽힌다(probeNotices 규약: 실패=기능 없음).
+    this.noticesBtn = this.headerButton(HEADER_BELL_SVG, t('overlay.header.notices'), () => this.openNotices());
+    this.noticesBtn.classList.add('ey-notices-btn');
+    this.noticesBtn.style.display = 'none';
+    this.noticesDot = h('span', { className: 'ey-unread-dot' });
+    this.noticesDot.style.display = 'none';
+    this.noticesBtn.append(this.noticesDot);
+    this.contribBtn = this.headerButton(HEADER_CONTRIB_SVG, t('overlay.header.contrib'), () => this.openContribution());
     const gearBtn = this.headerButton(ICONS.gear, t('overlay.header.settings'), () => this.toggleSettings());
     this.collapseBtn = this.headerButton(ICONS.collapse, t('overlay.header.collapse'), () => this.setCollapsed(!this.geometry.collapsed));
     const closeBtn = this.headerButton(ICONS.close, t('overlay.header.close'), () => this.setVisible(false));
@@ -373,7 +407,9 @@ export class LyricsOverlay {
         icon(ICONS.note),
         h('div', { className: 'ey-song' }, this.songTitleEl, this.songArtistEl),
       ),
-      h('div', { className: 'ey-actions' }, this.pipBtn, this.depthBtn, this.regenBtn, searchBtn, gearBtn, this.collapseBtn, closeBtn),
+      h('div', { className: 'ey-actions' },
+        this.pipBtn, this.depthBtn, this.regenBtn, searchBtn,
+        this.noticesBtn, this.contribBtn, gearBtn, this.collapseBtn, closeBtn),
     );
 
     // 제목바 언어 칩 — 이 곡에 어떤 언어가 준비돼 있는지 한눈에 보여주고 클릭 한 번으로
@@ -524,10 +560,14 @@ export class LyricsOverlay {
         text: t('overlay.matched.notThis'),
         title: t('overlay.matched.notThisTitle'),
         attrs: { type: 'button' },
-        on: { click: () => this.callbacks.onWrongLyrics() },
+        // 제보는 되돌릴 수 없는데 이 버튼은 가사 바로 위에 상시 떠 있어 오클릭 거리가
+        // 가장 짧다 — 확인을 한 단계 세운다(buildWrongLyricsConfirm 주석 참고)
+        on: { click: () => this.toggleWrongLyricsConfirm() },
       }),
     );
     this.matchedBar.style.display = 'none';
+    this.wrongLyricsPop = h('div', { className: 'ey-confirm-slot' });
+    this.wrongLyricsPop.style.display = 'none';
 
     // [모듈] 가라오케 레인 (설정 modMainLane) — 기본 꺼짐, applySettings가 표시를 정한다
     this.laneCanvas = h('canvas', {
@@ -563,7 +603,7 @@ export class LyricsOverlay {
       this.quickLaneBtn, this.quickLanePosBtn, this.quickCaptionBtn, this.quickNextUpBtn);
 
     this.panel = h('div', { className: 'ey-panel' },
-      this.header, this.quickRow, this.matchedBar, this.langChipsRow, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
+      this.header, this.quickRow, this.matchedBar, this.wrongLyricsPop, this.langChipsRow, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
       this.warnBar, this.translationPendingBar, this.mainRow, this.resumeChip, this.nextUpEl, this.laneWrap,
       this.footer, this.debugStrip, this.debugPanelEl,
     );
@@ -581,6 +621,7 @@ export class LyricsOverlay {
     this.updateOffsetLabel();
 
     this.setupDrag();
+    void this.refreshNoticesButton();
     this.resizeObserver = new ResizeObserver(() => this.handlePanelResize());
     this.resizeObserver.observe(this.panel);
     window.addEventListener('resize', this.handleWindowResize);
@@ -741,7 +782,11 @@ export class LyricsOverlay {
 
     const sheet = buildSearchSheet(
       this.panelContext(),
-      { title: this.lastSong?.title ?? '', artist: this.lastSong?.artist ?? '' },
+      {
+        title: this.lastSong?.title ?? '',
+        artist: this.lastSong?.artist ?? '',
+        rawTitle: this.rawVideoTitle(),
+      },
       {
         onBack: () => this.callbacks.onCloseSearch(),
         // 메인 패널에만 있는 고급 섹션 — 다른 영상 싱크 연결과 서버 저장 삭제는
@@ -773,6 +818,67 @@ export class LyricsOverlay {
     this.searchResultsEl = sheet.results;
     this.body.append(sheet.el);
     sheet.runSearch();
+  }
+
+  /**
+   * 영상 제목 원본 — SongInfo는 **정리된** 제목만 들고 다닌다(song-detector가 【】·MV·
+   * 업로더 접두를 걷어낸 뒤 원본을 버린다). 검색 폼의 '영상 제목 그대로' 탈출구는 걷기
+   * 전 값이 있어야 나타나므로, 여기서 페이지 제목에서 유튜브 접미만 떼어 되살린다.
+   *
+   * 이것은 근사치다 — song-detector가 실제로 정리 대상으로 삼은 h1(또는 mediaSession)
+   * 제목과 다를 수 있다. 정확한 원본은 content가 SongInfo에 실어 보내야 하고, 그때
+   * 이 폴백은 지워진다. 정리본과 같은 값이면 buildSearchForm이 버튼을 내지 않으므로
+   * 근사가 빗나가도 화면에 남는 피해는 없다.
+   */
+  private rawVideoTitle(): string | undefined {
+    const raw = document.title.replace(/ - YouTube$/, '').trim();
+    return raw && raw !== 'YouTube' ? raw : undefined;
+  }
+
+  /**
+   * 공지 진입점 표시 판정 — 서버에 공지 기능이 없으면 버튼을 **통째로 숨긴다**.
+   * 오류 문구를 띄우지 않는 이유는 probeNotices 주석과 같다: 구버전 서버에서 404는
+   * 비정상이 아니라 정상 경로이고, 없는 기능을 고장난 기능처럼 보이게 하면 안 된다.
+   */
+  private async refreshNoticesButton(): Promise<void> {
+    const probe = await probeNotices();
+    this.noticesBtn.style.display = probe.available ? '' : 'none';
+    this.noticesDot.style.display = probe.unread ? '' : 'none';
+  }
+
+  /**
+   * 공지함 — 본문 자리를 빌린다(패널 안에 또 다른 창을 띄우지 않는다).
+   * '뒤로'는 검색 시트의 탈출구와 **같은 경로**(onCloseSearch)를 쓴다: content가 지금
+   * 곡 데이터를 그대로 다시 그리므로, 시트를 여닫아도 보던 화면이 정확히 돌아온다.
+   */
+  openNotices(): void {
+    if (!this.visible) this.setVisible(true);
+    if (this.geometry.collapsed) this.setCollapsed(false);
+    this.stateKind = 'sheet';
+    this.resetBody();
+    const { el } = buildNoticesSheet({
+      onBack: () => this.callbacks.onCloseSearch(),
+      // 목록을 그린 순간이 '본' 시점이다 — 점을 끄는 자리도 여기 하나뿐이다
+      onSeen: () => { this.noticesDot.style.display = 'none'; },
+    });
+    this.body.append(el);
+  }
+
+  /** 내 기여·남은 한도 시트 — 한도는 영상 기준 조회라 지금 영상 id가 필요하다 */
+  openContribution(): void {
+    if (!this.visible) this.setVisible(true);
+    if (this.geometry.collapsed) this.setCollapsed(false);
+    this.stateKind = 'sheet';
+    this.resetBody();
+    const { el } = buildContributionSheet({
+      videoId: this.callbacks.getVideoId(),
+      // 지금 보던 곡을 잃지 않도록 새 탭으로 — 같은 탭 이동이면 여기 목록을 다시 열
+      // 방법이 뒤로가기뿐이다
+      onOpenVideo: videoId => window.open(
+        `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, '_blank', 'noopener'),
+      onBack: () => this.callbacks.onCloseSearch(),
+    });
+    this.body.append(el);
   }
 
   /** 다른 영상 싱크 연결 섹션 (inst·커버 영상용) — 검색 시트 하단 */
@@ -1608,6 +1714,9 @@ export class LyricsOverlay {
    *  content가 아직 이 메서드를 안 부르면 null로 남고, 패널은 요약줄만 생략한 채 동작한다. */
   /** 자동 매칭 표시줄 — 위키가 고른 곡 제목. null이면 숨김(서버 싱크·매칭 없음) */
   setMatchedSource(title: string | null): void {
+    // 곡이 바뀌면 열려 있던 확인도 함께 닫는다 — 이전 곡을 겨냥한 확인이 새 곡 위에
+    // 남으면, 누른 사람은 지금 곡을 제보한 줄 알지만 실제로는 다른 곡이 나간다
+    this.hideWrongLyricsConfirm();
     if (title) {
       this.matchedTitleEl.textContent = title;
       this.matchedTitleEl.title = title;
@@ -1779,60 +1888,58 @@ export class LyricsOverlay {
     this.feedbackPop.style.display = '';
   }
 
-  /** 별점(1~5) + 오류 유형·코멘트 팝오버 — 열 때마다 초기 상태로 다시 그린다 */
+  /**
+   * 지금 보고 있는 싱크의 분석 깊이 — 헤더 깊이 버튼(updateDepthButton)·레인 안내
+   * 배너(renderLaneNotice)와 **같은 출처**를 읽는다. 세 곳이 다른 값을 말하면
+   * 사용자는 어느 쪽을 믿어야 할지 알 수 없다.
+   */
+  private currentDepth(): 'fast' | 'medium' | 'heavy' | null {
+    const route = this.debugMeta?.routing?.route;
+    return route === 'fast' || route === 'medium' || route === 'heavy' ? route : null;
+  }
+
+  /** 별점 팝오버 — 별은 클릭 한 번으로 전송되고, 자세한 제보는 그 안에서 갈라진다 */
   private renderFeedbackPop(): void {
-    let rating = 0;
-    const stars: HTMLButtonElement[] = [];
-    const paint = () => stars.forEach((s, i) => s.classList.toggle('on', i < rating));
-    const starRow = h('div', { className: 'ey-feedback-stars' });
-    for (let i = 1; i <= 5; i++) {
-      const s = h('button', {
-        className: 'ey-feedback-star', text: '★', attrs: { type: 'button' },
-        on: { click: () => { rating = i; paint(); } },
-      });
-      stars.push(s);
-      starRow.append(s);
-    }
-    const category = h('select', { className: 'ey-select' }, ...([
-      ['', t('overlay.feedback.catNone')],
-      ['timing', t('overlay.feedback.catTiming')],
-      ['pronunciation', t('overlay.feedback.catPron')],
-      ['lyrics', t('overlay.feedback.catLyrics')],
-      ['other', t('overlay.feedback.catOther')],
-    ] as [string, string][]).map(([v, label]) => h('option', { text: label, attrs: { value: v } })));
-    const comment = h('input', {
-      className: 'ey-input',
-      attrs: { placeholder: t('overlay.feedback.commentPh'), maxlength: '500' },
+    const depth = this.currentDepth();
+    const { el } = buildRatingPop({
+      depth,
+      onSubmitRating: rating => this.callbacks.onSubmitFeedback(rating),
+      // 제보에도 별점 값이 필요하다 — 서버 계약이 rating 1~5(ge=1)라 "별점 없음"을
+      // 보낼 방법이 없다. 오매칭 제보(content.onWrongLyrics)가 이미 쓰고 있는
+      // "가사 오류 = 최저 별점" 관례를 그대로 따른다.
+      onSubmitReport: (category, comment) => this.callbacks.onSubmitFeedback(1, category, comment),
+      // 깊이를 올릴 곳이 남아 있을 때만 안내 버튼을 낸다 — heavy에서 '올리기'는 소음이다
+      onDepthUpgrade: depth === 'fast' || depth === 'medium'
+        ? () => this.callbacks.onDepthUpgrade(depth === 'fast' ? 'medium' : 'heavy')
+        : undefined,
+      onClose: () => { this.feedbackPop.style.display = 'none'; },
     });
-    const status = h('span', { className: 'ey-feedback-status' });
-    const send = h('button', {
-      className: 'ey-btn', text: t('overlay.feedback.send'), attrs: { type: 'button' },
-      on: {
-        click: () => {
-          if (rating === 0) {
-            status.textContent = t('overlay.feedback.needRating');
-            return;
-          }
-          send.disabled = true;
-          void this.callbacks
-            .onSubmitFeedback(rating, category.value || undefined, comment.value.trim() || undefined)
-            .then(ok => {
-              status.textContent = ok ? t('overlay.feedback.thanks') : t('overlay.feedback.failed');
-              if (ok) {
-                window.setTimeout(() => { this.feedbackPop.style.display = 'none'; }, 1200);
-              } else {
-                send.disabled = false; // 실패 — 입력을 남긴 채 재시도 가능
-              }
-            });
-        },
+    this.feedbackPop.replaceChildren(el);
+  }
+
+  /** "이 가사가 아니에요" 확인 — 한 번 더 누르면 접힌다(잘못 연 사람의 탈출구) */
+  private toggleWrongLyricsConfirm(): void {
+    if (this.wrongLyricsPop.style.display !== 'none') {
+      this.hideWrongLyricsConfirm();
+      return;
+    }
+    const { el } = buildWrongLyricsConfirm({
+      // 무엇을 제보하는지 눈으로 확인시킨다 — 매칭 표시줄이 접히면 값도 사라지므로
+      // 표시줄이 들고 있는 지금 제목을 그대로 넘긴다
+      matchedTitle: this.matchedTitleEl.textContent,
+      onConfirm: () => {
+        this.hideWrongLyricsConfirm();
+        this.callbacks.onWrongLyrics();
       },
-    }) as HTMLButtonElement;
-    this.feedbackPop.replaceChildren(
-      h('div', { className: 'ey-feedback-row' }, starRow),
-      h('div', { className: 'ey-feedback-row' }, category),
-      h('div', { className: 'ey-feedback-row' }, comment),
-      h('div', { className: 'ey-feedback-row' }, send, status),
-    );
+      onCancel: () => this.hideWrongLyricsConfirm(),
+    });
+    this.wrongLyricsPop.replaceChildren(el);
+    this.wrongLyricsPop.style.display = '';
+  }
+
+  private hideWrongLyricsConfirm(): void {
+    this.wrongLyricsPop.style.display = 'none';
+    this.wrongLyricsPop.replaceChildren();
   }
 
   /**
@@ -1915,6 +2022,7 @@ export class LyricsOverlay {
     this.depthAction = null;
     this.feedbackBtn.style.display = 'none';
     this.feedbackPop.style.display = 'none';
+    this.hideWrongLyricsConfirm();
     // 번역 출처 병기(U2)·번역 대기 표시(U3-b)는 곡 단위 상태다 — 이전 곡 것이 새 곡
     // 화면에 남으면 안 된다. content가 setLangPending(null)/setAvailableLangs를 곡
     // 전환마다 다시 부르긴 하지만, 여기서도 방어적으로 지운다(resetBody는 모든 show*
@@ -2091,9 +2199,16 @@ export class LyricsOverlay {
     if (!this.visible) this.setVisible(true);
     if (this.geometry.collapsed) this.setCollapsed(false);
     if (this.settingsSheet) return;
-    const sheet = this.buildSettingsSheet();
-    this.settingsSheet = sheet;
-    this.panel.append(sheet);
+    const sheet = buildSettingsSheet({
+      sections: this.settingsSections(),
+      onClose: () => this.closeSettings(),
+    });
+    this.settingsSheet = sheet.el;
+    this.panel.append(sheet.el);
+    // 검색칸으로 바로 — 설정을 여는 사람 대부분은 이미 무엇을 고칠지 알고 있고,
+    // 그때 필요한 건 스크롤이 아니라 이름을 치는 것이다. 패널이 키 이벤트를
+    // 끊으므로(생성자) 여기 타이핑이 유튜브 단축키로 새지 않는다.
+    sheet.focusFilter();
   }
 
   private closeSettings(): void {
@@ -2103,269 +2218,33 @@ export class LyricsOverlay {
     this.settingsPermBtn = null;
   }
 
-  private buildSettingsSheet(): HTMLDivElement {
-    const autoSearch = h('input', { attrs: { type: 'checkbox' } });
-    autoSearch.checked = this.settings.autoSearch;
-    autoSearch.addEventListener('change', () => this.callbacks.onSettingsChange({ autoSearch: autoSearch.checked }));
+  /**
+   * 설정 시트 명세 — 범주와 각 줄의 값·저장 동작만 여기서 정하고, 접힘·검색·그리기는
+   * panels.buildSettingsSheet가 맡는다(그쪽 주석에 분류+검색이 둘 다 필요한 근거).
+   *
+   * **여기 없는 설정이 넷 있다**(offsetSec·pipVideoRatio·pipWidth·pipHeight). 전부 화면
+   * 조작으로 정해지는 값이라 숫자로 고를 자리를 만드는 편이 더 나쁘다: 오프셋은 푸터의
+   * ±0.1 버튼이 **영상별로** 들고 있어 전역 설정으로 되돌리면 안 되고, 나머지 셋은 PiP
+   * 창을 끌어 놓은 크기·비율을 그대로 기억한 값이다.
+   *
+   * 각 줄의 key는 DOM id가 아니라 **검색어**다 — 라벨을 모른 채 'serverUrl'·'pitchF0'로
+   * 찾는 사람이 실제로 있어서(문서·제보 따라 하기) Settings의 실제 키 이름을 그대로 쓴다.
+   */
+  private settingsSections(): SettingsSection[] {
+    const set = (patch: Partial<Settings>): void => this.callbacks.onSettingsChange(patch);
+    const pct = (v: number): string => `${Math.round(v * 100)}%`;
+    const px = (v: number): string => `${Math.round(v)}px`;
 
-    const autoSearchShorts = h('input', { attrs: { type: 'checkbox' } });
-    autoSearchShorts.checked = this.settings.autoSearchShorts;
-    autoSearchShorts.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ autoSearchShorts: autoSearchShorts.checked }));
-
-    const fontSelect = this.buildSelect(
-      [['small', t('overlay.settings.fontSize.small')], ['medium', t('overlay.settings.fontSize.medium')], ['large', t('overlay.settings.fontSize.large')]],
-      this.settings.fontSize,
-      v => this.callbacks.onSettingsChange({ fontSize: v as Settings['fontSize'] }),
-    );
-    const themeSelect = this.buildSelect(
-      [['auto', t('overlay.settings.optAuto')], ['dark', t('overlay.settings.theme.dark')], ['light', t('overlay.settings.theme.light')]],
-      this.settings.theme,
-      v => this.callbacks.onSettingsChange({ theme: v as Settings['theme'] }),
-    );
-
-    const showTranslation = h('input', { attrs: { type: 'checkbox' } });
-    showTranslation.checked = this.settings.showTranslation;
-    showTranslation.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ showTranslation: showTranslation.checked }));
-
-    const langSelect = this.buildSelect(
-      // 언어 이름은 각 언어 자신의 표기로 고정 — uiLanguage가 바뀌어도 번역하지 않는다
-      // (사용자가 어느 표시 언어에서도 자기 언어를 바로 찾을 수 있어야 하는 표준 관례)
-      [['ko', '한국어'], ['en', 'English'], ['ja', '日本語'], ['zh', '中文']],
-      this.settings.translationLanguage,
-      v => this.callbacks.onSettingsChange({ translationLanguage: v }),
-    );
-
-    // 확장 UI 표시 언어 — 지금은 값만 저장한다(실제 반영은 다음 i18n 태스크에서: chrome.i18n은
-    // 브라우저 로케일에 고정되므로 이 값이 있어야 사용자가 직접 오버라이드할 수 있다)
-    const uiLangSelect = this.buildSelect(
-      [['auto', t('overlay.settings.optAuto')], ['ko', '한국어'], ['en', 'English'], ['ja', '日本語']],
-      this.settings.uiLanguage,
-      v => this.callbacks.onSettingsChange({ uiLanguage: v as Settings['uiLanguage'] }),
-    );
-
-    // 발음 표기 방식 — '자동'이면 번역 언어 기준으로 hangul/romaji/kana 중 골라진다
-    // (lib/lang.ts resolveScript). 서버가 표기별 발음(pron dict)을 아직 안 주므로 지금은
-    // hangul(한글 독음) 외의 선택은 화면상 차이가 없다 — 표기가 배포되면 그대로 반영된다.
-    const pronScriptSelect = this.buildSelect(
-      [['auto', t('overlay.settings.optAuto')], ['hangul', t('overlay.settings.pronScript.hangul')], ['romaji', t('overlay.settings.pronScript.romaji')], ['kana', t('overlay.settings.pronScript.kana')], ['ipa', t('overlay.settings.pronScript.ipa')]],
-      this.settings.pronunciationScript,
-      v => this.callbacks.onSettingsChange({ pronunciationScript: v as Settings['pronunciationScript'] }),
-    );
-
-    const showPronunciation = h('input', { attrs: { type: 'checkbox' } });
-    showPronunciation.checked = this.settings.showPronunciation;
-    showPronunciation.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ showPronunciation: showPronunciation.checked }));
-
-    const sourcePriority = this.buildSelect(
-      [['vocaro', t('overlay.settings.sourcePriority.vocaro')], ['lrclib', t('overlay.settings.sourcePriority.lrclib')]],
-      this.settings.lyricsSourcePriority,
-      v => this.callbacks.onSettingsChange({ lyricsSourcePriority: v as Settings['lyricsSourcePriority'] }),
-    );
-
-    const pipKeepPanel = h('input', { attrs: { type: 'checkbox' } });
-    pipKeepPanel.checked = this.settings.pipKeepPanel;
-    pipKeepPanel.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ pipKeepPanel: pipKeepPanel.checked }));
-
-    const pipShowVideo = h('input', { attrs: { type: 'checkbox' } });
-    pipShowVideo.checked = this.settings.pipShowVideo;
-    pipShowVideo.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ pipShowVideo: pipShowVideo.checked }));
-
-    const pitchGuide = h('input', { attrs: { type: 'checkbox' } });
-    pitchGuide.checked = this.settings.pitchGuide;
-    pitchGuide.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ pitchGuide: pitchGuide.checked }));
-
-    const pitchWindow = this.buildSelect(
-      [
-        ['0.5', t('overlay.settings.pitchWindow.half')], ['1', t('overlay.settings.pitchWindow.bars', ['1'])],
-        ['2', t('overlay.settings.pitchWindow.bars', ['2'])], ['4', t('overlay.settings.pitchWindow.bars', ['4'])],
-        ['8', t('overlay.settings.pitchWindow.bars', ['8'])],
-      ],
-      String(this.settings.pitchWindowMeasures),
-      v => this.callbacks.onSettingsChange({ pitchWindowMeasures: Number(v) }),
-    );
-
-    const pitchMode = this.buildSelect(
-      [['page', t('overlay.settings.pitchMode.page')], ['scroll', t('overlay.settings.pitchMode.scroll')]],
-      this.settings.pitchScrollMode,
-      v => this.callbacks.onSettingsChange({ pitchScrollMode: v as Settings['pitchScrollMode'] }),
-    );
-
-    const pitchFont = this.buildSelect(
-      [['1', t('overlay.settings.pitchFont.normal')], ['1.2', t('overlay.settings.pitchFont.large')], ['1.45', t('overlay.settings.pitchFont.xlarge')], ['0.85', t('overlay.settings.pitchFont.small')]],
-      String(this.settings.pitchFontScale),
-      v => this.callbacks.onSettingsChange({ pitchFontScale: Number(v) }),
-    );
-
-    // K2: 계이름 표기 — 한국어(도레미)/영어(C4·D#5)
-    const solfegeNotation = this.buildSelect(
-      [
-        ['korean', t('overlay.settings.solfegeNotation.korean')],
-        ['english', t('overlay.settings.solfegeNotation.english')],
-      ],
-      this.settings.solfegeNotation,
-      v => this.callbacks.onSettingsChange({ solfegeNotation: v as Settings['solfegeNotation'] }),
-    );
-
-    const pitchCountdown = h('input', { attrs: { type: 'checkbox' } });
-    pitchCountdown.checked = this.settings.pitchCountdown;
-    pitchCountdown.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ pitchCountdown: pitchCountdown.checked }));
-
-    const pitchF0Curve = h('input', { attrs: { type: 'checkbox' } });
-    pitchF0Curve.checked = this.settings.pitchF0Curve;
-    pitchF0Curve.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ pitchF0Curve: pitchF0Curve.checked }));
-
-    // K3: 음정선(f0 곡선·노트 바) 밝기 — 0.2~1.0(기존 볼륨 슬라이더와 같은 buildRange,
-    // 범위만 좁힌다)
-    const pitchF0Opacity = this.buildRange(
-      this.settings.pitchF0Opacity, v => this.callbacks.onSettingsChange({ pitchF0Opacity: v }), 0.2, 1.5,
-    );
-    const pitchLineOpacity = this.buildRange(
-      this.settings.pitchLineOpacity, v => this.callbacks.onSettingsChange({ pitchLineOpacity: v }), 0.2, 1,
-    );
-
-    const pitchPronPosition = this.buildSelect(
-      [
-        ['note', t('overlay.settings.pronPosition.note')],
-        ['bottom', t('overlay.settings.pronPosition.bottom')],
-        ['both', t('overlay.settings.pronPosition.both')],
-      ],
-      this.settings.pitchPronPosition,
-      v => this.callbacks.onSettingsChange({ pitchPronPosition: v as Settings['pitchPronPosition'] }),
-    );
-
-    // 크로마키 스트리밍 모드 — PIP 문서 배경을 단색 키 컬러로 (OBS 등에서 키잉, 방송용)
-    const pipChromaKey = this.buildSelect(
-      [
-        ['off', t('overlay.settings.chroma.off')],
-        ['green', t('overlay.settings.chroma.green')],
-        ['blue', t('overlay.settings.chroma.blue')],
-        ['magenta', t('overlay.settings.chroma.magenta')],
-      ],
-      this.settings.pipChromaKey,
-      v => this.callbacks.onSettingsChange({ pipChromaKey: v as Settings['pipChromaKey'] }),
-    );
-
-    const melodyPlayback = h('input', { attrs: { type: 'checkbox' } });
-    melodyPlayback.checked = this.settings.melodyPlayback;
-    melodyPlayback.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ melodyPlayback: melodyPlayback.checked }));
-    const melodyVolume = this.buildRange(this.settings.melodyVolume, v =>
-      this.callbacks.onSettingsChange({ melodyVolume: v }));
-
-    const metronome = h('input', { attrs: { type: 'checkbox' } });
-    metronome.checked = this.settings.metronome;
-    metronome.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ metronome: metronome.checked }));
-    const metronomeVolume = this.buildRange(this.settings.metronomeVolume, v =>
-      this.callbacks.onSettingsChange({ metronomeVolume: v }));
-    const metronomeRate = this.buildSelect(
-      [
-        ['0.5', t('overlay.settings.metronomeRate.half')], ['1', t('overlay.settings.metronomeRate.one')],
-        ['2', t('overlay.settings.metronomeRate.two')],
-      ],
-      String(this.settings.metronomeRate),
-      v => this.callbacks.onSettingsChange({ metronomeRate: Number(v) }),
-    );
-    const metronomeBeat = this.buildSelect(
-      [
-        ['0', t('overlay.settings.metronomeBeat.n', ['1'])], ['1', t('overlay.settings.metronomeBeat.n', ['2'])],
-        ['2', t('overlay.settings.metronomeBeat.n', ['3'])], ['3', t('overlay.settings.metronomeBeat.n', ['4'])],
-      ],
-      String(this.settings.metronomeBeat),
-      v => this.callbacks.onSettingsChange({ metronomeBeat: Number(v) }),
-    );
-
-    const micPitch = h('input', { attrs: { type: 'checkbox' } });
-    micPitch.checked = this.settings.micPitch;
-    micPitch.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ micPitch: micPitch.checked }));
-    const micOctave = this.buildSelect(
-      [
-        ['-2', t('overlay.settings.micOctave.n', ['-2'])], ['-1', t('overlay.settings.micOctave.n', ['-1'])],
-        ['0', t('overlay.settings.micOctave.none')], ['1', t('overlay.settings.micOctave.n', ['+1'])],
-        ['2', t('overlay.settings.micOctave.n', ['+2'])],
-      ],
-      String(this.settings.micOctave),
-      v => this.callbacks.onSettingsChange({ micOctave: Number(v) }),
-    );
-
-    const audioOut = h('select', { className: 'ey-select' });
-    audioOut.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ audioOutputId: audioOut.value }));
-    const micDevice = h('select', { className: 'ey-select' });
-    micDevice.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ micDeviceId: micDevice.value }));
-    void this.populateAudioDevices(audioOut, micDevice);
-
-    const lowConfWarning = h('input', { attrs: { type: 'checkbox' } });
-    lowConfWarning.checked = this.settings.lowConfWarning;
-    lowConfWarning.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ lowConfWarning: lowConfWarning.checked }));
-
-    const notifyOnComplete = h('input', { attrs: { type: 'checkbox' } });
-    notifyOnComplete.checked = this.settings.notifyOnComplete;
-    notifyOnComplete.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ notifyOnComplete: notifyOnComplete.checked }));
-
-    const debugInfo = h('input', { attrs: { type: 'checkbox' } });
-    debugInfo.checked = this.settings.debugInfo;
-    debugInfo.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ debugInfo: debugInfo.checked }));
-
-    const vocalGlow = h('input', { attrs: { type: 'checkbox' } });
-    vocalGlow.checked = this.settings.vocalGlow;
-    vocalGlow.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ vocalGlow: vocalGlow.checked }));
-
-    // 표시 모듈 — 패널과 독립적으로 켜고 끄는 부가 표시들
-    const videoCaptions = h('input', { attrs: { type: 'checkbox' } });
-    videoCaptions.checked = this.settings.videoCaptions;
-    videoCaptions.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ videoCaptions: videoCaptions.checked }));
-
-    const modNextUp = h('input', { attrs: { type: 'checkbox' } });
-    modNextUp.checked = this.settings.modNextUp;
-    modNextUp.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ modNextUp: modNextUp.checked }));
-
-    const modMainLane = h('input', { attrs: { type: 'checkbox' } });
-    modMainLane.checked = this.settings.modMainLane;
-    modMainLane.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ modMainLane: modMainLane.checked }));
-
-    // "다시 보지 않기"로 끈 음절 타이밍 안내를 되살리는 유일한 경로 — 안내 자체가
-    // 사라진 뒤에는 여기 말고 되돌릴 자리가 없다. 이미 켜져 있으면 버튼을 숨긴다.
-    const noticeReset = h('button', {
-      className: 'ey-secondary-btn',
-      text: t('overlay.settings.resetKaraokeNotice'),
-      attrs: { title: t('overlay.settings.resetKaraokeNoticeTitle'), type: 'button' },
-      on: {
-        click: () => {
-          this.timingNoticeHidden = false;
-          this.callbacks.onSettingsChange({ karaokeTimingNoticeDismissed: false });
-        },
-      },
+    // 아래 다섯은 **호스트가 참조를 계속 들고 있어야 하는** 컨트롤이라 custom 줄로 꽂는다:
+    // 상태 점·권한 버튼은 setServerStatus가 시트가 열린 채로 갱신하고, 기기 목록 select는
+    // enumerateDevices가 늦게 돌아와 비동기로 채워진다.
+    const dot = h('span', {
+      className: 'ey-dot',
+      title: t('overlay.settings.serverStatusTitle', [statusLine(this.serverStatus)]),
     });
-    noticeReset.style.display = this.settings.karaokeTimingNoticeDismissed ? '' : 'none';
-
-    const serverInput = h('input', { className: 'ey-input' });
-    serverInput.value = this.settings.serverUrl;
-    serverInput.addEventListener('change', () => {
-      const url = serverInput.value.trim().replace(/\/+$/, '');
-      if (url) this.callbacks.onSettingsChange({ serverUrl: url });
-    });
-    // 점 색만으론 "왜 빨간지"를 알 수 없다 — 사유를 툴팁으로 붙이고, 인증 실패는 따로 표시
-    const dot = h('span', { className: 'ey-dot', title: t('overlay.settings.serverStatusTitle', [statusLine(this.serverStatus)]) });
     this.applyDotClasses(dot, this.serverStatus);
     this.settingsDot = dot;
+
     // 서버가 정상이 아니면 설정 안에서도 사유를 글자로 남긴다 (색맹·툴팁 미표시 환경 대비)
     const serverNote = h('div', { className: 'ey-settings-note ey-settings-server-note' });
     if (!serverUsable(this.serverStatus)) {
@@ -2375,6 +2254,7 @@ export class LyricsOverlay {
     } else {
       serverNote.style.display = 'none';
     }
+
     /**
      * 로컬 서버 URL을 입력한 직후 사용자가 보고 있는 자리 — 여기에 허용 버튼을 둔다.
      *
@@ -2385,82 +2265,400 @@ export class LyricsOverlay {
     const permBtn = h('button', {
       className: 'ey-secondary-btn ey-settings-perm-btn',
       text: t('panels.serverBar.openPermissions'),
-      attrs: { title: t('overlay.settings.permBtnTitle') },
+      attrs: { type: 'button', title: t('overlay.settings.permBtnTitle') },
       on: { click: () => this.callbacks.onOpenPermissions() },
     });
     this.settingsPermBtn = permBtn;
     permBtn.style.display = needsHostPermission(this.serverStatus) ? '' : 'none';
 
-    const apiKeyInput = h('input', { className: 'ey-input', attrs: { type: 'password', placeholder: t('overlay.settings.apiKeyPlaceholder') } });
-    apiKeyInput.value = this.settings.apiKey;
-    apiKeyInput.addEventListener('change', () =>
-      this.callbacks.onSettingsChange({ apiKey: apiKeyInput.value.trim() }));
+    const audioOut = h('select', { className: 'ey-select' });
+    audioOut.addEventListener('change', () => set({ audioOutputId: audioOut.value }));
+    const micDevice = h('select', { className: 'ey-select' });
+    micDevice.addEventListener('change', () => set({ micDeviceId: micDevice.value }));
+    void this.populateAudioDevices(audioOut, micDevice);
 
-    return h('div', { className: 'ey-settings' },
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.autoSearch'), attrs: { title: t('overlay.settings.row.autoSearchTitle') } }), autoSearch),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.autoSearchShorts'), attrs: { title: t('overlay.settings.row.autoSearchShortsTitle') } }), autoSearchShorts),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.fontSize') }), fontSelect),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.theme') }), themeSelect),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.showTranslation') }), showTranslation),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.translationLanguage') }), langSelect),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.uiLanguage') }), uiLangSelect),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pronScript') }), pronScriptSelect),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.showPronunciation') }), showPronunciation),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.sourcePriority') }), sourcePriority),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pipKeepPanel') }), pipKeepPanel),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pipShowVideo') }), pipShowVideo),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchGuide') }), pitchGuide),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchWindow') }), pitchWindow),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchMode') }), pitchMode),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchFont') }), pitchFont),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.solfegeNotation') }), solfegeNotation),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchCountdown') }), pitchCountdown),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchF0Curve'), attrs: { title: t('overlay.settings.row.pitchF0CurveTitle') } }), pitchF0Curve),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchLineOpacity'), attrs: { title: t('overlay.settings.row.pitchLineOpacityTitle') } }), pitchLineOpacity),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pitchF0Opacity'), attrs: { title: t('overlay.settings.row.pitchF0OpacityTitle') } }), pitchF0Opacity),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pronPosition'), attrs: { title: t('overlay.settings.row.pronPositionTitle') } }), pitchPronPosition),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.pipChromaKey'), attrs: { title: t('overlay.settings.row.pipChromaKeyTitle') } }), pipChromaKey),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.melodyPlayback'), attrs: { title: t('overlay.settings.row.melodyPlaybackTitle') } }),
-        h('span', { className: 'ey-settings-inline' }, melodyVolume, melodyPlayback)),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.metronome'), attrs: { title: t('overlay.settings.row.metronomeTitle') } }),
-        h('span', { className: 'ey-settings-inline' }, metronomeVolume, metronome)),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.metronomeRate'), attrs: { title: t('overlay.settings.row.metronomeRateTitle') } }), metronomeRate),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.metronomeBeat'), attrs: { title: t('overlay.settings.row.metronomeBeatTitle') } }), metronomeBeat),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.audioOut'), attrs: { title: t('overlay.settings.row.audioOutTitle') } }), audioOut),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.micPitch'), attrs: { title: t('overlay.settings.row.micPitchTitle') } }), micPitch),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.micDevice') }), micDevice),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.micOctave'), attrs: { title: t('overlay.settings.row.micOctaveTitle') } }), micOctave),
-      h('div', { className: 'ey-settings-note', text: t('overlay.settings.deviceNote') }),
-      h('div', { className: 'ey-settings-row ey-settings-col' },
-        h('label', {}, t('overlay.settings.serverUrlLabel'), dot),
-        serverInput,
-      ),
-      h('div', { className: 'ey-settings-row ey-settings-col' },
-        h('label', { text: t('overlay.settings.apiKeyLabel') }),
-        apiKeyInput,
-      ),
-      serverNote,
-      permBtn,
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.lowConfWarning'), attrs: { title: t('overlay.settings.row.lowConfWarningTitle') } }), lowConfWarning),
-      h('div', { className: 'ey-settings-row' },
-        h('label', { text: t('overlay.settings.row.notifyOnComplete'), attrs: { title: t('overlay.settings.row.notifyOnCompleteTitle') } }), notifyOnComplete),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.vocalGlow'), attrs: { title: t('overlay.settings.row.vocalGlowTitle') } }), vocalGlow),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.videoCaptions'), attrs: { title: t('overlay.settings.row.videoCaptionsTitle') } }), videoCaptions),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.modNextUp'), attrs: { title: t('overlay.settings.row.modNextUpTitle') } }), modNextUp),
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.modMainLane'), attrs: { title: t('overlay.settings.row.modMainLaneTitle') } }), modMainLane),
-      noticeReset,
-      h('div', { className: 'ey-settings-row' }, h('label', { text: t('overlay.settings.row.debugInfo') }), debugInfo),
-      h('div', { className: 'ey-settings-note', text: t('overlay.settings.serverRequiredNote') }),
-      h('button', { className: 'ey-secondary-btn', text: t('overlay.settings.closeButton'), on: { click: () => this.closeSettings() } }),
-    );
+    const searchRows: SettingRow[] = [
+      {
+        kind: 'checkbox', key: 'autoSearch', label: t('overlay.settings.row.autoSearch'),
+        title: t('overlay.settings.row.autoSearchTitle'), value: this.settings.autoSearch,
+        onChange: v => set({ autoSearch: v }),
+      },
+      {
+        kind: 'checkbox', key: 'autoSearchShorts', label: t('overlay.settings.row.autoSearchShorts'),
+        title: t('overlay.settings.row.autoSearchShortsTitle'), value: this.settings.autoSearchShorts,
+        onChange: v => set({ autoSearchShorts: v }),
+      },
+      {
+        kind: 'select', key: 'lyricsSourcePriority', label: t('overlay.settings.row.sourcePriority'),
+        value: this.settings.lyricsSourcePriority,
+        options: [
+          ['vocaro', t('overlay.settings.sourcePriority.vocaro')],
+          ['lrclib', t('overlay.settings.sourcePriority.lrclib')],
+        ],
+        onChange: v => set({ lyricsSourcePriority: v as Settings['lyricsSourcePriority'] }),
+      },
+    ];
+
+    const displayRows: SettingRow[] = [
+      {
+        kind: 'select', key: 'fontSize', label: t('overlay.settings.row.fontSize'),
+        keywords: '폰트 글꼴 글씨 크기 font',
+        value: this.settings.fontSize,
+        options: [
+          ['small', t('overlay.settings.fontSize.small')],
+          ['medium', t('overlay.settings.fontSize.medium')],
+          ['large', t('overlay.settings.fontSize.large')],
+        ],
+        onChange: v => set({ fontSize: v as Settings['fontSize'] }),
+      },
+      {
+        kind: 'select', key: 'theme', label: t('overlay.settings.row.theme'),
+        keywords: '다크 라이트 dark light',
+        value: this.settings.theme,
+        options: [
+          ['auto', t('overlay.settings.optAuto')],
+          ['dark', t('overlay.settings.theme.dark')],
+          ['light', t('overlay.settings.theme.light')],
+        ],
+        onChange: v => set({ theme: v as Settings['theme'] }),
+      },
+      {
+        kind: 'select', key: 'uiLanguage', label: t('overlay.settings.row.uiLanguage'),
+        value: this.settings.uiLanguage,
+        // 언어 이름은 각 언어 자신의 표기로 고정 — uiLanguage가 바뀌어도 번역하지 않는다
+        // (사용자가 어느 표시 언어에서도 자기 언어를 바로 찾을 수 있어야 하는 표준 관례)
+        options: [['auto', t('overlay.settings.optAuto')], ['ko', '한국어'], ['en', 'English'], ['ja', '日本語']],
+        onChange: v => set({ uiLanguage: v as Settings['uiLanguage'] }),
+      },
+      {
+        kind: 'checkbox', key: 'showTranslation', label: t('overlay.settings.row.showTranslation'),
+        value: this.settings.showTranslation, onChange: v => set({ showTranslation: v }),
+      },
+      {
+        kind: 'select', key: 'translationLanguage', label: t('overlay.settings.row.translationLanguage'),
+        value: this.settings.translationLanguage,
+        options: [['ko', '한국어'], ['en', 'English'], ['ja', '日本語'], ['zh', '中文']],
+        onChange: v => set({ translationLanguage: v }),
+      },
+      {
+        // '자동'이면 번역 언어 기준으로 hangul/romaji/kana 중 골라진다(lib/lang.ts resolveScript)
+        kind: 'select', key: 'pronunciationScript', label: t('overlay.settings.row.pronScript'),
+        keywords: '발음 독음 로마자 가나 ipa',
+        value: this.settings.pronunciationScript,
+        options: [
+          ['auto', t('overlay.settings.optAuto')],
+          ['hangul', t('overlay.settings.pronScript.hangul')],
+          ['romaji', t('overlay.settings.pronScript.romaji')],
+          ['kana', t('overlay.settings.pronScript.kana')],
+          ['ipa', t('overlay.settings.pronScript.ipa')],
+        ],
+        onChange: v => set({ pronunciationScript: v as Settings['pronunciationScript'] }),
+      },
+      {
+        kind: 'checkbox', key: 'showPronunciation', label: t('overlay.settings.row.showPronunciation'),
+        value: this.settings.showPronunciation, onChange: v => set({ showPronunciation: v }),
+      },
+      {
+        kind: 'checkbox', key: 'vocalGlow', label: t('overlay.settings.row.vocalGlow'),
+        title: t('overlay.settings.row.vocalGlowTitle'), value: this.settings.vocalGlow,
+        onChange: v => set({ vocalGlow: v }),
+      },
+      {
+        kind: 'checkbox', key: 'lowConfWarning', label: t('overlay.settings.row.lowConfWarning'),
+        title: t('overlay.settings.row.lowConfWarningTitle'), value: this.settings.lowConfWarning,
+        onChange: v => set({ lowConfWarning: v }),
+      },
+      {
+        kind: 'checkbox', key: 'notifyOnComplete', label: t('overlay.settings.row.notifyOnComplete'),
+        title: t('overlay.settings.row.notifyOnCompleteTitle'), value: this.settings.notifyOnComplete,
+        onChange: v => set({ notifyOnComplete: v }),
+      },
+    ];
+
+    const laneRows: SettingRow[] = [
+      {
+        kind: 'checkbox', key: 'pitchGuide', label: t('overlay.settings.row.pitchGuide'),
+        value: this.settings.pitchGuide, onChange: v => set({ pitchGuide: v }),
+      },
+      {
+        kind: 'select', key: 'pitchWindowMeasures', label: t('overlay.settings.row.pitchWindow'),
+        keywords: '마디 창 window',
+        value: String(this.settings.pitchWindowMeasures),
+        options: [
+          ['0.5', t('overlay.settings.pitchWindow.half')],
+          ['1', t('overlay.settings.pitchWindow.bars', ['1'])],
+          ['2', t('overlay.settings.pitchWindow.bars', ['2'])],
+          ['4', t('overlay.settings.pitchWindow.bars', ['4'])],
+          ['8', t('overlay.settings.pitchWindow.bars', ['8'])],
+        ],
+        onChange: v => set({ pitchWindowMeasures: Number(v) }),
+      },
+      {
+        kind: 'select', key: 'pitchScrollMode', label: t('overlay.settings.row.pitchMode'),
+        value: this.settings.pitchScrollMode,
+        options: [
+          ['page', t('overlay.settings.pitchMode.page')],
+          ['scroll', t('overlay.settings.pitchMode.scroll')],
+        ],
+        onChange: v => set({ pitchScrollMode: v as Settings['pitchScrollMode'] }),
+      },
+      {
+        kind: 'select', key: 'pitchFontScale', label: t('overlay.settings.row.pitchFont'),
+        keywords: '레인 글씨 크기',
+        value: String(this.settings.pitchFontScale),
+        options: [
+          ['0.85', t('overlay.settings.pitchFont.small')],
+          ['1', t('overlay.settings.pitchFont.normal')],
+          ['1.2', t('overlay.settings.pitchFont.large')],
+          ['1.45', t('overlay.settings.pitchFont.xlarge')],
+        ],
+        onChange: v => set({ pitchFontScale: Number(v) }),
+      },
+      {
+        kind: 'select', key: 'solfegeNotation', label: t('overlay.settings.row.solfegeNotation'),
+        keywords: '계이름 도레미 solfege',
+        value: this.settings.solfegeNotation,
+        options: [
+          ['korean', t('overlay.settings.solfegeNotation.korean')],
+          ['english', t('overlay.settings.solfegeNotation.english')],
+        ],
+        onChange: v => set({ solfegeNotation: v as Settings['solfegeNotation'] }),
+      },
+      {
+        kind: 'checkbox', key: 'pitchCountdown', label: t('overlay.settings.row.pitchCountdown'),
+        value: this.settings.pitchCountdown, onChange: v => set({ pitchCountdown: v }),
+      },
+      {
+        kind: 'checkbox', key: 'pitchF0Curve', label: t('overlay.settings.row.pitchF0Curve'),
+        title: t('overlay.settings.row.pitchF0CurveTitle'), value: this.settings.pitchF0Curve,
+        onChange: v => set({ pitchF0Curve: v }),
+      },
+      {
+        kind: 'range', key: 'pitchLineOpacity', label: t('overlay.settings.row.pitchLineOpacity'),
+        title: t('overlay.settings.row.pitchLineOpacityTitle'),
+        value: this.settings.pitchLineOpacity, min: 0.2, max: 1, step: 0.05, format: pct,
+        onChange: v => set({ pitchLineOpacity: v }),
+      },
+      {
+        kind: 'range', key: 'pitchF0Opacity', label: t('overlay.settings.row.pitchF0Opacity'),
+        title: t('overlay.settings.row.pitchF0OpacityTitle'),
+        value: this.settings.pitchF0Opacity, min: 0.2, max: 1.5, step: 0.05, format: pct,
+        onChange: v => set({ pitchF0Opacity: v }),
+      },
+      {
+        kind: 'select', key: 'pitchPronPosition', label: t('overlay.settings.row.pronPosition'),
+        title: t('overlay.settings.row.pronPositionTitle'),
+        value: this.settings.pitchPronPosition,
+        options: [
+          ['note', t('overlay.settings.pronPosition.note')],
+          ['bottom', t('overlay.settings.pronPosition.bottom')],
+          ['both', t('overlay.settings.pronPosition.both')],
+        ],
+        onChange: v => set({ pitchPronPosition: v as Settings['pitchPronPosition'] }),
+      },
+      {
+        // 디바이더 드래그와 **같은 값**을 만진다 — 드래그가 안 되는 좁은 패널에서도
+        // 폭을 정할 수 있어야 해서 숫자 경로를 함께 둔다(clampLaneWidth가 실제 상한을 다시 깎는다)
+        kind: 'range', key: 'mainLaneWidth', label: t('panels.settings.row.mainLaneWidth'),
+        keywords: '가사창 레인 너비 width',
+        value: this.settings.mainLaneWidth,
+        min: LANE_WIDTH_MIN, max: LANE_WIDTH_MAX, step: 10, format: px,
+        onChange: v => set({ mainLaneWidth: Math.round(v) }),
+      },
+      {
+        kind: 'select', key: 'mainLanePos', label: t('panels.settings.row.mainLanePos'),
+        keywords: '가사창 레인 위치 왼쪽 아래',
+        value: this.settings.mainLanePos,
+        options: [
+          ['left', t('panels.settings.mainLanePos.left')],
+          ['bottom', t('panels.settings.mainLanePos.bottom')],
+        ],
+        onChange: v => set({ mainLanePos: v as Settings['mainLanePos'] }),
+      },
+    ];
+
+    const moduleRows: SettingRow[] = [
+      {
+        kind: 'checkbox', key: 'videoCaptions', label: t('overlay.settings.row.videoCaptions'),
+        title: t('overlay.settings.row.videoCaptionsTitle'), value: this.settings.videoCaptions,
+        onChange: v => set({ videoCaptions: v }),
+      },
+      {
+        kind: 'range', key: 'captionFontScale', label: t('overlay.settings.row.captionFontScale'),
+        keywords: '자막 글자 크기 caption',
+        value: this.settings.captionFontScale, min: 0.7, max: 1.6, step: 0.05,
+        format: v => `${v.toFixed(2)}×`,
+        onChange: v => set({ captionFontScale: v }),
+      },
+      {
+        kind: 'range', key: 'captionBgOpacity', label: t('overlay.settings.row.captionBgOpacity'),
+        keywords: '자막 배경 caption',
+        value: this.settings.captionBgOpacity, min: 0, max: 1, step: 0.05, format: pct,
+        onChange: v => set({ captionBgOpacity: v }),
+      },
+      {
+        kind: 'checkbox', key: 'modNextUp', label: t('overlay.settings.row.modNextUp'),
+        title: t('overlay.settings.row.modNextUpTitle'), value: this.settings.modNextUp,
+        onChange: v => set({ modNextUp: v }),
+      },
+      {
+        kind: 'checkbox', key: 'modMainLane', label: t('overlay.settings.row.modMainLane'),
+        title: t('overlay.settings.row.modMainLaneTitle'), value: this.settings.modMainLane,
+        onChange: v => set({ modMainLane: v }),
+      },
+    ];
+
+    const pipRows: SettingRow[] = [
+      {
+        kind: 'checkbox', key: 'pipKeepPanel', label: t('overlay.settings.row.pipKeepPanel'),
+        value: this.settings.pipKeepPanel, onChange: v => set({ pipKeepPanel: v }),
+      },
+      {
+        kind: 'checkbox', key: 'pipShowVideo', label: t('overlay.settings.row.pipShowVideo'),
+        value: this.settings.pipShowVideo, onChange: v => set({ pipShowVideo: v }),
+      },
+      {
+        kind: 'select', key: 'pipChromaKey', label: t('overlay.settings.row.pipChromaKey'),
+        title: t('overlay.settings.row.pipChromaKeyTitle'),
+        keywords: '방송 obs 크로마키',
+        value: this.settings.pipChromaKey,
+        options: [
+          ['off', t('overlay.settings.chroma.off')],
+          ['green', t('overlay.settings.chroma.green')],
+          ['blue', t('overlay.settings.chroma.blue')],
+          ['magenta', t('overlay.settings.chroma.magenta')],
+        ],
+        onChange: v => set({ pipChromaKey: v as Settings['pipChromaKey'] }),
+      },
+      {
+        // PiP 창 안 디바이더로도 바꾸는 값 — 다음에 여는 창부터 이 높이로 열린다
+        kind: 'range', key: 'pitchLaneHeight', label: t('panels.settings.row.pitchLaneHeight'),
+        keywords: 'pip 레인 높이 lane height',
+        value: this.settings.pitchLaneHeight, min: 90, max: 420, step: 10, format: px,
+        onChange: v => set({ pitchLaneHeight: Math.round(v) }),
+      },
+    ];
+
+    const audioRows: SettingRow[] = [
+      {
+        // 멜로디·메트로놈은 예전부터 '볼륨 슬라이더 + 켜기' 한 줄이었다 — 켜고 나서
+        // 볼륨을 찾으러 다른 줄로 가지 않아도 된다
+        kind: 'checkbox', key: 'melodyPlayback', label: t('overlay.settings.row.melodyPlayback'),
+        title: t('overlay.settings.row.melodyPlaybackTitle'), value: this.settings.melodyPlayback,
+        onChange: v => set({ melodyPlayback: v }),
+        range: { value: this.settings.melodyVolume, onChange: v => set({ melodyVolume: v }) },
+        keywords: 'melodyVolume 볼륨',
+      },
+      {
+        kind: 'checkbox', key: 'metronome', label: t('overlay.settings.row.metronome'),
+        title: t('overlay.settings.row.metronomeTitle'), value: this.settings.metronome,
+        onChange: v => set({ metronome: v }),
+        range: { value: this.settings.metronomeVolume, onChange: v => set({ metronomeVolume: v }) },
+        keywords: 'metronomeVolume 볼륨 박자',
+      },
+      {
+        kind: 'select', key: 'metronomeRate', label: t('overlay.settings.row.metronomeRate'),
+        title: t('overlay.settings.row.metronomeRateTitle'),
+        value: String(this.settings.metronomeRate),
+        options: [
+          ['0.5', t('overlay.settings.metronomeRate.half')],
+          ['1', t('overlay.settings.metronomeRate.one')],
+          ['2', t('overlay.settings.metronomeRate.two')],
+        ],
+        onChange: v => set({ metronomeRate: Number(v) }),
+      },
+      {
+        kind: 'select', key: 'metronomeBeat', label: t('overlay.settings.row.metronomeBeat'),
+        title: t('overlay.settings.row.metronomeBeatTitle'),
+        value: String(this.settings.metronomeBeat),
+        options: [
+          ['0', t('overlay.settings.metronomeBeat.n', ['1'])],
+          ['1', t('overlay.settings.metronomeBeat.n', ['2'])],
+          ['2', t('overlay.settings.metronomeBeat.n', ['3'])],
+          ['3', t('overlay.settings.metronomeBeat.n', ['4'])],
+        ],
+        onChange: v => set({ metronomeBeat: Number(v) }),
+      },
+      {
+        kind: 'custom', key: 'audioOutputId', label: t('overlay.settings.row.audioOut'),
+        title: t('overlay.settings.row.audioOutTitle'), keywords: '출력 스피커 기기',
+        control: audioOut,
+      },
+      {
+        kind: 'checkbox', key: 'micPitch', label: t('overlay.settings.row.micPitch'),
+        title: t('overlay.settings.row.micPitchTitle'), value: this.settings.micPitch,
+        onChange: v => set({ micPitch: v }),
+      },
+      {
+        kind: 'custom', key: 'micDeviceId', label: t('overlay.settings.row.micDevice'),
+        keywords: '마이크 입력 기기', control: micDevice,
+      },
+      {
+        kind: 'select', key: 'micOctave', label: t('overlay.settings.row.micOctave'),
+        title: t('overlay.settings.row.micOctaveTitle'),
+        value: String(this.settings.micOctave),
+        options: [
+          ['-2', t('overlay.settings.micOctave.n', ['-2'])],
+          ['-1', t('overlay.settings.micOctave.n', ['-1'])],
+          ['0', t('overlay.settings.micOctave.none')],
+          ['1', t('overlay.settings.micOctave.n', ['+1'])],
+          ['2', t('overlay.settings.micOctave.n', ['+2'])],
+        ],
+        onChange: v => set({ micOctave: Number(v) }),
+      },
+      { kind: 'note', key: 'deviceNote', text: t('overlay.settings.deviceNote') },
+    ];
+
+    const serverRows: SettingRow[] = [
+      {
+        kind: 'text', key: 'serverUrl', label: t('overlay.settings.serverUrlLabel'),
+        layout: 'col', labelSuffix: dot, value: this.settings.serverUrl,
+        // 빈 값이면 buildSettingControl이 저장하지 않고 되돌린다 — 주소를 통째로 지운
+        // 상태로 저장되면 그 뒤 모든 요청이 갈 곳을 잃는다
+        sanitize: v => v.trim().replace(/\/+$/, ''),
+        onChange: v => set({ serverUrl: v }),
+      },
+      {
+        kind: 'text', key: 'apiKey', label: t('overlay.settings.apiKeyLabel'),
+        layout: 'col', password: true, placeholder: t('overlay.settings.apiKeyPlaceholder'),
+        value: this.settings.apiKey, onChange: v => set({ apiKey: v }),
+      },
+      { kind: 'custom', key: 'serverStatusNote', control: serverNote },
+      { kind: 'custom', key: 'serverPermission', keywords: '권한 permission', control: permBtn },
+      {
+        kind: 'checkbox', key: 'debugInfo', label: t('overlay.settings.row.debugInfo'),
+        value: this.settings.debugInfo, onChange: v => set({ debugInfo: v }),
+      },
+      { kind: 'note', key: 'serverRequiredNote', text: t('overlay.settings.serverRequiredNote') },
+    ];
+
+    const resetRows: SettingRow[] = [
+      {
+        // "다시 보지 않기"로 끈 음절 타이밍 안내를 되살리는 **유일한** 경로 — 안내 자체가
+        // 사라진 뒤에는 여기 말고 되돌릴 자리가 없다. 이미 켜져 있을 때 눌러도 무해하므로
+        // 숨기지 않는다(비어 있는 범주는 고장난 것처럼 보인다).
+        kind: 'button', key: 'karaokeTimingNoticeDismissed',
+        label: t('panels.settings.reset.karaokeNotice'),
+        title: t('panels.settings.reset.karaokeNoticeTitle'),
+        keywords: '가라오케 타이밍 안내 배너 karaoke timing notice',
+        onClick: btn => {
+          this.timingNoticeHidden = false;
+          set({ karaokeTimingNoticeDismissed: false });
+          btn.textContent = t('panels.settings.reset.done');
+        },
+      },
+    ];
+
+    return [
+      { id: 'search', title: t('panels.settings.section.search'), icon: '🔎', rows: searchRows },
+      { id: 'display', title: t('panels.settings.section.display'), icon: '🎨', rows: displayRows },
+      { id: 'lane', title: t('panels.settings.section.lane'), icon: '🎹', rows: laneRows },
+      { id: 'modules', title: t('panels.settings.section.modules'), icon: '🧩', rows: moduleRows },
+      { id: 'pip', title: t('panels.settings.section.pip'), icon: '🪟', rows: pipRows },
+      { id: 'audio', title: t('panels.settings.section.audio'), icon: '🔊', rows: audioRows },
+      { id: 'server', title: t('panels.settings.section.server'), icon: '🖥️', rows: serverRows },
+      { id: 'reset', title: t('panels.settings.section.reset'), icon: '♻️', rows: resetRows },
+    ];
   }
 
   /** 오디오 입출력 기기 목록 채우기 — 라벨은 마이크 권한을 허용해야 브라우저가 내려준다 */
@@ -2481,33 +2679,6 @@ export class LyricsOverlay {
     }
     fill(outSel, devices.filter(d => d.kind === 'audiooutput'), t('overlay.settings.defaultOutput'), this.settings.audioOutputId);
     fill(inSel, devices.filter(d => d.kind === 'audioinput'), t('overlay.settings.defaultMic'), this.settings.micDeviceId);
-  }
-
-  /** min/max는 buildRange의 출력 스케일 기준 소수(예: 0.2~1) — 생략하면 기존 호출부와
-   *  똑같이 0~1 전체 범위(K3 이전부터 있던 볼륨류 슬라이더는 인자를 안 넘기므로 그대로다). */
-  private buildRange(
-    value: number, onChange: (v: number) => void, min = 0, max = 1,
-  ): HTMLInputElement {
-    const range = h('input', {
-      className: 'ey-settings-range',
-      attrs: {
-        type: 'range', min: String(Math.round(min * 100)), max: String(Math.round(max * 100)), step: '1',
-        value: String(Math.round(value * 100)),
-      },
-    });
-    range.addEventListener('change', () => onChange(Number(range.value) / 100));
-    return range;
-  }
-
-  private buildSelect(options: [string, string][], value: string, onChange: (v: string) => void): HTMLSelectElement {
-    const select = h('select', { className: 'ey-select' });
-    for (const [v, label] of options) {
-      const opt = h('option', { text: label, attrs: { value: v } });
-      select.append(opt);
-    }
-    select.value = value;
-    select.addEventListener('change', () => onChange(select.value));
-    return select;
   }
 
   // ── 위치/크기 ─────────────────────────────────────────────────

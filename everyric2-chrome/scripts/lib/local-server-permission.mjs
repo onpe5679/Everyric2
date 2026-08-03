@@ -67,6 +67,17 @@ async function hasPermission(sw, pattern) {
 }
 
 /**
+ * 버블이 뜬 직후의 클릭을 크롬이 무시하는 구간(입력 보호) — 그만큼 기다렸다 Invoke한다.
+ *
+ * 실측(2026-08-03): 버튼을 **찾자마자** Invoke하면 UI Automation은 성공을 돌려주는데
+ * (InvokePattern 예외 없음) 권한은 끝내 부여되지 않는다 — chrome.permissions.contains()가
+ * 계속 false다. 같은 코드에서 Invoke 전에 2.5초를 두면 그대로 부여된다. 크롬이 권한
+ * 프롬프트에 거는 클릭재킹 방지 지연(버블이 뜬 직후 일정 시간의 입력을 버린다)에 걸린
+ * 것이고, 머신 부하에 따라 됐다 안 됐다 하던 원인도 이것이다(빠른 머신일수록 잘 실패한다).
+ */
+const BUBBLE_INPUT_PROTECTION_MS = 1800;
+
+/**
  * UI Automation으로 옵션 페이지 창(제목에 titleSubstr 포함) 아래에서 네이티브 승인
  * 버블의 "허용"/"Allow" 버튼을 찾아 Invoke한다. timeoutMs 동안 폴링한다.
  * PropertyCondition의 -like 와일드카드 매칭이 아니라 문자열 포함 검사를 PowerShell에서
@@ -93,6 +104,9 @@ while ((Get-Date) -lt $deadline -and -not $found) {
       $bn = $null
       try { $bn = $b.Current.Name } catch { continue }
       if ($bn -eq '허용' -or $bn -eq 'Allow') {
+        # 버블이 방금 떴다면 크롬이 이 클릭을 버린다 — 입력 보호 구간을 넘기고 누른다
+        Start-Sleep -Milliseconds ${BUBBLE_INPUT_PROTECTION_MS}
+        try { $b.SetFocus() } catch { }
         $inv = $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
         $inv.Invoke()
         Write-Output 'CLICKED'
