@@ -408,13 +408,17 @@ def test_latin_segment_gets_all_four_display_scripts():
     # 끝난 곡 등)의 한국어 사용자가 기본 표기(hangul)를 아예 못 받았다. CTC 정렬이 라틴
     # 위에서 약해서(latin_hangul 모듈 실측) pron_segs(타이밍)는 여전히 안 만든다 — 표기
     # 문자열만 결정론 근사다.
+    #
+    # romaji==en(2026-08-03 추가 수정): en 곡의 romaji 정답은 원문 철자다 — 이전엔
+    # "teiku ito iiずぃ"처럼 가나 음차를 다시 로마자로 되돌린 근사가 나갔다(za wezaa
+    # poreketusu류 오염). en 곡에서는 romaji가 en과 같아진다.
     seg = _seg("Take it easy", "", words=True)
     attach_pron_variants(seg)
 
     assert seg["pron"] == {
         "hangul": "테익 잇 이지",
         "kana": "テイク イト イーズィー",
-        "romaji": "teiku ito iiずぃ",
+        "romaji": "Take it easy",
         "en": "Take it easy",
         # ipa는 정렬 타깃 자체(IPA 표시 옵션, 2026-08-03) — 파생이 아니라 타깃 문자열
         "ipa": "teik it izi",
@@ -684,6 +688,69 @@ def test_ja_text_with_kana_only_pron_is_not_latin_augmented():
     seg["pron"] = {"kana": "アルバイトハネクラモード"}
     attach_pron_variants(seg)
     assert seg["pron"] == {"kana": "アルバイトハネクラモード"}
+
+
+# ---------------------------------------------------------------------------
+# en 곡 romaji 오염 — "영어→가타카나 음차→로마자 재변환" 근사 제거 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def test_en_song_romaji_matches_the_original_spelling_not_a_katakana_roundtrip():
+    """en 곡의 romaji 정답은 원문 철자다 — 가타카나 음차를 거친 재변환(za wezaa
+    poreketusu류)이 아니다. en 곡은 derive_en_display_units가 두 표기(romaji/en)를
+    동시에 내므로, romaji가 그냥 en과 같아지는지로 오염 여부를 검산한다."""
+    seg = _seg("weather vane", "", words=False)
+    attach_pron_variants(seg)
+    assert seg["pron"]["romaji"] == seg["pron"]["en"]
+    # en 표시 자체가 원문 철자 기반이라 원문 낱말이 그대로(음절 구분 하이픈 정도만) 보여야 한다
+    assert "weather" in seg["pron"]["en"].lower().replace("-", "")
+
+
+def test_ja_song_latin_run_keeps_kana_derived_romaji():
+    """ja 곡(라틴 리퍼리 경로가 아니다)에서는 이 수정이 영향을 주면 안 된다 — 가나·로마자
+    변환이 여전히 정답이다. attach_pron_variants의 ja 분기(_attach_ja_pron_variants)는
+    애초에 _attach_latin_pron_variants를 타지 않으므로 romaji가 en과 같아질 이유가 없다."""
+    seg = _seg(NEKURA, NEKURA_HANGUL)
+    attach_pron_variants(seg)
+    assert seg["pron"]["romaji"] == NEKURA_ROMAJI
+    assert "en" not in seg["pron"]  # ja 곡 표기에는 애초에 en 키가 없다
+
+
+def test_legacy_contaminated_en_romaji_is_corrected_by_lazy_attach():
+    """구세대 en 곡 구제 — romaji가 예전 버그로 en과 다르게 저장돼 있으면(가타카나
+    재변환 근사) lazy 보완이 en 값으로 정정한다."""
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {
+        "hangul": "테이크 잇 이지",
+        "kana": "テイクイットイージー",
+        "romaji": "teikuittoiizii",  # 옛 근사(가타카나 재변환) — 오염된 값
+        "en": "take it ea-sy",
+    }
+    attach_pron_variants(seg)
+    assert seg["pron"]["romaji"] == "take it ea-sy"
+
+
+def test_legacy_correction_is_idempotent():
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {
+        "hangul": "테이크 잇 이지",
+        "kana": "テイクイットイージー",
+        "romaji": "teikuittoiizii",
+        "en": "take it ea-sy",
+    }
+    attach_pron_variants(seg)
+    first = dict(seg["pron"])
+    attach_pron_variants(seg)
+    assert seg["pron"] == first
+
+
+def test_legacy_correction_skips_when_romaji_already_matches_en():
+    """이미 romaji==en이면 손댈 것이 없다 — 조건 자체가 거짓이라 아무 일도 안 한다."""
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {"hangul": "테이크 잇 이지", "romaji": "take it ea-sy", "en": "take it ea-sy"}
+    before = dict(seg["pron"])
+    attach_pron_variants(seg)
+    assert seg["pron"] == before
 
 
 # ---------------------------------------------------------------------------

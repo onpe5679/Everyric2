@@ -934,6 +934,7 @@ def refine_lines(
             line.fallback_reason = "no_anchor_window"
             continue
 
+        is_ja_line = _is_ja_source(source, language)
         units = _derive_units(source, language)
         if not units.target:
             line.fallback_reason = "empty_derived_text"
@@ -959,7 +960,7 @@ def refine_lines(
         # (후보 재정렬 실패 등) 위에서 확보한 기본값으로 조용히 안전하게 되돌아간다 — 그
         # 모듈 불변식("하한이 앵커 단독으로 고정된다")이 심판에도 그대로 적용된다.
         if resolved_config.referee:
-            referee_fn = _referee_ja if _is_ja_source(source, language) else _referee_en
+            referee_fn = _referee_ja if is_ja_line else _referee_en
             kwargs = (
                 {}
                 if referee_fn is _referee_ja
@@ -1001,6 +1002,18 @@ def refine_lines(
             # 세그(_join_pron식 조립)가 아니라 owners 전체에서 잇는다 — vocab 미포함
             # 문자가 표시에서 사라지면 안 된다(join_display docstring의 連濁 실측).
             line.pron[key] = join_display(owners, units.word_end)
+        if not is_ja_line and "en" in line.pron:
+            # en 곡(라틴 리퍼리 경로)의 romaji 정답은 원문 철자다 — derive_en_display_units가
+            # 내는 romaji는 "영어→가타카나 음차→로마자 재변환" 근사라 en 곡에서는 틀린다
+            # (za wezaa poreketusu류, 감사 2026-08-03). ja 곡의 라틴 구간(derive_ja_display_
+            # units 경유, is_ja_line=True)은 절대 건드리지 않는다 — 그쪽은 가나·로마자
+            # 변환이 정답이다. en이 세그(``pron_segs``)를 못 얻은 라인(실패 폴백 등)은
+            # romaji 세그도 덮지 않는다 — 문자열만 있고 세그가 없는 상태를 유지한다.
+            line.pron["romaji"] = line.pron["en"]
+            if "en" in line.pron_segs:
+                line.pron_segs["romaji"] = line.pron_segs["en"]
+            else:
+                line.pron_segs.pop("romaji", None)
         line.refined = bool(line.pron_segs)
 
     if resolved_config.respace_repeats:

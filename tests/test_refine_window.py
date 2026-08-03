@@ -369,6 +369,70 @@ def test_refine_lines_aligns_simple_en_word_and_produces_multi_key_segs():
     assert line.start == 0.0 and line.end == 0.6  # 라인 경계는 안 바뀐다
 
 
+def test_refine_lines_en_song_romaji_matches_en_not_katakana_roundtrip():
+    """en 곡(라틴 리퍼리 경로)의 romaji 정답은 원문 철자다 — derive_en_display_units가
+    내는 romaji(가나 음차 재변환)는 en 곡에서 오염이다(za wezaa poreketusu류, 2026-08-03
+    감사). 같은 emission·같은 "cat" 라인으로 line.pron["romaji"] == line.pron["en"]과
+    두 표기의 세그 텍스트·시각이 일치하는지 못박는다."""
+    vocab = _build_vocab("kat")
+    frames_per_token = 10
+    token_ids_per_frame: list[int | None] = []
+    for ch in "kat":
+        token_ids_per_frame.extend([vocab[ch]] * frames_per_token)
+    token_ids_per_frame.extend([None] * 20)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor, blank_id=0, frame_sec=FRAME_SEC, audio_sec=1.0, vocab=vocab
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+
+    anchors = [_line("cat", 0.0, 0.6)]
+    lines = refine_lines(anchors, ["cat"], refiner, Path("dummy.wav"), language="en")
+
+    line = lines[0]
+    assert line.fallback_reason is None
+    assert line.pron["romaji"] == line.pron["en"]
+    assert [(s.text, s.start, s.end) for s in line.pron_segs["romaji"]] == [
+        (s.text, s.start, s.end) for s in line.pron_segs["en"]
+    ]
+
+
+def test_refine_lines_ja_song_latin_run_keeps_kana_derived_romaji():
+    """ja 곡(is_ja_line=True)에서는 이 수정이 손대면 안 된다 — derive_ja_display_units
+    경로의 라틴 구간은 가나·로마자 변환이 여전히 정답이다("numb"의 가나 음차 romaji가
+    "numb" 원문 철자로 덮이면 안 된다)."""
+    from everyric2.text.align_target import derive_ja_display_units
+
+    units = derive_ja_display_units("numb")
+    target = units.target
+    vocab = _build_vocab(target)
+    frames_per_char = 5
+    token_ids_per_frame: list[int | None] = []
+    for ch in target:
+        token_ids_per_frame.extend([vocab[ch]] * frames_per_char)
+    token_ids_per_frame.extend([None] * 10)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor,
+        blank_id=0,
+        frame_sec=FRAME_SEC,
+        audio_sec=len(token_ids_per_frame) * FRAME_SEC,
+        vocab=vocab,
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+
+    line_end = len(token_ids_per_frame) * FRAME_SEC
+    anchors = [_line("numb", 0.0, line_end)]
+    lines = refine_lines(anchors, ["numb"], refiner, Path("dummy.wav"), language="ja")
+
+    line = lines[0]
+    assert line.fallback_reason is None
+    # ja 파생(JA_DISPLAY_KEYS = hangul/kana/romaji)에는 en 표기 자체가 없다 — "en" in
+    # line.pron 가드가 거짓이라 이 수정이 아예 발동하지 않는다는 것이 곧 증거다.
+    assert "en" not in line.pron
+    assert line.pron["romaji"], "가나 기반 romaji 파생 자체는 여전히 나와야 한다"
+
+
 def test_refine_lines_window_ignores_frames_outside_pad():
     # 창 밖(라인 시작보다 훨씬 이전)에 다른 토큰이 강하게 있어도 그 라인 정렬에 안 쓰인다
     # — window_pad_sec(0.2s)가 실제로 창을 제한하는지 확인.

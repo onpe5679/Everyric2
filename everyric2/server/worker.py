@@ -305,9 +305,45 @@ def _normalize_line(s: str) -> str:
     return re.sub(r"\s+", "", t)
 
 
+# 느슨한 매칭 키 — 엄격 키(_normalize_line)가 못 찾을 때만 쓰는 폴백. text_fingerprint.
+# loose_normalize_line의 복사본이다(그쪽 docstring과 같은 이유로 이 파일이 그 모듈을
+# 임포트하지 않는다 — 고칠 때는 반드시 양쪽을 함께 고친다). 실측(2026-08 OVwCr2MESfo·
+# vg6pnvn1u10): 두 출처가 같은 줄을 구두점 유무만 다르게 적어("I love you." vs
+# "I love you") 엄격 키로 영원히 못 붙는다. 값이 다른 두 줄이 여기서 우연히 같아져도
+# 실사용 피해가 없다 — 엄격 키가 먼저 시도되고, 정확히 갈리는 구두점 쌍(行く。/行く？)은
+# 둘 다 값이 있어 엄격 키가 이미 각각 집어내므로 이 폴백까지 오지 않는다.
+_LOOSE_PUNCT_RE = re.compile(
+    "[" + ".,!?" + "、。！？…‥・" + "「」『』（）()" + "‘’“”" + "'\"" + "]+"
+)
+_MIN_LOOSE_KEY_LEN = 2
+
+
+def _loose_normalize_line(s: str) -> str | None:
+    """엄격 키가 못 찾을 때만 시도하는 폴백 키 — 구두점까지 지운다. 정규화 후
+    ``_MIN_LOOSE_KEY_LEN`` 미만이면 None(우연 일치 방지)."""
+    t = _LOOSE_PUNCT_RE.sub("", _normalize_line(s))
+    return t if len(t) >= _MIN_LOOSE_KEY_LEN else None
+
+
 def _meta_has_value(m: dict[str, Any]) -> bool:
     """라인 메타가 실제로 쓸 값(발음 또는 번역)을 담고 있는지."""
     return bool((m.get("pronunciation") or "").strip() or (m.get("translation") or "").strip())
+
+
+def _index_line_meta_loose(
+    line_meta: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """``_index_line_meta``와 같은 값 우선 규칙을 느슨한 키(``_loose_normalize_line``)로
+    색인한다 — 엄격 매칭이 놓친 줄만 여기로 폴백한다."""
+    by_loose: dict[str, dict[str, Any]] = {}
+    for m in line_meta or []:
+        t = _loose_normalize_line(m.get("text", "") or "")
+        if not t:
+            continue
+        cur = by_loose.get(t)
+        if cur is None or (not _meta_has_value(cur) and _meta_has_value(m)):
+            by_loose[t] = m
+    return by_loose
 
 
 def _index_line_meta(line_meta: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -350,10 +386,19 @@ def merge_line_meta(
     비ko 번역을 legacy 슬롯으로 밀어 넣으면 안 되는 경로(캐시 재사용)를 위한 문이다.
     """
     by_text = _index_line_meta(line_meta)
+    by_loose: dict[str, dict[str, Any]] | None = None  # 지연 생성 — 엄격 매칭이 다 되면 불필요
 
     merged = 0
     for seg in timestamps:
-        m = by_text.get(_normalize_line(seg.get("text", "") or ""))
+        text = seg.get("text", "") or ""
+        m = by_text.get(_normalize_line(text))
+        if not m:
+            # 엄격 키 실패 — 구두점 차이만으로 못 붙은 줄을 폴백으로 한 번 더 시도한다
+            # (실측 OVwCr2MESfo·vg6pnvn1u10 — text_fingerprint.loose_normalize_line 참고).
+            if by_loose is None:
+                by_loose = _index_line_meta_loose(line_meta)
+            loose_key = _loose_normalize_line(text)
+            m = by_loose.get(loose_key) if loose_key else None
         if not m:
             continue
         # seg["pronunciation"]은 한글 전용 legacy 계약이다(정렬 입력과 같은 계약 —
@@ -933,6 +978,13 @@ def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
         logger.exception("latin pron rendering failed")
         return
 
+    # en 곡의 romaji 정답은 원문 철자다 — "영어→가타카나 음차→로마자 재변환"으로 만든
+    # 근사(za wezaa poreketusu류)는 en 곡에서 의미가 없다. join 직전에 romaji 소유자를
+    # en 소유자로 바꿔치기한다(둘 다 owners 길이가 target과 같은 문자 단위 배열이라
+    # 그대로 교체할 수 있다). ja 곡의 라틴 구간(derive_ja_display_units 경유)은 이 함수를
+    # 타지 않으므로 영향이 없다 — 그쪽은 가나·로마자 변환이 정답이다.
+    units.owners["romaji"] = units.owners["en"]
+
     pron = {
         key: joined
         for key, owners in units.owners.items()
@@ -987,6 +1039,23 @@ def attach_pron_variants(
         # 값은 _attach_latin_pron_variants의 merge가 보존한다.
         if set(existing) == {"kana"} and text and not _JA_CHAR_RE.search(text):
             _attach_latin_pron_variants(seg, text)
+        elif (
+            text
+            and existing.get("en")
+            and existing.get("romaji")
+            and existing.get("romaji") != existing.get("en")
+            and not _JA_CHAR_RE.search(text)
+            and not _HANGUL_CHAR_RE.search(text)
+            and _LATIN_CHAR_RE.search(text)
+        ):
+            # 구세대 en 곡 구제: romaji가 "영어→가타카나 음차→로마자 재변환" 근사로
+            # 저장돼 있다(za wezaa poreketusu류, 감사 2026-08-03). en(원문 음절 분리
+            # 표기)이 이미 있으면 그것이 정답이므로 romaji를 그 값으로 정정한다.
+            # 멱등 — romaji==en이 되면 조건 자체가 거짓이라 다음 호출은 아무것도 안 한다.
+            seg["pron"]["romaji"] = existing["en"]
+            pron_segs = seg.get("pron_segs")
+            if isinstance(pron_segs, dict) and "en" in pron_segs:
+                pron_segs["romaji"] = pron_segs["en"]
         return
     if not text:
         return

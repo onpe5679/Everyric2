@@ -1664,6 +1664,80 @@ def test_align_exact_match_is_unaffected_by_normalize_line_whitespace():
     assert align_translation_lines(segs, wiki) == ["준비됐어?"]
 
 
+# ── A2: 느슨한 매칭 폴백 — 구두점 차이만으로 못 붙던 실측 2건 (2026-08-03) ──────────
+
+
+def test_align_falls_back_to_loose_match_on_trailing_punctuation_difference():
+    """vg6pnvn1u10 idx 0 재현: "I love you." vs "I love you" — 엄격 키는 마침표를
+    보존해 서로 다른 키가 된다. 느슨한 키(구두점 제거)가 폴백으로 붙여야 한다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [{"text": "I love you.", "translation": "사랑해"}]
+    segs = ["I love you"]
+    assert align_translation_lines(segs, wiki) == ["사랑해"]
+
+
+def test_align_combine_falls_back_to_loose_match_when_a_piece_has_punctuation():
+    """OVwCr2MESfo류 재현: 위키가 합친 한 줄("ドラマを見るのが好きだった。")과 세그가
+    쪼갠 두 줄("ドラマを見るのが" + "好きだった")을 엄격 결합("ドラマを見るのが" +
+    "好きだった" = "ドラマを見るのが好きだった", 위키 쪽엔 마침표가 남아 있다)이
+    못 붙일 때 느슨한 결합이 대신 붙는다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [
+        {"text": "ドラマを見るのが好きだった。", "translation": "드라마 보는 걸 좋아했어"},
+        {"text": "次の行", "translation": "다음 줄"},
+    ]
+    segs = ["ドラマを見るのが", "好きだった", "次の行"]
+    assert align_translation_lines(segs, wiki) == [
+        "드라마 보는 걸 좋아했어", None, "다음 줄",
+    ]
+
+
+def test_align_split_falls_back_to_loose_match_when_a_piece_has_punctuation():
+    # 결합 방향(세그가 합쳐 있고 위키가 쪼갠 경우)도 동일하게 느슨한 폴백이 붙는다
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [
+        {"text": "ドラマを見るのが", "translation": "T1"},
+        {"text": "好きだった。", "translation": "T2"},
+    ]
+    segs = ["ドラマを見るのが好きだった"]
+    assert align_translation_lines(segs, wiki) == ["T1T2"]
+
+
+def test_align_does_not_collide_short_punctuation_only_fragments():
+    """느슨한 키가 2자 미만이 되는 조각(감탄사·기호뿐)은 매칭에서 제외된다 — 무관한
+    다른 짧은 조각과 우연히 같은 키가 되는 사고를 막는다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [{"text": "!", "translation": "완전히 다른 뜻"}]
+    segs = ["?"]
+    assert align_translation_lines(segs, wiki) == [None]
+
+
+def test_align_strict_punctuation_pairs_still_disambiguate_when_both_present():
+    """엄격 키가 먼저 시도된다 — 뜻이 갈리는 구두점 쌍(둘 다 값이 있으면)은 느슨한
+    폴백까지 가지 않고 엄격 매칭이 각각 정확히 집어낸다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [
+        {"text": "行く。", "translation": "간다"},
+        {"text": "行く？", "translation": "갈까?"},
+    ]
+    segs = ["行く。", "行く？"]
+    assert align_translation_lines(segs, wiki) == ["간다", "갈까?"]
+
+
+def test_loose_normalize_line_strips_punctuation_and_guards_short_keys():
+    from everyric2.server.text_fingerprint import loose_normalize_line
+
+    assert loose_normalize_line("I love you.") == loose_normalize_line("I love you")
+    assert loose_normalize_line("行く。") == loose_normalize_line("行く？")
+    assert loose_normalize_line("!") is None  # 2자 미만은 매칭 불가
+    assert loose_normalize_line("") is None
+
+
 # ── B: 저장 엔드포인트가 재정렬을 쓰는지(세그 텍스트로 재키잉) ────────────────
 
 

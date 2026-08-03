@@ -80,6 +80,37 @@ def test_unmatched_line_is_left_untouched():
     assert "translation" not in segs[0]
 
 
+# --- 느슨한 매칭 폴백: 구두점 차이만으로 못 붙던 실측(2026-08-03) -----------------
+
+
+def test_trailing_period_difference_falls_back_to_loose_match():
+    # vg6pnvn1u10류 재현 — 엄격 키는 구두점을 보존해 서로 다른 키가 된다
+    segs = [{"text": "I love you"}]
+    meta = [{"text": "I love you.", "translation": "사랑해"}]
+    assert merge_line_meta(segs, meta) == 1
+    assert segs[0]["translation"] == "사랑해"
+
+
+def test_strict_match_is_tried_before_the_loose_fallback():
+    # 엄격 매칭이 성립하면 느슨한 폴백은 아예 안 쓰인다 — 뜻이 갈리는 구두점 쌍도
+    # 각각 정확히 집힌다(둘 다 값이 있으면).
+    segs = [{"text": "行く。"}, {"text": "行く？"}]
+    meta = [
+        {"text": "行く。", "translation": "간다"},
+        {"text": "行く？", "translation": "갈까?"},
+    ]
+    assert merge_line_meta(segs, meta) == 2
+    assert segs[0]["translation"] == "간다"
+    assert segs[1]["translation"] == "갈까?"
+
+
+def test_loose_fallback_does_not_collide_short_punctuation_only_lines():
+    segs = [{"text": "?"}]
+    meta = [{"text": "!", "translation": "완전히 다른 뜻"}]
+    assert merge_line_meta(segs, meta) == 0
+    assert "translation" not in segs[0]
+
+
 # --- 수정 7: 값이 있는 첫 항목이 이긴다 ----------------------------------------
 
 
