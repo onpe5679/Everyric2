@@ -52,7 +52,37 @@ export function cleanTitle(raw: string): string {
   return title.replace(/\s{2,}/g, ' ').trim();
 }
 
-function splitArtistTitle(title: string): { title: string; artist: string | null } {
+/**
+ * "곡명 / 아티스트 [커버 동사]｜채널" 꼴 — 일본어권 커버 영상 제목 관례(実測: PrXtrTgMDEg
+ * 「【韓国語で】네모네모(NEMONEMO) / YENA 歌ってみた｜Kotoha」). 아래 일반 분해(구분자
+ * 앞=아티스트, 뒤=곡명)와 필드 순서가 **정반대**(앞=곡명, 뒤=아티스트)라 같은 규칙으로
+ * 못 묶는다 — 그래서 별도 함수로 분리한다.
+ *
+ * 슬래시가 있다고 무조건 발동하면 "A / B"류의 정상 협업 제목까지 곡명·아티스트를 뒤바꿔
+ * 망가뜨린다. 그래서 슬래시 뒤 조각에 커버 지시어(歌ってみた·cover·커버 등)가 실제로
+ * 있을 때만 발동한다(보수적 게이트) — 없으면 null을 돌려줘 호출부가 기존 규칙이나
+ * meta.artist 폴백으로 넘어가게 한다.
+ */
+function splitCoverTitle(title: string): { title: string; artist: string } | null {
+  const slash = title.match(/\s*[/／]\s*/);
+  if (!slash || slash.index === undefined || slash.index <= 0) return null;
+  const left = title.slice(0, slash.index).trim();
+  let right = title.slice(slash.index + slash[0].length).trim();
+  if (!left || !right) return null;
+  // 전각/반각 파이프 뒤는 채널명이다 — 아티스트 후보에서 제외한다(공백 유무 무관, 실제
+  // 사고 제목은 "歌ってみた｜Kotoha"처럼 파이프 앞뒤에 공백이 없다)
+  const pipe = right.match(/[｜|]/);
+  if (pipe && pipe.index !== undefined) right = right.slice(0, pipe.index).trim();
+  const COVER_HINT = /歌ってみた|弾いてみた|踊ってみた|cover|커버/i;
+  if (!COVER_HINT.test(right)) return null;
+  const artist = right.replace(COVER_HINT, '').trim();
+  return artist ? { title: left, artist } : null;
+}
+
+/** export는 테스트 전용 — detectSong 내부 호출부는 그대로 상대 import로 쓴다 */
+export function splitArtistTitle(title: string): { title: string; artist: string | null } {
+  const cover = splitCoverTitle(title);
+  if (cover) return cover;
   for (const sep of [' - ', ' – ', ' — ', ' | ']) {
     const idx = title.indexOf(sep);
     if (idx > 0) {
@@ -71,9 +101,14 @@ export function detectSong(): SongInfo | null {
 
   const meta = navigator.mediaSession?.metadata;
   if (meta?.title) {
+    // DOM 폴백 경로(아래)와 같은 분해를 거친다 — 예전엔 이 경로만 cleanTitle만 태우고
+    // splitArtistTitle을 안 타서, 제목에 아티스트가 박혀 있어도 못 뽑고 meta.artist(대개
+    // 채널명, 실제 가수가 아닐 수 있다 — 커버 영상에서 특히 그렇다)를 그대로 썼다(실사고:
+    // PrXtrTgMDEg). 제목에서 뽑히면 그게 우선이고, meta.artist는 못 뽑았을 때만 폴백이다.
+    const split = splitArtistTitle(cleanTitle(meta.title));
     return {
-      title: cleanTitle(meta.title),
-      artist: meta.artist || null,
+      title: split.title,
+      artist: split.artist ?? (meta.artist || null),
       videoId,
       duration,
       rawTitle: meta.title,
