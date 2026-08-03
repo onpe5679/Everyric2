@@ -1909,11 +1909,14 @@ export class LyricsOverlay {
       this.attachPlaylistPanel.style.top = '';
       this.attachPlaylistPanel.style.width = '';
       this.attachPlaylistPanel.style.height = '';
-      this.attachPlaylistPanel.style.display = this.settings.modPlaylist ? '' : 'none';
+      // playlistVisible()이어야 한다 — modPlaylist를 직접 읽으면 브로드캐스트 때
+      // filled 인스턴스가 메인 키를 따라가 "메인에서 껐다 켜면 PiP도 껐다 켜지는"
+      // 표면 동기화 버그가 된다(운영자 실확인 P1, 2026-08-04).
+      this.attachPlaylistPanel.style.display = this.playlistVisible() ? '' : 'none';
       this.onColumnsChanged?.();
       return;
     }
-    const show = this.settings.modPlaylist && !this.geometry.collapsed;
+    const show = this.playlistVisible() && !this.geometry.collapsed;
     if (!show) {
       this.attachPlaylistPanel.style.display = 'none';
       return;
@@ -2663,7 +2666,8 @@ export class LyricsOverlay {
   /**
    * 이어질 재생목록 — content가 lib/yt-player.ts로 스크랩한 항목을 그대로 밀어넣는다.
    * null/빈 배열이면 "재생목록에 속하지 않은 영상"으로 보고 다음 영상 카드로 대체한다
-   * (renderPlaylistPanel). 표시 자체는 modPlaylist 설정을 따른다.
+   * (renderPlaylistPanel). 표시 자체는 표면별 판정(playlistVisible — 메인 modPlaylist /
+   * PiP pipPlaylist)을 따른다.
    */
   setPlaylist(items: PlaylistItem[] | null): void {
     this.playlistItems = items ?? [];
@@ -2672,7 +2676,7 @@ export class LyricsOverlay {
 
   /** 재생목록 부착 패널 — 목록이 있으면 스크롤 리스트, 없으면 다음 영상 카드 하나만 */
   private renderPlaylistPanel(): void {
-    if (!this.settings.modPlaylist || this.geometry.collapsed) {
+    if (!this.playlistVisible() || this.geometry.collapsed) {
       this.attachPlaylistPanel.style.display = 'none';
       return;
     }
@@ -2993,6 +2997,10 @@ export class LyricsOverlay {
 
   private resetBody(): void {
     this.body.replaceChildren();
+    // 스크롤 위치도 되돌린다 — 안 그러면 카라오케 자동 스크롤로 내려간 위치를 새 화면이
+    // 그대로 물려받아, 검색 시트를 열었는데 검색창 대신 «싱크 초기화(서버 저장 삭제)»가
+    // 첫 화면에 오는 사고가 난다(감사 A1-D1 실측: scrollTop 2599 → 시트 머리 y=-480).
+    this.body.scrollTop = 0;
     // 화면 전환마다 도는 지점이라 분리된(더 이상 DOM에 없는) 생성 버튼 참조를 여기서도
     // 걸러낸다 — 그 버튼들이 들고 있던 가사 전문 클로저가 다음 setServerStatus까지
     // 기다리지 않고 곧바로 해제된다(5fps 감사 #3, 메모리 누적 방지).

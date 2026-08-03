@@ -1213,7 +1213,9 @@ function applySettingsPatch(patch: Partial<Settings>): void {
   }
   // 재생목록 패널 — 토글 즉시 반영. 하단 카드와의 표시 전환(showNextUp)은
   // overlay.applySettings(위에서 이미 호출됨)가 렌더 시점에 처리한다.
-  if (patch.modPlaylist !== undefined) {
+  // pipPlaylist도 같은 조달을 깨운다 — 메인이 꺼진 채 PiP 쪽만 켜는 경우
+  // 여기서 스크랩을 시작해 줘야 PiP 재생목록이 채워진다(표면별 분리).
+  if (patch.modPlaylist !== undefined || patch.pipPlaylist !== undefined) {
     refreshPlaylist(true);
     // 재생목록이 없는 페이지의 대체 카드(다음 영상)도 즉시 채운다 — modNextUp이
     // 꺼져 있으면 refreshNextUp이 지금까지 한 번도 안 돌았을 수 있다
@@ -2813,7 +2815,9 @@ function refreshNextUp(force = false): void {
   // modPlaylist도 이 데이터를 쓴다 — 재생목록이 없는 단일 영상 페이지에서 부착 패널이
   // "다음 영상" 카드로 대체 표시한다(overlay.renderPlaylistPanel). modNextUp이 꺼져
   // 있어도 modPlaylist만으로 스크랩은 계속 돌아야 그 대체 카드가 채워진다.
-  if (!settings.modNextUp && !settings.modPlaylist) {
+  // pipPlaylist(PiP 표면의 재생목록)도 같은 데이터 소비자다 — 메인이 꺼져 있어도
+  // PiP 쪽이 켜져 있으면 스크랩은 돌아야 한다(표면별 분리, 2026-08-04).
+  if (!settings.modNextUp && !settings.modPlaylist && !settings.pipPlaylist) {
     if (force) {
       broadcast('setNextUp', null);
     }
@@ -2893,7 +2897,9 @@ function applyPlaylistEntries(entries: PlaylistEntry[]): void {
 }
 
 function refreshPlaylist(force = false): void {
-  if (!settings.modPlaylist) {
+  // 데이터 조달은 두 표면 중 하나라도 원하면 돈다 — 표시 여부는 각 인스턴스가
+  // playlistVisible()로 따로 판정한다(메인 modPlaylist / PiP pipPlaylist).
+  if (!settings.modPlaylist && !settings.pipPlaylist) {
     if (force && lastPlaylistItems.length > 0) {
       broadcast('setPlaylist', null);
       lastPlaylistItems = [];
@@ -2918,7 +2924,7 @@ function refreshPlaylist(force = false): void {
     window.setTimeout(() => {
       // 그 사이 다른 refreshPlaylist 호출(성공이든 또 다른 빈손이든)이 있었으면 이
       // 재시도는 낡았다 — 지금 상태를 덮지 않고 조용히 버린다
-      if (seq !== playlistRefreshSeq || !settings.modPlaylist) return;
+      if (seq !== playlistRefreshSeq || (!settings.modPlaylist && !settings.pipPlaylist)) return;
       const retried = getPlaylist();
       const isLast = i === PLAYLIST_EMPTY_RETRY_DELAYS_MS.length - 1;
       if (retried.length > 0 || isLast) applyPlaylistEntries(retried);
@@ -2933,7 +2939,7 @@ async function refreshPlaylistExists(videoIds: string[]): Promise<void> {
     type: 'SYNC_EXISTS', payload: { videoIds },
   });
   // 그 사이 목록이 다시 스크랩됐거나(seq 낡음) 모듈이 꺼졌으면 조용히 버린다
-  if (seq !== playlistExistsSeq || !res.data || !settings.modPlaylist) return;
+  if (seq !== playlistExistsSeq || !res.data || (!settings.modPlaylist && !settings.pipPlaylist)) return;
   const exists = res.data;
   lastPlaylistItems = lastPlaylistItems.map(it => ({
     ...it, syncExists: it.videoId ? exists[it.videoId] : undefined,

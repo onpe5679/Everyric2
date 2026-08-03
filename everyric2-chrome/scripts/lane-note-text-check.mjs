@@ -113,12 +113,31 @@ try {
       `pitchPronPosition='${pos}' 에서도 노트 영역에 글자가 그려짐`, m);
   }
 
-  // 'off'와 'both'의 노트 영역 잉크가 비슷해야 한다 — 노트 텍스트가 설정을 안 탄다는 뜻
+  // ── 노트 텍스트가 설정을 안 탄다는 것을 «잉크 양»으로 확인한다.
+  //
+  // 비교 상대는 'both'가 **아니라 'center'다**. 'bottom'·'both'는 발음 줄이 세로 공간을
+  // 차지해 오선이 줄고, 그만큼 아래 가사 줄(굵은 원문 토큰)이 이 측정 밴드(위 55%) 안으로
+  // 밀려 올라온다 — 노트 텍스트와 무관한 잉크가 섞이는 것이다. 'center'는 반투명 중앙
+  // 오버레이라 staffH 계산에 관여하지 않아(pitch-lane.ts renderPronFallback 호출부 주석)
+  // 'off'와 **레이아웃이 완전히 같다**. 차이는 오버레이 잉크 하나뿐이라 정규화가 성립한다.
+  //
+  // 예전 문턱("off 대비 both < 1.7")은 그 레이아웃 밀림 때문에 못 쓴다. 실측(2026-08-04,
+  // 5곡: K0WRNxEgnoE·UnIhRpIT7nc·M7VSEZOQIlg·m1A-S-PzU6E·BiQs9ABhT7U)에서 정상 동작인데도
+  // both/off가 1.13~1.92까지 벌어져 1.7을 넘겼다. 게다가 이 지표는 «잡으려던 결함»과
+  // 구분도 못 한다 — 노트 텍스트를 off/bottom에서 안 그리던 옛 동작을 되살려 같은 5곡을
+  // 재면 both/off가 1.80~2.23이라 정상 범위와 겹친다. 어떤 값을 넣어도 오탐 아니면 미탐이다.
+  //
+  // off/center는 갈린다: 정상 0.796·0.841·0.878·0.932·0.979(실브라우저 5곡) vs
+  // 결함 0.493~0.689(같은 5곡, 결함 재현 렌더). 문턱 0.72는 그 사이에 있다 —
+  // 정상 최저(0.796)와 0.076, 결함 최고(0.689)와 0.031 여유.
+  // 위쪽 한계는 두지 않는다 — center는 구조적으로 off + 오버레이라 1을 넘을 수 없고,
+  // 넘는다면 그건 오버레이 쪽 결함이지 이 검사의 대상이 아니다.
   const a = results.off?.noteInk ?? 0;
-  const b = results.both?.noteInk ?? 0;
-  const ratio = a > 0 ? b / a : 0;
-  check(ratio > 0.6 && ratio < 1.7,
-    "노트 영역 잉크가 설정값에 좌우되지 않음('off' 대비 'both')", { off: a, both: b, ratio: +ratio.toFixed(2) });
+  const c = results.center?.noteInk ?? 0;
+  const ratio = c > 0 ? a / c : 0;
+  check(ratio >= 0.72,
+    "노트 영역 잉크가 설정값에 좌우되지 않음('off'가 'center' 대비 안 줄어듦)",
+    { off: a, center: c, ratio: +ratio.toFixed(3) });
 
   await page.screenshot({ path: resolve(__dirname, '../lane-note-text-check.png') });
   console.log('screenshot: lane-note-text-check.png');
