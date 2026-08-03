@@ -1255,6 +1255,15 @@ class ServerSettings(BaseSettings):
         description="Max force-regenerations/resets per video per 24h for non-admin "
         "callers (only enforced when admin_api_key is set). 0 disables the limit.",
     )
+    daily_upgrade_limit: int = Field(
+        default=10,
+        description="Max depth-upgrade re-analyses (min_depth, non-force) per video per 24h "
+        "for non-admin callers (only enforced when admin_api_key is set). 0 disables the "
+        "limit. Separate from daily_destructive_limit/generate's own limit (operator "
+        "decision 2026-08-04: raising analysis depth on an existing sync isn't the same "
+        "spend as creating a new one). Default sized for a song walking fast->medium->heavy "
+        "(2 upgrade steps) a few times over the window, not for bulk re-analysis.",
+    )
     worker_key: str = Field(
         default="",
         description="원격 GPU 워커 풀 인증 키 (X-Worker-Key). 설정하면 /api/worker/* "

@@ -2290,9 +2290,6 @@
   "panels_contrib_quotaUpgrade": {
     "message": "Depth upgrade"
   },
-  "panels_contrib_quotaUpgradeShared": {
-    "message": "Shares the sync creation quota — not counted separately"
-  },
   "panels_contrib_quotaValue": {
     "message": "$P1$ / $P2$",
     "placeholders": {

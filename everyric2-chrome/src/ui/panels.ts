@@ -1486,18 +1486,9 @@ export function buildContributionSheet(opts: ContributionSheetOpts = {}): { el: 
       // link·upgrade는 구서버엔 없는 additive 필드(LimitsResponse 참고) — 응답에 없으면
       // (undefined) 그 줄 자체를 생략한다, 빈 값으로 그리지 않는다.
       ...(limits.link ? bucket(t('panels.contrib.quotaLink'), limits.link) : []),
-      // upgrade는 값이 generate와 항상 같다(별도 카운터가 없어 재노출한 것 — types.ts 참고).
-      // 그대로 두면 "정렬 업그레이드 쿼터가 따로 있다"로 오독하므로, 행 밑에 공유 안내를
-      // 한 줄 더 붙인다(회복 안내와 같은 ey-settings-note 자리 규약, 팀 지시 2026-08-04).
-      ...(limits.upgrade
-        ? [
-            ...bucket(t('panels.contrib.quotaUpgrade'), limits.upgrade),
-            h('div', {
-              className: 'ey-settings-note',
-              text: t('panels.contrib.quotaUpgradeShared'),
-            }),
-          ]
-        : []),
+      // upgrade는 이제 generate와 분리된 자기만의 카운터(daily_upgrade_limit, types.ts
+      // 참고) — 2026-08-04 운영자 정정으로 "공유돼요" 안내는 더 이상 사실이 아니라 제거.
+      ...(limits.upgrade ? bucket(t('panels.contrib.quotaUpgrade'), limits.upgrade) : []),
       ...bucket(t('panels.contrib.quotaDestructive'), limits.destructive),
       h('div', {
         className: 'ey-settings-note',

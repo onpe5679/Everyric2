@@ -45,6 +45,7 @@ from everyric2.server.db import connection as db_conn
 from everyric2.server.db import orphan_reaper
 from everyric2.server.db.models import Base, Job, LinkJob
 from everyric2.server.db.repository import (
+    ActionLogRepository,
     JobRepository,
     LinkJobRepository,
     SyncRepository,
@@ -508,6 +509,84 @@ def test_generate_limit_is_off_without_an_admin_key():
                 assert await _count_jobs(sm) == 3
             finally:
                 sync_api.DAILY_GENERATE_LIMIT = prev
+
+    asyncio.run(body())
+
+
+# ── 정렬 업그레이드(min_depth) 한도 분리 (운영자 결정 2026-08-04) ──────────────
+#
+# 처음엔 min_depth(force 없는 재생성)가 action="generate"를 그대로 소비했다 — 운영자
+# 정정("업그레이드도 당연히 생성 쿼터랑은 별개여야지")으로 sync.py가 action="upgrade"
+# 전용 카운터(daily_upgrade_limit)로 분리했다. 아래는 그 분리 자체를 실증한다.
+
+
+def test_regenerate_with_min_depth_consumes_upgrade_not_generate():
+    """force 없는 min_depth 재생성은 action="upgrade"만 늘리고 "generate"는 그대로다."""
+
+    async def body():
+        async with _env(admin_api_key="admin-secret", local_worker=False) as sm:
+            resp = await regenerate_sync(
+                RegenerateRequest(video_id=VIDEO, lyrics=LYRICS, min_depth="heavy"),
+                BackgroundTasks(),
+            )
+            assert resp.status == "processing"
+            assert await _count_jobs(sm) == 1
+
+            async with sm() as s:
+                repo = ActionLogRepository(s)
+                assert await repo.count_recent("upgrade", VIDEO) == 1
+                assert await repo.count_recent("generate", VIDEO) == 0
+
+    asyncio.run(body())
+
+
+def test_regenerate_without_min_depth_still_consumes_generate():
+    """min_depth 없는 일반 재생성(기존 싱크 미존재라 조기 반환을 안 타는 경우)은 예전
+    그대로 "generate"를 소비한다 — 분리는 min_depth 경로만 건드렸다는 회귀 방지."""
+
+    async def body():
+        async with _env(admin_api_key="admin-secret", local_worker=False) as sm:
+            resp = await regenerate_sync(
+                RegenerateRequest(video_id=VIDEO, lyrics=LYRICS), BackgroundTasks()
+            )
+            assert resp.status == "processing"
+
+            async with sm() as s:
+                repo = ActionLogRepository(s)
+                assert await repo.count_recent("generate", VIDEO) == 1
+                assert await repo.count_recent("upgrade", VIDEO) == 0
+
+    asyncio.run(body())
+
+
+def test_regenerate_with_min_depth_hits_429_when_upgrade_limit_exceeded():
+    """daily_upgrade_limit을 다 쓰면 429 — generate 한도(DAILY_GENERATE_LIMIT)와 무관하게
+    독립적으로 걸린다(가사를 매번 바꿔 캐시/합류를 비켜 매번 새 잡을 만들게 한다)."""
+
+    async def body():
+        async with _env(
+            admin_api_key="admin-secret", local_worker=False, daily_upgrade_limit=1
+        ) as sm:
+            await regenerate_sync(
+                RegenerateRequest(
+                    video_id=VIDEO, lyrics=LYRICS, min_depth="medium"
+                ),
+                BackgroundTasks(),
+            )
+            with pytest.raises(HTTPException) as exc:
+                await regenerate_sync(
+                    RegenerateRequest(
+                        video_id=VIDEO, lyrics=LYRICS + "\n두 번째 시도", min_depth="heavy"
+                    ),
+                    BackgroundTasks(),
+                )
+            assert exc.value.status_code == 429
+            assert await _count_jobs(sm) == 1
+
+            async with sm() as s:
+                repo = ActionLogRepository(s)
+                assert await repo.count_recent("upgrade", VIDEO) == 1  # 두 번째는 거절돼 안 늘어남
+                assert await repo.count_recent("generate", VIDEO) == 0  # generate는 전혀 안 건드림
 
     asyncio.run(body())
 

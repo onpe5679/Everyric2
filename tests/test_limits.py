@@ -16,9 +16,11 @@ connection.async_session을 몽키패치하고 라우트 코루틴을 직접 awa
      거짓 안내가 된다.
   ⑥ link(2026-08-04 보강) — action="link_candidates"를 generate/destructive와 완전히
      독립적으로 집계한다(sync.py._dispatch_candidate_followup이 이미 그 이름으로 로그).
-  ⑦ upgrade(2026-08-04 보강) — 별도 액션이 없다. "정렬 업그레이드"(min_depth, force 없는
-     재생성)는 서버에서 그대로 action="generate"로 로그되므로, upgrade 필드는 generate와
-     **완전히 같은 값**이어야 한다 — 이 항등이 깨지면 limits.py가 값을 발명한 것이다.
+  ⑦ upgrade(2026-08-04 보강, 같은 날 2차 정정) — 처음엔 별도 액션이 없어 generate를
+     복사해 냈으나, 운영자 정정("업그레이드도 당연히 생성 쿼터랑은 별개여야지")으로
+     sync.py가 action="upgrade" 전용 카운터로 분리했다(daily_upgrade_limit, 기본
+     10/24h). 이 파일은 이제 link와 동일하게 **독립 집계**를 검증한다 — generate와의
+     항등은 더 이상 계약이 아니다(오히려 서로 안 섞이는 것이 계약).
 """
 
 import asyncio
@@ -44,7 +46,9 @@ def _utc_naive(**delta_kwargs) -> datetime:
 
 
 @contextlib.asynccontextmanager
-async def _env(admin_api_key: str = "", daily_destructive_limit: int = 2):
+async def _env(
+    admin_api_key: str = "", daily_destructive_limit: int = 2, daily_upgrade_limit: int = 10
+):
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -57,15 +61,17 @@ async def _env(admin_api_key: str = "", daily_destructive_limit: int = 2):
     db_conn.async_session = sm
 
     server = get_settings().server
-    saved = (server.admin_api_key, server.daily_destructive_limit)
+    saved = (server.admin_api_key, server.daily_destructive_limit, server.daily_upgrade_limit)
     object.__setattr__(server, "admin_api_key", admin_api_key)
     object.__setattr__(server, "daily_destructive_limit", daily_destructive_limit)
+    object.__setattr__(server, "daily_upgrade_limit", daily_upgrade_limit)
     try:
         yield sm
     finally:
         db_conn.async_session = orig
         object.__setattr__(server, "admin_api_key", saved[0])
         object.__setattr__(server, "daily_destructive_limit", saved[1])
+        object.__setattr__(server, "daily_upgrade_limit", saved[2])
         await engine.dispose()
 
 
@@ -78,11 +84,11 @@ def test_unenforced_when_admin_key_unset():
             assert resp.destructive.used == 0
             assert resp.generate.remaining == resp.generate.limit
             assert resp.destructive.remaining == resp.destructive.limit
-            # link·upgrade도 같은 "무제한을 값으로" 계약을 따른다
+            # link·upgrade도 같은 "무제한을 값으로" 계약을 따른다 — 각자 자기 한도값으로.
             assert resp.link.used == 0
             assert resp.link.remaining == resp.link.limit == DAILY_LINK_CANDIDATE_LIMIT
             assert resp.upgrade.used == 0
-            assert resp.upgrade == resp.generate
+            assert resp.upgrade.remaining == resp.upgrade.limit
 
     asyncio.run(body())
 
@@ -109,6 +115,7 @@ def test_reflects_actual_action_log_usage():
                 await repo.log("generate", VIDEO)
                 await repo.log("reset", VIDEO)
                 await repo.log("link_candidates", VIDEO)
+                await repo.log("upgrade", VIDEO)
                 await s.commit()
 
             resp = await get_limits(VIDEO)
@@ -119,8 +126,9 @@ def test_reflects_actual_action_log_usage():
             assert resp.destructive.remaining == 1  # limit(2) - 1
             assert resp.link.used == 1
             assert resp.link.remaining == resp.link.limit - 1
-            # upgrade는 별도 로그가 없어도 generate를 그대로 반영한다(같은 액션 재노출)
-            assert resp.upgrade == resp.generate
+            # upgrade는 자기만의 로그(1건)만 반영한다 — generate(3건)와 섞이지 않는다
+            assert resp.upgrade.used == 1
+            assert resp.upgrade.remaining == resp.upgrade.limit - 1
 
     asyncio.run(body())
 
@@ -167,25 +175,55 @@ def test_link_bucket_next_reset_at_matches_oldest_log_plus_window():
     asyncio.run(body())
 
 
-def test_upgrade_bucket_mirrors_generate_exactly():
-    """정렬 업그레이드(min_depth, force 없음)는 서버에서 action="generate"로 그대로
-    로그된다 — 별도 카운터가 없으므로 upgrade는 generate와 항등이어야 한다(limit·used·
-    remaining·next_reset_at 전부)."""
+def test_upgrade_bucket_is_independent_of_generate_and_destructive():
+    """action="upgrade"는 generate/destructive와 겹치지 않는 자기만의 카운터다
+    (2026-08-04 2차 정정 — 처음의 generate 복사 계약은 폐기됨)."""
 
     async def body():
         async with _env(admin_api_key="secret"):
             async with db_conn.async_session() as s:
                 repo = ActionLogRepository(s)
-                await repo.log("generate", VIDEO)
-                await repo.log("generate", VIDEO)
+                await repo.log("upgrade", VIDEO)
+                await repo.log("upgrade", VIDEO)
                 await s.commit()
 
             resp = await get_limits(VIDEO)
-            assert resp.generate.used == 2
-            assert resp.upgrade.limit == resp.generate.limit
-            assert resp.upgrade.used == resp.generate.used
-            assert resp.upgrade.remaining == resp.generate.remaining
-            assert resp.upgrade.next_reset_at == resp.generate.next_reset_at
+            assert resp.upgrade.used == 2
+            assert resp.upgrade.remaining == resp.upgrade.limit - 2
+            # 다른 버킷은 전혀 영향받지 않는다
+            assert resp.generate.used == 0
+            assert resp.destructive.used == 0
+            assert resp.link.used == 0
+
+    asyncio.run(body())
+
+
+def test_upgrade_bucket_limit_reflects_daily_upgrade_limit_setting():
+    """운영자가 daily_upgrade_limit(기본 10)을 바꾸면 그 값이 그대로 노출된다 —
+    generate(DAILY_GENERATE_LIMIT, 코드 상수)와 달리 upgrade는 설정으로 조절 가능."""
+
+    async def body():
+        async with _env(admin_api_key="secret", daily_upgrade_limit=7):
+            resp = await get_limits(VIDEO)
+            assert resp.upgrade.limit == 7
+            assert resp.upgrade.remaining == 7
+
+    asyncio.run(body())
+
+
+def test_upgrade_bucket_next_reset_at_matches_oldest_log_plus_window():
+    async def body():
+        async with _env(admin_api_key="secret"):
+            oldest = _utc_naive(hours=-4)
+            async with db_conn.async_session() as s:
+                s.add(ActionLog(action="upgrade", video_id=VIDEO, created_at=oldest))
+                await s.commit()
+
+            resp = await get_limits(VIDEO)
+            assert resp.upgrade.used == 1
+            expected = oldest + timedelta(hours=resp.window_hours)
+            actual = datetime.fromisoformat(resp.upgrade.next_reset_at)
+            assert abs((actual - expected).total_seconds()) < 1
 
     asyncio.run(body())
 

@@ -494,9 +494,9 @@ export interface LimitsResponse {
    *  독립된 자기만의 카운터다. optional인 이유는 구서버 호환(2026-08-04 이전 서버는 이
    *  필드 자체가 없어 undefined) — panels.ts는 undefined면 그 줄을 생략한다. */
   link?: LimitBucket;
-  /** 정렬 업그레이드(분석 깊이 올리기, min_depth) 한도 — 서버에 별도 카운터가 없어
-   *  generate와 항상 같은 값이다(limits.py 실측: force 없는 min_depth 재생성이 그대로
-   *  action="generate"로 로그된다). optional 이유는 link와 동일(구서버 호환). */
+  /** 정렬 업그레이드(분석 깊이 올리기, min_depth) 한도 — action="upgrade" 독립 카운터
+   *  (generate와 분리된 자기만의 예산, daily_upgrade_limit). optional 이유는 link와
+   *  동일(구서버 호환 — 2026-08-04 이전 서버는 이 필드 자체가 없어 undefined). */
   upgrade?: LimitBucket;
   /** 파괴적 동작(초기화·링크 해제) 한도 */
   destructive: LimitBucket;

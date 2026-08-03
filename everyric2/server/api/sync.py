@@ -121,6 +121,21 @@ async def _check_destructive_limit(session, action: str, video_id: str, api_key:
         session, action, video_id, api_key, get_settings().server.daily_destructive_limit
     )
 
+
+async def _check_upgrade_limit(session, video_id: str, api_key: str | None) -> None:
+    """정렬 업그레이드(min_depth, force 없음) 일일 한도 — daily_upgrade_limit(기본 10회/24h).
+
+    운영자 결정(2026-08-04): "업그레이드도 당연히 생성 쿼터랑은 별개여야지" — 이미 만든
+    결과를 더 정밀하게 다시 뽑는 행위(fast→medium→heavy, 최대 2단계)가 새 싱크를 만드는
+    generate 예산을 깎으면 안 된다. action 이름을 "generate"가 아니라 "upgrade"로 독립시켜
+    ActionLog 집계 자체를 분리한다 — GET /api/limits가 이 이름을 그대로 읽어 upgrade
+    버킷을 낸다(limits.py 참고). 이전(2026-08-04 초판)엔 generate 값을 그대로 복사해
+    노출했으나, 이 분리로 그 항등 계약은 폐기됐다.
+    """
+    await _check_action_limit(
+        session, "upgrade", video_id, api_key, get_settings().server.daily_upgrade_limit
+    )
+
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
 # 유튜브 video_id 형식 (captions.py와 동일 규칙) — 무제한 길이 문자열이 그대로 쿼리
@@ -2504,7 +2519,8 @@ async def regenerate_sync(
         if not request.force and not request.min_depth:
             # min_depth(깊이 하한) 요청은 같은 가사의 기존 싱크가 **있어야** 성립하는
             # 재분석이다 — 이 조기 반환에 걸리면 아무 일도 안 일어나므로 건너뛴다.
-            # (한도는 아래 비force 경로의 generate 한도가 그대로 센다.)
+            # (한도는 아래 비force 경로에서 min_depth 유무로 갈라 upgrade/generate 각자
+            # 센다 — 2026-08-04 분리, _check_upgrade_limit 독스트링 참고.)
             existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
             if existing:
                 if request.line_meta or request.attribution:
@@ -2539,12 +2555,17 @@ async def regenerate_sync(
                 line_meta_wait_sec=wait_sec,
             )
         if not request.force:
-            # force는 위에서 이미 훨씬 엄격한 파괴적 한도(기본 2회/24h)를 통과했다 —
-            # 여기서 또 세면 한 번의 재생성이 두 예산을 먹는다. 비force 재생성은 GPU
-            # 소비가 /generate와 같으므로 같은 상한을 쓴다.
-            await _check_action_limit(
-                session, "generate", request.video_id, x_api_key, DAILY_GENERATE_LIMIT
-            )
+            if request.min_depth:
+                # 정렬 업그레이드는 generate와 별개 예산(운영자 결정 2026-08-04) —
+                # _check_upgrade_limit 독스트링 참고.
+                await _check_upgrade_limit(session, request.video_id, x_api_key)
+            else:
+                # force는 위에서 이미 훨씬 엄격한 파괴적 한도(기본 2회/24h)를 통과했다 —
+                # 여기서 또 세면 한 번의 재생성이 두 예산을 먹는다. 비force 재생성은 GPU
+                # 소비가 /generate와 같으므로 같은 상한을 쓴다.
+                await _check_action_limit(
+                    session, "generate", request.video_id, x_api_key, DAILY_GENERATE_LIMIT
+                )
         job = await job_repo.create(
             video_id=request.video_id,
             lyrics=request.lyrics,
