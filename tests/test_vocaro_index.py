@@ -213,14 +213,22 @@ def test_english_transliterated_title_matches_via_slug_alias():
     assert result.slug == "candy-cookie-chocolate"
 
 
-def test_slug_alias_participates_in_containment_pass():
-    # 영문 전사 제목에 장식이 붙어 정확 일치가 깨져도 포함 매칭으로 잡힌다
+def test_decorated_english_title_resolves_via_candidate_decomposition():
+    # 장식이 붙어도 candidate_queries가 괄호를 벗긴 후보를 만들어 정확 일치로 잡힌다 —
+    # 슬러그 별칭을 포함 매칭에 넣지 않아도 되는 근거.
     _set_entries([
         SongEntry(slug="candy-cookie-chocolate", ko="캔디 쿠키 초콜릿", ja=None),
     ])
     result = vi.match("Candy Cookie Chocolate (Official MV)")
     assert result is not None
     assert result.slug == "candy-cookie-chocolate"
+
+
+def test_slug_alias_is_not_a_containment_candidate():
+    # 동명이곡 넘버링 슬러그(melt-2)의 별칭 "melt2"가 쿼리 "melt"의 포함 매칭에 걸리면
+    # rest="2"가 2자 미만이라 가드를 통과해 버린다 — 슬러그는 정확 일치 전용이다(엣지 감사 #8).
+    _set_entries([SongEntry(slug="melt-2", ko="멜트 (다른 곡)", ja=None)])
+    assert vi.match("melt") is None
 
 
 def test_slug_alias_does_not_bypass_artist_token_guard():

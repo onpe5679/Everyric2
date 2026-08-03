@@ -124,7 +124,12 @@ def match(title: str) -> SongEntry | None:
     for q in queries:
         best: tuple[int, SongEntry] | None = None
         for entry in entries:
-            for field in (entry.ja, entry.ko, entry.slug.replace("-", " ")):
+            # 슬러그 별칭은 **정확 일치 패스에만** 둔다. 포함 매칭에 넣으면 동명이곡
+            # 넘버링 슬러그(melt-2 → "melt2")가 rest="2"(2자 미만)로 아티스트 토큰
+            # 가드를 그냥 통과해 오탐 표면이 넓어진다(엣지 감사 #8). 장식 제목
+            # ("… (Official MV)")은 candidate_queries가 괄호를 벗긴 후보를 이미
+            # 만들므로 정확 일치 패스가 잡는다.
+            for field in (entry.ja, entry.ko):
                 if not field:
                     continue
                 n = _normalize_title(field)

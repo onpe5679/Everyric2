@@ -469,6 +469,7 @@ def _merge_meta_into_sync(
             segs,
             [m.model_dump() for m in line_meta],
             with_translation=(line_meta_lang == "ko"),
+            language=sync_result.language,
         )
         if merged:
             updated["segments"] = segs

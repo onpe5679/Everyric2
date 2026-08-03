@@ -127,13 +127,25 @@ def adapter_coverage(counts: dict[str, int], adapter: str) -> float:
     return sum(n for script, n in counts.items() if script in scripts) / total
 
 
-# 후보가 되려면 그 언어를 지목하는 스크립트가 이만큼은 있어야 한다(전체 대비 비율).
+# 후보가 되려면 그 어댑터가 "라틴 말고" 덮는 글자가 이만큼은 있어야 한다(전체 대비 비율).
 # "덮는 쪽" 판정의 이면: jpn vocab은 라틴도 덮으므로, 영어 곡에 일본어 브리지 4줄만
 # 있어도(가나 27/1354자 = 2.0%) ja가 en을 커버리지로 이겨 버린다 — UgK6n1KKUxY 실측,
-# ja 판정→fast 라우팅→첫 줄이 35초 앞으로 끌려갔다. 지목 스크립트가 흔적 수준이면
-# 그 언어가 "덮어서 얻는 것"도 흔적뿐이므로 후보에서 뺀다. 0.05인 이유: 진짜 혼용곡의
-# 지목 스크립트는 실측 26~46%로 여유가 크고, 흔적 혼입(크레딧 줄·브리지 한 절)은 2~3%다.
+# ja 판정→fast 라우팅→첫 줄이 35초 앞으로 끌려갔다. 커버리지 우세가 라틴을 덮는 데서만
+# 오는 후보는 "덮어서 얻는 것"이 흔적뿐이므로 뺀다. 기준이 지목 스크립트(가나)가 아니라
+# **비라틴 커버리지**인 이유: 한자 위주 일본어 가사(가나 5% 미만 + 한자 다수)는 가나만
+# 재면 탈락해 zh/en으로 새는데, jpn이 라틴 밖에서 덮는 양(가나+한자)으로 재면 당당히
+# 남는다(엣지 감사 #9, 2026-08-03). 0.05인 이유: 진짜 혼용곡의 비라틴 비중은 실측
+# 26~46%로 여유가 크고, 흔적 혼입(크레딧 줄·브리지 한 절)은 2~3%다.
 _NATIVE_SHARE_FLOOR = 0.05
+
+
+def _nonlatin_gain(counts: dict[str, int], lang: str) -> float:
+    """이 언어 어댑터가 라틴 밖에서 덮는 글자 비율 — 후보 자격(_NATIVE_SHARE_FLOOR) 판정용."""
+    total = sum(counts.values())
+    if total == 0:
+        return 0.0
+    scripts = _ADAPTER_SCRIPTS[MMS_LANG_CODES[lang]]
+    return sum(n for script, n in counts.items() if script in scripts and script != "latin") / total
 
 
 def _pick_by_coverage(counts: dict[str, int]) -> str:
@@ -144,9 +156,9 @@ def _pick_by_coverage(counts: dict[str, int]) -> str:
     통째로 빠져 균등 보간만 됐다(구간 오차 −2.5초 → −11.4초로 단조 악화, 실측). 많은 쪽이
     아니라 **덮는 쪽**을 골라야 한다: kor은 한글과 라틴을 모두 덮으므로 이 곡을 100% 덮는다.
 
-    단, 지목 스크립트 비중이 _NATIVE_SHARE_FLOOR 미만인 후보는 애초에 빠진다 — 커버리지
-    우세가 라틴을 덮는 데서만 오는 후보를 걸러, 사실상 라틴 단일 가사가 ja/ko/zh로 새지
-    않게 한다. 전 후보가 빠지면 en이다.
+    단, 비라틴 커버리지(_nonlatin_gain)가 _NATIVE_SHARE_FLOOR 미만인 후보는 애초에
+    빠진다 — 커버리지 우세가 라틴을 덮는 데서만 오는 후보를 걸러, 사실상 라틴 단일
+    가사가 ja/ko/zh로 새지 않게 한다. 전 후보가 빠지면 en이다.
 
     동점 처리:
       ① 커버리지가 같으면 그 언어를 지목하는 스크립트가 실제로 더 많은 쪽. 한글 100자 +
@@ -155,11 +167,10 @@ def _pick_by_coverage(counts: dict[str, int]) -> str:
       ② 그래도 같으면 _MULTILINGUAL_CANDIDATES의 순서(ja → ko → zh). 남은 후보가
          정말로 구별 불가능한 경우이므로 결정론만 확보하면 된다.
     """
-    total = sum(counts.values())
     viable = [
         lang
-        for lang, script in _MULTILINGUAL_CANDIDATES.items()
-        if total > 0 and counts[script] / total >= _NATIVE_SHARE_FLOOR
+        for lang in _MULTILINGUAL_CANDIDATES
+        if _nonlatin_gain(counts, lang) >= _NATIVE_SHARE_FLOOR
     ]
     if not viable:
         return "en"

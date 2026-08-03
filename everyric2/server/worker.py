@@ -295,6 +295,7 @@ def merge_line_meta(
     line_meta: list[dict[str, Any]],
     *,
     with_translation: bool = True,
+    language: str | None = None,
 ) -> int:
     """세그먼트에 발음/번역을 라인 텍스트 매칭으로 병합. 병합된 세그먼트 수를 반환.
 
@@ -329,7 +330,9 @@ def merge_line_meta(
         # 캐시 재사용·늦은 병합으로 들어온 세그먼트도 표기별 발음을 갖게 한다. 직렬화에서
         # 이미 붙였으면 멱등 가드가 지킨다. 심판 개입 라인은 여기에 이긴 읽기의 토큰 열이
         # 없으므로 attach가 romaji를 스스로 생략한다(기본 읽기로 렌더하면 표기가 어긋난다).
-        attach_pron_variants(seg)
+        # language를 흘려야 zh 게이트가 이 경로에서도 동작한다 — 안 넘기면 zh 곡의 순한자
+        # 라인이 ja 분기로 빠져 일본어 독음이 붙는다(엣지 감사 #10, 2026-08-03).
+        attach_pron_variants(seg, language=language)
         merged += 1
     return merged
 
@@ -1267,7 +1270,9 @@ async def _complete_from_cache_db(
             # 남의 언어를 받는다. 언어별 값은 아래 레이어에만 남긴다. 기준은 요청자 언어가
             # 아니라 **이 메타에 실린 번역의 언어**다(resolve_layer_lang).
             # (발음은 언어 무관한 결정론 한글 독음이라 그대로 병합한다.)
-            if merge_line_meta(segs, meta, with_translation=(meta_lang == "ko")):
+            if merge_line_meta(
+                segs, meta, with_translation=(meta_lang == "ko"), language=target.language
+            ):
                 updated["segments"] = segs
                 changed = True
         if attr is not None:
@@ -1530,7 +1535,9 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
 
     # 독음 정렬 경로는 발음/번역/pron_segments를 이미 세그먼트에 붙였으므로 재병합 생략
     if line_meta and result.get("alignment_text") != "pronunciation":
-        merged = merge_line_meta(result["timestamps"], line_meta)
+        merged = merge_line_meta(
+            result["timestamps"], line_meta, language=result.get("language")
+        )
         logger.info(f"Line meta merged on {merged} segments")
 
     return PipelineResult(

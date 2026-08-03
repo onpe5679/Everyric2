@@ -281,6 +281,21 @@ def test_chinese_with_latin_majority_still_covers_han():
     assert MMS_LANG_CODES[lang] == "cmn-script_simplified"
 
 
+def test_kanji_heavy_japanese_stays_ja_despite_tiny_kana_share():
+    """한자 위주 일본어 가사(가나 5% 미만)가 바닥값에 걸려 zh/en으로 새면 안 된다.
+
+    바닥 기준이 지목 스크립트(가나)라면 이 곡의 ja가 탈락하고, zh는 가나>0이라
+    detect의 후보에도 없던 언어인데 커버리지 최고로 남아 병음 오표기 경로가 열린다
+    (엣지 감사 #9). 기준을 비라틴 커버리지(가나+한자)로 재면 ja가 당당히 남는다.
+    """
+    text = "漢字表記中心\n歌詞世界観全部漢字\n" * 10 + "ぞ\n" + "english hook line here\n" * 4
+    counts = script_census(text)
+    assert counts["kana"] / sum(counts.values()) < 0.05  # 가나만 재면 탈락하는 구성
+    lang, multi = detect_language_from_text(text)
+    assert multi is True
+    assert lang == "ja"
+
+
 def test_english_song_with_trace_ja_bridge_resolves_to_en():
     """영어 곡의 일본어 브리지 4줄(가나 2%)이 ja 판정을 뒤집으면 안 된다.
 
