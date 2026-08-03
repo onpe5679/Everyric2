@@ -22,9 +22,12 @@ cpSync(resolve(__dirname, '../dist'), distDir, { recursive: true });
 JSON.parse(readFileSync(join(distDir, 'manifest.json'), 'utf8'));
 
 const videoId = process.argv[2];
-const LOCAL_SERVER_URL = 'http://127.0.0.1:8000';
+// 서버는 인자로 바꿀 수 있다 — 프로드 읽기 검증에 쓴다(생성 없이 «이미 있는 싱크»만 본다).
+// 프로드는 manifest의 **필수** host_permission이라 별도 승인 흐름이 필요 없다.
+const SERVER_URL = process.argv[3] ?? 'http://127.0.0.1:8000';
+const IS_LOCAL = /127\.0\.0\.1|localhost/.test(SERVER_URL);
 if (!videoId) {
-  console.log('사용법: node scripts/lane-note-text-check.mjs <syncedVideoId>');
+  console.log('사용법: node scripts/lane-note-text-check.mjs <syncedVideoId> [serverUrl]');
   process.exit(2);
 }
 
@@ -60,7 +63,10 @@ const ctx = await chromium.launchPersistentContext(userDataDir, {
 
 try {
   const sw = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: 15000 });
-  await ensureLocalServerPermissionForServerUrl(ctx, sw, new URL(sw.url()).host, LOCAL_SERVER_URL);
+  // 로컬 주소만 optional_host_permissions라 승인 흐름이 필요하다
+  if (IS_LOCAL) {
+    await ensureLocalServerPermissionForServerUrl(ctx, sw, new URL(sw.url()).host, SERVER_URL);
+  }
   const setSettings = (patch) => sw.evaluate(async (p) => {
     const cur = (await chrome.storage.local.get('settings')).settings ?? {};
     await chrome.storage.local.set({ settings: { ...cur, ...p } });
@@ -68,7 +74,7 @@ try {
 
   // **메인 창 레인**으로 잰다 — PiP를 열지 않아도 같은 렌더러·같은 캔버스다.
   await setSettings({
-    serverUrl: LOCAL_SERVER_URL, uiLanguage: 'ko', theme: 'dark',
+    serverUrl: SERVER_URL, uiLanguage: 'ko', theme: 'dark',
     modMainLane: true, mainLanePos: 'bottom', pitchPronPosition: 'off',
   });
 
@@ -84,6 +90,18 @@ try {
     if (v) { v.currentTime = 30; void v.play().catch(() => {}); }
   });
   await page.waitForTimeout(2500);
+
+  // 노트 텍스트의 **출처**를 판정한다 — 잉크 양만으로는 «원문 음절»인지 «발음»인지
+  // 구분되지 않는다. 레인이 실제로 쓴 세그를 패널에서 직접 물어본다.
+  const source = await page.evaluate(() => {
+    const root = document.getElementById('everyric-root')?.shadowRoot;
+    const lines = [...(root?.querySelectorAll('.ey-line') ?? [])].slice(0, 6);
+    return lines.map(el => ({
+      text: (el.querySelector('.ey-line-text')?.textContent ?? el.textContent ?? '').slice(0, 40),
+      pron: (el.querySelector('.ey-line-pron')?.textContent ?? '').slice(0, 40),
+    }));
+  });
+  console.log('INFO: 화면 줄 샘플 =', JSON.stringify(source.slice(0, 3)));
 
   const results = {};
   for (const pos of ['off', 'bottom', 'center', 'both']) {

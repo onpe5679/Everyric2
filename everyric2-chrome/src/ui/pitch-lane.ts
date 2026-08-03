@@ -104,14 +104,23 @@ function evenlyPlaceHeard(heard: string, start: number, end: number): [string, n
  * 보여주게 되고, 그것이 정확히 이번에 없앤 «구현이 둘» 문제의 축소판이다.
  */
 export function laneTextSegments(line: LyricLine, script: PronScript): PronSegment[] | undefined {
-  // 1) 영어 곡 — 원문 철자 음절(서버가 en 세그로 준다)
-  const latin = isLatinDominant(line.text) ? line.pronSegsByScript?.['en'] : undefined;
-  if (latin && latin.length > 0) return latin;
-  // 2) 발음 표기 음절
-  const pron = resolvedPronSegments(line, script);
-  if (pron && pron.length > 0) return pron;
+  // 1·2) 서버가 준 «읽을 것»의 음절 타이밍
+  const pron = pronSegmentsFor(line, script);
+  if (pron) return pron;
   // 3) 폴백 — 원문을 글자 단위로. 단어 타이밍이 있으면 그 구간을 글자 수로 나눈다.
   return originalTextSegments(line);
+}
+
+/**
+ * 서버가 준 발음 음절 세그 — 없으면 undefined(그때 원문 폴백이 돈다).
+ * 폴백 여부를 호출부가 알아야 해서 분리했다(laneLineText 주석 참고).
+ */
+function pronSegmentsFor(line: LyricLine, script: PronScript): PronSegment[] | undefined {
+  // 영어 곡 — 원문 철자 음절(서버가 en 세그로 준다)
+  const latin = isLatinDominant(line.text) ? line.pronSegsByScript?.['en'] : undefined;
+  if (latin && latin.length > 0) return latin;
+  const pron = resolvedPronSegments(line, script);
+  return pron && pron.length > 0 ? pron : undefined;
 }
 
 /**
@@ -1244,8 +1253,13 @@ export class PitchLaneRenderer {
  * 그 어긋남이 원리적으로 불가능해진다.
  */
 function laneLineText(line: LyricLine, script: PronScript): string {
-  const segs = laneTextSegments(line, script);
-  if (!segs || segs.length === 0) return '';
+  const segs = pronSegmentsFor(line, script);
+  // **폴백일 때는 원문을 그대로 쓴다.** 그 세그는 원문을 쪼갠 것이라 이어 붙여 봐야
+  // 원문이 되는데, 어느 구분자를 써도 원문보다 나빠진다 — 프로드 실측(M7VSEZOQIlg,
+  // words가 글자 단위인 곡): 공백 세그가 trim으로 사라져 ''로 이으면
+  // "I'llstayafraidinweekday", ' '로 이으면 "I ' l l s t a y". 원문이 정답이다.
+  // 노트와 같은 소스라는 성질은 그대로다(세그가 원문에서 나왔으므로).
+  if (!segs || segs.length === 0) return line.text;
   // 라틴 세그(단어 단위)는 공백으로, CJK 음절은 붙여서 — 읽는 모양을 원문과 맞춘다
   return segs.map(sg => sg.text).join(isLatinDominant(line.text) ? ' ' : '');
 }
