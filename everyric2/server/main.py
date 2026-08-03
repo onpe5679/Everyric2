@@ -48,7 +48,11 @@ def _gpu_available() -> bool:
 async def lifespan(app: FastAPI):
     # 만료 리스 주기 스윕을 여기서만 띄운다 — 임포트 시점에 뜨면 실행 중인 루프가 없고,
     # 앱을 띄우지 않는 테스트에 태스크가 남는다 (api/worker.start_lease_sweeper 주석 참고).
-    from everyric2.server.api.worker import start_lease_sweeper, stop_lease_sweeper
+    from everyric2.server.api.worker import (
+        start_lease_sweeper,
+        stop_lease_sweeper,
+        sweep_orphan_worker_audio,
+    )
     # 고아 잡 TTL 리퍼도 같은 이유로 lifespan에서만 띄운다 — 리스 스위퍼는 원격 워커
     # 리스가 있는 잡만 커버하고, 인프로세스 워커·번역 대기 구간은 별도 안전망이 필요하다
     # (db/orphan_reaper.py 모듈 docstring 참고).
@@ -75,6 +79,15 @@ async def lifespan(app: FastAPI):
             )
 
     await anyio.to_thread.run_sync(_warm_reading_engine)
+    # 이전 생의 워커 전달용 오디오 잔재 정리 — 인메모리 레지스트리가 재시작으로 비면
+    # 그 파일을 지울 주체가 사라진다(저작권 규약상 남기면 안 되는 파일이다).
+    swept = await anyio.to_thread.run_sync(sweep_orphan_worker_audio)
+    if swept:
+        import logging
+
+        logging.getLogger(__name__).info(
+            f"Swept {swept} orphaned worker-audio file(s) from a previous run"
+        )
     start_lease_sweeper()
     start_orphan_sweeper()
     try:

@@ -45,6 +45,43 @@ _LEASES: dict[str, tuple[str, float]] = {}
 # (GET /jobs/{job_id}/audio)에서만 서빙하고, 잡 터미널 지점에서 삭제한다 (저작권 규약).
 _WORKER_AUDIO: dict[str, str] = {}
 
+
+def sweep_orphan_worker_audio() -> int:
+    """기동 시 워커 전달용 오디오 잔재를 지운다 — 지운 파일 수를 반환.
+
+    이 레지스트리는 인메모리라, 재시작하면 dict만 사라지고 **파일은 남는다**. 그 파일을
+    지울 주체가 영영 없어져 "터미널 지점에서 삭제"라는 저작권 규약이 조용히 깨진다(엣지
+    감사 5.1). 기동 시점에는 정의상 in-flight 잡이 없으므로(레지스트리가 비어 있다) 이
+    패턴의 파일은 전부 이전 생의 잔재다.
+
+    media_cache가 쓰는 두 패턴만 지운다 — `{video_id}-{job_id[:8]}.m4a`(워커 전달분)와
+    `linkcache-{tag}-{video_id}.m4a`(링크 판정분). temp_dir의 다른 파일은 다른 주인이
+    있으므로 건드리지 않는다. 실패는 삼킨다(기동을 막을 이유가 없다)."""
+    import logging
+    import re
+
+    from everyric2.config.settings import get_settings
+
+    removed = 0
+    try:
+        temp_dir = get_settings().audio.temp_dir
+        if not temp_dir.exists():
+            return 0
+        worker_pat = re.compile(r"^[A-Za-z0-9_-]{1,64}-[0-9a-f]{8}\.m4a$")
+        for path in temp_dir.iterdir():
+            if not path.is_file():
+                continue
+            if not (worker_pat.match(path.name) or path.name.startswith("linkcache-")):
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    except Exception:
+        logging.getLogger(__name__).warning("worker audio sweep failed", exc_info=True)
+    return removed
+
 # claim의 select→마킹을 직렬화 — 여러 워커가 동시에 폴링하면 같은 잡을 두 번 물 수 있다.
 # 단일 프로세스 서버라 프로세스 내 락으로 충분하다 (sync.py의 _CREATE_LOCK과 같은 이유).
 _CLAIM_LOCK = asyncio.Lock()
