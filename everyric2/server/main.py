@@ -113,8 +113,13 @@ async def require_api_key(request, call_next):
             and request.headers.get("x-worker-key") == worker_key
         )
         if not worker_authed:
+            # 허용 집합에 falsy 값이 스미면 안 된다 — 예전 `(api_key, admin or None)`
+            # 튜플은 어드민 키 미설정 시 None을 허용해, 헤더를 **아예 안 보낸** 요청
+            # (provided=None)이 통과했다(엣지 감사 3.1, 런타임 재현됨). 틀린 키는
+            # 막히는 형태라 수동 점검으로는 안 드러나는 우회였다.
+            allowed = {server.api_key} | ({server.admin_api_key} if server.admin_api_key else set())
             provided = request.headers.get("x-api-key")
-            if provided not in (server.api_key, server.admin_api_key or None):
+            if not provided or provided not in allowed:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "API 키가 필요해요 (확장 설정의 API 키 칸에 입력)"},
