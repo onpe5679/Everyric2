@@ -338,6 +338,8 @@ export class PipController {
   private playlistBtn: HTMLButtonElement | null = null;
   private playlistEl: HTMLDivElement | null = null;
   private playlistOpen = false;
+  // open()의 requestWindow await 동안 두 번째 open()을 차단 — 고아 PiP 창 방지(아래 주석)
+  private opening = false;
 
   static isSupported(): boolean {
     return 'documentPictureInPicture' in window;
@@ -349,17 +351,38 @@ export class PipController {
 
   async open(cssText: string, opts: PipOptions): Promise<boolean> {
     if (this.win) return true;
-    const api = (window as unknown as { documentPictureInPicture?: DocumentPictureInPictureApi })
-      .documentPictureInPicture;
-    if (!api) return false;
-
-    const { width, height } = clampPipSize(opts.width, opts.height);
-    let win: Window;
+    // 재진입 가드 — `if (this.win)` 검사와 `this.win = win` 대입 사이에 await가 끼어
+    // 있어, 토글을 빠르게 두 번 누르면 requestWindow가 두 번 나가고 먼저 열린 창이
+    // 고아가 됐다. 고아의 rAF는 스스로 멈추지만 captureStream 영상 미러는 브라우저
+    // 미디어 파이프라인이 계속 프레임을 밀어 넣어, SPA 세션 내내 누적되면 메인 탭이
+    // 5fps대로 주저앉는다(새로고침으로만 해소 — fps 추적 감사, 2026-08-03).
+    if (this.opening) return false;
+    this.opening = true;
     try {
-      win = await api.requestWindow({ width, height });
-    } catch {
-      return false;
+      const api = (window as unknown as { documentPictureInPicture?: DocumentPictureInPictureApi })
+        .documentPictureInPicture;
+      if (!api) return false;
+
+      const { width, height } = clampPipSize(opts.width, opts.height);
+      let win: Window;
+      try {
+        win = await api.requestWindow({ width, height });
+      } catch {
+        return false;
+      }
+      if (this.win) {
+        // 가드가 있어도 도달할 수 있는 마지막 창구(예: 외부에서 open을 직접 두 번
+        // 호출) — 늦게 온 창을 즉시 닫아 고아를 만들지 않는다.
+        try { win.close(); } catch { /* 이미 닫힌 창 */ }
+        return true;
+      }
+      return this.finishOpen(win, cssText, opts);
+    } finally {
+      this.opening = false;
     }
+  }
+
+  private finishOpen(win: Window, cssText: string, opts: PipOptions): boolean {
     this.win = win;
     this.onSeek = opts.onSeek;
     this.panelCallbacks = opts.panel;
