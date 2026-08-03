@@ -440,17 +440,24 @@ def test_our_lyrics_script_orders_the_candidates_over_youtube_signals():
     order = order_manual_tracks(MANY_TRACKS, script_lang_hint("\n".join(LYRICS)), 5)
     assert order[0] == "ja", "우리 가사의 문자 체계가 ja를 첫 후보로 올려야 한다"
     assert len(order) == 5, "후보 트랙 수에 상한이 있어야 한다 (트랙당 다운로드 1회)"
-    # 유튜브 신호(vi-orig · language=vi)는 순서에 **쓰지 않는다**. 자동 더빙 업로드에서
-    # 일본어 곡에 vi-orig가 붙는 것이 실측으로 확인됐고, 그 신호를 순서에 넣으면 틀린
-    # 트랙을 먼저 받아 본다. 힌트도 제목도 없으면 재현 가능한 알파벳순으로 떨어진다.
-    no_hint = order_manual_tracks(MANY_TRACKS, None, 5)
-    assert no_hint[0] == "ar", f"유튜브 신호를 따라갔다: {no_hint}"
-    assert "vi" not in no_hint
-    assert "ja" not in no_hint, "힌트가 없으면 상한 안에 ja가 들어오지 않는다"
 
-    # 실제 영상에는 제목이 있고, 그것이 가사 힌트를 대신한다
+    # 유튜브 asr('-orig') 신호는 **제목이 있으면** 절대 안 쓴다. 자동 더빙 업로드에서
+    # 일본어 곡에 vi-orig가 붙는 것이 실측으로 확인됐고(zyRt-nBM3dY), 실제 그 영상에는
+    # 제목이 있어(일본어 문자) title_script_hint가 asr보다 항상 이긴다.
     with_title = order_manual_tracks({**MANY_TRACKS, "title": "シニカルナイトプラン"}, None, 5)
-    assert with_title[0] == "ja", f"제목의 문자 체계가 ja를 올려야 한다: {with_title}"
+    assert with_title[0] == "ja", f"제목의 문자 체계가 asr 신호를 이겨야 한다: {with_title}"
+
+    # 제목도 가사 힌트도 없으면(c_9UTrrqcLI 수정, 2026-08-03) asr('-orig') 언어가 폴백
+    # 힌트가 된다 — 라틴 제목뿐인 곡이 알파벳순으로 떨어져 원어를 못 받아 보던 실사용
+    # 결함의 수정이다. MANY_TRACKS의 automatic_captions는 vi-orig라 no_hint[0]는 'vi'.
+    no_hint = order_manual_tracks(MANY_TRACKS, None, 5)
+    assert no_hint[0] == "vi", f"제목이 없으면 asr 신호가 순서를 정해야 한다: {no_hint}"
+
+    # 제목도 asr도 없으면(수동 트랙 목록과 무관한 진짜 무신호) 재현 가능한 알파벳순으로
+    # 떨어진다 — 예전 동작 그대로.
+    no_signal_at_all = order_manual_tracks({**MANY_TRACKS, "automatic_captions": {}}, None, 5)
+    assert no_signal_at_all[0] == "ar", f"신호가 전혀 없는데도 뭔가를 따라갔다: {no_signal_at_all}"
+    assert "ja" not in no_signal_at_all, "힌트가 없으면 상한 안에 ja가 들어오지 않는다"
 
 
 def test_no_manual_track_yields_no_candidates():
