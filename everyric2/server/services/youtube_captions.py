@@ -285,20 +285,21 @@ def body_language(counts: dict[str, int]) -> str | None:
     **크레딧 오염 방어(2026-08-03 Atvsg_zogxo 실측)**: 독일어 번역 자막 69줄 중 크레딧
     줄(`ACAね`처럼 콜론 없이 이름만 적혀 `_is_credit_line`을 통과한 줄)의 가나·한자
     몇 글자만으로 `kana >= hangul`이 성립해 통째로 독일어인 본문이 ja로 오판됐다. 그래서
-    ja/ko 판정(가나·한글이 하나라도 있는 분기)에서는 **CJK 문자 전체(가나+한글+한자)가
-    본문에서 차지하는 비중**이 `_MIN_CJK_PROPORTION` 미만이면 None으로 돌린다 — 절대
-    개수(`kana=1, han=100`처럼 라틴 오염이 전혀 없는 순수 CJK 본문)가 아니라 **라틴에
-    파묻힌 정도**를 본다. zh 분기(한자만 있고 가나·한글이 전혀 없는 경우)는 이 관문을
-    거치지 않는다 — 이번에 실측된 오염 경로가 아니고, 한자만으로 된 순정 중국어 자막을
-    잘못 버릴 위험이 더 크다.
+    **CJK 문자 전체(가나+한글+한자)가 본문에서 차지하는 비중**이 `_MIN_CJK_PROPORTION`
+    미만이면 어느 분기든 None으로 돌린다 — 절대 개수(`kana=1, han=100`처럼 라틴 오염이
+    전혀 없는 순수 CJK 본문)가 아니라 **라틴에 파묻힌 정도**를 본다. zh 분기(한자만 있고
+    가나·한글이 전혀 없는 경우)도 2026-08-04 감사(F2-b)로 이 게이트를 함께 받는다 —
+    한자 몇 글자 섞인 크레딧 줄이 비CJK 본문에서 zh로 새는 경로가 실측됐다(독일어 340자
+    + 한자 4자류). 순정 zh 본문은 이 게이트를 걸어도 안전하다(비중 1.0 실측, 병음 병기가
+    섞여도 0.231로 문턱을 크게 웃돈다).
     """
     kana, hangul, han = counts.get("kana", 0), counts.get("hangul", 0), counts.get("han", 0)
     if not (kana or hangul or han):
         return None
+    total = counts.get("total") or (kana + hangul + han + counts.get("latin", 0))
+    if total and (kana + hangul + han) / total < _MIN_CJK_PROPORTION:
+        return None
     if kana or hangul:
-        total = counts.get("total") or (kana + hangul + han + counts.get("latin", 0))
-        if total and (kana + hangul + han) / total < _MIN_CJK_PROPORTION:
-            return None
         return "ja" if kana >= hangul else "ko"
     return "zh"
 
@@ -322,11 +323,24 @@ def title_script_hint(info: dict[str, Any]) -> str | None:
     없다. 그때는 None을 돌려주고, 호출부가 «본문이 CJK이기만 하면 받는다»로 느슨하게
     판정한다. 실측(폐기 44건 전수 조사)에서 제목 문자가 ja/ko인 곡이 38건, 로마자인 곡이
     6건이었다.
+
+    **한자만(가나·한글 0) 있는 제목은 None(2026-08-04 감사 F2-a)**: `body_language`는
+    이 경우 무조건 zh를 낸다(한자는 ja·zh 공용 문자라 제목만으로는 못 가른다). 실측
+    (廻廻奇譚): 제목이 한자 4자(가나 없음)인 실제 ja 곡이 zh로 오판돼, `order_manual_
+    tracks`의 하드 리젝트(원어 트랙 없음 사유)가 실재하는 ja 수동 트랙을 "원어(zh) 자막
+    없음"이라는 틀린 사유로 포기시켰다. 여기서 None을 돌리면 `asr_lang_hint`(-orig 트랙
+    언어 코드) 폴백이 자리를 얻는다 — 순정 zh 곡은 대개 zh-orig가 있어 그쪽에서 정답을
+    받고, ja 곡은 ja-orig에서 정답을 받는다. 자막 **본문**(`body_language`) 판정의 zh
+    분기는 그대로다 — 본문은 실제로 그 트랙을 받아 본 뒤라 한자만으로 zh 단정해도
+    `verify_track_body`의 대칭 예외(아래)가 있어 ja 곡을 오탈락시키지 않는다.
     """
     from everyric2.alignment.caption_anchors import script_counts
 
     text = f"{info.get('title') or ''} {info.get('uploader') or ''}"
-    return body_language(script_counts(text))
+    counts = script_counts(text)
+    if counts.get("han") and not counts.get("kana") and not counts.get("hangul"):
+        return None
+    return body_language(counts)
 
 
 def asr_lang_hint(info: dict[str, Any]) -> str | None:
@@ -418,7 +432,11 @@ def verify_track_body(hint: str | None, counts: dict[str, int]) -> str | None:
     한글도 없이 한자만 있으면 `body_language`는 zh를 내지만, 그것만으로 두 언어를 가릴 수는
     없다 — 짧은 자막이나 한자 위주 줄에서 실제로 일어난다(실측: language=ja 196건의 한자
     비율이 최대 0.500까지 올라간다). 그래서 그 경우는 제목 힌트를 따른다. 반대 방향은
-    거른다 — 가나가 있는 본문은 중국어 곡의 가사가 아니다.
+    거른다 — 가나가 있는 본문은 중국어 곡의 가사가 아니다(`test_verify_does_not_accept_
+    kana_for_a_chinese_title`이 이 방향을 명시적으로 못박는다 — 2026-08-04 감사가 "한자
+    예외 대칭화"를 제안했으나 이 기존 계약과 직접 충돌해 채택하지 않았다. 廻廻奇譚류의
+    실제 결함은 `title_script_hint`가 한자만 있는 제목에 더는 zh를 단정하지 않는 F2-a
+    하나로 이미 해소된다 — asr_lang_hint 폴백이 정답을 준다).
     """
     lang = body_language(counts)
     if lang is None:

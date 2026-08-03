@@ -873,9 +873,10 @@ class AlignmentSettings(BaseSettings):
     # 앵커(무거운 모델)가 라인 경계를 잡고, 그 창 안에서만 경량 CTC 모델이 음절을 다시
     # 잡는다. 문턱값은 scripts/bench_adapters/two_pass.py의 실측을 그대로 옮긴 것이라
     # 기본값을 바꾸면 안 된다 — 특히 two_pass_seg_voiced_level(0.12)은 ja 7곡 스윕에서
-    # 유일하게 UST 축이 회귀하지 않은 값이다(주석은 그 필드에). 배선(팩토리·워커 연결)은
-    # 이 설정 추가와 별개 작업이라 two_pass_enabled 기본값은 False다 — 켜기 전까지는
-    # 기존 동작이 완전히 그대로다.
+    # 유일하게 UST 축이 회귀하지 않은 값이다(주석은 그 필드에). 배선(팩토리·워커 연결)이
+    # 끝나 worker.py(_run_new_stack_alignment)가 이 필드를 실제로 읽으므로 아래
+    # two_pass_enabled 기본값은 True다 — 이 주석은 배선 이전 초안이 남긴 스테일이었다
+    # (2026-08-04 정정).
     two_pass_enabled: bool = Field(
         default=True,
         description="Enable the 2-pass refiner (heavy anchor for line boundaries + light CTC "

@@ -36,6 +36,10 @@ from everyric2.server.text_fingerprint import (
 
 logger = logging.getLogger(__name__)
 
+# 레거시 ko 번역 판정(F4, 2026-08-04 감사)용 — 완성형 한글 U+AC00~D7A3. 다른 모듈의
+# 같은 계열 정규식(worker._HANGUL_CHAR_RE 등)과 같은 범위다.
+_HANGUL_RE = re.compile("[가-힣]")
+
 
 # ── GPU를 태우는 경로의 일일 상한 (action_logs 기반, 영상·행위별 24시간) ──────────
 #
@@ -261,6 +265,15 @@ class SyncLookupResponse(BaseModel):
     # 판정이 아니라 후보다 — 화면에 띄워 귀로 확인하는 용도. additive 필드라 구버전
     # 확장은 무시하면 그만이다.
     adlib: list[list[float]] | None = None
+    # F5(2026-08-04 감사, additive) — 이번 조회가 실제로 서빙한 번역의 출처. translation_
+    # layers.attribution/origin은 저장만 되고 조회 응답에 안 나가 확장이 번역 출처 배지를
+    # 세울 손잡이가 없었다. lang이 있고 그 언어 번역이 실제로 채워졌을 때만 채운다 —
+    # translation_origin은 "llm"|"wiki"|"manual"|"caption"|"legacy"(TranslationLayer.origin과
+    # 같은 값, 레이어 없이 세그 레거시 번역으로 서빙한 legacy ko 경로는 "legacy"). 레이어를
+    # 못 찾았거나 lang 미지정이면 둘 다 None. 크로스 지문 이관 서빙은 이관 **원본** 레이어의
+    # attribution/origin을 그대로 낸다(실제로 그 출처의 번역이기 때문).
+    translation_attribution: dict[str, Any] | None = None
+    translation_origin: str | None = None
 
 
 class SyncPreviousVersionResponse(BaseModel):
@@ -738,7 +751,11 @@ async def _apply_translation_lang(
     if not layer_langs and link_source_video_id:
         layer_langs = await repo.list_layer_langs(link_source_video_id, fingerprint)
     available = set(layer_langs)
-    if has_legacy_translation:
+    # F4(2026-08-04 감사): 세그 translation 존재만으로 "ko"를 넣으면, 레거시 번역이
+    # 실제로는 다른 언어인데 ko 레이어가 없는 곡에서 available_langs가 거짓으로 ko를
+    # 광고한다(값을 더 정확하게 만들 뿐인 additive 보강 — 필드 존재 여부는 안 바뀐다).
+    # 한글 문자가 실제로 있는 translation이 하나라도 있을 때만 ko로 친다.
+    if any(_HANGUL_RE.search(seg.get("translation") or "") for seg in segments):
         available.add("ko")
     resp.available_langs = sorted(available)
 
@@ -763,16 +780,23 @@ async def _apply_translation_lang(
     # 현재 지문이 최우선이다(재이관할 이유가 없다). 링크 조회는 커버 자신의 지문
     # 이력부터, 없으면 원곡의 지문 이력도 본다 — 정확 매칭의 own→link 폴백과 같은 우선순위.
     migrated = False
+    migrated_attribution: dict[str, Any] | None = None
+    migrated_origin: str | None = None
     if layer is None or layer.origin == "llm":
         for search_vid in (video_id, *((link_source_video_id,) if link_source_video_id else ())):
-            if await _try_cross_fingerprint_migration(
+            ok, migrated_attribution, migrated_origin = await _try_cross_fingerprint_migration(
                 repo, background_tasks, search_vid, video_id, fingerprint, lang, segments
-            ):
+            )
+            if ok:
                 migrated = True
                 break
 
     if migrated:
         resp.translation_lang = lang
+        # F5: 이관 서빙은 이관 원본 레이어(사람 origin)의 출처를 낸다 — 실제로 그
+        # 출처의 번역이 재정렬돼 실린 것이기 때문이다.
+        resp.translation_attribution = migrated_attribution
+        resp.translation_origin = migrated_origin
     elif layer is not None:
         # 이관 후보가 없었거나(레이어가 애초에 사람 origin) 커버리지 미달 — 정확 매칭을
         # 그대로 서빙한다(merge_line_meta(worker.py)와 같은 색인 규칙 — 값이 있는 첫
@@ -788,11 +812,18 @@ async def _apply_translation_lang(
         for seg in segments:
             seg["translation"] = by_text.get(normalize_line(seg.get("text", "") or ""), "")
         resp.translation_lang = lang
+        resp.translation_attribution = layer.attribution
+        resp.translation_origin = layer.origin
     elif lang == "ko":
         # 레이어가 없으면 저장된 레거시 번역이 ko라는 이행 가정 — 그대로 둔다.
         # 세그에 번역이 하나도 없으면 "ko"라고 우길 근거가 없으므로 None.
         resp.translation_lang = "ko" if has_legacy_translation else None
         if has_legacy_translation:
+            # F5: 레이어가 없는 legacy 경로 — 곡 단위 가사 출처(resp.attribution, 이미
+            # 이 응답에 채워져 있다)를 그대로 번역 출처로 낸다. origin="legacy"는
+            # TranslationLayer.origin의 같은 값(모델 docstring 참고)과 일치시킨다.
+            resp.translation_attribution = resp.attribution
+            resp.translation_origin = "legacy"
             # 이번 조회로 레거시 ko가 노출되는 김에 레이어에 옮겨 백필한다 — 다음 번
             # lang=en 등 비ko 조회·재생성에서도 이 번역이 살아남게 한다.
             await _schedule_ko_backfill_if_needed(
@@ -842,7 +873,7 @@ async def _try_cross_fingerprint_migration(
     fingerprint: str,
     lang: str,
     segments: list[dict[str, Any]],
-) -> bool:
+) -> tuple[bool, dict[str, Any] | None, str | None]:
     """`search_video_id`의 다른 지문에 사람이 단 번역(wiki/caption/manual/legacy)이 있으면
     `align_translation_lines`로 지금 세그(`segments`)에 재정렬해 옮겨 쓴다.
 
@@ -853,26 +884,31 @@ async def _try_cross_fingerprint_migration(
     아니다 — 품질 보증이 없는 기계번역을 다른 줄 분할로 우격다짐 재정렬해 옮기느니
     재생성이 낫다.
 
-    성공(재정렬 커버리지 50% 이상)하면 `segments`를 in-place로 채우고 True, 새 지문으로도
-    `store_video_id` 키로 BackgroundTasks upsert(origin 유지)해 다음부터 정확 매칭으로
-    바로 찾게 한다 — **(b) 상황에서는 이 upsert가 기존 llm 레이어를 그대로 덮어쓴다**
-    (`upsert_layer`가 같은 (video, fingerprint, target_lang) 키를 통째로 교체하는 기존
-    동작 그대로 — 저장 엔드포인트의 human-over-llm 규칙과 같은 원칙). `store_video_id`가
-    검색과 다를 수 있는 이유(링크 조회): 저장은 언제나 **보는 영상** 기준을 지킨다(#6과
-    동일 원칙) — 원곡에서 찾은 번역이어도 커버 video_id로 저장한다.
+    성공(재정렬 커버리지 50% 이상)하면 `segments`를 in-place로 채우고
+    `(True, 이관 원본의 attribution, 이관 원본의 origin)`, 새 지문으로도 `store_video_id`
+    키로 BackgroundTasks upsert(origin 유지)해 다음부터 정확 매칭으로 바로 찾게 한다 —
+    **(b) 상황에서는 이 upsert가 기존 llm 레이어를 그대로 덮어쓴다**(`upsert_layer`가
+    같은 (video, fingerprint, target_lang) 키를 통째로 교체하는 기존 동작 그대로 — 저장
+    엔드포인트의 human-over-llm 규칙과 같은 원칙). `store_video_id`가 검색과 다를 수
+    있는 이유(링크 조회): 저장은 언제나 **보는 영상** 기준을 지킨다(#6과 동일 원칙) —
+    원곡에서 찾은 번역이어도 커버 video_id로 저장한다. attribution/origin을 함께 돌려주는
+    이유(F5, 2026-08-04 감사): 호출부가 조회 응답의 `translation_attribution`/
+    `translation_origin`에 실제로 서빙한 출처를 실어야 한다 — 새 지문 저장이 끝나기를
+    기다리지 않고(백그라운드 태스크라 이 응답 시점엔 아직 커밋 전이다) 이미 손에 쥔
+    `other`의 값을 그대로 돌려준다.
 
-    후보가 없거나 커버리지 미달이면 `segments`를 건드리지 않고 False — 호출부가 (b)
-    상황이었다면 기존 llm 레이어를 그대로 서빙하면 된다."""
+    후보가 없거나 커버리지 미달이면 `segments`를 건드리지 않고 `(False, None, None)` —
+    호출부가 (b) 상황이었다면 기존 llm 레이어를 그대로 서빙하면 된다."""
     other = await repo.find_human_layer_other_fingerprint(search_video_id, lang, fingerprint)
     if other is None:
-        return False
+        return False, None, None
     seg_texts = [seg.get("text", "") or "" for seg in segments]
     if not seg_texts:
-        return False
+        return False, None, None
     remapped = align_translation_lines(seg_texts, other.lines or [])
     matched = sum(1 for value in remapped if value is not None)
     if matched / len(seg_texts) < _CROSS_FINGERPRINT_MIGRATION_MIN_COVERAGE:
-        return False
+        return False, None, None
     for seg, translation in zip(segments, remapped):
         seg["translation"] = translation or ""
     new_lines = [
@@ -889,7 +925,7 @@ async def _try_cross_fingerprint_migration(
         other.attribution,
         other.origin,
     )
-    return True
+    return True, other.attribution, other.origin
 
 
 # translations_by_lang 응답 크기 상한 — 언어가 늘어날수록 응답이 커진다(세그당 배열

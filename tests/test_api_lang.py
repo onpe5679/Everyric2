@@ -279,6 +279,96 @@ def test_lookup_with_lang_ko_and_no_translation_anywhere_yields_none():
     asyncio.run(body())
 
 
+# ── F5(2026-08-04 감사, additive): translation_attribution/translation_origin ──
+
+
+def test_translation_attribution_and_origin_reflect_the_exact_match_layer():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO, lyrics_hash="h1", timestamps=_seed_segments(["", ""])
+                )
+                await TranslationLayerRepository(s).upsert_layer(
+                    VIDEO,
+                    FP,
+                    "en",
+                    lines=[
+                        {"text": "첫 줄", "translation": "First line"},
+                        {"text": "둘째 줄", "translation": "Second line"},
+                    ],
+                    attribution={"name": "위키", "url": None, "license": None, "source_id": "wiki"},
+                    origin="wiki",
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="en")
+            assert resp.translation_lang == "en"
+            assert resp.translation_origin == "wiki"
+            assert resp.translation_attribution == {
+                "name": "위키", "url": None, "license": None, "source_id": "wiki",
+            }
+
+    asyncio.run(body())
+
+
+def test_translation_origin_is_legacy_when_serving_ko_without_a_layer():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["레거시 번역 1", ""]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="ko")
+            assert resp.translation_lang == "ko"
+            assert resp.translation_origin == "legacy"
+            # 레이어가 없는 legacy 경로는 곡 단위 가사 출처(resp.attribution)를 그대로 낸다.
+            assert resp.translation_attribution == resp.attribution
+
+    asyncio.run(body())
+
+
+def test_translation_attribution_and_origin_are_none_without_lang():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["레거시 번역 1", ""]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO)
+            assert resp.translation_origin is None
+            assert resp.translation_attribution is None
+
+    asyncio.run(body())
+
+
+def test_translation_attribution_and_origin_are_none_when_lang_has_no_translation():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["레거시 번역 1", "레거시 번역 2"]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="fr")
+            assert resp.translation_lang is None
+            assert resp.translation_origin is None
+            assert resp.translation_attribution is None
+
+    asyncio.run(body())
+
+
 # ── (4) POST /api/translate persist=true → 레이어 생김 ─────────────────
 
 
@@ -707,6 +797,27 @@ def test_available_langs_is_none_when_sync_not_found():
             resp = await get_sync("NOSYNCNOS01")
             assert resp.found is False
             assert resp.available_langs is None
+
+    asyncio.run(body())
+
+
+def test_available_langs_excludes_ko_when_legacy_translation_has_no_hangul():
+    """F4(2026-08-04 감사) — 레거시 translation 필드에 한글이 전혀 없는 텍스트가 남아
+    있어도(다른 언어가 실수로 legacy 슬롯에 들어간 경우 등) available_langs가 거짓으로
+    "ko"를 광고하면 안 된다. 존재 여부가 아니라 실제 한글 문자로 판정한다."""
+
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["Not Korean at all", "second line, still not"]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO)
+            assert resp.available_langs == []
 
     asyncio.run(body())
 
@@ -1849,6 +1960,47 @@ def test_cross_fingerprint_migration_serves_and_persists_human_layer_under_new_f
             resp2 = await get_sync(VIDEO, lang="ko")
             assert resp2.translation_lang == "ko"
             assert resp2.timestamps[0]["translation"] == "하나둘"
+
+    asyncio.run(body())
+
+
+def test_cross_fingerprint_migration_reports_the_migrated_source_attribution_and_origin():
+    """F5(2026-08-04 감사) — 이관 서빙 응답의 translation_attribution/translation_origin은
+    이관 **원본**(다른 지문의 사람 origin 레이어)의 값을 낸다 — 실제로 그 출처의
+    번역이 재정렬돼 실린 것이기 때문이다."""
+
+    async def body():
+        async with _env() as sm:
+            old_seg_texts = ["one", "two", "three"]
+            new_seg_texts = ["onetwo", "three"]
+
+            async with sm() as s:
+                old_fp = lines_fingerprint(old_seg_texts)
+                await TranslationLayerRepository(s).upsert_layer(
+                    VIDEO,
+                    old_fp,
+                    "ko",
+                    lines=[
+                        {"text": "one", "translation": "하나"},
+                        {"text": "two", "translation": "둘"},
+                        {"text": "three", "translation": "셋"},
+                    ],
+                    attribution={"name": "위키", "url": None, "license": None, "source_id": "wiki"},
+                    origin="wiki",
+                )
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h_new",
+                    timestamps=[{"text": t, "translation": ""} for t in new_seg_texts],
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="ko", background_tasks=BackgroundTasks())
+            assert resp.translation_lang == "ko"
+            assert resp.translation_origin == "wiki"
+            assert resp.translation_attribution == {
+                "name": "위키", "url": None, "license": None, "source_id": "wiki",
+            }
 
     asyncio.run(body())
 

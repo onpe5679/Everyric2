@@ -654,6 +654,26 @@ def test_no_language_keeps_existing_ja_behavior_for_pure_han():
 
 
 # ---------------------------------------------------------------------------
+# F3 — zh 병음 음절 공백 (2026-08-04 감사)
+#
+# align_target.join_display(owners를 공백 없이 붙이는 범용 조립기)를 쓰면 병음 음절
+# 사이 공백이 사라져 "wǒbùxiǎngshuōzàijiàn"처럼 못 읽는 문자열이 된다.
+# ---------------------------------------------------------------------------
+
+
+def test_zh_pron_romaji_keeps_spaces_between_pinyin_syllables():
+    from everyric2.text.zh_reading import zh_to_pinyin
+
+    text = "月亮代表我的心"
+    seg = _seg(text, "", words=False)
+    attach_pron_variants(seg, language="zh")
+    # zh_reading.zh_pron_variants(text)와 정확히 같은 값이어야 한다 — join_display를 쓰면
+    # 공백이 사라져 이 등식이 깨진다(F3 결함의 회귀 표지).
+    assert seg["pron"]["romaji"] == zh_to_pinyin(text)
+    assert seg["pron"]["romaji"].count(" ") == len(text) - 1, seg["pron"]["romaji"]
+
+
+# ---------------------------------------------------------------------------
 # 구세대 kana 단독 근사 보완 — 멱등 가드는 동결이 아니라 보존이다 (2026-08-03)
 # ---------------------------------------------------------------------------
 
@@ -751,6 +771,79 @@ def test_legacy_correction_skips_when_romaji_already_matches_en():
     before = dict(seg["pron"])
     attach_pron_variants(seg)
     assert seg["pron"] == before
+
+
+# ---------------------------------------------------------------------------
+# F1 lazy 치유 — refine_window가 en 갈래로 잘못 보내 저장한 ko/zh 파손 pron 복구
+# (2026-08-04 감사). 파손 지문: hangul 값이 원문에서 공백만 뺀 것과 완전히 같다.
+# ---------------------------------------------------------------------------
+
+
+def test_broken_ko_route_pron_is_healed_by_lazy_attach():
+    """F1 실측 재현 — «사랑해 너를 위해»가 예전엔 en 갈래(라틴 전용 _WORD_RE)로 새
+    hangul이 «사랑해너를위해»(공백만 소실된 원문)로 저장됐다. attach_pron_variants가
+    그 파손 지문을 알아보고 버린 뒤 올바른 ko 파생(가타카나/RR 로마자)으로 재생성한다."""
+    text = "사랑해 너를 위해"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}  # 파손 지문
+    attach_pron_variants(seg, language="ko")
+    # 순한글 줄은 hangul 표기 키를 새로 만들지 않는다(원문 자체가 표시라는 공유 계약,
+    # _attach_ko_pron_variants) — 파손된 값이 남아 있지 않은 것이 핵심이다.
+    assert "hangul" not in seg["pron"]
+    assert seg["pron"]["kana"]
+    assert seg["pron"]["romaji"]
+
+
+def test_broken_ko_route_healing_is_idempotent():
+    text = "사랑해 너를 위해"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}
+    attach_pron_variants(seg, language="ko")
+    first = dict(seg["pron"])
+    attach_pron_variants(seg, language="ko")
+    assert seg["pron"] == first
+
+
+def test_broken_zh_route_pron_is_healed_by_lazy_attach():
+    """zh 곡의 순한자 줄이 en 갈래를 거쳐 저장된 파손 지문을 치유한다 — 병음(공백
+    포함, F3)이 실제로 생성된다."""
+    text = "我不想说再见"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}
+    attach_pron_variants(seg, language="zh")
+    assert seg["pron"]["hangul"] != "".join(text.split())
+    assert seg["pron"]["romaji"]
+
+
+def test_broken_zh_route_healing_is_idempotent():
+    text = "我不想说再见"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}
+    attach_pron_variants(seg, language="zh")
+    first = dict(seg["pron"])
+    attach_pron_variants(seg, language="zh")
+    assert seg["pron"] == first
+
+
+def test_pron_that_is_not_a_broken_fingerprint_is_left_alone():
+    # 우연히 hangul 키가 없어도(파손 지문이 아니면) 멱등 가드가 그대로 지킨다 — 이미
+    # 올바르게 파생된 ko pron(원문과 다른 실제 변환값)은 건드리지 않는다.
+    text = "사랑해 너를 위해"
+    seg = _seg(text, "", words=False)
+    correct = {"kana": "サランヘ ノルル ウィヘ", "romaji": "saranghae neoreul wihae"}
+    seg["pron"] = dict(correct)
+    attach_pron_variants(seg, language="ko")
+    assert seg["pron"] == correct
+
+
+def test_broken_fingerprint_check_ignores_lines_that_should_not_have_skipped():
+    # 한자가 한글보다 많은 mixed 줄(_should_skip_derivation이 False를 내는 자리) 등
+    # 정말로 en/ja 갈래가 정답인 원문은 우연히 fingerprint 모양이어도 건드리지 않는다
+    # — 여기서는 순수 en 곡이라 애초에 should_have_skipped_en_route 자체가 거짓이다.
+    seg = _seg("hi", "", words=False)
+    seg["pron"] = {"hangul": "hi"}  # "hi".split()으로도 "hi" — 우연히 같은 모양
+    attach_pron_variants(seg)
+    assert seg["pron"] == {"hangul": "hi"}
 
 
 # ---------------------------------------------------------------------------

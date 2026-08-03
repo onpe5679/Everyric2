@@ -1347,11 +1347,14 @@ async def _worker_loop(base: str, key: str, worker_id: str, poll: float, once: b
         try:
             result = await run_pipeline(job_input, hooks)
         except PipelineError as e:
-            # 사용자 노출 실패(과길이 등) — 친절한 문구를 그대로 서버에 올린다. failure_kind는
-            # 안 넘긴다: downloader 분류도 시스템 결함도 아닌 정책 거절이라 NULL로 남는 게
-            # 맞다(억지 분류 금지, MoRef 감사 #3).
+            # 사용자 노출 실패(과길이·F6 언어 불일치 등) — 친절한 문구를 그대로 서버에
+            # 올린다. failure_kind는 PipelineError가 명시한 값을 그대로 넘긴다(기본
+            # None — downloader 분류도 시스템 결함도 아닌 애매한 정책 거절은 NULL로
+            # 남는 게 맞다, 억지 분류 금지, MoRef 감사 #3).
             console.print(f"[yellow]사용자 노출 실패:[/yellow] {e}")
-            await asyncio.to_thread(_worker_fail, base, key, worker_id, job_id, str(e))
+            await asyncio.to_thread(
+                _worker_fail, base, key, worker_id, job_id, str(e), e.failure_kind
+            )
         except Exception as e:
             console.print(f"[red]잡 처리 오류:[/red] {e}")
             await asyncio.to_thread(

@@ -463,16 +463,29 @@ class TestRunDeepStage:
         assert stack.alignment_text == "heavy"
 
     def test_refine_populates_multi_script_pron_data(self, monkeypatch):
-        vocab = {"가": 1}
+        # "가"(순한글 한 글자)는 F1(2026-08-04 감사) 이후 refine_window가 owners 파생
+        # 자체를 건너뛰는 입력이 됐다(한글 우세 → fallback_reason="non_derivable_script",
+        # fast 경로에 위임) — 이 테스트의 실제 관심사(refine_lines가 낸 표기별 pron/
+        # pron_segs가 pron_data 진입점까지 하나도 안 빠지고 실리는가, 결함 수정
+        # 2026-08-03)와는 무관한 입력이었다. en 갈래(라틴)로 픽스처를 바꿔 같은 관심사를
+        # 계속 지킨다 — "cat" -> CMU IPA "kat"(test_refine_window.py와 같은 패턴).
+        vocab = {"k": 1, "a": 2, "t": 3}
         frame_sec = 0.02
-        logits = torch.full((1, 4, 2), -8.0)
-        logits[0, 1, 1] = 8.0
+        frames_per_char = 5
+        token_ids: list[int | None] = []
+        for ch in "kat":
+            token_ids.extend([vocab[ch]] * frames_per_char)
+        token_ids.extend([None] * 10)
+        logits = torch.full((1, len(token_ids), len(vocab) + 1), -8.0)
+        for t, tid in enumerate(token_ids):
+            logits[0, t, tid if tid is not None else 0] = 8.0
         emission = torch.log_softmax(logits, dim=-1)
+        line_end = len(token_ids) * frame_sec
         fake_emission = EngineEmission(
-            emission=emission, blank_id=0, frame_sec=frame_sec, audio_sec=0.08, chunks=1,
+            emission=emission, blank_id=0, frame_sec=frame_sec, audio_sec=line_end, chunks=1,
             vocab=vocab,
         )
-        anchor_result = SyncResult(text="가", start_time=0.0, end_time=0.08, confidence=0.9)
+        anchor_result = SyncResult(text="cat", start_time=0.0, end_time=line_end, confidence=0.9)
         anchor = _FakeAnchor([anchor_result])
         refiner_engine = _RecordingEngine(fake_emission)
 
@@ -484,7 +497,7 @@ class TestRunDeepStage:
         )
         sep = _FakeSepResult(_silence(0.5), _silence(0.5))
         stack = worker._run_deep_stage(
-            _silence(0.5), sep, [LyricLine(text="가", line_number=1)], "ja",
+            _silence(0.5), sep, [LyricLine(text="cat", line_number=1)], "ja",
             _settings(two_pass_enabled=True), lambda s: None, "heavy",
         )
         assert stack.alignment_text == "heavy-2pass"

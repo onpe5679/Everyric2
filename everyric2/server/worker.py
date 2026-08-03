@@ -936,21 +936,21 @@ def _attach_zh_pron_variants(seg: dict[str, Any], text: str) -> None:
     결정론 근사라 글자 스팬을 신뢰할 근거가 없다 — 라틴 경로와 같은 이유로
     ``pron_segs``는 붙이지 않고 표시 문자열만 남긴다. 다음자 판독은 pypinyin이
     맡는다(pyproject 의존성 — 없는 배포는 예외를 삼키고 무표기로 남는다).
+
+    ``zh_reading.zh_pron_variants``를 그대로 쓴다 — ``align_target.join_display``(owners를
+    공백 없이 붙이는 범용 조립기)를 쓰면 병음 음절 사이 공백이 사라진다(F3 결함,
+    2026-08-04 감사: word_end가 전부 False라 join이 "wǒbùxiǎngshuōzàijiàn"처럼 못 읽는
+    병음을 만들었다). ``zh_reading.py`` 모듈 docstring의 "표시 문자열은 zh_pron_variants로
+    만든다" 계약이 원래도 이것을 요구했다 — ``zh_to_pinyin()``과 값이 일치한다.
     """
     try:
-        from everyric2.text.align_target import join_display
-        from everyric2.text.zh_reading import derive_zh_display_units
+        from everyric2.text.zh_reading import zh_pron_variants
 
-        units = derive_zh_display_units(text)
+        pron = zh_pron_variants(text)
     except Exception:
         logger.exception("zh pron rendering failed")
         return
 
-    pron = {
-        key: joined
-        for key, owners in units.owners.items()
-        if (joined := join_display(owners, units.word_end))
-    }
     if pron:
         seg["pron"] = pron
 
@@ -997,6 +997,37 @@ def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
     seg["pron"] = {**pron, **(seg.get("pron") or {})}
 
 
+def _broken_ko_zh_via_en_route(text: str, existing: dict[str, Any], language: str | None) -> bool:
+    """F1 결함(2026-08-04 감사) lazy 치유 — ``refine_window``의 owners 파생이 ko/zh 줄을
+    잘못 en 갈래(``derive_en_display_units``, 라틴 전용 ``_WORD_RE``)로 보내 저장해 둔
+    파손 지문을 알아본다.
+
+    en 갈래는 라틴이 아닌 문자(한글·한자)를 vocab 조회만 통과시키고 변환은 전혀 하지
+    않는다 — 그 결과 ``pron["hangul"]``이 원문에서 공백만 뺀 값과 완전히 같아진다
+    («사랑해 너를 위해» → «사랑해너를위해»). 진짜 변환이 한 번이라도 일어났다면 이
+    값과 우연히 같을 수 없다(초성·종성 변화 없이 원문 그대로일 확률은 0에 가깝다).
+
+    그 줄이 (한글 우세 또는 language가 zh·ko로 확정된 한자만 줄)일 때만 검사한다 —
+    ``everyric2.alignment.refine_window._should_skip_derivation``과 같은 두 조건이다
+    (그 모듈이 이제 이 두 경우를 건너뛰므로 새로 생기는 파손은 없다 — 이 함수는 **이미
+    저장된** 옛 파손 행만 치유한다).
+    """
+    hangul = existing.get("hangul")
+    if not hangul or not text:
+        return False
+    ja_n = len(_JA_CHAR_RE.findall(text))
+    ko_n = len(_HANGUL_CHAR_RE.findall(text))
+    should_have_skipped_en_route = False
+    if ko_n > ja_n:
+        should_have_skipped_en_route = True
+    elif ja_n and not ko_n:
+        lang = (language or "").strip().lower()
+        should_have_skipped_en_route = lang in ("zh", "ko")
+    if not should_have_skipped_en_route:
+        return False
+    return hangul == "".join(text.split())
+
+
 def attach_pron_variants(
     seg: dict[str, Any],
     *,
@@ -1039,7 +1070,8 @@ def attach_pron_variants(
         # 값은 _attach_latin_pron_variants의 merge가 보존한다.
         if set(existing) == {"kana"} and text and not _JA_CHAR_RE.search(text):
             _attach_latin_pron_variants(seg, text)
-        elif (
+            return
+        if (
             text
             and existing.get("en")
             and existing.get("romaji")
@@ -1056,7 +1088,18 @@ def attach_pron_variants(
             pron_segs = seg.get("pron_segs")
             if isinstance(pron_segs, dict) and "en" in pron_segs:
                 pron_segs["romaji"] = pron_segs["en"]
-        return
+            return
+        if not _broken_ko_zh_via_en_route(text, existing, language):
+            return
+        # F1 lazy 치유(2026-08-04 감사) — 파손 지문 확인됨. 저장된 pron/pron_segs를
+        # 버리고 아래 새 파생으로 넘어간다. 멱등 — 치유 후 hangul은 실제 ko/zh 파생값이라
+        # 다시는 "원문에서 공백만 뺀 값"과 우연히 같아지지 않는다(다음 호출은 이 분기에
+        # 안 걸린다).
+        seg["pron"] = {}
+        pron_segs = seg.get("pron_segs")
+        if isinstance(pron_segs, dict):
+            for key in ("hangul", "kana", "romaji"):
+                pron_segs.pop(key, None)
     if not text:
         return
 
@@ -1427,7 +1470,16 @@ async def _try_complete_from_cache(
 
 
 class PipelineError(Exception):
-    """사용자에게 보이는 파이프라인 실패 (예: 영상 과길이). str(e)가 실패 문구가 된다."""
+    """사용자에게 보이는 파이프라인 실패 (예: 영상 과길이). str(e)가 실패 문구가 된다.
+
+    ``failure_kind``는 jobs.failure_kind에 그대로 실린다 — 기본 None(억지 분류 금지,
+    MoRef 감사 #3: 과길이 등 애매한 정책 거절은 분류하지 않고 NULL로 남긴다). 뚜렷이
+    식별 가능한 사유만 명시적으로 채운다(예: F6의 "language_mismatch",
+    2026-08-04 감사)."""
+
+    def __init__(self, message: str, *, failure_kind: str | None = None) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 def over_length_message(duration_sec: float, max_audio_sec: int) -> str:
@@ -1436,6 +1488,74 @@ def over_length_message(duration_sec: float, max_audio_sec: int) -> str:
         f"영상이 너무 길어요 ({duration_sec / 60:.0f}분). 싱크 생성은 "
         f"{max_audio_sec // 60}분 이하의 노래 영상에서만 지원해요."
     )
+
+
+# ── F6(2026-08-04 감사, 운영자 재지시로 보강): 정렬 붕괴 + 언어 불일치는 저장하지
+# 않고 실패 처리 ──────────────────────────────────────────────────────────
+#
+# 실측 사고 2건 — 잘못된 언어의 가사(일본어 번역 자막을 language=ja로, 독일어 자막을
+# language=ja로)로 생성된 싱크가 quality_score 완전 붕괴(0.00023/0.00032)로도 그대로
+# 저장·서빙됐다(Atvsg_zogxo/c_9UTrrqcLI). 모든 곡이 fast 정렬을 한 번은 거치므로 그
+# 시점(정렬 완료 직후, 저장 직전)에 걸러낼 수 있다.
+#
+# **품질 단독 판정은 어떤 임계로도 불가**하다는 것이 로컬 DB 61행 실측으로 확정됐다 —
+# 정상이지만 어려운 곡의 quality_score가 사고 곡과 완전히 겹친다:
+#
+#   정상(어려운 오디오, 저장돼야 한다):
+#     きゅうくらりん  0.00007
+#     D/N/A          0.00026
+#     熱異常          0.00079, 0.00203
+#     About Me        0.00140
+#   오채택 사고(실패 처리돼야 한다, Atvsg_zogxo/c_9UTrrqcLI):
+#     0.00023, 0.00032
+#
+# きゅうくらりん(0.00007)이 사고 곡 둘(0.00023/0.00032)보다도 **더 낮다** — 즉 "얼마나
+# 낮은가"로는 절대 못 가른다. 그래서 실패 결정권은 전적으로 언어 불일치 신호에 있고,
+# quality_score는 **그 신호가 있을 때만** 발동을 허가하는 프리필터일 뿐이다(신호가
+# 없으면 quality_score가 얼마든 절대 막지 않는다 — 과잉 차단 금지, 운영자 지시).
+# 프리필터 하한 0.001은 사고 2건(0.00023/0.00032) 전부보다 약 3배 넉넉하다.
+_LANGUAGE_MISMATCH_QUALITY_MAX = 0.001
+
+
+def _language_script_mismatch(lyrics_text: str, language: str | None) -> bool:
+    """F6 — 가사 원문에 판정된 곡 ``language``의 문자가 **아예 없는가**(극단 모순만).
+
+    운영자 재지시(2026-08-04): 이 신호는 "우세"가 아니라 "부재"만 봐야 한다 —
+    language=ja인데 가사 전체에 가나가 단 하나도 없거나, language=ko인데 한글이 단
+    하나도 없을 때만 True다. **가나·한글이 조금이라도 있으면**(영어 비중이 아무리
+    높은 혼합곡이라도) 절대 발화하지 않는다 — 그래서 ``youtube_captions.body_
+    language``(F2, 캡션 크레딧 오염 방어용 5% CJK 비중 게이트)는 여기서 못 쓴다. 그
+    게이트를 그대로 재사용하면 "가나·한글이 소량 섞인 영어 위주 혼합곡"이 비중
+    미달로 모순 취급돼 절대 막으면 안 되는 곡을 막는다(이전 구현의 결함이었다) — F6은
+    F2와 판정 목적 자체가 다르다(F2: 캡션 트랙이 원어인지, F6: 정렬이 완전히 엉뚱한
+    언어에 붙었는지).
+
+    ``language``가 en이거나 판정 불가(None)면 이 문자 존재 여부로는 애초에 가를 수
+    없어(라틴 vs 라틴) 항상 False다 — **신호가 없으면 절대 막지 않는다**(과잉 차단
+    금지, 이 함수 단독으로는 아무것도 실패시키지 않고 호출부가 quality_score 하한과
+    AND로 묶는다). zh는 순정 중국어 가사가 한자 없이 존재할 수 없어(한자가 표기
+    체계 자체다) 같은 "부재" 규칙을 그대로 적용해도 안전하다.
+
+    유튜브 ASR 트랙 언어(오디오 언어 메타데이터, c_9UTrrqcLI가 예시로 든 신호)는 이번
+    배선에 포함하지 않았다 — 그 신호는 지금 캡션 조달 경로(``youtube_captions``)에만
+    있고, 가사를 직접 붙여넣는 일반 생성 경로까지 끌어오려면 모든 잡에 대해 yt-dlp
+    메타데이터를 추가로 조회해야 한다(지연·API 비용 증가, JobInput에 새 필드도 필요).
+    Atvsg_zogxo(독일어 텍스트 vs language=ja, 문자 자체가 전혀 없다)는 이 신호만으로
+    확실히 잡히지만, 언어는 같은 문자 계열인데 트랙이 틀린 유형(원어와 문자 계열이
+    같은 오역)은 이 신호로 못 잡는다 — 필요해지면 캡션 조달이 이미 얻은
+    ``asr_lang_hint``를 잡 메타데이터로 실어 오는 별도 배선으로 추가할 수 있다.
+    """
+    lang = (language or "").strip().lower()
+    if lang not in ("ja", "ko", "zh"):
+        return False
+    from everyric2.alignment.caption_anchors import script_counts
+
+    counts = script_counts(lyrics_text)
+    if lang == "ja":
+        return counts.get("kana", 0) == 0
+    if lang == "ko":
+        return counts.get("hangul", 0) == 0
+    return counts.get("han", 0) == 0  # zh
 
 
 def classify_job_failure(exc: BaseException) -> str | None:
@@ -1644,6 +1764,21 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
     finally:
         monitor.cancel()
 
+    # F6(2026-08-04 감사) — 정렬 붕괴 + 언어 불일치는 저장 전에 실패 처리한다. AND 조건
+    # (품질 하한 + 문자 센서스 모순)이 반드시 둘 다 성립해야 한다 — 신호 없이 품질만
+    # 낮은 곡(진짜 어려운 오디오)은 여기서 걸리지 않는다(_language_script_mismatch
+    # docstring의 과잉 차단 금지 원칙). 재생성(min_depth)·깊이 승급 경로도 이 지점을
+    # 그대로 지나가므로 동일하게 걸린다 — _run_alignment가 어느 깊이로 끝났든 quality_
+    # score/language는 여기서 한 번만 본다.
+    quality_score = result.get("quality_score")
+    if quality_score is not None and quality_score < _LANGUAGE_MISMATCH_QUALITY_MAX:
+        if _language_script_mismatch(job.lyrics, result.get("language")):
+            raise PipelineError(
+                "가사 언어가 오디오와 다르게 들려요 — 가사 원문이 맞는지 확인하고 "
+                "다시 만들어 주세요",
+                failure_kind="language_mismatch",
+            )
+
     # 정렬 완료, 저장 단계 (취소 경계 겸) — 오디오는 _run_alignment의 finally가 정리했다
     if not await hooks.progress(90, "저장"):
         return None
@@ -1797,13 +1932,17 @@ async def _process_job_inner(job_id: str, job) -> None:
         _PENDING_TITLE.pop(job_id, None)
 
     except PipelineError as e:
-        # 사용자 노출 실패 (과길이 등) — 친절한 한국어 문구를 그대로 보존
+        # 사용자 노출 실패 (과길이·F6 언어 불일치 등) — 친절한 한국어 문구를 그대로 보존.
+        # failure_kind는 PipelineError가 명시한 값을 그대로 옮긴다(기본 None — 과길이 등
+        # 애매한 정책 거절은 억지로 분류하지 않는다, MoRef 감사 #3).
         _PENDING_LINE_META.pop(job_id, None)
         _PENDING_LINE_META_LANG.pop(job_id, None)
         _PENDING_ATTRIBUTION.pop(job_id, None)
         _PENDING_TITLE.pop(job_id, None)
         async with get_session() as session:
-            await JobRepository(session).update_status(job_id, "failed", error=str(e))
+            await JobRepository(session).update_status(
+                job_id, "failed", error=str(e), failure_kind=e.failure_kind
+            )
         logger.info(f"Job {job_id} rejected: {e}")
 
     except Exception as e:

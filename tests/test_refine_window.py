@@ -397,19 +397,52 @@ def test_refine_lines_en_song_romaji_matches_en_not_katakana_roundtrip():
     ]
 
 
-def test_refine_lines_ja_song_latin_run_keeps_kana_derived_romaji():
-    """ja 곡(is_ja_line=True)에서는 이 수정이 손대면 안 된다 — derive_ja_display_units
-    경로의 라틴 구간은 가나·로마자 변환이 여전히 정답이다("numb"의 가나 음차 romaji가
-    "numb" 원문 철자로 덮이면 안 된다)."""
+def test_refine_lines_ja_song_standalone_latin_line_now_uses_en_route():
+    """F1-b(2026-08-04 감사 zh#7): ja 곡이어도 원문에 가나가 전혀 없는 순라틴 **줄**은
+    이제 en 갈래로 간다 — fast 경로(worker.attach_pron_variants의 ja_n=0 라틴 분기)와
+    규칙을 통일한다. 이 테스트는 예전엔 ``_is_ja_source``의 language 타이브레이커가
+    이런 줄까지 ja 갈래(derive_ja_display_units)로 보내는 것을 못박았었다 — 그 결과
+    romaji가 "영어→가타카나 음차→로마자 재변환" 근사가 됐는데, **같은 줄이 fast 경로를
+    타면 원문 철자 그대로**였다(경로에 따라 romaji가 갈리던 결함). 지금은 두 경로 다
+    원문 철자를 romaji로 낸다(회귀 방지 대조군은 아래
+    ``test_refine_lines_ja_song_mixed_line_latin_run_still_keeps_kana_derived_romaji`` —
+    줄 안에 가나가 실제로 섞여 있으면 이 변경의 영향을 받지 않는다)."""
+    vocab = _build_vocab("kat")
+    frames_per_token = 10
+    token_ids_per_frame: list[int | None] = []
+    for ch in "kat":
+        token_ids_per_frame.extend([vocab[ch]] * frames_per_token)
+    token_ids_per_frame.extend([None] * 20)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor, blank_id=0, frame_sec=FRAME_SEC, audio_sec=1.0, vocab=vocab
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+
+    anchors = [_line("cat", 0.0, 0.6)]
+    lines = refine_lines(anchors, ["cat"], refiner, Path("dummy.wav"), language="ja")
+
+    line = lines[0]
+    assert line.fallback_reason is None
+    # en 갈래로 갔다는 증거 — ja 파생(JA_DISPLAY_KEYS)엔 없는 "en" 키가 나온다.
+    assert "en" in line.pron
+    assert line.pron["romaji"] == line.pron["en"]
+
+
+def test_refine_lines_ja_song_mixed_line_latin_run_still_keeps_kana_derived_romaji():
+    """대조군 — 줄에 가나가 실제로 섞여 있으면(``_is_ja_source``의 ``ja_n and ja_n>=ko_n``
+    조건이 이미 ja를 고르므로 F1-b의 라틴-전용 타이브레이커는 관여하지 않는다) 그 줄의
+    라틴 구간(derive_ja_display_units의 append_latin_run 경로)은 여전히 가나 음차
+    romaji가 정답이다 — "numb"의 romaji가 원문 철자로 덮이면 안 된다."""
     from everyric2.text.align_target import derive_ja_display_units
 
-    units = derive_ja_display_units("numb")
+    units = derive_ja_display_units("ひらひら numb")
     target = units.target
     vocab = _build_vocab(target)
     frames_per_char = 5
     token_ids_per_frame: list[int | None] = []
     for ch in target:
-        token_ids_per_frame.extend([vocab[ch]] * frames_per_char)
+        token_ids_per_frame.extend([vocab.get(ch)] * frames_per_char)
     token_ids_per_frame.extend([None] * 10)
     emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
     fake_emission = _FakeEmission(
@@ -422,13 +455,12 @@ def test_refine_lines_ja_song_latin_run_keeps_kana_derived_romaji():
     refiner = _FakeRefiner(emission=fake_emission)
 
     line_end = len(token_ids_per_frame) * FRAME_SEC
-    anchors = [_line("numb", 0.0, line_end)]
-    lines = refine_lines(anchors, ["numb"], refiner, Path("dummy.wav"), language="ja")
+    anchors = [_line("ひらひら numb", 0.0, line_end)]
+    lines = refine_lines(anchors, ["ひらひら numb"], refiner, Path("dummy.wav"), language="ja")
 
     line = lines[0]
     assert line.fallback_reason is None
-    # ja 파생(JA_DISPLAY_KEYS = hangul/kana/romaji)에는 en 표기 자체가 없다 — "en" in
-    # line.pron 가드가 거짓이라 이 수정이 아예 발동하지 않는다는 것이 곧 증거다.
+    # ja 파생(JA_DISPLAY_KEYS = hangul/kana/romaji)에는 en 표기 자체가 없다.
     assert "en" not in line.pron
     assert line.pron["romaji"], "가나 기반 romaji 파생 자체는 여전히 나와야 한다"
 
@@ -572,6 +604,119 @@ def test_derive_units_falls_back_to_language_hint_only_when_character_majority_i
     assert _derive_units(source, "ja").owners == derive_ja_display_units(source).owners
     assert _derive_units(source, "en").owners == derive_en_display_units(source).owners
     assert _derive_units(source, None).owners == derive_en_display_units(source).owners
+
+
+# ---------------------------------------------------------------------------
+# _should_skip_derivation — F1 4분류의 세 번째 갈래(2026-08-04 감사)
+#
+# ko/zh 줄이 en/ja 갈래로 잘못 새 나가던 결함: ko 줄("사랑해 너를 위해")은 en 갈래의
+# 라틴 전용 _WORD_RE가 한글을 못 읽어 원문을 그대로 통과시켜 공백만 잃었고
+# ("사랑해너를위해"), zh 줄("我不想说再见", language=zh)은 한자가 있다는 이유만으로
+# ja 갈래(derive_ja_display_units)로 새 일본어 독음이 잘못 붙었다.
+# ---------------------------------------------------------------------------
+
+
+def test_should_skip_derivation_for_pure_hangul_line():
+    from everyric2.alignment.refine_window import _should_skip_derivation
+
+    assert _should_skip_derivation("사랑해 너를 위해", "ko") is True
+    # language를 몰라도(None) 한글 우세면 여전히 건너뛴다 — 문자 계열이 우선한다.
+    assert _should_skip_derivation("사랑해 너를 위해", None) is True
+    assert _should_skip_derivation("사랑해 너를 위해", "ja") is True
+
+
+def test_should_skip_derivation_for_hanzi_only_line_when_song_language_is_zh_or_ko():
+    from everyric2.alignment.refine_window import _should_skip_derivation
+
+    assert _should_skip_derivation("我不想说再见", "zh") is True
+    assert _should_skip_derivation("我不想说再见", "ko") is True
+
+
+def test_should_skip_derivation_keeps_old_ja_route_for_hanzi_only_line_without_zh_ko_language():
+    # language가 ja거나 판정 불가(None)면 옛 동작(ja 갈래) 그대로 — zh/ko로 **확정된**
+    # 곡만 건너뛴다.
+    from everyric2.alignment.refine_window import _should_skip_derivation
+
+    assert _should_skip_derivation("我不想说再见", "ja") is False
+    assert _should_skip_derivation("我不想说再见", None) is False
+
+
+def test_should_skip_derivation_does_not_skip_pure_latin_or_symbol_lines():
+    from everyric2.alignment.refine_window import _should_skip_derivation
+
+    assert _should_skip_derivation("hello world", "ja") is False
+    assert _should_skip_derivation("123!", "ja") is False
+    assert _should_skip_derivation("123!", None) is False
+
+
+def test_should_skip_derivation_does_not_skip_kana_lines_even_when_hangul_present():
+    # 가나가 있으면(ja_n>=ko_n인 흔한 경우) 여전히 건너뛰지 않는다 — ja 갈래가 정답이다.
+    from everyric2.alignment.refine_window import _should_skip_derivation
+
+    assert _should_skip_derivation("死んだ変数で繰り返す", None) is False
+
+
+def test_refine_lines_skips_hangul_dominant_line_instead_of_deriving_en_route():
+    """F1 P0 실측 재현 — "사랑해 너를 위해"가 refine_lines를 거쳐도 en 갈래로 새지
+    않는다. owners 파생 자체를 건너뛰고(fallback_reason) 라인 경계(앵커 값)만 남는다 —
+    표기(가타카나+RR 로마자)는 fast 경로(worker._attach_ko_pron_variants)가 만든다."""
+    text = "사랑해 너를 위해"
+    vocab = _build_vocab(text)
+    frames_per_char = 5
+    token_ids_per_frame: list[int | None] = []
+    for ch in text:
+        token_ids_per_frame.extend([vocab.get(ch)] * frames_per_char)
+    token_ids_per_frame.extend([None] * 10)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor,
+        blank_id=0,
+        frame_sec=FRAME_SEC,
+        audio_sec=len(token_ids_per_frame) * FRAME_SEC,
+        vocab=vocab,
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+    line_end = len(token_ids_per_frame) * FRAME_SEC
+    anchors = [_line(text, 0.0, line_end)]
+    lines = refine_lines(anchors, [text], refiner, Path("dummy.wav"), language="ko")
+
+    line = lines[0]
+    assert line.fallback_reason == "non_derivable_script"
+    assert line.pron == {}
+    assert line.pron_segs == {}
+    assert line.refined is False
+    # 라인 경계(앵커 값)는 이 분기와 무관하게 그대로다.
+    assert line.start == 0.0 and line.end == pytest.approx(line_end)
+
+
+def test_refine_lines_skips_hanzi_only_line_for_a_zh_song_instead_of_ja_route():
+    """F1 실측 재현 — zh 곡의 순한자 줄("我不想说再见")이 refine_lines를 거쳐도 일본어
+    독음(ja 갈래)을 받지 않는다. 표기(병음)는 fast 경로(worker._attach_zh_pron_variants)가
+    만든다."""
+    text = "我不想说再见"
+    vocab = _build_vocab(text)
+    frames_per_char = 5
+    token_ids_per_frame: list[int | None] = []
+    for ch in text:
+        token_ids_per_frame.extend([vocab.get(ch)] * frames_per_char)
+    token_ids_per_frame.extend([None] * 10)
+    emission_tensor = _peaky_emission(token_ids_per_frame, vocab_size=len(vocab) + 1, blank_id=0)
+    fake_emission = _FakeEmission(
+        emission=emission_tensor,
+        blank_id=0,
+        frame_sec=FRAME_SEC,
+        audio_sec=len(token_ids_per_frame) * FRAME_SEC,
+        vocab=vocab,
+    )
+    refiner = _FakeRefiner(emission=fake_emission)
+    line_end = len(token_ids_per_frame) * FRAME_SEC
+    anchors = [_line(text, 0.0, line_end)]
+    lines = refine_lines(anchors, [text], refiner, Path("dummy.wav"), language="zh")
+
+    line = lines[0]
+    assert line.fallback_reason == "non_derivable_script"
+    assert line.pron == {}
+    assert line.start == 0.0 and line.end == pytest.approx(line_end)
 
 
 def test_refine_lines_derives_ja_display_even_when_language_is_none():

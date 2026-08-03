@@ -14,6 +14,10 @@
    (근거는 worker._acquire_audio 독스트링의 실측).
 ⑤ 교차 영상 캐시 복사 로그가 정작 복사가 없는 분기에 붙어 있던 것.
 ⑥ m4a 경로에서 과길이 검사가 통째로 생략되던 것 (libsndfile이 m4a를 못 읽는다).
+⑦ 정렬이 극단으로 붕괴(quality_score<0.001)했는데 가사 원문의 문자 계열이 곡 language와
+   모순되는데도(예: language=ja인데 가사가 독일어) 그대로 저장·서빙되던 것(F6,
+   2026-08-04 감사, Atvsg_zogxo 실측). AND 조건(붕괴 + 모순)이 둘 다 있어야만 막는다 —
+   신호 없이 품질만 낮은 곡은 절대 막지 않는다.
 """
 
 import contextlib
@@ -1121,3 +1125,117 @@ class TestDurationProbeCoversM4a:
             asyncio.run(worker_mod.run_pipeline(job, _Hooks()))
         assert "너무 길어요" in str(e.value)
         assert not path.exists()  # 거부하면서 오디오도 정리한다
+
+
+# ── ⑦ F6(2026-08-04 감사): 정렬 붕괴 + 언어 불일치는 저장 전에 실패 처리 ───────
+#
+# 실측 사고 2건 — 잘못된 언어의 가사(일본어 번역 자막·독일어 자막)로 생성된 싱크가
+# quality_score 0.0002~0.0003(완전 붕괴)으로도 그대로 저장·서빙됐다(Atvsg_zogxo류).
+# AND 조건(품질 극단 바닥 + 문자 센서스 모순)이 반드시 둘 다 성립해야 실패시킨다 —
+# 신호 없이 품질만 낮은 곡(진짜 어려운 오디오)은 절대 막지 않는다(과잉 차단 금지).
+
+
+class TestLanguageMismatchQualityGate:
+    """run_pipeline 레벨에서 직접 검증 — _acquire_audio·_run_alignment만 목으로 갈아끼우고
+    (⑥ m4a 절과 같은 전략) 그 사이 코어(F6 게이트 포함)는 실제 코드가 돈다."""
+
+    # Atvsg_zogxo 실측 재현: language=ja인데 가사 원문이 독일어(라틴, CJK 문자 0개).
+    MISMATCHED_LYRICS = "Das ist die deutsche Übersetzung ohne jedes japanische Schriftzeichen"
+    # 문자 계열이 실제로 ja와 일치하는 정상 가사(가나 포함).
+    MATCHING_JA_LYRICS = "これは日本語の歌詞です"
+
+    @staticmethod
+    def _hooks():
+        class _Hooks:
+            async def report(self, progress, stage):
+                pass
+
+            async def progress(self, progress, stage):
+                return True
+
+            async def cache_check(self, audio_hash, audio_path):
+                return False
+
+        return _Hooks()
+
+    @staticmethod
+    def _fake_alignment(audio_file, quality_score, language):
+        def fake(
+            audio_path, lyrics, lang, line_meta=None, on_stage=None, resolver=None,
+            video_id=None, min_depth=None, on_depth=None,
+        ):
+            try:
+                return {
+                    "timestamps": [{"text": lyrics.splitlines()[0], "start": 0.0, "end": 1.0}],
+                    "language": language,
+                    "quality_score": quality_score,
+                    "debug": {"alignment_text": "original"},
+                    "alignment_text": "original",
+                    "tempo": None,
+                    "key": None,
+                }
+            finally:
+                audio_file.unlink(missing_ok=True)  # 실제 _run_alignment의 finally와 같은 계약
+
+        return fake
+
+    def _run(self, tmp_path, monkeypatch, *, quality_score, language, lyrics):
+        import asyncio
+
+        from everyric2.server import worker as worker_mod
+
+        audio_file = tmp_path / "audio.wav"
+        audio_file.write_bytes(b"fake-audio")
+        monkeypatch.setattr(
+            worker_mod,
+            "_acquire_audio",
+            lambda job: {"audio_path": str(audio_file), "audio_hash": "deadbeef"},
+        )
+        monkeypatch.setattr(
+            worker_mod, "_run_alignment", self._fake_alignment(audio_file, quality_score, language)
+        )
+        job = worker_mod.JobInput(job_id="job-langmismatch", video_id=VID_A, lyrics=lyrics)
+        return worker_mod, asyncio.run(worker_mod.run_pipeline(job, self._hooks()))
+
+    def test_collapsed_quality_with_script_mismatch_fails_instead_of_saving(
+        self, tmp_path, monkeypatch
+    ):
+        """(1) 붕괴 + 스크립트 모순 → 실패 처리, 저장(PipelineResult 반환) 없음."""
+        from everyric2.server import worker as worker_mod
+
+        with pytest.raises(worker_mod.PipelineError) as e:
+            self._run(
+                tmp_path, monkeypatch,
+                quality_score=0.0002, language="ja", lyrics=self.MISMATCHED_LYRICS,
+            )
+        # (4) 실패 메시지·failure_kind
+        assert "가사 언어가 오디오와 다르게 들려요" in str(e.value)
+        assert e.value.failure_kind == "language_mismatch"
+
+    def test_collapsed_quality_with_matching_language_still_saves(self, tmp_path, monkeypatch):
+        """(2) 붕괴지만 언어 정합(문자 센서스가 language와 일치) → 기존대로 저장(반환)."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.0002, language="ja", lyrics=self.MATCHING_JA_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+        assert result.quality_score == pytest.approx(0.0002)
+
+    def test_normal_quality_with_script_mismatch_still_saves(self, tmp_path, monkeypatch):
+        """(3) 정상 품질 + 스크립트 모순(혼합 가사 등) → 저장(반환) — 품질 하한 미달이
+        아니면 이 게이트는 절대 개입하지 않는다(과잉 차단 금지)."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.9, language="ja", lyrics=self.MISMATCHED_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+        assert result.quality_score == pytest.approx(0.9)
+
+    def test_collapsed_quality_with_non_cjk_language_is_never_blocked(self, tmp_path, monkeypatch):
+        """language가 en 등(문자 센서스로 못 가르는 언어)이면 붕괴돼도 이 게이트는 절대
+        개입하지 않는다 — 신호 없이 품질만 낮은 곡은 막지 않는다는 원칙의 직접 증거."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.0001, language="en", lyrics="genuinely difficult audio, low conf",
+        )
+        assert isinstance(result, worker_mod.PipelineResult)

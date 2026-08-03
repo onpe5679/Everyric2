@@ -221,6 +221,8 @@ def _tokenize_target(
 # 역전 금지) 그 반대로 끌어올 수 없다.
 _JA_CHAR_RE = re.compile("[぀-ヿ㐀-鿿]")
 _HANGUL_CHAR_RE = re.compile("[가-힣]")
+# 라틴 — F1-b 타이브레이커 스코프 판정용(2026-08-04 감사).
+_LATIN_CHAR_RE = re.compile("[A-Za-z]")
 
 
 def _is_ja_source(source: str, language: str) -> bool:
@@ -237,18 +239,71 @@ def _is_ja_source(source: str, language: str) -> bool:
     그 외 문자(한글 등)는 원문 그대로 통과시키므로(``derive_en_display_units`` 문서 참고)
     ko 원문에는 지금과 같은 근사가 유지된다.
 
+    **호출부 주의(F1, 2026-08-04 감사)**: 이 함수는 ja/en 이분법만 판정한다 — 한글이
+    우세하거나(순한글 줄 등) 곡 language가 zh·ko로 확정된 순한자 줄은 이 함수가 각각
+    False/True를 내지만 **둘 다 이 모듈이 못 읽는 원문**이라 en/ja 어느 쪽으로도 owners를
+    파생하면 안 된다 — ``refine_lines``는 이 함수를 부르기 **전에**
+    ``_should_skip_derivation``으로 그 두 경우를 먼저 걸러낸다(``_should_skip_derivation``
+    문서 참고). ``_derive_units``를 직접 부르는 테스트처럼 그 사전 필터를 거치지 않는
+    호출부는 여기의 en/ja 이분법 그대로를 본다(``tests/test_refine_window.py`` 참고).
+
     ja/한글이 둘 다 없는 줄(숫자·기호뿐 등)만 ``language`` 힌트를 최후 타이브레이커로
-    쓴다 — 문자만으로 못 정하는 자리에서까지 힌트를 버릴 이유는 없다. ``refine_lines``의
+    쓴다 — 문자만으로 못 정하는 자리에서까지 힌트를 버릴 이유는 없다. 다만 그 줄에
+    **라틴 문자가 있으면** 힌트가 ja여도 en으로 보낸다(F1-b, 2026-08-04 감사 zh#7):
+    fast 경로(``worker.attach_pron_variants``)의 ja_n=0 라틴 분기는 애초에 이런 언어
+    타이브레이커가 없어 늘 en(``_attach_latin_pron_variants``)으로 갔는데, 이 함수가
+    language=="ja"만 보고 ja로 보내면 같은 줄(예: ja 곡에 낀 순라틴 애드리브 한 줄)의
+    romaji가 정렬 경로에 따라 갈렸다(가나 음차 재변환 vs 원문 철자). ``refine_lines``의
     파생 선택과 심판 후보 생성기 선택(en/ja) 둘 다 이 판정 하나를 공유한다."""
     ja_n = len(_JA_CHAR_RE.findall(source))
     ko_n = len(_HANGUL_CHAR_RE.findall(source))
     if ja_n and ja_n >= ko_n:
         return True
-    return not ja_n and not ko_n and language == "ja"
+    if ja_n or ko_n:
+        return False
+    if _LATIN_CHAR_RE.search(source):
+        return False
+    return language == "ja"
+
+
+def _should_skip_derivation(source: str, language: str) -> bool:
+    """이 라인의 owners 파생·``pron``/``pron_segs`` 저장을 이 모듈이 아예 건너뛰어야
+    하는가 — F1 4분류의 세 번째 갈래(2026-08-04 감사, 실측: ko 줄 "사랑해 너를 위해"가
+    en 갈래를 거쳐 "사랑해너를위해"(공백만 소실된 원문)로, zh 줄 "我不想说再见"이 ja
+    갈래를 거쳐 일본어 독음+미판독 한자 잡탕으로 저장됐다). ``refine_lines``는 이 함수를
+    ``_is_ja_source``보다 **먼저** 불러야 한다 — 아래 두 사례 모두 ``_is_ja_source``의
+    ``ja_n and ja_n >= ko_n`` 공식이 무조건 True(ja 갈래)를 내는 자리라, 여기서 선점하지
+    않으면 절대 안 걸린다.
+
+    ① **한글 우세** — 한글 수가 가나+한자(``_JA_CHAR_RE``) 수보다 많다. en 갈래(라틴
+       전용 ``_WORD_RE``)도 ja 갈래(가나 독음)도 한글 원문을 못 읽는다 — en 갈래는 그대로
+       통과시켜 공백만 잃고, ja 갈래는 한글 vocab이 없는 ``tokenize_reading``이 원문을
+       그대로 흘린다.
+    ② **한자만(가나·한글 전부 0) + 곡 language가 zh 또는 ko** — 한자는 ja·zh 공용
+       문자라 문자만으로는 절대 못 가른다. language가 ja거나 판정 불가(None)면 이 조건은
+       거짓이고 옛 동작(ja 갈래)이 그대로 유지된다 — zh·ko로 **확정된** 곡만 건너뛴다.
+
+    두 경우 다 표기는 fast 경로(``worker._attach_ko_pron_variants``/``_attach_zh_pron_
+    variants``)가 만든다 — 그 언어들엔 원래 이 모듈의 음절 타이밍(``pron_segs``)이
+    없었으므로 건너뛰어도 잃는 것이 없다. 라인 경계(``start``/``end``, 앵커 값)는 이
+    판정과 무관하게 항상 그대로다 — 이 모듈이 절대 못 건드리는 값이기 때문이다."""
+    ko_n = len(_HANGUL_CHAR_RE.findall(source))
+    ja_n = len(_JA_CHAR_RE.findall(source))
+    if ko_n > ja_n:
+        return True
+    if ja_n and not ko_n:
+        lang = (language or "").strip().lower()
+        if lang in ("zh", "ko"):
+            return True
+    return False
 
 
 def _derive_units(source: str, language: str):
-    """``align_target`` 파생 함수 선택 — ``_is_ja_source`` 판정 하나로 갈린다."""
+    """``align_target`` 파생 함수 선택 — ``_is_ja_source`` 판정 하나로 갈린다.
+
+    호출부가 ``_should_skip_derivation``으로 먼저 거르지 않은 원문(한글 우세 줄 등)을
+    그대로 넘기면 en 갈래의 근사가 그대로 나온다 — 이 함수 자체는 그 사전 필터를 모른다
+    (``_is_ja_source`` docstring의 "호출부 주의" 참고)."""
     from everyric2.text.align_target import derive_en_display_units, derive_ja_display_units
 
     if _is_ja_source(source, language):
@@ -934,6 +989,15 @@ def refine_lines(
             line.fallback_reason = "no_anchor_window"
             continue
 
+        if _should_skip_derivation(source, language):
+            # 한글 우세/한자만+zh·ko 줄 — 이 모듈의 owners 파생은 둘 다 못 읽는 원문이다
+            # (F1, ``_should_skip_derivation`` 문서 참고). 표기는 fast 경로(worker.
+            # _attach_ko_pron_variants/_attach_zh_pron_variants)에 맡기고 손을 뗀다 —
+            # 그 언어들엔 원래 이 모듈의 pron_segs(음절 타이밍)가 없었으므로 잃는 것도
+            # 없다. 라인 경계(start/end, 앵커 값)는 이 분기와 무관하게 그대로 유지된다.
+            line.fallback_reason = "non_derivable_script"
+            continue
+
         is_ja_line = _is_ja_source(source, language)
         units = _derive_units(source, language)
         if not units.target:
@@ -1003,12 +1067,16 @@ def refine_lines(
             # 문자가 표시에서 사라지면 안 된다(join_display docstring의 連濁 실측).
             line.pron[key] = join_display(owners, units.word_end)
         if not is_ja_line and "en" in line.pron:
-            # en 곡(라틴 리퍼리 경로)의 romaji 정답은 원문 철자다 — derive_en_display_units가
-            # 내는 romaji는 "영어→가타카나 음차→로마자 재변환" 근사라 en 곡에서는 틀린다
-            # (za wezaa poreketusu류, 감사 2026-08-03). ja 곡의 라틴 구간(derive_ja_display_
-            # units 경유, is_ja_line=True)은 절대 건드리지 않는다 — 그쪽은 가나·로마자
-            # 변환이 정답이다. en이 세그(``pron_segs``)를 못 얻은 라인(실패 폴백 등)은
-            # romaji 세그도 덮지 않는다 — 문자열만 있고 세그가 없는 상태를 유지한다.
+            # en 갈래(derive_en_display_units 경유) 줄에서만 작동한다 — is_ja_line=False가
+            # 이 시점에 곧 en 갈래라는 뜻이다(F1: skip 갈래는 위에서 이미 continue했고,
+            # JA_DISPLAY_KEYS엔 "en" 키 자체가 없어 ja 갈래는 "en" in line.pron이 항상
+            # 거짓이다 — 2026-08-04 감사 F1-c 스코프 확인). en 곡(라틴 리퍼리 경로)의
+            # romaji 정답은 원문 철자다 — derive_en_display_units가 내는 romaji는
+            # "영어→가타카나 음차→로마자 재변환" 근사라 en 곡에서는 틀린다(za wezaa
+            # poreketusu류, 감사 2026-08-03). ja 곡의 라틴 구간(derive_ja_display_units
+            # 경유, is_ja_line=True)은 절대 건드리지 않는다 — 그쪽은 가나·로마자 변환이
+            # 정답이다. en이 세그(``pron_segs``)를 못 얻은 라인(실패 폴백 등)은 romaji
+            # 세그도 덮지 않는다 — 문자열만 있고 세그가 없는 상태를 유지한다.
             line.pron["romaji"] = line.pron["en"]
             if "en" in line.pron_segs:
                 line.pron_segs["romaji"] = line.pron_segs["en"]
