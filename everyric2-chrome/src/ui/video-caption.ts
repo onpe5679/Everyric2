@@ -128,6 +128,10 @@ export class VideoCaption {
     this.syncYtSuppression();
     if (this.host?.isConnected) return;
     this.host = document.createElement('div');
+    // 식별용 클래스 — 스타일은 인라인이라 CSS로 쓰이진 않지만, 이게 없으면 이 호스트가
+    // 유튜브 DOM 안에서 «이름 없는 div»라 디버깅으로도 E2E 선택자로도 못 짚는다(실측:
+    // 자막 검사가 요소를 못 찾아 검증 자체가 건너뛰어졌다).
+    this.host.className = 'ey-video-caption';
     // 자막 관례 위치: 하단 중앙, 조작을 막지 않게 pointer-events 없음
     this.host.style.cssText = [
       'position:absolute', 'left:50%', 'bottom:8%', 'transform:translateX(-50%)',
