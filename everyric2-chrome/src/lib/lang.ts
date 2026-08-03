@@ -42,25 +42,56 @@ export function isLatinDominant(text: string): boolean {
  * 쓴다 — 구세대 서버가 영어 가사를 "영어→가타카나→로마자"로 오염시켜 저장한 곡들이
  * 이미 많이 쌓여 있다("za wezaa..."류). 서버는 이제 새로 만드는 곡에 romaji=en(원문
  * 철자)을 넣지만, 이미 저장된 곡은 클라이언트가 이렇게 구제한다.
+ *
+ * **ipa 폴백**: ipa는 서버 en 정렬 스택의 부산물이라(derive_en_display_units가 en 곡에만
+ * owners['ipa']를 얹는다) ja·ko 곡에는 애초에 존재하지 않는다. script가 'ipa'인데 이
+ * 줄에 값이 없으면 IPA_FALLBACK_ORDER(hangul→romaji→kana) 순으로 대신 찾는다 — hangul을
+ * 최우선으로 두는 이유는 attach_pron_variants가 ja·ko 곡에도 hangul은 항상 채우므로
+ * (가나 근사·결정론 RR) 이 순서가 "발음 줄이 통째로 빈다"를 가장 넓게 막기 때문이다.
  */
+const IPA_FALLBACK_ORDER: readonly Exclude<PronScript, 'ipa'>[] = ['hangul', 'romaji', 'kana'];
+
 export function resolvedPronunciation(line: LyricLine, script: PronScript): string | undefined {
   if (script === 'romaji' && line.pron?.['en'] && isLatinDominant(line.text)) return line.pron['en'];
+  if (script === 'ipa' && !line.pron?.['ipa']) {
+    for (const fallback of IPA_FALLBACK_ORDER) {
+      const v = resolvedPronunciation(line, fallback);
+      if (v) return v;
+    }
+    return undefined;
+  }
   return line.pron?.[script] ?? (script === 'hangul' ? line.pronunciation : undefined);
 }
 
 /** 표시용 발음 음절 타이밍 — 규칙은 resolvedPronunciation과 동일(표기별 값 → hangul만 레거시
- *  폴백, 라틴 우세 romaji 줄은 'en' 세그로 구제). */
+ *  폴백, 라틴 우세 romaji 줄은 'en' 세그로 구제, ipa 부재 줄은 IPA_FALLBACK_ORDER로 대체).
+ *  worker.py의 attach_pron_variants는 ipa 문자열만 얹고 pron_segs(모라 타이밍)는 CTC가
+ *  라틴 위에서 신뢰할 수 없어 붙이지 않는다 — 그래서 ipa 세그는 사실상 항상 이 폴백을 탄다. */
 export function resolvedPronSegments(line: LyricLine, script: PronScript): PronSegment[] | undefined {
   if (script === 'romaji' && line.pronSegsByScript?.['en'] && isLatinDominant(line.text)) {
     return line.pronSegsByScript['en'];
   }
+  if (script === 'ipa' && !line.pronSegsByScript?.['ipa']) {
+    for (const fallback of IPA_FALLBACK_ORDER) {
+      const v = resolvedPronSegments(line, fallback);
+      if (v) return v;
+    }
+    return undefined;
+  }
   return line.pronSegsByScript?.[script] ?? (script === 'hangul' ? line.pronSegments : undefined);
 }
 
-/** 공백을 한 칸으로 접고 대소문자를 무시한 비교용 정규화 — shouldShowPron의 "원문과
- *  발음이 사실상 같은 문자열인가" 판정에 쓴다. */
+/** 비교용 정규화 — shouldShowPron의 "원문과 발음이 사실상 같은 문자열인가" 판정에 쓴다.
+ *  NFKC로 정준 결합(전각·호환 문자 통일) 후 소문자화, 그다음 공백(\s)과 유니코드 구두점
+ *  (\p{P} — 쉼표·마침표·따옴표·대시 등)을 전부 제거한다. 공백만 접던 이전 버전은
+ *  "morning, just"(원문)와 "morning ,just"(발음)처럼 구두점 위치·공백 유무만 다른 줄을
+ *  "다른 텍스트"로 오판해 en 곡×en 사용자의 원문이 발음 줄로 한 번 더 뜨는 결함이 있었다
+ *  (실사용 제보). 진짜 로마자 발음(가나 곡의 romaji 등)은 이 정규화를 거쳐도 원문과 계속
+ *  다르므로 계속 표시된다.
+ *  shouldShowPron이 이 판정의 유일한 지점이라 메인 패널·PIP·자막(video-caption.ts)이
+ *  전부 이 규칙을 공유한다 — 사용처마다 따로 정규화하지 않는다. */
 function normalizeForPronCompare(s: string): string {
-  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+  return s.normalize('NFKC').toLowerCase().replace(/[\s\p{P}]+/gu, '');
 }
 
 /**

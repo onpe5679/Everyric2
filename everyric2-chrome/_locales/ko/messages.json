@@ -748,8 +748,19 @@
       }
     }
   },
+  "overlay_warn_textNeutral": {
+    "message": "전사 완료 (정렬 신뢰도 $P1$)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
   "overlay_warn_title": {
     "message": "전사·발음 정렬의 평균 신뢰도가 낮아요. 가사 원문이 정확한지 확인하거나 싱크 초기화를 시도해 보세요."
+  },
+  "overlay_warn_titleNeutral": {
+    "message": "빠른 분석(fast)이 자체 신뢰도 확인까지 통과한 결과예요. 수치가 낮아 보여도 정상-어려운 곡일 수 있어요."
   },
   "overlay_warn_close": {
     "message": "이 경고 닫기 (설정에서 끌 수도 있어요)"
@@ -762,6 +773,9 @@
   },
   "overlay_warn_detail": {
     "message": "가사 원문이 정확한지 확인하거나 분석 깊이를 높여보세요."
+  },
+  "overlay_warn_detailNeutral": {
+    "message": "이 곡은 fast 분석 라우터가 품질까지 확인해 저장한 결과예요. 신뢰도 수치 자체는 정상-어려운 곡에서도 낮게 나올 수 있어 참고용일 뿐이에요. 그래도 이상하면 분석 깊이를 높여보세요."
   },
   "overlay_warn_dismissSong": {
     "message": "이 곡에서 다시 보지 않기"
@@ -818,6 +832,9 @@
   },
   "overlay_settings_pronScript_kana": {
     "message": "가나"
+  },
+  "overlay_settings_pronScript_ipa": {
+    "message": "IPA(발음기호)"
   },
   "overlay_settings_sourcePriority_vocaro": {
     "message": "보카로 위키 우선"
@@ -1080,17 +1097,11 @@
   "overlay_settings_row_captionBgOpacity": {
     "message": "자막 배경 불투명도"
   },
-  "overlay_settings_row_modNextUp": {
-    "message": "[모듈] 다음 영상 정보"
-  },
-  "overlay_settings_row_modNextUpTitle": {
-    "message": "가사창·PIP에 다음 재생될 영상 제목을 표시해요 (재생목록·자동재생 공통)"
-  },
   "overlay_settings_row_modPlaylist": {
     "message": "[모듈] 재생목록 패널"
   },
   "overlay_settings_row_modPlaylistTitle": {
-    "message": "가사창 옆에 유튜브 재생목록 전체를 붙여 보여줘요 — 이전/다음 이동, 항목 클릭 이동, 서버 싱크 존재 배지 포함. 켜지면 아래 다음 영상 카드는 숨겨져요"
+    "message": "가사창 옆에 유튜브 재생목록 전체를 붙여 보여줘요 — 이전/다음 이동, 항목 클릭 이동, 서버 싱크 존재 배지 포함. 재생목록이 없는 영상에서는 다음 영상 카드로 대신 보여줘요"
   },
   "overlay_settings_row_modMainLane": {
     "message": "[모듈] 가라오케 레인"
@@ -1118,9 +1129,6 @@
   },
   "overlay_quick_caption": {
     "message": "영상 자막 켜기/끄기"
-  },
-  "overlay_quick_nextUp": {
-    "message": "다음 영상 표시 켜기/끄기"
   },
   "overlay_quick_playlist": {
     "message": "재생목록 패널 켜기/끄기"

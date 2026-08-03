@@ -45,7 +45,6 @@ function depthArrowIcon(count: number): string {
 /** 퀵 토글 줄 아이콘 — PiP 좌상단 미니 버튼(.ey-pip-mini)과 같은 13px 도안 계열 */
 const MINI_LANE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M3 5h18v2H3zm0 4h12v2H3zm0 4h18v2H3zm0 4h9v2H3z"/></svg>';
 const MINI_CAPTION_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="2"/><line x1="6" y1="14" x2="11" y2="14" stroke-linecap="round"/><line x1="13" y1="14" x2="18" y2="14" stroke-linecap="round"/></svg>';
-const MINI_NEXT_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M5 5l9 7-9 7V5zm11 0h3v14h-3V5z"/></svg>';
 /** 재생목록 패널 토글 — 목록 줄 세 개 + 재생 삼각형(대기열을 표시하는 관용 도안) */
 const MINI_PLAYLIST_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h12"/><path d="M3 12h12"/><path d="M3 18h8"/><path d="M17 14.5v5l4.5-2.5z" fill="currentColor" stroke="none"/></svg>';
 /** 재생목록 패널 헤더의 이전/다음 버튼 — PiP 재생 컨트롤과 같은 삼각형 도안 계열 */
@@ -135,6 +134,9 @@ export interface OverlayCallbacks {
   /** 재생목록 항목 클릭 — index는 content가 스크랩한 순서(yt-player.playPlaylistItem과
    *  같은 인덱스 체계)를 그대로 되돌려준다 */
   onPlaylistSelect: (index: number) => void;
+  /** 다음 영상 카드 클릭(재생목록 부착 패널의 폴백 카드) — videoId가 있으면 그 영상으로,
+   *  없으면(문자열만 받은 구버전 setNextUp 경로) content가 유튜브 다음 버튼을 눌러 이동한다 */
+  onNextUpClick: (videoId?: string) => void;
   /** 저신뢰 경고 바의 "이 곡에서 다시 보지 않기" — 이 영상에서는 영구히 억제한다 */
   onWarnDismissSong: () => void;
   /** 설정 시트 ♻️ 범주 — 곡별로 끈 저신뢰 경고 억제를 전부 되살린다 */
@@ -242,6 +244,10 @@ export class LyricsOverlay {
   private warnScore: number | null = null;
   /** "자세히" 펼침 상태 — 곡이 바뀌면 setQualityWarning이 접힘으로 되돌린다 */
   private warnExpanded = false;
+  /** ×로 세션 한정 닫음 — setDebugMeta가 뒤늦게 도착한 깊이로 renderWarnBar를 다시
+   *  불러도(경고→중립 전환) 사용자가 이미 닫은 배너를 되살리지 않기 위한 가드.
+   *  setQualityWarning(새 곡·설정 변경)이 새 컨텍스트를 열 때만 되돌린다. */
+  private warnClosedByUser = false;
   /** 미보유 언어 칩을 눌러 번역을 기다리는 동안의 표시(U3-b) — 칩 펄스만으론 눈에 잘
    *  안 띈다는 실보고로 추가. 라인 목록 바로 위(.ey-warn-bar와 같은 자리 규칙)에 둬서
    *  "빈 번역 줄"이 아니라 "준비 중"임을 알린다. .ey-tr-status 클래스를 재사용한다
@@ -269,8 +275,9 @@ export class LyricsOverlay {
   private lanePaused = false;
   /** [모듈] 레인이 지금 화면에 있는가 — 꺼져 있을 때 매 tick 캔버스를 만지지 않기 위한 게이트 */
   private laneShown = false;
-  private nextUpEl: HTMLDivElement;
-  /** 다음 영상 카드의 현재 내용 — 재생목록만 늦게 도착해도 카드를 다시 그릴 수 있게 보관 */
+  /** 다음 영상 카드의 현재 내용 — 재생목록 부착 패널의 폴백 카드(목록 없는 단일 영상
+   *  페이지)가 쓴다. 메인 패널 하단 전용 카드는 2026-08-04 제거됐다(운영자 지시 —
+   *  재생목록 모듈과 정보가 겹친다). */
   private nextUpInfo: NextUpInfo | null = null;
   /** 이어질 재생목록 (content가 setPlaylist로 밀어넣는다) — 비면 목록 자체를 안 그린다 */
   private playlistItems: PlaylistItem[] = [];
@@ -327,7 +334,6 @@ export class LyricsOverlay {
   private quickLaneBtn: HTMLButtonElement;
   private quickLanePosBtn: HTMLButtonElement;
   private quickCaptionBtn: HTMLButtonElement;
-  private quickNextUpBtn: HTMLButtonElement;
   private quickPlaylistBtn: HTMLButtonElement;
   private collapseBtn: HTMLButtonElement;
   private settingsSheet: HTMLDivElement | null = null;
@@ -609,10 +615,6 @@ export class LyricsOverlay {
     this.debugPanelEl = h('div', { className: 'ey-debug-panel-wrap' });
     this.debugPanelEl.style.display = 'none';
 
-    // 다음 영상 정보 모듈 (설정 modNextUp) — content가 setNextUp으로 채운다
-    this.nextUpEl = h('div', { className: 'ey-nextup' });
-    this.nextUpEl.style.display = 'none';
-
     // 자동 매칭 표시줄 — 위키가 고른 곡 제목을 가사 위에 명시하고, 오매칭이면 그 자리에서
     // 제보(기존 피드백 시스템)할 수 있게 한다(운영자 요청 2026-08-03: ダミーロマンス가
     // 다른 곡에 붙었는데 화면만으로는 무엇에 매칭됐는지 알 수 없었다).
@@ -686,22 +688,18 @@ export class LyricsOverlay {
       }));
     this.quickCaptionBtn = this.miniButton(MINI_CAPTION_SVG, t('overlay.quick.caption'),
       () => this.callbacks.onSettingsChange({ videoCaptions: !this.settings.videoCaptions }));
-    this.quickNextUpBtn = this.miniButton(MINI_NEXT_SVG, t('overlay.quick.nextUp'),
-      () => this.callbacks.onSettingsChange({ modNextUp: !this.settings.modNextUp }));
-    // 재생목록 패널 — modNextUp(하단 카드)과는 별개 설정이다. 켜지면 하단 카드는
-    // 중복 정보라 숨는다(renderNextUp의 modPlaylist 가드).
     this.quickPlaylistBtn = this.miniButton(MINI_PLAYLIST_SVG, t('overlay.quick.playlist'),
       () => this.callbacks.onSettingsChange({ modPlaylist: !this.settings.modPlaylist }));
     // 번역 언어 칩을 같은 줄 오른쪽 끝에 함께 싣는다 — 별도 줄로 두면 얇은 줄이 두 개
     // 쌓여 세로 공간만 먹는다(실사용 제보). 칩 줄 표시/숨김(renderLangChips)은 그대로
     // 자기 display로 하고, 접힘 상태는 퀵 줄과 함께 사라진다.
     this.quickRow = h('div', { className: 'ey-quick-row' },
-      this.quickLaneBtn, this.quickLanePosBtn, this.quickCaptionBtn, this.quickNextUpBtn,
+      this.quickLaneBtn, this.quickLanePosBtn, this.quickCaptionBtn,
       this.quickPlaylistBtn, this.langChipsRow);
 
     this.panel = h('div', { className: 'ey-panel' },
       this.header, this.quickRow, this.matchedBar, this.wrongLyricsPop, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
-      this.warnBar, this.translationPendingBar, this.mainRow, this.resumeChip, this.nextUpEl, this.laneWrap,
+      this.warnBar, this.translationPendingBar, this.mainRow, this.resumeChip, this.laneWrap,
       this.footer, this.debugStrip, this.debugPanelEl,
     );
     this.lane.attach(this.laneCanvas, this.panel);
@@ -1523,8 +1521,6 @@ export class LyricsOverlay {
     this.quickLaneBtn.title = t('overlay.quick.lane');
     this.quickCaptionBtn.classList.toggle('on', this.settings.videoCaptions);
     this.quickCaptionBtn.title = t('overlay.quick.caption');
-    this.quickNextUpBtn.classList.toggle('on', this.settings.modNextUp);
-    this.quickNextUpBtn.title = t('overlay.quick.nextUp');
     this.quickPlaylistBtn.classList.toggle('on', this.settings.modPlaylist);
     this.quickPlaylistBtn.title = t('overlay.quick.playlist');
     // 배치 버튼은 "지금 어디에 있는가"가 아니라 "누르면 어디로 가는가"를 말한다 —
@@ -1779,6 +1775,7 @@ export class LyricsOverlay {
   setQualityWarning(score: number | null): void {
     this.warnScore = score;
     this.warnExpanded = false; // 곡이 바뀌면 접힘 상태로 되돌린다
+    this.warnClosedByUser = false; // 새 컨텍스트(곡·설정 변경)는 이전 × 닫음을 승계하지 않는다
     this.renderWarnBar();
   }
 
@@ -1788,20 +1785,39 @@ export class LyricsOverlay {
    * 본문 노출로 승격). ×는 이번 세션만 닫고, "이 곡에서 다시 보지 않기"는 영상별로
    * 영구히 억제한다(content가 chrome.storage에 적는다) — 둘의 되돌릴 수 있는 정도가
    * 달라 같은 버튼으로 합치지 않는다.
+   *
+   * **깊이별 톤 분기(운영자 실사용 제보 2026-08-04)**: fast로 **저장된** 싱크는 이미
+   * 라우터를 통과한 것이다 — fast 결과의 라인 신뢰도 중앙값이 임계 미달이면 서버가
+   * 자동으로 heavy까지 승급시키므로, fast 저장본은 "라우터가 품질을 확인한 곡"이다.
+   * 반면 이 배너가 읽는 절대 신뢰도 수치(qualityScore, 0.00026류)는 정상-어려운 곡과
+   * 사고 곡이 겹치는 대리 지표라 그 수치만으로 매번 느낌표+노란색 경고를 내면 정상
+   * 곡까지 과잉 경보가 된다. fast로 확인되면 같은 정보(신뢰도 수치)를 느낌표·노란
+   * 배경 없이 중립 톤으로만 보여주고, medium·heavy(라우터가 fast로 못 끝낸 곡)는
+   * 기존 경고 스타일을 그대로 유지한다 — 그 경우엔 절대 수치가 진짜 위험 신호다.
+   * 깊이는 currentDepth()(헤더 깊이 버튼·레인 안내와 같은 출처)로 읽는다.
    */
   private renderWarnBar(): void {
     const score = this.warnScore;
-    if (score === null) {
+    if (score === null || this.warnClosedByUser) {
       this.warnBar.style.display = 'none';
       this.warnBar.replaceChildren();
       return;
     }
+    // depth===null(메타 미도착·구세대)은 라우터 통과를 확인할 수 없으므로 안전하게
+    // 경고 톤을 유지한다 — setDebugMeta가 뒤늦게 'fast'를 확정하면 이 함수를 다시 불러
+    // 그때 중립으로 내려간다(경고→중립 방향만 있고, 반대는 없다 — score 자체가 fast
+    // 승급 로직을 통과한 뒤에야 정해지므로 medium/heavy가 뒤늦게 fast로 내려갈 일은 없다).
+    const isFastVerified = this.currentDepth() === 'fast';
+    this.warnBar.classList.toggle('ey-warn-neutral', isFastVerified);
+    const headText = isFastVerified
+      ? t('overlay.warn.textNeutral', [fmtConf(score)])
+      : `⚠️ ${t('overlay.warn.text', [fmtConf(score)])}`;
     const head = h('div', { className: 'ey-warn-head' },
-      h('span', { className: 'ey-warn-text', text: `⚠️ ${t('overlay.warn.text', [fmtConf(score)])}` }),
+      h('span', { className: 'ey-warn-text', text: headText }),
       h('button', {
         className: 'ey-warn-expand',
         text: this.warnExpanded ? t('overlay.warn.collapse') : t('overlay.warn.expand'),
-        title: t('overlay.warn.title'),
+        title: isFastVerified ? t('overlay.warn.titleNeutral') : t('overlay.warn.title'),
         attrs: { type: 'button' },
         on: { click: () => { this.warnExpanded = !this.warnExpanded; this.renderWarnBar(); } },
       }),
@@ -1810,13 +1826,21 @@ export class LyricsOverlay {
         text: '×',
         title: t('overlay.warn.close'),
         attrs: { type: 'button' },
-        on: { click: () => { this.warnBar.style.display = 'none'; } },
+        on: {
+          click: () => {
+            this.warnClosedByUser = true;
+            this.warnBar.style.display = 'none';
+          },
+        },
       }),
     );
     const children: HTMLElement[] = [head];
     if (this.warnExpanded) {
       children.push(h('div', { className: 'ey-warn-detail' },
-        h('span', { className: 'ey-warn-detail-text', text: t('overlay.warn.detail') }),
+        h('span', {
+          className: 'ey-warn-detail-text',
+          text: isFastVerified ? t('overlay.warn.detailNeutral') : t('overlay.warn.detail'),
+        }),
         h('button', {
           className: 'ey-warn-dismiss-song',
           text: t('overlay.warn.dismissSong'),
@@ -1824,6 +1848,7 @@ export class LyricsOverlay {
           attrs: { type: 'button' },
           on: {
             click: () => {
+              this.warnClosedByUser = true;
               this.warnBar.style.display = 'none';
               this.callbacks.onWarnDismissSong();
             },
@@ -1978,35 +2003,25 @@ export class LyricsOverlay {
    */
   setNextUp(info: string | NextUpInfo | null): void {
     this.nextUpInfo = typeof info === 'string' ? { title: info } : info;
-    this.renderNextUp();
-    // 재생목록이 없는 페이지(단일 영상)에서는 부착 패널도 이 값을 재사용해 보여준다
+    // 메인 패널 하단 전용 카드는 제거됐다(2026-08-04, 운영자 지시) — 재생목록이 없는
+    // 페이지(단일 영상)에서는 부착 패널의 폴백 카드가 이 값을 재사용해 보여준다.
     this.renderPlaylistPanel();
   }
 
-  /** 하단 다음 영상 카드 — modPlaylist가 켜지면 부착 패널이 같은 정보를 대신 보여주므로
-   *  중복을 피해 숨긴다(설정 항목의 관계 정리, overlay.ts 담당자 메모 2026-08-03). */
-  private renderNextUp(): void {
-    const info = this.nextUpInfo;
-    if (!info || this.settings.modPlaylist) {
-      this.nextUpEl.style.display = 'none';
-      this.nextUpEl.replaceChildren();
-      return;
-    }
-    this.nextUpEl.replaceChildren(
-      h('div', { className: 'ey-nextup-label', text: t('overlay.nextUp.label') }),
-      this.buildNextUpCard(info),
-    );
-    this.nextUpEl.style.display = '';
-  }
-
-  /** 다음 영상 카드 본체(썸네일 + 제목 + 채널) — 하단 카드·재생목록 부착 패널(목록이
-   *  없는 단일 영상 페이지)이 함께 쓴다. */
+  /** 다음 영상 카드 본체(썸네일 + 제목 + 채널) — 재생목록 부착 패널의 폴백(목록이 없는
+   *  단일 영상 페이지)에서 쓴다. 클릭하면 그 영상으로 이동한다(카드 전체가 타깃) —
+   *  videoId가 있으면 content가 그 영상으로 직접, 없으면 유튜브 다음 버튼을 눌러
+   *  이동한다(onNextUpClick, 실사용 제보: 카드를 눌러도 아무 일도 안 일어났다). */
   private buildNextUpCard(info: NextUpInfo): HTMLDivElement {
     const meta = h('div', { className: 'ey-nextup-meta' },
       h('div', { className: 'ey-nextup-title', text: info.title, title: info.title }),
     );
     if (info.channel) meta.append(h('div', { className: 'ey-nextup-channel', text: info.channel }));
-    const card = h('div', { className: 'ey-nextup-card' });
+    const card = h('div', {
+      className: 'ey-nextup-card',
+      attrs: { title: info.title },
+      on: { click: () => this.callbacks.onNextUpClick(info.videoId) },
+    });
     const thumb = info.thumbnail ?? (info.videoId ? thumbUrl(info.videoId) : null);
     if (thumb) {
       // 썸네일은 있으면 좋은 장식이다 — 404·CSP·오프라인 어느 이유로 실패하든 깨진
@@ -2085,6 +2100,10 @@ export class LyricsOverlay {
     // 음절 타이밍 안내도 같은 깊이를 읽는다 — 메타는 가사보다 늦게 도착할 수 있어,
     // 여기서 다시 판정하지 않으면 fast 싱크인데 배너가 끝내 안 뜨는 곡이 생긴다
     this.renderLaneNotice();
+    // 저신뢰 경고 바도 같은 이유로 다시 그린다 — setQualityWarning은 applyLyricsData에서
+    // 메타 도착보다 먼저 불려 depth가 아직 null(경고 톤 기본값)인 채로 그려질 수 있다.
+    // 여기서 다시 부르면 fast가 뒤늦게 확정된 순간 경고→중립으로 자연스럽게 내려간다.
+    this.renderWarnBar();
   }
 
   /**
@@ -2167,8 +2186,6 @@ export class LyricsOverlay {
     });
     this.lane.refreshColors(); // 테마가 바뀌었을 수 있다 — CSS 변수를 다시 읽게 한다
     this.applyLaneVisibility();
-    // modPlaylist 토글은 하단 카드↔부착 패널의 표시를 즉시 맞바꿔야 한다
-    this.renderNextUp();
     this.renderPlaylistPanel();
   }
 
@@ -2379,27 +2396,37 @@ export class LyricsOverlay {
   private renderSourceBadge(): void {
     const source = this.badgeSource;
     const synced = this.badgeSynced;
-    const base = source === 'everyric' ? 'Everyric'
+    // source==='everyric'는 base로 'Everyric'을 더 이상 안 쓴다(운영자 지시 2026-08-04:
+    // "Everyric · 보카로 가사 위키 · 번역: 보카로 가사 위키"처럼 이 확장 자신을 가리키는
+    // 첫 조각이 늘 같은 값이라 소음이었다 — 이 배지는 이미 이 확장 안에서만 보이므로
+    // "Everyric"이라는 정보 자체가 무의미하다). 실제 가사 출처(attributionName)를 그
+    // 자리에 바로 쓴다 — 수동 붙여넣기 생성 등 출처가 없으면 빈 문자열로 접힌다(아래
+    // parts 필터가 걸러낸다).
+    const base = source === 'everyric' ? (this.attributionName ?? '')
       : source === 'vocaro'
         ? (this.attributionSourceId === 'miraheze' ? t('overlay.source.miraheze') : t('overlay.source.vocaro'))
       : source === 'caption' ? t('overlay.source.caption')
       : 'LRCLIB';
-    // 가사 원출처(위키 등)를 병기 — 전사는 서버가 했어도 가사의 출처는 따로 표기
-    const extra = this.attributionName && this.attributionName !== base ? ` · ${this.attributionName}` : '';
+    // 가사 원출처(위키 등)를 병기 — everyric 분기는 이미 attributionName을 base로 썼으므로
+    // 중복 병기하지 않는다. 그 밖의 소스(vocaro 직접 채택 등)만 부가 정보로 덧붙인다.
+    const extra = source !== 'everyric' && this.attributionName && this.attributionName !== base
+      ? this.attributionName : '';
     // 다른 영상의 싱크를 빌려온 경우 링크 표시 (해제는 검색 시트에서).
     // 검증(반주 대조)을 통과한 자동 링크와 검증 없는 수동 링크는 신뢰도가 다르다 —
     // 어긋난 가사를 보고 있을 때 원인을 짚을 수 있도록 ✓/? 로 구분해 표시한다
     const link = this.linkedInfo
-      ? ` · 🔗${this.linkedInfo.verified ? '✓' : '?'}${this.linkedInfo.offsetSec !== 0 ? `${this.linkedInfo.offsetSec > 0 ? '+' : ''}${this.linkedInfo.offsetSec}s` : ''}`
+      ? `🔗${this.linkedInfo.verified ? '✓' : '?'}${this.linkedInfo.offsetSec !== 0 ? `${this.linkedInfo.offsetSec > 0 ? '+' : ''}${this.linkedInfo.offsetSec}s` : ''}`
       : '';
     // 번역 출처 병기(U2) — 가사 원출처(extra)와 별개로, 사후 채택 번역이 어디서 왔는지.
     // kind==='wiki'면 실제로 히트한 위키 이름(translationSourceWikiName)을 그대로 쓴다.
-    const trSource = this.translationSourceKind === 'caption' ? ` · ${t('overlay.translationSource.caption')}`
+    const trSource = this.translationSourceKind === 'caption' ? t('overlay.translationSource.caption')
       : this.translationSourceKind === 'wiki'
-        ? ` · ${t('overlay.translationSource.wiki', [this.translationSourceWikiName ?? t('overlay.source.vocaro')])}`
-      : this.translationSourceKind === 'llm' ? ` · ${t('overlay.translationSource.llm')}`
+        ? t('overlay.translationSource.wiki', [this.translationSourceWikiName ?? t('overlay.source.vocaro')])
+      : this.translationSourceKind === 'llm' ? t('overlay.translationSource.llm')
       : '';
-    this.sourceBadge.textContent = base + extra + link + trSource;
+    // base가 비어도(everyric×출처 없음) 뒤 조각들이 선두 " · "를 달고 뜨지 않도록 join으로
+    // 조립한다 — 예전 raw concat은 base가 항상 비어 있지 않다는 전제였다.
+    this.sourceBadge.textContent = [base, extra, link, trSource].filter(Boolean).join(' · ');
     // 출처 상세: 무엇을 어디서 가져왔는지 — 클릭 전에 툴팁으로도 확인 가능
     const kind = synced ? t('overlay.source.syncedLyrics') : t('overlay.source.plainLyrics');
     this.sourceBadge.title = this.sourceUrl ? `${kind} · ${t('overlay.source.openPage')}\n${this.sourceUrl}` : kind;
@@ -2662,6 +2689,7 @@ export class LyricsOverlay {
           ['hangul', t('overlay.settings.pronScript.hangul')],
           ['romaji', t('overlay.settings.pronScript.romaji')],
           ['kana', t('overlay.settings.pronScript.kana')],
+          ['ipa', t('overlay.settings.pronScript.ipa')],
         ],
         onChange: v => set({ pronunciationScript: v as Settings['pronunciationScript'] }),
       },
@@ -2824,11 +2852,6 @@ export class LyricsOverlay {
         keywords: '자막 배경 caption',
         value: this.settings.captionBgOpacity, min: 0, max: 1, step: 0.05, format: pct,
         onChange: v => set({ captionBgOpacity: v }),
-      },
-      {
-        kind: 'checkbox', key: 'modNextUp', label: t('overlay.settings.row.modNextUp'),
-        title: t('overlay.settings.row.modNextUpTitle'), value: this.settings.modNextUp,
-        onChange: v => set({ modNextUp: v }),
       },
       {
         kind: 'checkbox', key: 'modPlaylist', label: t('overlay.settings.row.modPlaylist'),

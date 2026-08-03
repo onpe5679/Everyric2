@@ -101,7 +101,6 @@
 .ey-panel.collapsed .ey-resume-chip,
 .ey-panel.collapsed .ey-main-lane,
 .ey-panel.collapsed .ey-matched-bar,
-.ey-panel.collapsed .ey-nextup,
 .ey-panel.collapsed .ey-settings,
 .ey-panel.collapsed .ey-debug-strip,
 .ey-panel.collapsed .ey-debug-panel-wrap {
@@ -177,6 +176,16 @@
   white-space: nowrap;
 }
 .ey-warn-dismiss-song:hover { color: var(--ey-text); border-color: rgba(255, 176, 46, 0.7); }
+
+/* fast로 라우터가 통과시킨 싱크는 같은 정보를 경고색 없이 중립 톤으로 보여준다
+   (overlay.ts renderWarnBar) — 노란 계열을 패널 기본 표면/테두리 변수로만 대체한다. */
+.ey-warn-bar.ey-warn-neutral {
+  background: var(--ey-elev);
+  border-color: var(--ey-border);
+}
+.ey-warn-bar.ey-warn-neutral .ey-warn-detail { border-top-color: var(--ey-border); }
+.ey-warn-bar.ey-warn-neutral .ey-warn-dismiss-song { border-color: var(--ey-border); }
+.ey-warn-bar.ey-warn-neutral .ey-warn-dismiss-song:hover { border-color: var(--ey-text-dim); }
 
 /* ── 서버 오류 배너 ───────────────────────────────────────────────
    메인 패널(헤더 아래 고정 슬롯)과 PiP(창 하단 슬롯), 그리고 본문 상태 화면이
@@ -905,17 +914,9 @@
   50% { opacity: 1; }
 }
 
-/* 다음 영상 정보 모듈 (setNextUp) — 푸터 위 카드.
-   예전엔 말줄임 한 줄이었는데, 잘린 제목만으론 "다음이 뭔지" 판단이 안 됐다(운영자
-   실보고). 썸네일 + 2줄 제목 + 채널로 한눈에 알아보게 한다. */
-.ey-nextup {
-  padding: 6px 12px 8px;
-  border-top: 1px solid var(--ey-border);
-  color: var(--ey-text-dim);
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
+/* 다음 영상 정보 카드(setNextUp) — 재생목록 부착 패널의 폴백(목록 없는 단일 영상
+   페이지)에서만 쓴다. 메인 패널 하단 전용 카드는 2026-08-04 제거됐다(운영자 지시 —
+   재생목록 모듈과 정보가 겹친다). 썸네일 + 2줄 제목 + 채널로 한눈에 알아보게 한다. */
 .ey-nextup-label {
   font-size: 10px;
   letter-spacing: 0.04em;
@@ -923,7 +924,8 @@
   margin-bottom: 4px;
 }
 
-.ey-nextup-card { display: flex; gap: 8px; align-items: flex-start; }
+/* 카드 전체가 클릭 타깃 — 눌러도 반응이 없다는 실사용 제보(overlay.ts buildNextUpCard) */
+.ey-nextup-card { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
 
 .ey-nextup-thumb {
   width: 72px;
@@ -957,8 +959,7 @@
 }
 
 /* 이어질 재생목록의 인라인 임베드 목록(.ey-nextup-pl*)은 2026-08-03 재작업으로
-   전용 부착 패널(.ey-attach-playlist, .ey-pl-*)로 대체됐다 — 하단 카드는 다음
-   영상 정보만 남는다(renderNextUp). */
+   전용 부착 패널(.ey-attach-playlist, .ey-pl-*)로 대체됐다. */
 .ey-pip-nextup {
   color: var(--ey-text-dim);
   font-size: calc(10px * var(--ey-pip-fs, 1));

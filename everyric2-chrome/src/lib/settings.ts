@@ -75,10 +75,6 @@ let lastKnown: Settings | null = null;
 async function readSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get(SETTINGS_KEY);
   const merged = { ...DEFAULT_SETTINGS, ...(stored[SETTINGS_KEY] as Partial<Settings> | undefined) };
-  // IPA 발음 표기 옵션 제거(감사 C3) — ipa 키가 라틴 세그에만 존재해 ja·ko 곡에서 발음
-  // 줄이 조용히 전멸했고, "발음이 이미 있다" 가드까지 뚫려 LLM 헛요청이 반복됐다. 옵션은
-  // UI에서 없앴지만 저장값이 남아 있는 사용자는 여기서 한 번 'auto'로 정규화한다.
-  if (merged.pronunciationScript === 'ipa') merged.pronunciationScript = 'auto';
   lastKnown = merged;
   return merged;
 }

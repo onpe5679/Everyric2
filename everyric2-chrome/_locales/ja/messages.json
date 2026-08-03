@@ -748,8 +748,19 @@
       }
     }
   },
+  "overlay_warn_textNeutral": {
+    "message": "転写完了(整列信頼度 $P1$)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
   "overlay_warn_title": {
     "message": "転写・発音整列の平均信頼度が低いです。原文の歌詞が正しいか確認するか、同期の初期化を試してください。"
+  },
+  "overlay_warn_titleNeutral": {
+    "message": "高速解析(fast)が自身の信頼度チェックを通過した結果です。数値が低く見えても、難しい曲では正常な場合があります。"
   },
   "overlay_warn_close": {
     "message": "この警告を閉じる(設定でオフにもできます)"
@@ -762,6 +773,9 @@
   },
   "overlay_warn_detail": {
     "message": "歌詞原文が正確か確認するか、解析の深さを上げてみてください。"
+  },
+  "overlay_warn_detailNeutral": {
+    "message": "この曲は高速解析ルーターが品質を確認した上で保存した結果です。信頼度の数値自体は、正常でも難しい曲では低く出ることがあるため参考程度に見てください。それでもおかしいと感じたら、解析の深さを上げてみてください。"
   },
   "overlay_warn_dismissSong": {
     "message": "この曲では二度と表示しない"
@@ -818,6 +832,9 @@
   },
   "overlay_settings_pronScript_kana": {
     "message": "かな"
+  },
+  "overlay_settings_pronScript_ipa": {
+    "message": "IPA（発音記号）"
   },
   "overlay_settings_sourcePriority_vocaro": {
     "message": "ボカロ歌詞wiki優先"
@@ -1080,17 +1097,11 @@
   "overlay_settings_row_captionBgOpacity": {
     "message": "字幕背景の不透明度"
   },
-  "overlay_settings_row_modNextUp": {
-    "message": "[モジュール] 次の動画情報"
-  },
-  "overlay_settings_row_modNextUpTitle": {
-    "message": "パネルとPiPに次に再生される動画のタイトルを表示します（再生リスト・自動再生共通）"
-  },
   "overlay_settings_row_modPlaylist": {
     "message": "[モジュール] 再生リストパネル"
   },
   "overlay_settings_row_modPlaylistTitle": {
-    "message": "歌詞パネルの横にYouTubeの再生リスト全体を表示します — 前後移動・項目クリックでの移動・サーバー同期バッジ付き。オンにすると下部の次の動画カードは隠れます"
+    "message": "歌詞パネルの横にYouTubeの再生リスト全体を表示します — 前後移動・項目クリックでの移動・サーバー同期バッジ付き。再生リストのない動画では次の動画カードを代わりに表示します"
   },
   "overlay_settings_row_modMainLane": {
     "message": "[モジュール] カラオケレーン"
@@ -1118,9 +1129,6 @@
   },
   "overlay_quick_caption": {
     "message": "動画字幕のオン/オフ"
-  },
-  "overlay_quick_nextUp": {
-    "message": "次の動画表示のオン/オフ"
   },
   "overlay_quick_playlist": {
     "message": "再生リストパネルの表示切替"

@@ -1,5 +1,6 @@
 import { detectSong, getCurrentVideoId, getVideoElement } from './lib/song-detector';
 import { getPlaylist, playNext, playPlaylistItem, playPrevious } from './lib/yt-player';
+import type { PlaylistEntry } from './lib/yt-player';
 import { SyncEngine, type SyncHandlers } from './lib/sync-engine';
 import { KaraokeAudio, collectMelodyNotes } from './lib/karaoke-audio';
 import { parseTriLineLyrics } from './lib/tri-line';
@@ -539,6 +540,16 @@ function beginFollowing(videoId: string): void {
   // stale 판정과 같은 한계다 — 다음 tick/interval에서 스스로 바로잡는다)
   refreshNextUp(true);
   refreshPlaylist(true);
+  // 재생목록의 "현재 재생 중" 강조(ey-pl-row.current)는 유튜브 재생목록 패널 DOM의
+  // selected 속성을 읽는데, 그 속성이 전환 직후 즉시 갱신되지 않을 때가 있다(실측:
+  // 행을 클릭해 이동해도 강조가 안 따라옴). 60초 주기 갱신을 기다리지 않고 짧은 지연
+  // 뒤 한 번 더 다시 긁어 스스로 바로잡는다 — videoId가 그 사이 또 바뀌면(빠른 연속
+  // 전환) 실행 시점에 다시 확인해 낡은 재조회가 최신 상태를 덮지 않게 한다.
+  for (const delayMs of [500, 1500]) {
+    window.setTimeout(() => {
+      if (videoId === currentVideoId) refreshPlaylist(true);
+    }, delayMs);
+  }
 }
 
 function checkCurrentPage(): void {
@@ -722,6 +733,7 @@ function ensureOverlay(): LyricsOverlay {
     onPlaylistPrev: () => { if (!playPrevious()) refreshPlaylist(true); },
     onPlaylistNext: () => { if (!playNext()) refreshPlaylist(true); },
     onPlaylistSelect: index => { if (!playPlaylistItem(index)) refreshPlaylist(true); },
+    onNextUpClick: videoId => handleNextUpClick(videoId),
     onWarnDismissSong: () => {
       const videoId = currentVideoId;
       if (videoId) void dismissWarnForVideo(videoId);
@@ -1998,6 +2010,12 @@ function applyTranslations(data: LyricsData, translated: TranslatedLine[], origi
   }
   // 이 배치의 발음을 실을 스크립트 — 매 줄 동일하므로 루프 밖에서 한 번만 정한다.
   const pronScript = resolveScript(settings);
+  // ipa는 LLM이 만들 수 있는 표기가 아니다(서버 en 정렬 스택의 부산물일 뿐 — lib/lang.ts
+  // IPA_FALLBACK_ORDER 주석 참고). 사용자가 ipa를 선택했어도 이 translate 응답을 pron.ipa에
+  // 그대로 적으면 LLM이 만든 한글·가나류 근사를 IPA로 잘못 라벨링하게 된다. auto 판정
+  // 스크립트로 대신 저장한다 — 표시는 resolvedPronunciation의 ipa 폴백이 그 값을 자동으로
+  // 대신 보여주므로 사용자에게는 차이가 없다.
+  const writeScript = pronScript === 'ipa' ? resolveScript({ ...settings, pronunciationScript: 'auto' }) : pronScript;
   let pronApplied = false;
   data.lines.forEach((line, i) => {
     const t = translated[i]?.translation?.trim();
@@ -2011,16 +2029,16 @@ function applyTranslations(data: LyricsData, translated: TranslatedLine[], origi
     }
     // 발음표기 — translate 응답의 legacy pronunciation은 요청 시점 target_lang에 따라
     // 이미 한글이 아닐 수 있다(로마자·가나, 번역 API의 결정론 매트릭스 — 감사 E1).
-    // pronScript==='hangul'일 때만 레거시 한글 전용 슬롯에 쓰고, 그 밖은 pron[script]
+    // writeScript==='hangul'일 때만 레거시 한글 전용 슬롯에 쓰고, 그 밖은 pron[script]
     // 딕셔너리에 표시 문자열만 싣는다(pronSegsByScript는 안 건드린다 — 음절 타이밍은
     // 서버가 세그로 줄 때만 정본이고, 여기서 만들 수 있는 게 아니다). 사람이 단 발음이
     // 있으면(보카로 위키 등) 어느 쪽이든 건드리지 않는다.
     const p = translated[i]?.pronunciation?.trim();
     if (p) {
-      if (pronScript === 'hangul') {
+      if (writeScript === 'hangul') {
         if (!line.pronunciation) { line.pronunciation = p; pronApplied = true; }
-      } else if (!line.pron?.[pronScript]) {
-        line.pron = { ...line.pron, [pronScript]: p };
+      } else if (!line.pron?.[writeScript]) {
+        line.pron = { ...line.pron, [writeScript]: p };
         pronApplied = true;
       }
     }
@@ -2791,6 +2809,22 @@ function refreshNextUp(force = false): void {
 }
 
 /**
+ * 다음 영상 카드 클릭(재생목록 부착 패널의 폴백 카드) — 눌러도 아무 일도 안 일어난다는
+ * 실사용 제보. videoId는 애초에 이 next 버튼의 href에서 뽑은 값이라(refreshNextUp),
+ * 버튼이 아직 살아 있으면 그 버튼을 실제로 클릭하는 것이 곧 "그 영상으로 이동"이다
+ * (onPlaylistSelect가 재생목록 행의 실제 링크를 클릭하는 것과 같은 원칙 — 유튜브 자신의
+ * 클릭 핸들러가 SPA 내비게이션을 처리하므로 새로고침 없이 넘어간다).
+ *
+ * 5초 스로틀 창 사이 버튼이 사라졌거나 가리키는 영상이 바뀌었을 수 있다 — videoId를
+ * 알면 카드가 보여준 그 영상으로 직접 이동해 "보여준 것과 다른 곳으로 간다"를 막는다
+ * (표준 전체 내비게이션 — 유튜브 내부 SPA 라우터 구현에 기대지 않는 확실한 폴백).
+ */
+function handleNextUpClick(videoId?: string): void {
+  if (playNext()) return;
+  if (videoId) location.assign(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`);
+}
+
+/**
  * 재생목록 부착 패널 모듈(설정 modPlaylist) — 유튜브 재생목록 패널 DOM(lib/yt-player.ts)에서
  * 항목을 읽어 채운다. 60초 간격이면 충분하다(운영자 지시 — 5fps 감사 규약처럼 고빈도
  * 타이머를 새로 만들지 않는다) + 영상 전환 지점(beginFollowing)에서 1회.
@@ -2805,6 +2839,34 @@ const PLAYLIST_REFRESH_MS = 60000;
  *  (재조회 사이 목록이 바뀌면 병합 대상이 어긋날 수 있어, 응답이 낡았으면 seq로 버린다) */
 let lastPlaylistItems: { title: string; channel?: string; videoId?: string; index: number; current: boolean; syncExists?: boolean }[] = [];
 let playlistExistsSeq = 0;
+/** refreshPlaylist가 통과할 때마다 증가 — 아래 빈손 재시도가 그 사이 성공한 최신
+ *  스크랩 결과를 뒤늦게 덮지 못하게 하는 펜스(모든 refreshPlaylist 호출 경로 공유) */
+let playlistRefreshSeq = 0;
+/** URL이 재생목록(list=)인데 스크랩이 빈 손일 때 재시도할 지연(ms) — 백오프 */
+const PLAYLIST_EMPTY_RETRY_DELAYS_MS = [500, 1000, 2000, 4000];
+
+/** 지금 주소가 재생목록 컨텍스트(list= 파라미터)인가 — 스크랩이 빈 손이어도 이 경우엔
+ *  "재생목록 없음"을 바로 확정하지 않는다(아래 refreshPlaylist 참고) */
+function isPlaylistUrl(): boolean {
+  try {
+    return new URL(location.href).searchParams.has('list');
+  } catch {
+    return false;
+  }
+}
+
+function applyPlaylistEntries(entries: PlaylistEntry[]): void {
+  lastPlaylistItems = entries.map(e => ({
+    title: e.title,
+    channel: e.byline || undefined,
+    videoId: e.videoId ?? undefined,
+    index: e.index,
+    current: e.selected,
+  }));
+  overlay?.setPlaylist(lastPlaylistItems);
+  const ids = [...new Set(lastPlaylistItems.map(it => it.videoId).filter((v): v is string => Boolean(v)))];
+  if (ids.length > 0) void refreshPlaylistExists(ids);
+}
 
 function refreshPlaylist(force = false): void {
   if (!settings.modPlaylist) {
@@ -2817,17 +2879,27 @@ function refreshPlaylist(force = false): void {
   const now = Date.now();
   if (!force && now - lastPlaylistPush < PLAYLIST_REFRESH_MS) return;
   lastPlaylistPush = now;
+  const seq = ++playlistRefreshSeq;
   const entries = getPlaylist();
-  lastPlaylistItems = entries.map(e => ({
-    title: e.title,
-    channel: e.byline || undefined,
-    videoId: e.videoId ?? undefined,
-    index: e.index,
-    current: e.selected,
-  }));
-  overlay?.setPlaylist(lastPlaylistItems);
-  const ids = [...new Set(lastPlaylistItems.map(it => it.videoId).filter((v): v is string => Boolean(v)))];
-  if (ids.length > 0) void refreshPlaylistExists(ids);
+  if (entries.length > 0 || !isPlaylistUrl()) {
+    applyPlaylistEntries(entries);
+    return;
+  }
+  // URL은 재생목록(list=)인데 스크랩은 빈 손이다 — SPA 내비 직후 유튜브 재생목록 패널
+  // DOM이 아직 안 붙었을 수 있다(실측: 재생목록 링크로 들어와도 "재생목록에 속하지
+  // 않아요"가 뜨는 멤버십 오탐). 빈 결과를 바로 확정 짓지 않고 백오프로 재시도한다 —
+  // 재시도 중엔 화면을 안 건드려(이전 상태 유지) 오탐 문구가 잠깐이라도 뜨지 않게
+  // 한다. 마지막 재시도까지 실패해야만 빈 목록으로 정착한다.
+  PLAYLIST_EMPTY_RETRY_DELAYS_MS.forEach((delay, i) => {
+    window.setTimeout(() => {
+      // 그 사이 다른 refreshPlaylist 호출(성공이든 또 다른 빈손이든)이 있었으면 이
+      // 재시도는 낡았다 — 지금 상태를 덮지 않고 조용히 버린다
+      if (seq !== playlistRefreshSeq || !settings.modPlaylist) return;
+      const retried = getPlaylist();
+      const isLast = i === PLAYLIST_EMPTY_RETRY_DELAYS_MS.length - 1;
+      if (retried.length > 0 || isLast) applyPlaylistEntries(retried);
+    }, delay);
+  });
 }
 
 /** 재생목록 항목들의 서버 싱크 존재 여부를 배치로 물어 배지만 병합한다 */
@@ -3652,13 +3724,35 @@ async function pollJobs(): Promise<void> {
       job.progress = status.progress ?? job.progress;
       job.stage = status.stage ?? undefined;
       job.stageProgress = status.stage_progress ?? undefined;
+      // 깊이 비교를 ETA 계산보다 먼저 한다 — 아래 클램프가 "깊이가 바뀌었는가"를
+      // 신호로 써야 한다(depthChanged). 깊이가 도중에 heavy로 바뀌는 것은 **서버가
+      // 판단을 바꿨다**는 사건이다(라우팅이 얕게 잡았다가 결과가 나빠 다시 깊게 간다).
+      // 시간이 갑자기 늘어나는 이유를 말해 주지 않으면 멈춘 것처럼 보인다 — 승격
+      // 순간에 한 번만 알린다.
+      const prevDepth = job.depth;
+      job.depth = knownDepth(status.depth) ?? job.depth;
+      const depthChanged = prevDepth !== undefined && job.depth !== undefined && job.depth !== prevDepth;
+      if (job.depth === 'heavy' && prevDepth !== undefined && prevDepth !== 'heavy'
+        && !job.heavyNoticed && videoId === currentVideoId) {
+        job.heavyNoticed = true;
+        showNotice(t('content.genChip.depthUpgraded'), 12000);
+      }
       // ETA는 표시값을 단조 감소로 눌러 둔다 — 서버 추정이 폴마다 흔들리면(24→28→22)
-      // 숫자가 오르내려 표시를 못 믿게 된다. 30초 넘게 뛰는 증가만 진짜 재추정(heavy
-      // 전환 등)으로 받아들이고, 소폭 증가는 로컬 카운트다운(effectiveEtaSec)을 유지한다.
+      // 숫자가 오르내려 표시를 못 믿게 된다. 30초 넘게 뛰는 증가는 진짜 재추정으로 받아
+      // 들이고, 소폭 증가는 로컬 카운트다운(effectiveEtaSec)을 유지한다 — 단, **깊이가
+      // 실제로 바뀐 폴은 증가폭과 무관하게 무조건 새 값을 그대로 받는다**(운영자 요구:
+      // "정확한 남은 초수를 다시 보이게"). 30초 문턱만 보면 fast의 잔여 추정이 우연히
+      // heavy 중앙값에 가까워 증가폭이 30초 이내인 경우(예: fast 45s → heavy 60s)
+      // 깊이가 바뀌었는데도 클램프가 낡은 fast 기반 카운트다운을 계속 감쇠시켜 버린다 —
+      // 서버가 depth 전환 순간 이미 새 깊이 중앙값 기준 eta_sec을 보내주므로(worker.py
+      // 계약), 그 값을 믿지 않을 이유가 없다.
       const nextEta = status.eta_sec ?? undefined;
       if (nextEta == null) {
         job.etaSec = undefined;
         job.etaSyncedAt = undefined;
+      } else if (depthChanged) {
+        job.etaSec = nextEta;
+        job.etaSyncedAt = Date.now();
       } else {
         const eff = effectiveEtaSec(job);
         job.etaSec = eff != null && nextEta > eff && nextEta - eff <= 30 ? eff : nextEta;
@@ -3667,16 +3761,6 @@ async function pollJobs(): Promise<void> {
       job.etaOverrun = status.eta_overrun ?? false;
       job.queueEtaSec = status.queue_eta_sec ?? undefined;
       job.queuePosition = status.queue_position ?? undefined;
-      // 깊이가 도중에 heavy로 바뀌는 것은 **서버가 판단을 바꿨다**는 사건이다(라우팅이
-      // 얕게 잡았다가 결과가 나빠 다시 깊게 간다). 시간이 갑자기 늘어나는 이유를 말해
-      // 주지 않으면 멈춘 것처럼 보인다 — 승격 순간에 한 번만 알린다.
-      const prevDepth = job.depth;
-      job.depth = knownDepth(status.depth) ?? job.depth;
-      if (job.depth === 'heavy' && prevDepth !== undefined && prevDepth !== 'heavy'
-        && !job.heavyNoticed && videoId === currentVideoId) {
-        job.heavyNoticed = true;
-        showNotice(t('content.genChip.depthUpgraded'), 12000);
-      }
       job.queueLabel = status.queue_position != null && status.queue_position > 0
         ? t('content.queue.position', [String(status.queue_position)])
         : (status.status === 'queued' || status.status === 'pending' ? t('content.queue.label') : undefined);

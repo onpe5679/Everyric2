@@ -748,8 +748,19 @@
       }
     }
   },
+  "overlay_warn_textNeutral": {
+    "message": "Transcription complete (alignment confidence $P1$)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
   "overlay_warn_title": {
     "message": "The average alignment confidence for transcription/pronunciation is low. Check that the original lyrics are correct, or try resetting the sync."
+  },
+  "overlay_warn_titleNeutral": {
+    "message": "The fast analysis pass already passed its own confidence check. A low number here can still be normal for a hard song."
   },
   "overlay_warn_close": {
     "message": "Dismiss this warning (you can also turn it off in settings)"
@@ -762,6 +773,9 @@
   },
   "overlay_warn_detail": {
     "message": "Check whether the original lyrics are accurate, or try increasing the analysis depth."
+  },
+  "overlay_warn_detailNeutral": {
+    "message": "This song was saved by the fast analysis router, which already confirmed its quality. The raw confidence number can look low even for normal, hard-to-align songs — treat it as informational. If something still looks off, try increasing the analysis depth."
   },
   "overlay_warn_dismissSong": {
     "message": "Don't show for this song"
@@ -818,6 +832,9 @@
   },
   "overlay_settings_pronScript_kana": {
     "message": "Kana"
+  },
+  "overlay_settings_pronScript_ipa": {
+    "message": "IPA (phonetic)"
   },
   "overlay_settings_sourcePriority_vocaro": {
     "message": "Vocaloid Lyrics Wiki first"
@@ -1080,17 +1097,11 @@
   "overlay_settings_row_captionBgOpacity": {
     "message": "Caption background opacity"
   },
-  "overlay_settings_row_modNextUp": {
-    "message": "[Module] Next video info"
-  },
-  "overlay_settings_row_modNextUpTitle": {
-    "message": "Shows the upcoming video's title in the panel and PiP (playlist and autoplay)"
-  },
   "overlay_settings_row_modPlaylist": {
     "message": "[Module] Playlist panel"
   },
   "overlay_settings_row_modPlaylistTitle": {
-    "message": "Attaches the full YouTube playlist next to the lyrics panel — previous/next navigation, click to jump, and a server-sync badge per item. Turning this on hides the next-video card below"
+    "message": "Attaches the full YouTube playlist next to the lyrics panel — previous/next navigation, click to jump, and a server-sync badge per item. On videos without a playlist, shows a next-video card instead"
   },
   "overlay_settings_row_modMainLane": {
     "message": "[Module] Karaoke lane"
@@ -1118,9 +1129,6 @@
   },
   "overlay_quick_caption": {
     "message": "Toggle video captions"
-  },
-  "overlay_quick_nextUp": {
-    "message": "Toggle next-video info"
   },
   "overlay_quick_playlist": {
     "message": "Toggle playlist panel"
