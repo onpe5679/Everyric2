@@ -45,6 +45,43 @@ _LEASES: dict[str, tuple[str, float]] = {}
 # (GET /jobs/{job_id}/audio)에서만 서빙하고, 잡 터미널 지점에서 삭제한다 (저작권 규약).
 _WORKER_AUDIO: dict[str, str] = {}
 
+
+def sweep_orphan_worker_audio() -> int:
+    """기동 시 워커 전달용 오디오 잔재를 지운다 — 지운 파일 수를 반환.
+
+    이 레지스트리는 인메모리라, 재시작하면 dict만 사라지고 **파일은 남는다**. 그 파일을
+    지울 주체가 영영 없어져 "터미널 지점에서 삭제"라는 저작권 규약이 조용히 깨진다(엣지
+    감사 5.1). 기동 시점에는 정의상 in-flight 잡이 없으므로(레지스트리가 비어 있다) 이
+    패턴의 파일은 전부 이전 생의 잔재다.
+
+    media_cache가 쓰는 두 패턴만 지운다 — `{video_id}-{job_id[:8]}.m4a`(워커 전달분)와
+    `linkcache-{tag}-{video_id}.m4a`(링크 판정분). temp_dir의 다른 파일은 다른 주인이
+    있으므로 건드리지 않는다. 실패는 삼킨다(기동을 막을 이유가 없다)."""
+    import logging
+    import re
+
+    from everyric2.config.settings import get_settings
+
+    removed = 0
+    try:
+        temp_dir = get_settings().audio.temp_dir
+        if not temp_dir.exists():
+            return 0
+        worker_pat = re.compile(r"^[A-Za-z0-9_-]{1,64}-[0-9a-f]{8}\.m4a$")
+        for path in temp_dir.iterdir():
+            if not path.is_file():
+                continue
+            if not (worker_pat.match(path.name) or path.name.startswith("linkcache-")):
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    except Exception:
+        logging.getLogger(__name__).warning("worker audio sweep failed", exc_info=True)
+    return removed
+
 # claim의 select→마킹을 직렬화 — 여러 워커가 동시에 폴링하면 같은 잡을 두 번 물 수 있다.
 # 단일 프로세스 서버라 프로세스 내 락으로 충분하다 (sync.py의 _CREATE_LOCK과 같은 이유).
 _CLAIM_LOCK = asyncio.Lock()
@@ -78,11 +115,13 @@ def _require_lease(lease_key: str, worker_id: str | None) -> None:
 def _pop_stashes(job_id: str) -> None:
     """잡별 인메모리 스태시(발음/번역 메타·출처·강제·대기 예고) 정리 — 완료/실패/취소 시 (멱등)."""
     from everyric2.server.worker import (
+        _JOB_PROCESSING_START,
         _PENDING_ATTRIBUTION,
         _PENDING_FORCE,
         _PENDING_LINE_META,
         _PENDING_LINE_META_LANG,
         _PENDING_META_WAIT,
+        _PENDING_MIN_DEPTH,
         _PENDING_TITLE,
     )
 
@@ -91,8 +130,15 @@ def _pop_stashes(job_id: str) -> None:
     _PENDING_ATTRIBUTION.pop(job_id, None)
     _PENDING_TITLE.pop(job_id, None)
     _PENDING_FORCE.discard(job_id)
+    # 깊이 하한도 claim이 peek로 실어 보낸다(재클레임 대비) — 터미널 지점에서만 비운다
+    _PENDING_MIN_DEPTH.pop(job_id, None)
     # 대기 예고는 claim이 peek로 실어 보내므로(재클레임 대비) 터미널 지점에서만 비운다
     _PENDING_META_WAIT.discard(job_id)
+    # 처리 시작 스탬프 — submit_result는 JobMetric 기록에 pop_processing_duration으로 이미
+    # 소비했을 수 있다(dict.pop 기본값이라 중복은 무해). fail/cache-check-완결/과길이 거절
+    # 경로는 duration을 안 재므로 여기서만 비운다 — 안 그러면 재클레임되지 않는 종결 잡의
+    # 스탬프가 프로세스 수명 동안 계속 남는다.
+    _JOB_PROCESSING_START.pop(job_id, None)
 
 
 def _peek_line_meta(job_id: str) -> list[dict[str, Any]] | None:
@@ -283,6 +329,9 @@ class WorkerJob(BaseModel):
     # 정렬 진입 직전에 상한을 둔 대기를 한 번 넣는다(하트비트 응답으로 받는다). line_meta가
     # 이미 실려 있으면 코어가 대기를 만들지 않으므로 함께 와도 무해하다.
     await_line_meta: bool = False
+    # 분석 깊이 하한("medium"|"heavy") — 확장의 "분석 깊이 올리기" 버튼. 새 스택이 라우팅
+    # 판정을 건너뛰고 이 깊이에서 시작한다(_PENDING_MIN_DEPTH 스태시의 원격 전달로).
+    min_depth: str | None = None
 
 
 class WorkerLinkJob(BaseModel):
@@ -333,6 +382,9 @@ class CacheCheckResponse(BaseModel):
 class ResultRequest(BaseModel):
     timestamps: list[dict[str, Any]]
     language: str | None = None
+    # MMS 강제 폴백 등 엔진 변형 식별자 — 결함 #5, PipelineResult.engine_variant를 그대로 싣는다.
+    # 구버전 원격 워커는 이 필드를 안 보내므로 기본값 None(엔진 변형 정보 없음, 기존 동작).
+    engine_variant: str | None = None
     quality_score: float | None = None
     audio_hash: str | None = None
     extra: dict[str, Any] | None = None
@@ -346,6 +398,15 @@ class LinkResultRequest(BaseModel):
 
 class FailRequest(BaseModel):
     error: str
+    # sync 잡(/jobs/{id}/fail) 전용 — jobs.failure_kind (MoRef 감사 #3). 원격 워커(cli.py)가
+    # classify_job_failure로 계산해 실어 보낸다. "cancelled"는 이 경로로 오지 않는다(취소는
+    # cancel API가 서버 쪽에서 이미 확정한다 — report_progress의 cancel_requested 참고).
+    # 구버전 워커는 이 필드를 안 보내므로 기본값 None(미분류)으로 남는다.
+    failure_kind: str | None = None
+    # link-jobs(/link-jobs/{id}/fail) 전용 — True면 오류가 아니라 무다운로드 원칙에 따른
+    # 정책적 종결(cache_miss_no_download 등, MoRef 감사 #4). sync 잡 쪽은 이 필드를 읽지
+    # 않는다(항상 기본값 False로 무해하게 무시됨).
+    declined: bool = False
 
 
 class AcceptResponse(BaseModel):
@@ -380,6 +441,7 @@ async def claim_job(request: ClaimRequest, x_worker_key: str | None = Header(def
         _PENDING_ATTRIBUTION,
         _PENDING_FORCE,
         _PENDING_META_WAIT,
+        _PENDING_MIN_DEPTH,
     )
 
     max_audio_sec = get_settings().server.max_job_audio_sec
@@ -396,6 +458,13 @@ async def claim_job(request: ClaimRequest, x_worker_key: str | None = Header(def
             job = await repo.get_oldest_queued()
             if job:
                 await repo.update_status(job.id, "processing", progress=0, stage="워커 할당")
+                # 처리 시작 스탬프 — JobMetric.duration_sec/ETA 재료(worker.stash_processing_
+                # start 독스트링 참고). 재클레임(만료 리스 회수 후 다른/같은 워커가 다시 물어도)
+                # 이 시각을 최신 시도 기준으로 덮어써 정직하다 — 이전 시도의 소요는 완주하지
+                # 못했으므로 duration에 섞이면 안 된다.
+                from everyric2.server.worker import stash_processing_start
+
+                stash_processing_start(job.id)
                 sync_payload = WorkerJob(
                     job_id=job.id,
                     video_id=job.video_id,
@@ -404,6 +473,9 @@ async def claim_job(request: ClaimRequest, x_worker_key: str | None = Header(def
                     line_meta=_peek_line_meta(job.id),
                     attribution=_PENDING_ATTRIBUTION.get(job.id),
                     force=job.id in _PENDING_FORCE,
+                    # peek(제거하지 않음) — line_meta와 같은 이유로 재클레임 시 다시 전달.
+                    # 소거는 result 수신부가 다른 스태시와 함께 한다.
+                    min_depth=_PENDING_MIN_DEPTH.get(job.id),
                     max_audio_sec=max_audio_sec,
                     await_line_meta=(
                         job.id in _PENDING_META_WAIT and request.supports_line_meta_heartbeat
@@ -577,6 +649,7 @@ async def submit_result(
             layer_origin,
             peek_attribution,
             peek_title,
+            pop_processing_duration,
             record_translation_layer,
             resolve_layer_lang,
             translation_layer_lines,
@@ -609,6 +682,7 @@ async def submit_result(
             timestamps=request.timestamps,
             language=request.language,
             engine="ctc",
+            engine_variant=request.engine_variant,
             quality_score=request.quality_score,
             audio_hash=request.audio_hash,
             extra=request.extra,
@@ -618,6 +692,17 @@ async def submit_result(
         await job_repo.update_status(
             job_id, "completed", progress=100, result_id=sync_result.id
         )
+
+        # ETA 재료 기록 — 인프로세스 성공 경로(worker._process_job_inner)와 같은 규약.
+        # 프로덕션은 이 원격 워커 경로가 주 경로라 여기 없으면 JobMetric이 사실상 안 쌓인다.
+        duration = pop_processing_duration(job_id)
+        if duration is not None:
+            depth = ((request.extra or {}).get("debug") or {}).get("routing", {}).get("route")
+            from everyric2.server.db.repository import JobMetricRepository
+
+            await JobMetricRepository(session).record(
+                job_id=job_id, video_id=job.video_id, depth=depth, duration_sec=duration
+            )
     _LEASES.pop(job_id, None)
     _cleanup_worker_audio(job_id)
     _pop_stashes(job_id)
@@ -644,7 +729,9 @@ async def submit_fail(
         if not job:
             raise HTTPException(status_code=404, detail="잡을 찾을 수 없어요")
         if job.status == "processing":
-            await job_repo.update_status(job_id, "failed", error=request.error)
+            await job_repo.update_status(
+                job_id, "failed", error=request.error, failure_kind=request.failure_kind
+            )
     _LEASES.pop(job_id, None)
     _cleanup_worker_audio(job_id)
     _pop_stashes(job_id)
@@ -702,7 +789,8 @@ async def submit_link_fail(
     x_worker_key: str | None = Header(default=None),
     x_worker_id: str | None = Header(default=None),
 ):
-    """링크 잡 실패 보고 → status=failed. processing일 때만 반영(뒤늦은/중복 실패 무시)."""
+    """링크 잡 실패/거절 보고 → status=failed(오류) 또는 declined(request.declined=True,
+    무다운로드 정책 종결 — MoRef 감사 #4). processing일 때만 반영(뒤늦은/중복 보고 무시)."""
     _require_worker_key(x_worker_key)
     lease_key = f"link:{link_job_id}"
     _require_lease(lease_key, x_worker_id)
@@ -713,6 +801,9 @@ async def submit_link_fail(
         if not link_job:
             raise HTTPException(status_code=404, detail="링크 잡을 찾을 수 없어요")
         if link_job.status == "processing":
-            await repo.mark_failed(link_job_id, request.error)
+            if request.declined:
+                await repo.mark_declined(link_job_id, request.error)
+            else:
+                await repo.mark_failed(link_job_id, request.error)
     _LEASES.pop(lease_key, None)
     return AcceptResponse(accepted=True)

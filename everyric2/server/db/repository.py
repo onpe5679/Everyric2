@@ -3,15 +3,20 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import Row, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from everyric2.server.db.models import (
+    ENGINE_VERSION,
     ActionLog,
     Job,
+    JobMetric,
     LinkJob,
+    Notice,
     SyncLink,
     SyncResult,
+    SyncResultVersion,
+    SyncView,
     TranslationLayer,
     VideoOffset,
 )
@@ -118,6 +123,18 @@ class SyncRepository:
         )
         return list(result.scalars().all())
 
+    async def get_existing_video_ids(self, video_ids: list[str]) -> set[str]:
+        """요청받은 video_id 중 자기 싱크(sync_results 행)가 있는 것만 — POST
+        /api/sync/exists 배치 조회 전용. video_id 열만 select한다(timestamps JSON
+        블롭은 절대 읽지 않는다 — 존재 유무만 필요한 요청 하나가 곡 전체를 실어 나르면
+        안 된다)."""
+        if not video_ids:
+            return set()
+        result = await self.session.execute(
+            select(SyncResult.video_id).where(SyncResult.video_id.in_(video_ids)).distinct()
+        )
+        return set(result.scalars().all())
+
     async def get_all_unique_videos(self, limit: int = 50) -> list[SyncResult]:
         """Get one sync result per unique video_id, ordered by most recent."""
         from sqlalchemy import func
@@ -142,11 +159,17 @@ class SyncRepository:
         )
         return list(result.scalars().all())
 
-    async def list_titled(self, limit: int = 500) -> list[SyncResult]:
+    async def list_titled(self, limit: int = 500) -> list[Row[tuple[str, str | None, str | None]]]:
         """title이 채워진 싱크를 영상별 1건(최신)으로 — 링크 후보 전수 스캔용.
 
         created_at이 초 단위 문자열이라 같은 초에 만들어진 동일 영상 행이 둘 다 걸릴 수
-        있어 파이썬에서 한 번 더 dedupe한다."""
+        있어 파이썬에서 한 번 더 dedupe한다.
+
+        호출부(server/api/sync.py의 find_link_candidates)는 video_id/title/artist 세
+        속성만 쓴다 — ORM 엔티티 전체(특히 대형 JSON `timestamps` 컬럼)를 끌어와 매 요청
+        수백MB를 역직렬화하며 이벤트루프를 통째로 블로킹하던 문제(실측 5~7초)가 있어
+        필요한 세 컬럼만 select한다. 다중 컬럼 select라 `.scalars()`를 걸면 0번째 컬럼만
+        남으므로 반드시 `.all()`을 그대로 쓴다 — Row는 속성 접근이 되어 호출부는 그대로다."""
         subquery = (
             select(SyncResult.video_id, func.max(SyncResult.created_at).label("max_created"))
             .where(SyncResult.title.is_not(None))
@@ -154,7 +177,7 @@ class SyncRepository:
             .subquery()
         )
         result = await self.session.execute(
-            select(SyncResult)
+            select(SyncResult.video_id, SyncResult.title, SyncResult.artist)
             .join(
                 subquery,
                 (SyncResult.video_id == subquery.c.video_id)
@@ -165,8 +188,8 @@ class SyncRepository:
             .limit(limit * 2)
         )
         seen: set[str] = set()
-        rows: list[SyncResult] = []
-        for row in result.scalars().all():
+        rows: list[Row[tuple[str, str | None, str | None]]] = []
+        for row in result.all():
             if row.video_id in seen:
                 continue
             seen.add(row.video_id)
@@ -192,7 +215,32 @@ class SyncRepository:
 
     async def delete_by_video(self, video_id: str) -> int:
         """이 영상의 모든 싱크 삭제(초기화) — 잘못 붙여넣은 가사 등에서 완전히 새로 시작.
-        삭제된 행 수를 반환."""
+        삭제된 행 수를 반환한다(반환값은 sync_results 삭제 건수만 — 아래 스냅샷 삭제는
+        포함하지 않는다. reset_video_syncs의 removed_syncs 응답 계약을 그대로 유지한다).
+
+        같은 트랜잭션에서 sync_result_versions의 스냅샷도 함께 지운다 — 스냅샷은
+        "재처리가 덮어쓴 직전 버전"을 보여주는 재료인데, 사용자가 초기화로 sync_results를
+        통째로 지운 뒤에도 그 스냅샷이 남으면 GET /api/sync/{video_id}/previous가
+        사용자가 지우라고 한 옛 내용을 계속 돌려준다(재생성 후에도 create()는 지워진
+        video_id에 "기존 행 없음=최초 생성"으로 보아 새 스냅샷을 안 만드므로, 고아
+        스냅샷은 재처리로도 자연 정리되지 않고 영구 잔류한다). 이 삭제는 video_id 하나의
+        PK 행 하나만 건드리므로(SyncResultVersion.video_id가 PK) 전체 스캔이 아니다.
+
+        번역 레이어와 사용자 오프셋도 같은 논리로 함께 지운다(엣지 감사 4.1, 실측: 로컬
+        DB에 싱크 없는 고아 레이어 1건). 레이어 키가 (video_id, **지문**, lang)이라,
+        초기화 뒤 같은 가사로 다시 만들면 지문이 그대로 맞아 **지우라고 한 옛 번역이
+        되살아난다** — 오염된 번역이 저장된 경우 초기화로 복구할 수 없는 상태가 된다.
+        오프셋도 지워진 싱크의 타이밍에 맞춘 값이라 새 싱크에 적용하면 어긋난다.
+
+        피드백·잡·행위 로그는 **남긴다** — 운영자에게 간 제보와 쿼터 계산의 재료라
+        사용자 콘텐츠가 아니고, 지우면 초기화가 일일 한도 우회 수단이 된다."""
+        await self.session.execute(
+            delete(SyncResultVersion).where(SyncResultVersion.video_id == video_id)
+        )
+        await self.session.execute(
+            delete(TranslationLayer).where(TranslationLayer.video_id == video_id)
+        )
+        await self.session.execute(delete(VideoOffset).where(VideoOffset.video_id == video_id))
         result = await self.session.execute(
             delete(SyncResult).where(SyncResult.video_id == video_id)
         )
@@ -205,20 +253,34 @@ class SyncRepository:
         timestamps: list[dict[str, Any]],
         language: str | None = None,
         engine: str = "ctc",
+        engine_variant: str | None = None,
+        # 새로 만드는 싱크는 전부 현행 스택 식별자를 새긴다(결함 #5 부수 작업) — 호출부가
+        # 일일이 넘기지 않아도 되게 기본값을 ENGINE_VERSION으로 둔다. 옛 스택 흔적을 남기고
+        # 싶은 백필/마이그레이션 스크립트만 명시적으로 None을 넘기면 된다.
+        engine_version: str | None = ENGINE_VERSION,
         quality_score: float | None = None,
         audio_hash: str | None = None,
         extra: dict[str, Any] | None = None,
         title: str | None = None,
         artist: str | None = None,
     ) -> SyncResult:
+        payload = {"segments": timestamps, **(extra or {})}
+        # 이 video_id의 기존 최신 행이 있으면(=이 새 행이 조회 우선순위에서 그 행을
+        # 가리게 되면) 새로 넣기 **직전**에 스냅샷한다 — 모든 저장 경로(인프로세스
+        # worker._process_job_inner, 원격 워커 api/worker.submit_result, 캐시 재사용의
+        # 교차 영상 복사 _complete_from_cache_db)가 이 메서드 하나로 수렴하므로 여기가
+        # "덮어쓰기" 지점의 유일한 문이다. SyncResultVersion.__doc__ 참고.
+        await self._snapshot_previous_version(video_id, payload)
         sync_result = SyncResult(
             video_id=video_id,
             lyrics_hash=lyrics_hash,
             audio_hash=audio_hash,
             # extra: segments 밖의 곡 단위 부가정보 (예: {"debug": {...}})
-            timestamps={"segments": timestamps, **(extra or {})},
+            timestamps=payload,
             language=language,
             engine=engine,
+            engine_variant=engine_variant,
+            engine_version=engine_version,
             quality_score=quality_score,
             title=(title.strip()[:256] if title else None),
             artist=(artist.strip()[:128] if artist else None),
@@ -226,6 +288,79 @@ class SyncRepository:
         self.session.add(sync_result)
         await self.session.flush()
         return sync_result
+
+    async def _snapshot_previous_version(
+        self, video_id: str, new_payload: dict[str, Any]
+    ) -> None:
+        """새 행이 가리게 될 이 video_id의 기존 최신 행을 sync_result_versions로 옮긴다.
+
+        기존 행이 없으면(최초 생성) 아무것도 하지 않는다 — 비교할 "직전"이 없다.
+
+        기존 행의 timestamps가 새 payload와 **완전히 같으면**(캐시 재사용의 교차 영상
+        복사가 다른 video_id의 동일 내용을 그대로 옮겨 담는 경우 등) 스냅샷도 만들지
+        않는다 — 실질적으로 아무것도 안 바뀐 "교체"를 버전으로 남기면 고스트 A/B 비교가
+        내용이 같은 두 스냅샷을 나란히 보여주는 무의미한 diff가 된다. 이미 이 조회
+        하나로 두 값을 다 들고 있으므로 비교 비용은 이 video_id 한 건에 한정된다(전체
+        스캔이나 다른 행의 하이드레이션은 없다).
+        """
+        result = await self.session.execute(
+            select(SyncResult)
+            .where(SyncResult.video_id == video_id)
+            .order_by(SyncResult.created_at.desc())
+            .limit(1)
+        )
+        previous = result.scalars().first()
+        if previous is None or previous.timestamps == new_payload:
+            return
+        await SyncResultVersionRepository(self.session).snapshot(previous)
+
+
+class SyncResultVersionRepository:
+    """직전 버전 스냅샷 CRUD — video_id가 PK라 video_id당 최신 1건만 존재한다.
+
+    SyncLinkRepository.upsert·VideoOffsetRepository.upsert와 같은 관례(조회 후 있으면
+    필드 교체, 없으면 새로 삽입 후 flush)를 따른다 — DELETE 후 INSERT가 아니라 같은
+    PK 행을 UPDATE하는 편이 "video_id당 최신 1건" 불변식을 SQLite 레벨(PK 유일성)에서
+    그대로 보장하면서 왕복도 하나 더 줄인다.
+    """
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get(self, video_id: str) -> SyncResultVersion | None:
+        result = await self.session.execute(
+            select(SyncResultVersion).where(SyncResultVersion.video_id == video_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def snapshot(self, previous: SyncResult) -> None:
+        """덮어써지기 직전의 sync_results 행 하나를 스냅샷한다 (video_id당 최신 1건,
+        기존 스냅샷이 있으면 이번 것으로 교체 — replaced_at은 onupdate로 자동 갱신)."""
+        existing = await self.get(previous.video_id)
+        if existing:
+            existing.lyrics_hash = previous.lyrics_hash
+            existing.timestamps = previous.timestamps
+            existing.language = previous.language
+            existing.engine = previous.engine
+            existing.engine_variant = previous.engine_variant
+            existing.engine_version = previous.engine_version
+            existing.quality_score = previous.quality_score
+            existing.created_at = previous.created_at
+        else:
+            self.session.add(
+                SyncResultVersion(
+                    video_id=previous.video_id,
+                    lyrics_hash=previous.lyrics_hash,
+                    timestamps=previous.timestamps,
+                    language=previous.language,
+                    engine=previous.engine,
+                    engine_variant=previous.engine_variant,
+                    engine_version=previous.engine_version,
+                    quality_score=previous.quality_score,
+                    created_at=previous.created_at,
+                )
+            )
+        await self.session.flush()
 
 
 class JobRepository:
@@ -248,6 +383,18 @@ class JobRepository:
             select(Job).where(Job.status == "queued").order_by(Job.created_at).limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def get_stale_processing(self, cutoff: datetime) -> list[Job]:
+        """updated_at이 cutoff보다 오래된 processing 잡 — 고아 잡 TTL 리퍼(orphan_reaper)가
+        회수 대상을 고르는 데 쓴다.
+
+        기준은 created_at(시작 시각)이 아니라 updated_at(마지막 진행 갱신)이다 — 정상 진행
+        중인 긴 잡은 2~4초 간격으로 진행률을 보고해(worker._tick_progress/_stage_monitor)
+        updated_at이 계속 갱신되므로, 오래 걸리는 정상 잡을 실수로 회수하지 않는다."""
+        result = await self.session.execute(
+            select(Job).where(Job.status == "processing", Job.updated_at < cutoff)
+        )
+        return list(result.scalars().all())
 
     async def get_active_by_video(self, video_id: str, lyrics_hash: str) -> Job | None:
         """같은 영상·같은 가사로 이미 진행 중(pending/processing)인 잡 — 중복 생성 차단용.
@@ -312,7 +459,11 @@ class JobRepository:
         result_id: str | None = None,
         error: str | None = None,
         stage: str | None = None,
+        failure_kind: str | None = None,
     ) -> None:
+        """failure_kind는 status="failed" 쓰기 지점만 넘긴다 — "cancelled"/"external"/"system".
+        분류가 애매한 실패(과길이 등 정책 거절)는 넘기지 않아 컬럼이 NULL로 남는다(억지
+        분류 금지, MoRef 감사 #3). 완료·진행 갱신 등 나머지 호출부는 그대로 생략한다."""
         values: dict[str, Any] = {"status": status}
         if progress is not None:
             values["progress"] = progress
@@ -322,6 +473,8 @@ class JobRepository:
             values["error"] = error
         if stage is not None:
             values["stage"] = stage
+        if failure_kind is not None:
+            values["failure_kind"] = failure_kind
 
         await self.session.execute(update(Job).where(Job.id == job_id).values(**values))
 
@@ -405,6 +558,21 @@ class ActionLogRepository:
         )
         return int(result.scalar_one())
 
+    async def oldest_recent(self, action: str, video_id: str, hours: int = 24) -> datetime | None:
+        """count_recent와 같은 창(hours) 안에서 가장 오래된 기록의 created_at — 그 기록이
+        창 밖으로 나가는 시각(+hours)이 이 (action, video_id) 카운트가 다음으로 줄어드는
+        진짜 순간이다(GET /api/limits의 next_reset_at 산출용). 창 안에 기록이 없으면
+        None — count_recent가 0을 주는 경우와 정확히 짝을 이룬다."""
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+        result = await self.session.execute(
+            select(func.min(ActionLog.created_at)).where(
+                ActionLog.action == action,
+                ActionLog.video_id == video_id,
+                ActionLog.created_at >= since,
+            )
+        )
+        return result.scalar_one_or_none()
+
 
 class SyncLinkRepository:
     """싱크 링크 CRUD (video_id 고유 → PK 기반 upsert)."""
@@ -417,6 +585,17 @@ class SyncLinkRepository:
             select(SyncLink).where(SyncLink.video_id == video_id)
         )
         return result.scalar_one_or_none()
+
+    async def get_existing_video_ids(self, video_ids: list[str]) -> set[str]:
+        """요청받은 video_id 중 링크(다른 영상의 싱크를 빌려 쓰는 행)가 있는 것만 — POST
+        /api/sync/exists 배치 조회 전용. `get_sync`가 자기 싱크 없는 영상에도 링크
+        폴백을 내주므로(GET /api/sync/{video_id} 참고) 링크만 있는 영상도 존재로 친다."""
+        if not video_ids:
+            return set()
+        result = await self.session.execute(
+            select(SyncLink.video_id).where(SyncLink.video_id.in_(video_ids))
+        )
+        return set(result.scalars().all())
 
     async def delete_involving(self, video_id: str) -> int:
         """이 영상이 소유자이거나 소스인 링크 전부 삭제 — 싱크 초기화 시 정합성 유지
@@ -616,12 +795,16 @@ class LinkJobRepository:
     async def get_recent_attempt(
         self, video_id: str, source_video_id: str, days: int
     ) -> LinkJob | None:
-        """최근 N일 안에 끝난(done/failed) 같은 쌍의 잡 — 자동 재제출 쿨다운용.
+        """최근 N일 안에 끝난(done/failed/declined) 같은 쌍의 잡 — 자동 재제출 쿨다운용.
 
         get_active_pair는 진행 중(queued/processing) 중복만 막는다. 그래서 완료·실패한
         쌍은 사용자가 그 영상을 열 때마다 다시 제출돼 GPU를 반복해 태울 수 있다 (온디맨드
         자동 제출 경로가 생기며 실제 남용 경로가 됐다). 이력이 있으면 그 잡을 돌려준다.
-        days<=0이면 쿨다운 비활성으로 보고 항상 None."""
+        days<=0이면 쿨다운 비활성으로 보고 항상 None.
+
+        declined(무다운로드 정책 종결 — MoRef 감사 #4)도 "끝난 잡"이라 여기 포함한다: 빼면
+        캐시 미스로 거절된 쌍이 그 영상을 열 때마다 매번 새 링크 잡을 만들어 워커 claim
+        왕복만 반복하게 된다(다운로드가 없어 GPU 비용은 없지만 같은 남용 경로다)."""
         if days <= 0:
             return None
         since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
@@ -630,7 +813,7 @@ class LinkJobRepository:
             .where(
                 LinkJob.video_id == video_id,
                 LinkJob.source_video_id == source_video_id,
-                LinkJob.status.in_(["done", "failed"]),
+                LinkJob.status.in_(["done", "failed", "declined"]),
                 LinkJob.created_at >= since,
             )
             .order_by(LinkJob.created_at.desc())
@@ -671,3 +854,103 @@ class LinkJobRepository:
         await self.session.execute(
             update(LinkJob).where(LinkJob.id == link_job_id).values(status="failed", error=error)
         )
+
+    async def mark_declined(self, link_job_id: str, error: str) -> None:
+        """무다운로드 원칙에 따른 정책적 종결(예: cache_miss_no_download) — 오류가 아니므로
+        failed와 갈라 기록한다 (MoRef 감사 #4). error 자유텍스트는 그대로 보존한다."""
+        await self.session.execute(
+            update(LinkJob)
+            .where(LinkJob.id == link_job_id)
+            .values(status="declined", error=error)
+        )
+
+
+class NoticeRepository:
+    """운영 공지 CRUD — 목록은 활성분만, 생성·비활성화는 어드민 전용(api/notices.py가 키를 검사)."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def list_active(self, limit: int = 20) -> list[Notice]:
+        """활성(active=True) + 아직 안 끝난(ends_at NULL 또는 미래) 공지, 최신순."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = await self.session.execute(
+            select(Notice)
+            .where(Notice.active.is_(True), or_(Notice.ends_at.is_(None), Notice.ends_at > now))
+            .order_by(Notice.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id(self, notice_id: int) -> Notice | None:
+        result = await self.session.execute(select(Notice).where(Notice.id == notice_id))
+        return result.scalar_one_or_none()
+
+    async def create(
+        self, title: str, body: str, level: str, ends_at: datetime | None = None
+    ) -> Notice:
+        notice = Notice(title=title, body=body, level=level, ends_at=ends_at)
+        self.session.add(notice)
+        await self.session.flush()
+        return notice
+
+    async def deactivate(self, notice_id: int) -> bool:
+        notice = await self.get_by_id(notice_id)
+        if notice is None:
+            return False
+        notice.active = False
+        await self.session.flush()
+        return True
+
+
+class SyncViewRepository:
+    """영상별 조회수 카운터 — video_id가 PK라 upsert(있으면 +1, 없으면 1로 생성)."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def increment(self, video_id: str) -> None:
+        result = await self.session.execute(select(SyncView).where(SyncView.video_id == video_id))
+        row = result.scalar_one_or_none()
+        if row:
+            row.views += 1
+        else:
+            self.session.add(SyncView(video_id=video_id, views=1))
+        await self.session.flush()
+
+    async def get_many(self, video_ids: list[str]) -> dict[str, int]:
+        """요청받은 video_id 중 실제로 조회수가 있는 것만 dict로 — 없는 건 응답 조립부가 0으로
+        채운다(SyncView 행이 아예 없는 영상은 여기 안 잡힌다)."""
+        if not video_ids:
+            return {}
+        result = await self.session.execute(
+            select(SyncView.video_id, SyncView.views).where(SyncView.video_id.in_(video_ids))
+        )
+        return {row.video_id: row.views for row in result.all()}
+
+
+class JobMetricRepository:
+    """완료된 잡의 처리 시간·깊이 이력 — ETA 산출(GET /api/job/{id})의 유일한 재료.
+
+    실패한 잡은 여기 안 온다(호출부가 성공 경로에서만 record를 부른다) — 완주 못 한
+    소요 시간을 섞으면 ETA가 낙관적으로 왜곡된다(models.JobMetric 독스트링 참고)."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def record(
+        self, job_id: str, video_id: str, depth: str | None, duration_sec: float
+    ) -> None:
+        self.session.add(
+            JobMetric(job_id=job_id, video_id=video_id, depth=depth, duration_sec=duration_sec)
+        )
+        await self.session.flush()
+
+    async def recent_durations(self, depth: str | None, limit: int = 20) -> list[float]:
+        """최근 limit건의 duration_sec — depth를 주면 그 깊이만(라우팅이 결정한 깊이별
+        ETA), None이면 전체(깊이 미상·큐 대기열 ETA의 all-depth 폴백)."""
+        stmt = select(JobMetric.duration_sec).order_by(JobMetric.created_at.desc()).limit(limit)
+        if depth is not None:
+            stmt = stmt.where(JobMetric.depth == depth)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

@@ -190,6 +190,11 @@ export function titleScripts(text: string): Set<string> {
  *    b. 여러 개면 곡 제목의 문자 체계로 추정해 일치하는 트랙을 쓴다.
  *    c. 그래도 못 정하면 **포기한다.** 여러 언어 중 아무거나 고르면 번역 자막을
  *       원문 가사인 양 띄우게 되고, 그건 자막을 아예 안 띄우는 것보다 나쁘다.
+ * 5. **asr 트랙 자체는 절대 반환하지 않는다**(운영자 지시, 2026-08-03). asr은 원어
+ *    추정의 **힌트로만** 쓴다(규칙 1~3). 노래의 ASR 전사는 오인식이 그대로 남아
+ *    (「縋って」→「すがって おち読も」 실측), 그걸 가사창에 띄우면 사용자가 확장의
+ *    싱크 품질이 나쁜 것으로 오해한다 — 자막 없음으로 처리하는 편이 낫다. 예전엔
+ *    수동 후보가 전무하면 asr을 표시용으로 반환했다(생성만 막고).
  */
 export function selectLyricTrack(tracks: YtCaptionTrack[], title = ''): YtCaptionTrack | null {
   const manual = tracks.filter(t => !t.auto);
@@ -228,7 +233,7 @@ export function selectLyricTrack(tracks: YtCaptionTrack[], title = ''): YtCaptio
     ) {
       return manual[0];
     }
-    return asr;
+    return null; // 규칙 5 — asr 자체는 표시로도 반환하지 않는다
   }
   if (manual.length === 1) return manual[0];
   if (manual.length === 0) return null;

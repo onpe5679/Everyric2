@@ -52,6 +52,9 @@ dependencies = [
     "pykakasi>=2.3.0",
     "fugashi>=1.5.2",
     "unidic-lite>=1.0.8",
+    # 중국어 곡 표기(everyric2.text.zh_reading)용 한자→병음 읽기. 다음자(长江/长大)를
+    # 구 사전으로 가르는 부분만 맡고 표기 관례는 저장소가 정한다. 순수 파이썬이다.
+    "pypinyin>=0.53.0",
 ]
 
 [project.optional-dependencies]
@@ -65,6 +68,36 @@ dev = [
 ]
 separator = [
     "demucs>=4.0.0",
+    # bs-polarformer-fp16 백엔드(everyric2/audio/polarformer_separator.py) 전용 — 벤치가
+    # 실측 검증한 정확 버전(benchmark/.venv-sep, 2026-08-04 확인)에 핀 고정한다. 이
+    # 패키지의 RoformerLoader/ModelLoadingResult/MDXCSeparator를 몽키패치로 가로채는
+    # 코드라 마이너 버전 사이의 내부 계약 변경에도 깨질 수 있다 — MSST 벤더 소스를 커밋
+    # 해시로 고정한 것과 같은 이유(폴라포머 모듈 docstring의 _MSST_COMMIT 참고)로 여기도
+    # 하한이 아니라 정확히 고정한다.
+    "audio-separator==0.44.1",
+    # audio_separator.separator 패키지의 __init__.py가 무조건 separator.py를 import하고
+    # 그 파일이 모듈 최상단에서 onnxruntime을 요구한다(separator.py:24, mdx_separator.py:7).
+    # polarformer_separator.py는 MDXCSeparator만 쓰고 RoformerLoader.load_model을 통째로
+    # 몽키패치해 실제 추론에서는 ONNX 경로를 절대 안 타지만, 그 임포트 체인 자체가
+    # onnxruntime 없이는 import 시점에 즉시 실패한다(실곡 검증 2026-08-04, 코디네이터
+    # 확인 — "No module named 'audio_separator'"의 배경). audio-separator 자체가 선언한
+    # extra(cpu/gpu/dml)를 거치지 않고 직접 얹는다 — CPU 전용 onnxruntime으로 충분하다:
+    # 이 코드 경로에서 onnxruntime은 실제로 추론에 한 번도 안 쓰이므로(모듈 임포트를
+    # 만족시키는 용도뿐) GPU 빌드가 torch의 CUDA 런타임(cu128)과 얽힐 위험을 감수할
+    # 이유가 없다 — 벤치도 CPU 빌드(1.28.0)로 검증했다(uv pip install --dry-run으로 메인
+    # .venv 대상 해석 확인, 2026-08-04: 기존 torch/numpy/scipy/transformers 어느 것도
+    # 재설치·강등 없이 16개 신규 패키지만 추가된다).
+    "onnxruntime>=1.17",
+    # MSST 벤더 소스(models/bs_roformer/bs_roformer.py, 위 audio-separator 항목 참고)가
+    # PoPE(극좌표 위치 임베딩, arXiv 2509.10534) 사용 여부를 `try: from PoPE_pytorch import
+    # PoPE, flash_attn_with_pope` 조건부 import로 갈라 `_HAS_POPE` 플래그로 기억해 둔다 —
+    # 실제 forward 시점(use_pope=True 모델 생성)에 그 플래그가 False면 AssertionError로
+    # 죽는다(실곡 검증 2026-08-04: "PoPE requested but PoPE_pytorch is not installed").
+    # audio-separator 자신의 선언된 의존성엔 없다 — 벤치 실측 버전(benchmark/.venv-sep)에
+    # 정확히 고정한다(같은 재현성 근거, audio-separator 항목 참고). PoPE_pytorch 자체의
+    # 전이 의존성(einx·torch-einops-utils)은 별도로 선언하지 않는다 — 일반적인 하한
+    # 표기라 resolver가 알아서 끌어온다(2026-08-04 dry-run 확인, 충돌 없음).
+    "PoPE-pytorch==0.2.1",
 ]
 bench = [
     # scripts/align_bench.py — MIREX 표준 정렬 지표(AAE/PCO/지각 지표)를 재구현하지

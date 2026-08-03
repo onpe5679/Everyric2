@@ -14,12 +14,21 @@
    (근거는 worker._acquire_audio 독스트링의 실측).
 ⑤ 교차 영상 캐시 복사 로그가 정작 복사가 없는 분기에 붙어 있던 것.
 ⑥ m4a 경로에서 과길이 검사가 통째로 생략되던 것 (libsndfile이 m4a를 못 읽는다).
+⑦ 정렬이 극단으로 붕괴(quality_score<0.001)했는데 가사 원문의 문자 계열이 곡 language와
+   모순되는데도(예: language=ja인데 가사가 독일어) 그대로 저장·서빙되던 것(F6,
+   2026-08-04 감사, Atvsg_zogxo 실측). AND 조건(붕괴 + 모순)이 둘 다 있어야만 막는다 —
+   신호 없이 품질만 낮은 곡은 절대 막지 않는다.
+⑧ 캐시 미스 → 정렬 진입 경계(run_pipeline)가 라우팅(fast/medium/heavy) 판정 전에
+   "보컬 분리"를 무조건 냈던 것 — fast 잡(분리 없음)에서도 사용자가 분리 중이라는
+   거짓 단계를 봤다(실사용 제보, 2026-08-04). 진입 시점의 실제 작업과 맞는 "전사 정렬"로
+   교체했다.
 """
 
 import contextlib
 import logging
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -222,12 +231,17 @@ def _run_alignment_with_unaligned_engine(
 
     settings = get_settings()
     saved_melody = settings.melody.enabled
+    # 이 헬퍼는 레거시 CTC 엔진을 직접 대역(_UnalignedEngine)한다(위 get_shared_ctc_engine
+    # 대역) — 새 스택(기본값 owsm/omniasr)은 이 경로가 없으므로 레거시로 강제 고정한다.
+    saved_engine = settings.alignment.engine
     object.__setattr__(settings.melody, "enabled", False)
+    object.__setattr__(settings.alignment, "engine", "ctc")
     try:
         lyrics = "\n".join(f"揺らめく光の中で{i}" for i in range(lines))
         return worker_mod._run_alignment(str(audio_file), lyrics, "ja")
     finally:
         object.__setattr__(settings.melody, "enabled", saved_melody)
+        object.__setattr__(settings.alignment, "engine", saved_engine)
 
 
 # ── ② 나중 빈 line_meta가 앞의 진짜 메타를 지우지 않는다 ─────────────
@@ -419,6 +433,76 @@ class TestDownloadErrorClassification:
         assert "다시 시도" in str(err)
         assert "Forbidden" not in str(err)  # 영문 원문은 로그용(cause_text)으로만 남는다
         assert err.cause_text == "HTTP Error 403: Forbidden"
+
+
+class TestJobFailureClassification:
+    """jobs.failure_kind 분류 (MoRef 감사 #3) — status="failed" 하나로 사용자 취소·다운로드의
+    외부 요인·진짜 시스템 오류가 뭉뚱그려지던 결함의 수정. classify_job_failure는 취소를
+    다루지 않는다(그 경로는 cancel API·_consume_cancel이 별도로 "cancelled"를 못 박는다)."""
+
+    def test_downloader_classified_failure_is_external(self):
+        """downloader.py가 이미 분류한 실패(로그인요구 등)는 우리 시스템 바깥 요인이다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("Sign in to confirm you're not a bot"),
+            "https://y/watch?v=abc",
+            "Download failed",
+        )
+        assert classify_job_failure(err) == "external"
+
+    def test_video_unavailable_is_external(self):
+        """VideoUnavailableError도 DownloadError 계열이라 external이다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("Video unavailable"), "https://y/watch?v=abc", "Download failed"
+        )
+        assert classify_job_failure(err) == "external"
+
+    def test_dependency_error_is_system_not_external(self):
+        """ffmpeg 미설치는 DownloadError 계열이 아니지만, 다운로드 예외 계층에 있다고 해서
+        외부 요인은 아니다 — 우리 서버 구성 문제이므로 system."""
+        from everyric2.audio.downloader import DependencyError
+        from everyric2.server.worker import classify_job_failure
+
+        assert classify_job_failure(DependencyError("ffmpeg 미설치")) == "system"
+
+    def test_js_runtime_code_is_system_despite_download_error_type(self):
+        """js_runtime도 downloader.py 자신이 (d) "서버 구성 문제"로 분류한 케이스다 — 형은
+        DownloadError지만 login_required 등과 달리 우리 쪽 결함이라 system으로 남긴다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("No supported JavaScript runtime could be found"),
+            "https://y/watch?v=abc",
+            "Download failed",
+        )
+        assert err.code == "js_runtime"
+        assert classify_job_failure(err) == "system"
+
+    def test_unclassified_download_error_is_none_not_forced(self):
+        """downloader가 패턴을 못 찾아 code="unknown"으로 영문 원문만 노출한 실패는 외부
+        요인인지 우리 쪽 결함인지 판단할 근거가 없다 — 억지로 external/system에 넣지 않는다."""
+        from everyric2.audio.downloader import _classified_error
+        from everyric2.server.worker import classify_job_failure
+
+        err = _classified_error(
+            RuntimeError("some brand new failure mode nobody has seen"),
+            "https://y/watch?v=abc",
+            "Download failed",
+        )
+        assert err.code == "unknown"
+        assert classify_job_failure(err) is None
+
+    def test_non_download_exception_is_system(self):
+        """CTC/demucs 크래시 등 downloader와 무관한 예외는 전부 진짜 시스템 오류다."""
+        from everyric2.server.worker import classify_job_failure
+
+        assert classify_job_failure(RuntimeError("CUDA out of memory")) == "system"
 
 
 # ── 다운로드 egress 순회 ────────────────────────────────────────────
@@ -817,6 +901,173 @@ class TestEgressRotation:
         assert tried == order[:2]
 
 
+# ── opus 우선 다운로드: 산출물 발견 + 디코드 구제 ──────────────────────
+#
+# 전곡을 wav로 트랜스코드해 곡당 수십 MB가 캐시에 쌓이던 것을 opus 우선 스트림카피로
+# 바꿨다(운영자 요청: 전곡 wav 보존 용량 과다). 소스 코덱에 따라 산출물 확장자가
+# opus/m4a/webm으로 갈리므로 wav 하나만 찾던 예전 글롭은 못 찾는다 — 이 자리를
+# _locate_downloaded_file(requested_downloads 우선 → 예상 경로 → 확장자 글롭)과
+# _ensure_decodable(디코드 프로브 실패 시에만 로컬 wav 구제)로 대체했다.
+
+
+def _fake_yt_dlp_module(monkeypatch, info: dict):
+    """`import yt_dlp`가 이 가짜 모듈을 받도록 sys.modules에 심는다.
+
+    _download_once는 함수 안에서 지역 import를 쓰므로(``import yt_dlp``), 실제 네트워크
+    없이 그 경로를 통째로 돌리려면 모듈 자체를 바꿔치기해야 한다.
+    """
+    import sys
+    import types
+
+    fake = types.ModuleType("yt_dlp")
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            return info
+
+    fake.YoutubeDL = _FakeYDL
+    utils_ns = types.SimpleNamespace()
+    utils_ns.DownloadError = type("FakeYtDlpDownloadError", (Exception,), {})
+    utils_ns.sanitize_filename = lambda s: s
+    fake.utils = utils_ns
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake)
+    return fake
+
+
+class TestDownloadedFileDiscovery:
+    def test_requested_downloads_filepath_is_used_when_present(self, monkeypatch, tmp_path):
+        """최신 yt-dlp가 후처리 후 최종 경로를 실어 주면 그 값을 그대로 믿는다."""
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        produced = tmp_path / "제목과-다른-실제파일.opus"
+        produced.write_bytes(b"opus-bytes")
+        _fake_yt_dlp_module(
+            monkeypatch,
+            {
+                "title": "My Song",
+                "duration": 12.0,
+                "requested_downloads": [{"filepath": str(produced)}],
+            },
+        )
+
+        result = dl._download_once(
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa", tmp_path, None, None
+        )
+        assert result.audio_path == produced
+        assert result.title == "My Song"
+
+    def test_glob_discovery_finds_opus_when_no_requested_downloads(self, monkeypatch, tmp_path):
+        """구버전 yt-dlp(또는 필드 누락)는 확장자 제한 글롭으로 내려간다 — wav 전용이 아니다."""
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        # 예상 경로("My Song.opus")는 없고, 제목 접두사로 시작하는 실제 산출물만 있다 —
+        # 글롭이 찾아야 한다.
+        actual = tmp_path / "My Song [id123].opus"
+        actual.write_bytes(b"opus-bytes")
+        _fake_yt_dlp_module(monkeypatch, {"title": "My Song", "duration": 5.0})
+
+        result = dl._download_once(
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa", tmp_path, None, None
+        )
+        assert result.audio_path == actual
+
+    def test_explicit_filename_glob_never_grabs_another_jobs_file(self, monkeypatch, tmp_path):
+        """기존 불변식: filename이 있으면 글롭도 그 접두사로 좁힌다."""
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        mine = tmp_path / "job-abc [x].m4a"
+        mine.write_bytes(b"m4a-bytes")
+        other = tmp_path / "job-xyz [y].m4a"
+        other.write_bytes(b"m4a-bytes-other")
+        _fake_yt_dlp_module(monkeypatch, {"title": "irrelevant", "duration": 3.0})
+
+        result = dl._download_once(
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa", tmp_path, "job-abc", None
+        )
+        assert result.audio_path == mine
+
+
+class TestDecodabilityFallback:
+    """스트림카피 산출물이 아주 드물게 안 열리는 경우를 로컬 트랜스코드로만 구제한다
+    (유튜브 재접촉 없음)."""
+
+    def test_decodable_file_is_kept_as_is(self, monkeypatch, tmp_path):
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        src = tmp_path / "a.opus"
+        src.write_bytes(b"opus-bytes")
+        assert dl._ensure_decodable(src) == src
+        assert src.exists()  # 손대지 않는다
+
+    def test_probe_failure_transcodes_locally_and_removes_original(self, monkeypatch, tmp_path):
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: False)
+
+        src = tmp_path / "broken.opus"
+        src.write_bytes(b"not-really-opus")
+
+        calls = []
+
+        def fake_run(cmd, check, capture_output):
+            calls.append(cmd)
+            # 실제 ffmpeg 대신 wav 출력만 흉내낸다
+            out_path = Path(cmd[-1])
+            out_path.write_bytes(b"RIFF....WAVEfmt ")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(dl_mod.subprocess, "run", fake_run)
+
+        result = dl._ensure_decodable(src)
+        assert result == src.with_suffix(".wav")
+        assert result.exists()
+        assert not src.exists()  # 디코드 안 되는 원본은 지운다
+        assert calls and calls[0][0] == "ffmpeg"
+        assert "-i" in calls[0] and str(src) in calls[0]
+        # 유튜브를 다시 접촉하지 않는다 — yt_dlp를 아예 안 불렀다는 것이 이 테스트의 전제
+
+    def test_transcode_failure_still_cleans_up_original_and_raises(self, monkeypatch, tmp_path):
+        from everyric2.audio import downloader as dl_mod
+        from everyric2.audio.downloader import DownloadError
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: False)
+
+        src = tmp_path / "broken.opus"
+        src.write_bytes(b"not-really-opus")
+
+        def fake_run(cmd, check, capture_output):
+            raise subprocess.CalledProcessError(1, cmd)
+
+        monkeypatch.setattr(dl_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(DownloadError):
+            dl._ensure_decodable(src)
+        assert not src.exists()  # 실패해도 디코드 안 되는 원본을 남기지 않는다
+
+
 # ── ④ audio_hash 계약 고정 ──────────────────────────────────────────
 
 
@@ -978,3 +1229,229 @@ class TestDurationProbeCoversM4a:
             asyncio.run(worker_mod.run_pipeline(job, _Hooks()))
         assert "너무 길어요" in str(e.value)
         assert not path.exists()  # 거부하면서 오디오도 정리한다
+
+
+# ── ⑦ F6(2026-08-04 감사, 운영자 재지시로 보강): 정렬 붕괴 + 언어 불일치는 저장 전에
+# 실패 처리 ─────────────────────────────────────────────────────────────
+#
+# 실측 사고 2건 — 잘못된 언어의 가사(일본어 번역 자막·독일어 자막)로 생성된 싱크가
+# quality_score 완전 붕괴(0.00023/0.00032)로도 그대로 저장·서빙됐다(Atvsg_zogxo류).
+# **품질만으로는 어떤 임계로도 못 가른다** — 로컬 DB 61행 실측에서 정상-어려운 곡
+# (きゅうくらりん 0.00007·D/N/A 0.00026·熱異常 0.00079/0.00203·About Me 0.00140)이
+# 사고 곡(0.00023/0.00032)과 완전히 겹친다(きゅうくらりん은 사고 곡보다도 더 낮다).
+# 그래서 실패 결정권은 언어 불일치 신호에만 있고, quality_score<0.001은 그 신호가
+# 있을 때만 발동을 허가하는 프리필터일 뿐이다(AND, 신호 없이 품질만 낮은 곡은 절대
+# 막지 않는다 — 과잉 차단 금지). 언어 신호 자체도 "우세"가 아니라 **극단 부재**만
+# 본다(language=ja인데 가나 0자 등) — 가나·한글이 소량이라도 있는 혼합곡은 절대
+# 발화하면 안 된다(worker._language_script_mismatch 문서 참고).
+
+
+class TestLanguageMismatchQualityGate:
+    """run_pipeline 레벨에서 직접 검증 — _acquire_audio·_run_alignment만 목으로 갈아끼우고
+    (⑥ m4a 절과 같은 전략) 그 사이 코어(F6 게이트 포함)는 실제 코드가 돈다."""
+
+    # Atvsg_zogxo 실측 재현: language=ja인데 가사 원문이 독일어(라틴, 가나 0자).
+    MISMATCHED_LYRICS = "Das ist die deutsche Übersetzung ohne jedes japanische Schriftzeichen"
+    # 문자 계열이 실제로 ja와 일치하는 정상 가사(가나 포함).
+    MATCHING_JA_LYRICS = "これは日本語の歌詞です"
+    # 혼합곡 — 영어 비중이 압도적으로 높지만 한글이 "조금" 있다(2단어). 운영자 재지시의
+    # 핵심 회귀 대상: 언어 신호는 "우세"가 아니라 "부재"만 봐야 하므로, 이런 곡은 붕괴
+    # 품질이어도 **절대** 실패 처리되면 안 된다.
+    MOSTLY_ENGLISH_MIXED_KO_LYRICS = (
+        "Baby you and I, running through the night, chasing every light, "
+        "never gonna stop this feeling deep inside 사랑해 forever and ever 그대"
+    )
+
+    @staticmethod
+    def _hooks():
+        class _Hooks:
+            async def report(self, progress, stage):
+                pass
+
+            async def progress(self, progress, stage):
+                return True
+
+            async def cache_check(self, audio_hash, audio_path):
+                return False
+
+        return _Hooks()
+
+    @staticmethod
+    def _fake_alignment(audio_file, quality_score, language):
+        def fake(
+            audio_path, lyrics, lang, line_meta=None, on_stage=None, resolver=None,
+            video_id=None, min_depth=None, on_depth=None,
+        ):
+            try:
+                return {
+                    "timestamps": [{"text": lyrics.splitlines()[0], "start": 0.0, "end": 1.0}],
+                    "language": language,
+                    "quality_score": quality_score,
+                    "debug": {"alignment_text": "original"},
+                    "alignment_text": "original",
+                    "tempo": None,
+                    "key": None,
+                }
+            finally:
+                audio_file.unlink(missing_ok=True)  # 실제 _run_alignment의 finally와 같은 계약
+
+        return fake
+
+    def _run(self, tmp_path, monkeypatch, *, quality_score, language, lyrics):
+        import asyncio
+
+        from everyric2.server import worker as worker_mod
+
+        audio_file = tmp_path / "audio.wav"
+        audio_file.write_bytes(b"fake-audio")
+        monkeypatch.setattr(
+            worker_mod,
+            "_acquire_audio",
+            lambda job: {"audio_path": str(audio_file), "audio_hash": "deadbeef"},
+        )
+        monkeypatch.setattr(
+            worker_mod, "_run_alignment", self._fake_alignment(audio_file, quality_score, language)
+        )
+        job = worker_mod.JobInput(job_id="job-langmismatch", video_id=VID_A, lyrics=lyrics)
+        return worker_mod, asyncio.run(worker_mod.run_pipeline(job, self._hooks()))
+
+    def test_collapsed_quality_with_script_mismatch_fails_instead_of_saving(
+        self, tmp_path, monkeypatch
+    ):
+        """(1) 붕괴(오채택 사고 실측값 0.00023) + 가나 0자(스크립트 모순) → 실패 처리,
+        저장(PipelineResult 반환) 없음."""
+        from everyric2.server import worker as worker_mod
+
+        with pytest.raises(worker_mod.PipelineError) as e:
+            self._run(
+                tmp_path, monkeypatch,
+                quality_score=0.00023, language="ja", lyrics=self.MISMATCHED_LYRICS,
+            )
+        # (4) 실패 메시지·failure_kind
+        assert "가사 언어가 오디오와 다르게 들려요" in str(e.value)
+        assert e.value.failure_kind == "language_mismatch"
+
+    def test_collapsed_quality_with_matching_language_still_saves(self, tmp_path, monkeypatch):
+        """(2) 붕괴(熱異常 실측값 0.00079)지만 언어 정합(가나 있음) → 기존대로 저장(반환)."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.00079, language="ja", lyrics=self.MATCHING_JA_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+        assert result.quality_score == pytest.approx(0.00079)
+
+    def test_another_collapsed_but_matching_quality_still_saves(self, tmp_path, monkeypatch):
+        """About Me 실측값(0.00140) — 정상-어려운 곡이 오채택 사고 곡(0.00023/0.00032)보다
+        높아도(둘 다 하한 미만) 언어가 정합하면 저장된다. 품질 크기 자체는 이 게이트의
+        판단 근거가 아니라는 것을 다른 실측값으로 한 번 더 못박는다."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.00140, language="ja", lyrics=self.MATCHING_JA_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+        assert result.quality_score == pytest.approx(0.00140)
+
+    def test_collapsed_mixed_song_with_only_a_little_hangul_is_never_blocked(
+        self, tmp_path, monkeypatch
+    ):
+        """운영자 재지시 핵심 회귀 — 영어 비중이 압도적인 혼합곡(한글이 조금이라도
+        있음)은 붕괴 품질이어도 절대 막으면 안 된다. 언어 신호는 "우세"가 아니라
+        "부재"만 봐야 한다는 것의 직접 증거(youtube_captions.body_language의 5% CJK
+        비중 게이트를 그대로 썼다면 이 테스트가 실패했을 것 — 그 게이트는 F2용이지
+        F6용이 아니다)."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.00023, language="ko", lyrics=self.MOSTLY_ENGLISH_MIXED_KO_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+
+    def test_normal_quality_with_script_mismatch_still_saves(self, tmp_path, monkeypatch):
+        """(3) 정상 품질 + 스크립트 모순(가나 0자) → 저장(반환) — 품질 하한 미달이
+        아니면 이 게이트는 절대 개입하지 않는다(과잉 차단 금지)."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.9, language="ja", lyrics=self.MISMATCHED_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+        assert result.quality_score == pytest.approx(0.9)
+
+    def test_collapsed_quality_with_non_cjk_language_is_never_blocked(self, tmp_path, monkeypatch):
+        """language가 en 등(문자 존재 여부로 못 가르는 언어)이면 붕괴돼도 이 게이트는
+        절대 개입하지 않는다 — 신호 없이 품질만 낮은 곡은 막지 않는다는 원칙의 직접
+        증거(きゅうくらりん 0.00007류 — 사고 곡보다 더 낮은 정상곡이 실존한다)."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.00007, language="en", lyrics="genuinely difficult audio, low conf",
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+
+
+# ── ⑧ 캐시 미스 → 정렬 진입 경계가 라우팅 전에 "보컬 분리"를 내던 것(실사용 제보,
+# 2026-08-04: "전사 버튼 누르면 보컬 분리 뜬 다음에 fast 전사중이 떠") ─────────────
+
+
+class TestEntryStageBeforeRoutingIsTruthful:
+    """run_pipeline이 캐시 미스 뒤 정렬 스레드를 띄우기 **전에** 자체적으로 보고하는
+    진입 단계명 — 이 시점엔 아직 라우팅(fast/medium/heavy)이 안 끝나 분리가 실제로
+    일어날지조차 모른다(fast는 아예 안 한다). 실제로 하지 않을 수도 있는 "보컬 분리"를
+    낼 수 없고, 이 시점의 실제 작업(오디오 로드·CTC 웜업·정렬 준비)과 맞는 "전사 정렬"
+    이어야 한다(운영자 지시, 2026-08-04)."""
+
+    def test_entry_progress_reports_transcribe_align_not_separation(self, tmp_path, monkeypatch):
+        import asyncio
+
+        from everyric2.server import worker as worker_mod
+
+        audio_file = tmp_path / "audio.wav"
+        audio_file.write_bytes(b"fake-audio")
+        monkeypatch.setattr(
+            worker_mod,
+            "_acquire_audio",
+            lambda job: {"audio_path": str(audio_file), "audio_hash": "deadbeef"},
+        )
+
+        def fake_fast_alignment(
+            audio_path, lyrics, lang, line_meta=None, on_stage=None, resolver=None,
+            video_id=None, min_depth=None, on_depth=None,
+        ):
+            # fast 라우팅 흉내 — 분리 없이 곧장 실제 정렬(전사 정렬)만 보고한다.
+            if on_stage is not None:
+                on_stage("전사 정렬")
+            try:
+                return {
+                    "timestamps": [{"text": lyrics.splitlines()[0], "start": 0.0, "end": 1.0}],
+                    "language": "ko",
+                    "quality_score": 0.9,
+                    "debug": {"alignment_text": "original"},
+                    "alignment_text": "original",
+                    "tempo": None,
+                    "key": None,
+                }
+            finally:
+                Path(audio_path).unlink(missing_ok=True)
+
+        monkeypatch.setattr(worker_mod, "_run_alignment", fake_fast_alignment)
+
+        seen: list[tuple[int, str]] = []
+
+        class _Hooks:
+            async def report(self, progress, stage):
+                seen.append((progress, stage))
+
+            async def progress(self, progress, stage):
+                seen.append((progress, stage))
+                return True
+
+            async def cache_check(self, audio_hash, audio_path):
+                return False
+
+        job = worker_mod.JobInput(job_id="job-entry-stage", video_id=VID_A, lyrics="라인1")
+        result = asyncio.run(worker_mod.run_pipeline(job, _Hooks()))
+        assert isinstance(result, worker_mod.PipelineResult)
+
+        # 캐시 확인(35%) 직후, 정렬 스레드가 뜨기 전 run_pipeline 자신이 낸 36% 진입
+        # 보고 — fast 잡(분리 없음)에서 이 라벨이 "보컬 분리"면 안 된다.
+        entry_calls = [stage for progress, stage in seen if progress == 36]
+        assert entry_calls, f"36% 진입 경계 보고가 없다: {seen}"
+        assert entry_calls[0] == "전사 정렬"
+        assert "보컬 분리" not in [stage for _, stage in seen]

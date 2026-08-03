@@ -137,8 +137,18 @@ export class SyncEngine {
     cancelAnimationFrame(this.rafId);
     const loop = (): void => {
       if (!this.running || document.hidden) return;
-      this.tick();
+      // 다음 프레임을 먼저 예약한 뒤 tick()을 부른다 (pip.ts의 startFrameLoop와 같은 순서).
+      // tick()은 onLineChange/onTick 핸들러를 통해 overlay·pip의 DOM 렌더 코드를 부르므로,
+      // 그쪽에서 예외가 나면 예약을 tick() 뒤에 뒀을 때 이 루프가 그 프레임에서 영구히
+      // 끊긴다 — running은 true로 남고 video도 그대로라 watchVideoBinding의 재바인딩
+      // 조건(video !== engine.getVideo())도 걸리지 않아 같은 영상에서는 새로고침 전까지
+      // 아무도 다시 살리지 못한다. 예약을 먼저 해 두면 예외가 나도 다음 프레임에서 이어진다.
       this.rafId = requestAnimationFrame(loop);
+      try {
+        this.tick();
+      } catch (error) {
+        console.error('[everyric] sync-engine tick 예외 — 이번 프레임만 건너뛰고 루프는 계속 돈다', error);
+      }
     };
     this.rafId = requestAnimationFrame(loop);
   }

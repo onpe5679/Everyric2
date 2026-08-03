@@ -105,6 +105,163 @@ def test_empty_original_lines_are_dropped():
     assert [ln.text for ln in lines] == ["いち"]
 
 
+# ── 다중 버전 페이지 (원곡/리믹스가 한 페이지에) ────────────────────
+
+# /monitoring 실측 구조: h1 "가사" 아래 h2 버전 헤딩("오리지널"/"Best Friend Remix")이
+# 각 표 앞에 붙는다. 힌트 없으면(구버전 확장) 첫 표 = 기존 동작.
+_MULTI_VERSION_HTML = (
+    "<h1>가사</h1>"
+    "<h2>오리지널</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>げんきょく</td></tr><tr><td>genkyoku</td></tr><tr><td>원곡</td></tr>"
+    "</tbody></table>"
+    "<h2>Best Friend Remix</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>りみっくす</td></tr><tr><td>rimikkusu</td></tr><tr><td>리믹스</td></tr>"
+    "</tbody></table>"
+)
+
+
+def test_variant_hint_picks_the_matching_version_table():
+    """리믹스 영상 제목을 힌트로 주면 리믹스 표를 고른다 (실측: /monitoring 오리지널 오집)."""
+    _title, lines = vocaro.parse_song_page(
+        _MULTI_VERSION_HTML, "DECO*27 - モニタリング (Best Friend Remix) feat. 初音ミク"
+    )
+
+    assert [ln.text for ln in lines] == ["りみっくす"]
+    assert lines[0].translation == "리믹스"
+
+
+def test_no_hint_keeps_first_table_for_old_callers():
+    _title, lines = vocaro.parse_song_page(_MULTI_VERSION_HTML)
+
+    assert [ln.text for ln in lines] == ["げんきょく"]
+
+
+def test_unmatched_hint_falls_back_to_first_table():
+    """어느 버전 헤딩도 힌트에 없으면 첫 표 — 오리지널 영상 제목이 바로 이 경우다."""
+    _title, lines = vocaro.parse_song_page(
+        _MULTI_VERSION_HTML, "DECO*27 - モニタリング feat. 初音ミク"
+    )
+
+    assert [ln.text for ln in lines] == ["げんきょく"]
+
+
+# ── 언어 간 버전 동의어 (긴/짧은 버전 ↔ long/short ver) ─────────────
+
+# 실측(2026-08-04, qXkkhP0d_iM «秋の未確認生物(long ver) / 音街ウナ» →
+# /cryptid-of-autumn): 위키 헤딩은 한국어("짧은 버전"/"긴 버전")인데 유튜브 제목의
+# 버전 표기는 영어("long ver")뿐이라 순수 부분열 포함으로는 절대 못 만난다.
+_LONG_SHORT_VERSION_HTML = (
+    "<h1>가사</h1>"
+    "<h2>짧은 버전</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>みじかい</td></tr><tr><td>mijikai</td></tr><tr><td>짧다</td></tr>"
+    "</tbody></table>"
+    "<h2>긴 버전</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>ながい</td></tr><tr><td>nagai</td></tr><tr><td>길다</td></tr>"
+    "</tbody></table>"
+)
+
+
+def test_variant_hint_matches_cross_language_long_version():
+    """영어 "(long ver)" 힌트가 한국어 "긴 버전" 헤딩 표를 고른다 (실사용 사고 재현)."""
+    _title, lines = vocaro.parse_song_page(
+        _LONG_SHORT_VERSION_HTML, "秋の未確認生物(long ver) / 音街ウナ"
+    )
+
+    assert [ln.text for ln in lines] == ["ながい"]
+
+
+def test_variant_hint_matches_cross_language_short_version():
+    """대칭: 영어 "(short ver)" 힌트는 한국어 "짧은 버전" 헤딩 표를 고른다."""
+    _title, lines = vocaro.parse_song_page(
+        _LONG_SHORT_VERSION_HTML, "Aki no Mikakunin Seibutsu (short ver.)"
+    )
+
+    assert [ln.text for ln in lines] == ["みじかい"]
+
+
+def test_variant_synonym_does_not_false_positive_on_coincidental_substring():
+    """"Longing"처럼 "long"을 우연히 포함해도 "longver" 토큰이 없으면 안 걸린다."""
+    _title, lines = vocaro.parse_song_page(_LONG_SHORT_VERSION_HTML, "Longing feat. 初音ミク")
+
+    assert [ln.text for ln in lines] == ["みじかい"]  # 매칭 없음 → 첫 표 그대로
+
+
+# ── 동의어 매칭 오탐 방지 (A4 감사, 2026-08-04 — 부분열 → 토큰 정확 일치) ──────
+#
+# 예전 구현은 힌트 전체를 부분열로 뭉쳐 검사해 "against"·"instant"·"instinct"·
+# "institute"(전부 "inst"를 부분열로 포함)가 "인스트" 그룹과, "Long Verse"/"Short
+# Verse"("longver"/"shortver"를 부분열로 포함)가 "긴버전"/"짧은버전" 그룹과 우연히
+# 충돌했다 — 전부 실제 함수 호출로 재현(A4 검수 보고). 토큰 경계(_hint_tokens) 도입
+# 후에는 이 단어들이 통짜 토큰이라 그룹 낱말과 정확히 같아질 수 없다.
+
+_INST_ORIGINAL_HTML = (
+    "<h1>가사</h1>"
+    "<h2>오리지널</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>げんきょく</td></tr><tr><td>genkyoku</td></tr><tr><td>원곡</td></tr>"
+    "</tbody></table>"
+    "<h2>인스트</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>いんすと</td></tr><tr><td>insuto</td></tr><tr><td>반주판</td></tr>"
+    "</tbody></table>"
+)
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        "Song Title / Against the World",
+        "Song Title (Instant Cover ver.)",
+        "Wild Instinct - Cover",
+        "Berklee Institute Session",
+    ],
+)
+def test_inst_synonym_does_not_false_positive_on_coincidental_english_words(hint):
+    """against/instant/instinct/institute — "inst"를 부분열로 포함해도 "인스트" 표가 안 걸린다."""
+    _title, lines = vocaro.parse_song_page(_INST_ORIGINAL_HTML, hint)
+
+    assert [ln.text for ln in lines] == ["げんきょく"]  # 매칭 없음 → 첫 표(오리지널) 그대로
+
+
+def test_inst_synonym_still_matches_genuine_instrumental_mention():
+    """대조군: "Instrumental"이 독립 토큰으로 있으면 여전히 인스트 표를 고른다."""
+    _title, lines = vocaro.parse_song_page(_INST_ORIGINAL_HTML, "Song Title (Instrumental)")
+
+    assert [ln.text for ln in lines] == ["いんすと"]
+
+
+def test_long_verse_does_not_false_positive_as_long_version():
+    """작사 용어 "Long Verse" — "longver"와 정규화 후 부분열은 겹치지만 토큰은 다르다."""
+    _title, lines = vocaro.parse_song_page(_LONG_SHORT_VERSION_HTML, "My Long Verse (cover)")
+
+    assert [ln.text for ln in lines] == ["みじかい"]  # 매칭 없음 → 첫 표(짧은 버전) 그대로
+
+
+def test_short_verse_does_not_false_positive_as_short_version():
+    """대칭: "Short Verse"도 "shortver"와 안 걸린다."""
+    _title, lines = vocaro.parse_song_page(_LONG_SHORT_VERSION_HTML, "The Short Verse Session")
+
+    assert [ln.text for ln in lines] == ["みじかい"]
+
+
+def test_single_table_page_ignores_hint():
+    _title, lines = vocaro.parse_song_page(_fixture("vocaro_song_3row.html"), "무슨 힌트든")
+
+    assert len(lines) == 3
+
+
+def test_fetch_song_threads_variant_hint():
+    fetcher = _StubFetcher(_MULTI_VERSION_HTML)
+
+    song = vocaro.fetch_song("monitoring", fetcher, "モニタリング (Best Friend Remix)")
+
+    assert [ln.text for ln in song.lines] == ["りみっくす"]
+
+
 # ── 조회 + 파생 계약 ───────────────────────────────────────────────
 
 

@@ -9,7 +9,10 @@ from everyric2 import __version__
 from everyric2.server.api.captions import router as captions_router
 from everyric2.server.api.cookies import router as cookies_router
 from everyric2.server.api.job import router as job_router
+from everyric2.server.api.limits import router as limits_router
 from everyric2.server.api.link_jobs import router as link_jobs_router
+from everyric2.server.api.notices import router as notices_router
+from everyric2.server.api.stats import router as stats_router
 from everyric2.server.api.sync import router as sync_router
 from everyric2.server.api.translate import router as translate_router
 from everyric2.server.api.vocaro import router as vocaro_router
@@ -45,7 +48,15 @@ def _gpu_available() -> bool:
 async def lifespan(app: FastAPI):
     # 만료 리스 주기 스윕을 여기서만 띄운다 — 임포트 시점에 뜨면 실행 중인 루프가 없고,
     # 앱을 띄우지 않는 테스트에 태스크가 남는다 (api/worker.start_lease_sweeper 주석 참고).
-    from everyric2.server.api.worker import start_lease_sweeper, stop_lease_sweeper
+    from everyric2.server.api.worker import (
+        start_lease_sweeper,
+        stop_lease_sweeper,
+        sweep_orphan_worker_audio,
+    )
+    # 고아 잡 TTL 리퍼도 같은 이유로 lifespan에서만 띄운다 — 리스 스위퍼는 원격 워커
+    # 리스가 있는 잡만 커버하고, 인프로세스 워커·번역 대기 구간은 별도 안전망이 필요하다
+    # (db/orphan_reaper.py 모듈 docstring 참고).
+    from everyric2.server.db.orphan_reaper import start_orphan_sweeper, stop_orphan_sweeper
 
     await init_db()
     _gpu_available()  # 기동 시 프리웜 — 첫 /health가 2초 페널티를 물지 않게
@@ -68,11 +79,22 @@ async def lifespan(app: FastAPI):
             )
 
     await anyio.to_thread.run_sync(_warm_reading_engine)
+    # 이전 생의 워커 전달용 오디오 잔재 정리 — 인메모리 레지스트리가 재시작으로 비면
+    # 그 파일을 지울 주체가 사라진다(저작권 규약상 남기면 안 되는 파일이다).
+    swept = await anyio.to_thread.run_sync(sweep_orphan_worker_audio)
+    if swept:
+        import logging
+
+        logging.getLogger(__name__).info(
+            f"Swept {swept} orphaned worker-audio file(s) from a previous run"
+        )
     start_lease_sweeper()
+    start_orphan_sweeper()
     try:
         yield
     finally:
         # 예외로 끝나는 종료에서도 태스크를 반드시 회수한다 (누수 금지)
+        await stop_orphan_sweeper()
         await stop_lease_sweeper()
         await close_db()
 
@@ -107,8 +129,13 @@ async def require_api_key(request, call_next):
             and request.headers.get("x-worker-key") == worker_key
         )
         if not worker_authed:
+            # 허용 집합에 falsy 값이 스미면 안 된다 — 예전 `(api_key, admin or None)`
+            # 튜플은 어드민 키 미설정 시 None을 허용해, 헤더를 **아예 안 보낸** 요청
+            # (provided=None)이 통과했다(엣지 감사 3.1, 런타임 재현됨). 틀린 키는
+            # 막히는 형태라 수동 점검으로는 안 드러나는 우회였다.
+            allowed = {server.api_key} | ({server.admin_api_key} if server.admin_api_key else set())
             provided = request.headers.get("x-api-key")
-            if provided not in (server.api_key, server.admin_api_key or None):
+            if not provided or provided not in allowed:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "API 키가 필요해요 (확장 설정의 API 키 칸에 입력)"},
@@ -152,6 +179,9 @@ app.include_router(cookies_router)
 app.include_router(vocaro_router)
 app.include_router(captions_router)
 app.include_router(worker_router)
+app.include_router(notices_router)
+app.include_router(limits_router)
+app.include_router(stats_router)
 
 
 class HealthResponse(BaseModel):

@@ -35,6 +35,8 @@ async def init_db():
                 await conn.execute(
                     text("ALTER TABLE jobs ADD COLUMN target_lang VARCHAR(8) DEFAULT 'ko'")
                 )
+            if "failure_kind" not in cols:
+                await conn.execute(text("ALTER TABLE jobs ADD COLUMN failure_kind VARCHAR(16)"))
             link_cols = {
                 row[1] for row in await conn.execute(text("PRAGMA table_info(sync_links)"))
             }
@@ -65,13 +67,54 @@ async def init_db():
                 await conn.execute(text("ALTER TABLE sync_results ADD COLUMN title VARCHAR(256)"))
             if sync_cols and "artist" not in sync_cols:
                 await conn.execute(text("ALTER TABLE sync_results ADD COLUMN artist VARCHAR(128)"))
+            # 결함 #5: language와 엔진 변형(MMS 강제 폴백 등)을 분리하는 컬럼 — models.py의
+            # SyncResult.engine_variant/engine_version 독스트링 참고.
+            if sync_cols and "engine_variant" not in sync_cols:
+                await conn.execute(
+                    text("ALTER TABLE sync_results ADD COLUMN engine_variant VARCHAR(16)")
+                )
+                # 일회성 소급 백필: 이 컬럼이 생기기 전에는 force_mms 정렬 결과가
+                # language="{순수언어}_mms"로 뭉쳐 저장됐다(ctc_engine.py 654행 cache_key를
+                # worker.py가 그대로 detected_lang에 흘리던 시절의 흔적). 순수 언어를 되살리고
+                # 변형을 engine_variant로 옮긴다. SUBSTR(-4)='_mms' 정확 비교라 언어 코드
+                # 안에 우연히 "mms"가 들어가는 경우와 섞이지 않는다(LIKE '%_mms'는 SQLite에서
+                # '_'가 단일문자 와일드카드라 오탐 가능 — 그래서 LIKE가 아니라 SUBSTR로 짠다).
+                # 컬럼이 막 생긴 시점엔 모든 행의 engine_variant가 NULL이라 이 UPDATE가 그
+                # 조건과 겹칠 일이 없고, WHERE 조건 자체도 재실행에 안전(멱등)하다 — 한 번
+                # 분리된 행은 language가 더 이상 "_mms"로 안 끝나 다시 걸리지 않는다.
+                await conn.execute(
+                    text(
+                        "UPDATE sync_results SET "
+                        "language = SUBSTR(language, 1, LENGTH(language) - 4), "
+                        "engine_variant = 'mms' "
+                        "WHERE language IS NOT NULL AND SUBSTR(language, -4) = '_mms'"
+                    )
+                )
+            if sync_cols and "engine_version" not in sync_cols:
+                await conn.execute(
+                    text("ALTER TABLE sync_results ADD COLUMN engine_version VARCHAR(32)")
+                )
+            # sync_feedback은 2026-08-03에 create_all로 처음 생겼다 — 그 뒤 depth 컬럼이
+            # additive로 붙었으므로(2026-08-04) 이미 그 사이에 만들어진 배포 DB는 create_all이
+            # 손대지 않는다(기존 테이블에 컬럼을 추가하지 않는다는 이 함수 전체의 전제).
+            # 테이블 자체가 없는 완전 신규 DB는 위 create_all이 이미 depth 포함 스키마로
+            # 만들었으므로 아래 ALTER는 멱등하게 스킵된다(테이블 없으면 PRAGMA가 빈 집합).
+            feedback_cols = {
+                row[1] for row in await conn.execute(text("PRAGMA table_info(sync_feedback)"))
+            }
+            if feedback_cols and "depth" not in feedback_cols:
+                await conn.execute(
+                    text("ALTER TABLE sync_feedback ADD COLUMN depth VARCHAR(16)")
+                )
         # 서버가 죽으며 남긴 좀비 잡(pending/processing) 정리 — 방치하면 같은 영상의
         # 생성 요청이 죽은 잡에 합류해 영구 "전사 중"에 갇힌다
         from sqlalchemy import text as _text
 
+        # failure_kind='system' — 서버 프로세스 자체가 죽어 중단된 것이지 사용자 취소도
+        # 다운로드의 외부 요인도 아니다(MoRef 감사 #3).
         result = await conn.execute(
             _text(
-                "UPDATE jobs SET status='failed', "
+                "UPDATE jobs SET status='failed', failure_kind='system', "
                 "error='서버 재시작으로 중단된 작업이에요. 다시 생성해 주세요.' "
                 "WHERE status IN ('pending', 'processing', 'queued')"
             )

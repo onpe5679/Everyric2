@@ -279,6 +279,96 @@ def test_lookup_with_lang_ko_and_no_translation_anywhere_yields_none():
     asyncio.run(body())
 
 
+# ── F5(2026-08-04 감사, additive): translation_attribution/translation_origin ──
+
+
+def test_translation_attribution_and_origin_reflect_the_exact_match_layer():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO, lyrics_hash="h1", timestamps=_seed_segments(["", ""])
+                )
+                await TranslationLayerRepository(s).upsert_layer(
+                    VIDEO,
+                    FP,
+                    "en",
+                    lines=[
+                        {"text": "첫 줄", "translation": "First line"},
+                        {"text": "둘째 줄", "translation": "Second line"},
+                    ],
+                    attribution={"name": "위키", "url": None, "license": None, "source_id": "wiki"},
+                    origin="wiki",
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="en")
+            assert resp.translation_lang == "en"
+            assert resp.translation_origin == "wiki"
+            assert resp.translation_attribution == {
+                "name": "위키", "url": None, "license": None, "source_id": "wiki",
+            }
+
+    asyncio.run(body())
+
+
+def test_translation_origin_is_legacy_when_serving_ko_without_a_layer():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["레거시 번역 1", ""]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="ko")
+            assert resp.translation_lang == "ko"
+            assert resp.translation_origin == "legacy"
+            # 레이어가 없는 legacy 경로는 곡 단위 가사 출처(resp.attribution)를 그대로 낸다.
+            assert resp.translation_attribution == resp.attribution
+
+    asyncio.run(body())
+
+
+def test_translation_attribution_and_origin_are_none_without_lang():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["레거시 번역 1", ""]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO)
+            assert resp.translation_origin is None
+            assert resp.translation_attribution is None
+
+    asyncio.run(body())
+
+
+def test_translation_attribution_and_origin_are_none_when_lang_has_no_translation():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["레거시 번역 1", "레거시 번역 2"]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="fr")
+            assert resp.translation_lang is None
+            assert resp.translation_origin is None
+            assert resp.translation_attribution is None
+
+    asyncio.run(body())
+
+
 # ── (4) POST /api/translate persist=true → 레이어 생김 ─────────────────
 
 
@@ -515,10 +605,14 @@ def test_ko_lookup_backfills_layer_and_survives_regeneration_without_legacy_segm
                     {"text": "둘째 줄", "translation": "레거시 번역 2"},
                 ]
 
-            # (2) en 유저의 재생성을 흉내 — 같은 가사지만 새 싱크의 세그엔 ko 번역이 없다
+            # (2) en 유저의 재생성을 흉내 — 같은 가사지만 새 싱크의 세그엔 ko 번역이 없다.
+            # **delete_by_video로 흉내 내면 안 된다**: sync_results는 INSERT 전용에
+            # 최신 우선이라 재생성은 행을 지우지 않고 새로 쌓을 뿐이고, delete_by_video는
+            # 사용자의 "초기화"(번역 레이어·오프셋까지 함께 버린다)라 의미가 정반대다.
+            # 예전엔 이 자리에서 delete를 불러, 초기화가 레이어를 남기던 결함(엣지 감사
+            # 4.1)이 고쳐지자 이 테스트가 깨졌다 — 깨진 쪽은 흉내 방식이었다.
             async with sm() as s:
                 repo = SyncRepository(s)
-                await repo.delete_by_video(VIDEO)
                 await repo.create(
                     video_id=VIDEO, lyrics_hash="h1", timestamps=_seed_segments(["", ""])
                 )
@@ -703,6 +797,27 @@ def test_available_langs_is_none_when_sync_not_found():
             resp = await get_sync("NOSYNCNOS01")
             assert resp.found is False
             assert resp.available_langs is None
+
+    asyncio.run(body())
+
+
+def test_available_langs_excludes_ko_when_legacy_translation_has_no_hangul():
+    """F4(2026-08-04 감사) — 레거시 translation 필드에 한글이 전혀 없는 텍스트가 남아
+    있어도(다른 언어가 실수로 legacy 슬롯에 들어간 경우 등) available_langs가 거짓으로
+    "ko"를 광고하면 안 된다. 존재 여부가 아니라 실제 한글 문자로 판정한다."""
+
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h1",
+                    timestamps=_seed_segments(["Not Korean at all", "second line, still not"]),
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO)
+            assert resp.available_langs == []
 
     asyncio.run(body())
 
@@ -1660,6 +1775,80 @@ def test_align_exact_match_is_unaffected_by_normalize_line_whitespace():
     assert align_translation_lines(segs, wiki) == ["준비됐어?"]
 
 
+# ── A2: 느슨한 매칭 폴백 — 구두점 차이만으로 못 붙던 실측 2건 (2026-08-03) ──────────
+
+
+def test_align_falls_back_to_loose_match_on_trailing_punctuation_difference():
+    """vg6pnvn1u10 idx 0 재현: "I love you." vs "I love you" — 엄격 키는 마침표를
+    보존해 서로 다른 키가 된다. 느슨한 키(구두점 제거)가 폴백으로 붙여야 한다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [{"text": "I love you.", "translation": "사랑해"}]
+    segs = ["I love you"]
+    assert align_translation_lines(segs, wiki) == ["사랑해"]
+
+
+def test_align_combine_falls_back_to_loose_match_when_a_piece_has_punctuation():
+    """OVwCr2MESfo류 재현: 위키가 합친 한 줄("ドラマを見るのが好きだった。")과 세그가
+    쪼갠 두 줄("ドラマを見るのが" + "好きだった")을 엄격 결합("ドラマを見るのが" +
+    "好きだった" = "ドラマを見るのが好きだった", 위키 쪽엔 마침표가 남아 있다)이
+    못 붙일 때 느슨한 결합이 대신 붙는다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [
+        {"text": "ドラマを見るのが好きだった。", "translation": "드라마 보는 걸 좋아했어"},
+        {"text": "次の行", "translation": "다음 줄"},
+    ]
+    segs = ["ドラマを見るのが", "好きだった", "次の行"]
+    assert align_translation_lines(segs, wiki) == [
+        "드라마 보는 걸 좋아했어", None, "다음 줄",
+    ]
+
+
+def test_align_split_falls_back_to_loose_match_when_a_piece_has_punctuation():
+    # 결합 방향(세그가 합쳐 있고 위키가 쪼갠 경우)도 동일하게 느슨한 폴백이 붙는다
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [
+        {"text": "ドラマを見るのが", "translation": "T1"},
+        {"text": "好きだった。", "translation": "T2"},
+    ]
+    segs = ["ドラマを見るのが好きだった"]
+    assert align_translation_lines(segs, wiki) == ["T1T2"]
+
+
+def test_align_does_not_collide_short_punctuation_only_fragments():
+    """느슨한 키가 2자 미만이 되는 조각(감탄사·기호뿐)은 매칭에서 제외된다 — 무관한
+    다른 짧은 조각과 우연히 같은 키가 되는 사고를 막는다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [{"text": "!", "translation": "완전히 다른 뜻"}]
+    segs = ["?"]
+    assert align_translation_lines(segs, wiki) == [None]
+
+
+def test_align_strict_punctuation_pairs_still_disambiguate_when_both_present():
+    """엄격 키가 먼저 시도된다 — 뜻이 갈리는 구두점 쌍(둘 다 값이 있으면)은 느슨한
+    폴백까지 가지 않고 엄격 매칭이 각각 정확히 집어낸다."""
+    from everyric2.server.text_fingerprint import align_translation_lines
+
+    wiki = [
+        {"text": "行く。", "translation": "간다"},
+        {"text": "行く？", "translation": "갈까?"},
+    ]
+    segs = ["行く。", "行く？"]
+    assert align_translation_lines(segs, wiki) == ["간다", "갈까?"]
+
+
+def test_loose_normalize_line_strips_punctuation_and_guards_short_keys():
+    from everyric2.server.text_fingerprint import loose_normalize_line
+
+    assert loose_normalize_line("I love you.") == loose_normalize_line("I love you")
+    assert loose_normalize_line("行く。") == loose_normalize_line("行く？")
+    assert loose_normalize_line("!") is None  # 2자 미만은 매칭 불가
+    assert loose_normalize_line("") is None
+
+
 # ── B: 저장 엔드포인트가 재정렬을 쓰는지(세그 텍스트로 재키잉) ────────────────
 
 
@@ -1771,6 +1960,47 @@ def test_cross_fingerprint_migration_serves_and_persists_human_layer_under_new_f
             resp2 = await get_sync(VIDEO, lang="ko")
             assert resp2.translation_lang == "ko"
             assert resp2.timestamps[0]["translation"] == "하나둘"
+
+    asyncio.run(body())
+
+
+def test_cross_fingerprint_migration_reports_the_migrated_source_attribution_and_origin():
+    """F5(2026-08-04 감사) — 이관 서빙 응답의 translation_attribution/translation_origin은
+    이관 **원본**(다른 지문의 사람 origin 레이어)의 값을 낸다 — 실제로 그 출처의
+    번역이 재정렬돼 실린 것이기 때문이다."""
+
+    async def body():
+        async with _env() as sm:
+            old_seg_texts = ["one", "two", "three"]
+            new_seg_texts = ["onetwo", "three"]
+
+            async with sm() as s:
+                old_fp = lines_fingerprint(old_seg_texts)
+                await TranslationLayerRepository(s).upsert_layer(
+                    VIDEO,
+                    old_fp,
+                    "ko",
+                    lines=[
+                        {"text": "one", "translation": "하나"},
+                        {"text": "two", "translation": "둘"},
+                        {"text": "three", "translation": "셋"},
+                    ],
+                    attribution={"name": "위키", "url": None, "license": None, "source_id": "wiki"},
+                    origin="wiki",
+                )
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="h_new",
+                    timestamps=[{"text": t, "translation": ""} for t in new_seg_texts],
+                )
+                await s.commit()
+
+            resp = await get_sync(VIDEO, lang="ko", background_tasks=BackgroundTasks())
+            assert resp.translation_lang == "ko"
+            assert resp.translation_origin == "wiki"
+            assert resp.translation_attribution == {
+                "name": "위키", "url": None, "license": None, "source_id": "wiki",
+            }
 
     asyncio.run(body())
 

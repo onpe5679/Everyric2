@@ -15,13 +15,15 @@ from everyric2.server import media_cache, song_link, title_match
 # 임포트하지 않으므로 순환이 없다 — 요청마다 함수 내 임포트를 반복하지 않게 최상위로 둔다.
 from everyric2.server.api.worker import reclaim_expired_leases
 from everyric2.server.db.connection import get_session
-from everyric2.server.db.models import SyncResult
+from everyric2.server.db.models import SyncFeedback, SyncResult
 from everyric2.server.db.repository import (
     ActionLogRepository,
     JobRepository,
     LinkJobRepository,
     SyncLinkRepository,
     SyncRepository,
+    SyncResultVersionRepository,
+    SyncViewRepository,
     TranslationLayerRepository,
     VideoOffsetRepository,
     hash_lyrics,
@@ -33,6 +35,10 @@ from everyric2.server.text_fingerprint import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 레거시 ko 번역 판정(F4, 2026-08-04 감사)용 — 완성형 한글 U+AC00~D7A3. 다른 모듈의
+# 같은 계열 정규식(worker._HANGUL_CHAR_RE 등)과 같은 범위다.
+_HANGUL_RE = re.compile("[가-힣]")
 
 
 # ── GPU를 태우는 경로의 일일 상한 (action_logs 기반, 영상·행위별 24시간) ──────────
@@ -113,6 +119,21 @@ async def _check_destructive_limit(session, action: str, video_id: str, api_key:
     """파괴적 행위(강제 재생성·초기화) 일일 한도 — daily_destructive_limit(기본 2회/24h)."""
     await _check_action_limit(
         session, action, video_id, api_key, get_settings().server.daily_destructive_limit
+    )
+
+
+async def _check_upgrade_limit(session, video_id: str, api_key: str | None) -> None:
+    """정렬 업그레이드(min_depth, force 없음) 일일 한도 — daily_upgrade_limit(기본 10회/24h).
+
+    운영자 결정(2026-08-04): "업그레이드도 당연히 생성 쿼터랑은 별개여야지" — 이미 만든
+    결과를 더 정밀하게 다시 뽑는 행위(fast→medium→heavy, 최대 2단계)가 새 싱크를 만드는
+    generate 예산을 깎으면 안 된다. action 이름을 "generate"가 아니라 "upgrade"로 독립시켜
+    ActionLog 집계 자체를 분리한다 — GET /api/limits가 이 이름을 그대로 읽어 upgrade
+    버킷을 낸다(limits.py 참고). 이전(2026-08-04 초판)엔 generate 값을 그대로 복사해
+    노출했으나, 이 분리로 그 항등 계약은 폐기됐다.
+    """
+    await _check_action_limit(
+        session, "upgrade", video_id, api_key, get_settings().server.daily_upgrade_limit
     )
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
@@ -216,6 +237,11 @@ class SyncLookupResponse(BaseModel):
     quality_score: float | None = None
     audio_hash: str | None = None
     language: str | None = None
+    # 결함 #5 additive 필드 — 구버전 확장은 모르는 필드를 무시하므로 하위호환 유지.
+    # engine_variant: MMS 강제 폴백 등 엔진 변형("mms" | None). engine_version: 이 싱크를
+    # 만든 정렬 스택 식별자(models.ENGINE_VERSION) — NULL이면 이 컬럼이 생기기 전 구세대.
+    engine_variant: str | None = None
+    engine_version: str | None = None
     created_at: str | None = None
     # 곡 단위 진단 정보 (star 흡수 구간, VAD 발성 구간) — 확장 디버그 스트립용
     debug: dict[str, Any] | None = None
@@ -249,6 +275,47 @@ class SyncLookupResponse(BaseModel):
     # None. lang 파라미터의 기존 동작(legacy 슬롯 오버레이·translation_lang)은 이 필드와
     # 무관하게 그대로다 — 추가 필드라 구버전 클라이언트는 무시하면 그만이다.
     translations_by_lang: dict[str, list[str | None]] | None = None
+    # 곡 단위 추임새 후보 [(start, end), ...] — 가사가 주장하지 않은 가창 구간(새 정렬
+    # 스택의 display_fixes.adlib_candidates 전용, 레거시 스택은 이 필드를 채우지 않는다).
+    # 판정이 아니라 후보다 — 화면에 띄워 귀로 확인하는 용도. additive 필드라 구버전
+    # 확장은 무시하면 그만이다.
+    adlib: list[list[float]] | None = None
+    # F5(2026-08-04 감사, additive) — 이번 조회가 실제로 서빙한 번역의 출처. translation_
+    # layers.attribution/origin은 저장만 되고 조회 응답에 안 나가 확장이 번역 출처 배지를
+    # 세울 손잡이가 없었다. lang이 있고 그 언어 번역이 실제로 채워졌을 때만 채운다 —
+    # translation_origin은 "llm"|"wiki"|"manual"|"caption"|"legacy"(TranslationLayer.origin과
+    # 같은 값, 레이어 없이 세그 레거시 번역으로 서빙한 legacy ko 경로는 "legacy"). 레이어를
+    # 못 찾았거나 lang 미지정이면 둘 다 None. 크로스 지문 이관 서빙은 이관 **원본** 레이어의
+    # attribution/origin을 그대로 낸다(실제로 그 출처의 번역이기 때문).
+    translation_attribution: dict[str, Any] | None = None
+    translation_origin: str | None = None
+
+
+class SyncPreviousVersionResponse(BaseModel):
+    """이 영상 자기 싱크의 직전(재처리로 덮어써지기 전) 버전 — 확장의 A/B 고스트 비교용.
+
+    SyncLookupResponse와 최대한 같은 모양을 쓴다(같은 필드명: timestamps=세그먼트 리스트,
+    created_at=그 세대의 원래 생성 시각). 없으면(최초 생성뿐이었거나 아직 재처리된 적이
+    없으면) found=false — GET /api/sync/{video_id}의 미존재 관례(404가 아니라 found=false)를
+    그대로 따른다. 롤백 API는 이번 스코프 밖이라 이 응답에는 sync_id/롤백 액션이 없다."""
+
+    found: bool
+    timestamps: list[dict[str, Any]] | None = None
+    language: str | None = None
+    quality_score: float | None = None
+    # 스냅샷된 행이 원래 만들어진 시각 (교체 전 세대의 생성 시각)
+    created_at: str | None = None
+    # 이 스냅샷이 찍힌(=재처리가 그 세대를 덮어쓴) 시각
+    replaced_at: str | None = None
+    # 스냅샷된 행의 lyrics_hash — 지금 화면의 싱크(현재 sync_results 행)와 대조해 "가사가
+    # 같은 재정렬"(재생성 버튼 — A/B 스택 비교가 성립)인지 "가사 자체가 다른 새 생성"
+    # (붙여넣기/검색 생성 — 줄이 대응하지 않아 비교가 무의미)인지 **확장이** 가리는 재료다.
+    # 서버는 판정하지 않는다 — additive 필드라 구버전 확장은 무시하면 그만이다.
+    lyrics_hash: str | None = None
+    # 스냅샷된 세대의 엔진 정체 — 고스트 비교의 라벨("구: mms-htdemucs-1 → 신: ...").
+    # engine_version이 NULL이면 스탬프 도입 이전 세대라는 뜻이다(그 자체가 정보).
+    engine_variant: str | None = None
+    engine_version: str | None = None
 
 
 class LineMeta(BaseModel):
@@ -378,11 +445,31 @@ class CopySyncRequest(BaseModel):
     lyrics: str | None = None
 
 
+class FeedbackRequest(BaseModel):
+    """정렬 품질 별점 + 선택 오류 제보 (확장 별점 UI, 2026-08-03). 수집 전용 — 응답에
+    영향을 주지 않는다."""
+
+    video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
+    rating: int = Field(ge=1, le=5)
+    category: str | None = Field(default=None, pattern="^(timing|pronunciation|lyrics|other)$")
+    comment: str | None = Field(default=None, max_length=1000)
+    # 제출 시점 화면에 떠 있던 싱크의 분석 깊이(fast/medium/heavy) — 확장이 조회 응답의
+    # debug.routing.route(또는 진행 중이었다면 job의 depth 배지)를 그대로 실어 보낸다.
+    # 서버가 sync_id로 역산하지 않는 이유: 제출 시점과 조회 시점 사이에 재생성이 끼면
+    # latest sync가 바뀌어 사용자가 실제로 본 세대와 어긋난다 — 확인 UI 쪽이 아는 값이
+    # 더 정확하다. additive — 안 싣는 구버전 확장은 None.
+    depth: str | None = Field(default=None, pattern="^(fast|medium|heavy)$")
+
+
 class RegenerateRequest(BaseModel):
     video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
     lyrics: str
     language: str | None = None
     force: bool = False
+    # 분석 깊이 하한("medium"|"heavy") — 확장의 "분석 깊이 올리기" 버튼. 새 스택이
+    # 라우팅 판정을 건너뛰고 이 깊이에서 시작한다(worker._PENDING_MIN_DEPTH 스태시로
+    # 전달). 안 싣는 구버전/일반 재생성은 None = 기존 자동 라우팅 그대로.
+    min_depth: str | None = Field(default=None, pattern="^(medium|heavy)$")
     line_meta: list[LineMeta] | None = None
     attribution: Attribution | None = None
     title: str | None = Field(default=None, max_length=256)
@@ -417,6 +504,7 @@ def _merge_meta_into_sync(
             segs,
             [m.model_dump() for m in line_meta],
             with_translation=(line_meta_lang == "ko"),
+            language=sync_result.language,
         )
         if merged:
             updated["segments"] = segs
@@ -561,13 +649,26 @@ def _build_sync_response(
         quality_score=result.quality_score,
         audio_hash=result.audio_hash,
         language=result.language,
+        engine_variant=result.engine_variant,
+        engine_version=result.engine_version,
         created_at=result.created_at.isoformat() if result.created_at else None,
         debug=timestamps.get("debug"),
         attribution=timestamps.get("attribution"),
         tempo=timestamps.get("tempo"),
         key=timestamps.get("key"),
+        adlib=timestamps.get("adlib"),
         linked=linked,
     )
+
+
+async def _bump_sync_views(session, video_id: str) -> None:
+    """조회수 증가 — 실패해도 조회 자체(get_sync의 응답)는 절대 막지 않는다. 카운터는
+    "내가 만든 N곡을 M명이 봤어요" 기여 이력용 부가 정보지, 싱크 조회의 핵심 계약이
+    아니다(SyncView.__doc__ 참고)."""
+    try:
+        await SyncViewRepository(session).increment(video_id)
+    except Exception:
+        logger.exception("Failed to bump sync view count for video %s", video_id)
 
 
 async def _persist_legacy_ko_layer(
@@ -665,7 +766,11 @@ async def _apply_translation_lang(
     if not layer_langs and link_source_video_id:
         layer_langs = await repo.list_layer_langs(link_source_video_id, fingerprint)
     available = set(layer_langs)
-    if has_legacy_translation:
+    # F4(2026-08-04 감사): 세그 translation 존재만으로 "ko"를 넣으면, 레거시 번역이
+    # 실제로는 다른 언어인데 ko 레이어가 없는 곡에서 available_langs가 거짓으로 ko를
+    # 광고한다(값을 더 정확하게 만들 뿐인 additive 보강 — 필드 존재 여부는 안 바뀐다).
+    # 한글 문자가 실제로 있는 translation이 하나라도 있을 때만 ko로 친다.
+    if any(_HANGUL_RE.search(seg.get("translation") or "") for seg in segments):
         available.add("ko")
     resp.available_langs = sorted(available)
 
@@ -690,16 +795,23 @@ async def _apply_translation_lang(
     # 현재 지문이 최우선이다(재이관할 이유가 없다). 링크 조회는 커버 자신의 지문
     # 이력부터, 없으면 원곡의 지문 이력도 본다 — 정확 매칭의 own→link 폴백과 같은 우선순위.
     migrated = False
+    migrated_attribution: dict[str, Any] | None = None
+    migrated_origin: str | None = None
     if layer is None or layer.origin == "llm":
         for search_vid in (video_id, *((link_source_video_id,) if link_source_video_id else ())):
-            if await _try_cross_fingerprint_migration(
+            ok, migrated_attribution, migrated_origin = await _try_cross_fingerprint_migration(
                 repo, background_tasks, search_vid, video_id, fingerprint, lang, segments
-            ):
+            )
+            if ok:
                 migrated = True
                 break
 
     if migrated:
         resp.translation_lang = lang
+        # F5: 이관 서빙은 이관 원본 레이어(사람 origin)의 출처를 낸다 — 실제로 그
+        # 출처의 번역이 재정렬돼 실린 것이기 때문이다.
+        resp.translation_attribution = migrated_attribution
+        resp.translation_origin = migrated_origin
     elif layer is not None:
         # 이관 후보가 없었거나(레이어가 애초에 사람 origin) 커버리지 미달 — 정확 매칭을
         # 그대로 서빙한다(merge_line_meta(worker.py)와 같은 색인 규칙 — 값이 있는 첫
@@ -715,11 +827,18 @@ async def _apply_translation_lang(
         for seg in segments:
             seg["translation"] = by_text.get(normalize_line(seg.get("text", "") or ""), "")
         resp.translation_lang = lang
+        resp.translation_attribution = layer.attribution
+        resp.translation_origin = layer.origin
     elif lang == "ko":
         # 레이어가 없으면 저장된 레거시 번역이 ko라는 이행 가정 — 그대로 둔다.
         # 세그에 번역이 하나도 없으면 "ko"라고 우길 근거가 없으므로 None.
         resp.translation_lang = "ko" if has_legacy_translation else None
         if has_legacy_translation:
+            # F5: 레이어가 없는 legacy 경로 — 곡 단위 가사 출처(resp.attribution, 이미
+            # 이 응답에 채워져 있다)를 그대로 번역 출처로 낸다. origin="legacy"는
+            # TranslationLayer.origin의 같은 값(모델 docstring 참고)과 일치시킨다.
+            resp.translation_attribution = resp.attribution
+            resp.translation_origin = "legacy"
             # 이번 조회로 레거시 ko가 노출되는 김에 레이어에 옮겨 백필한다 — 다음 번
             # lang=en 등 비ko 조회·재생성에서도 이 번역이 살아남게 한다.
             await _schedule_ko_backfill_if_needed(
@@ -769,7 +888,7 @@ async def _try_cross_fingerprint_migration(
     fingerprint: str,
     lang: str,
     segments: list[dict[str, Any]],
-) -> bool:
+) -> tuple[bool, dict[str, Any] | None, str | None]:
     """`search_video_id`의 다른 지문에 사람이 단 번역(wiki/caption/manual/legacy)이 있으면
     `align_translation_lines`로 지금 세그(`segments`)에 재정렬해 옮겨 쓴다.
 
@@ -780,26 +899,31 @@ async def _try_cross_fingerprint_migration(
     아니다 — 품질 보증이 없는 기계번역을 다른 줄 분할로 우격다짐 재정렬해 옮기느니
     재생성이 낫다.
 
-    성공(재정렬 커버리지 50% 이상)하면 `segments`를 in-place로 채우고 True, 새 지문으로도
-    `store_video_id` 키로 BackgroundTasks upsert(origin 유지)해 다음부터 정확 매칭으로
-    바로 찾게 한다 — **(b) 상황에서는 이 upsert가 기존 llm 레이어를 그대로 덮어쓴다**
-    (`upsert_layer`가 같은 (video, fingerprint, target_lang) 키를 통째로 교체하는 기존
-    동작 그대로 — 저장 엔드포인트의 human-over-llm 규칙과 같은 원칙). `store_video_id`가
-    검색과 다를 수 있는 이유(링크 조회): 저장은 언제나 **보는 영상** 기준을 지킨다(#6과
-    동일 원칙) — 원곡에서 찾은 번역이어도 커버 video_id로 저장한다.
+    성공(재정렬 커버리지 50% 이상)하면 `segments`를 in-place로 채우고
+    `(True, 이관 원본의 attribution, 이관 원본의 origin)`, 새 지문으로도 `store_video_id`
+    키로 BackgroundTasks upsert(origin 유지)해 다음부터 정확 매칭으로 바로 찾게 한다 —
+    **(b) 상황에서는 이 upsert가 기존 llm 레이어를 그대로 덮어쓴다**(`upsert_layer`가
+    같은 (video, fingerprint, target_lang) 키를 통째로 교체하는 기존 동작 그대로 — 저장
+    엔드포인트의 human-over-llm 규칙과 같은 원칙). `store_video_id`가 검색과 다를 수
+    있는 이유(링크 조회): 저장은 언제나 **보는 영상** 기준을 지킨다(#6과 동일 원칙) —
+    원곡에서 찾은 번역이어도 커버 video_id로 저장한다. attribution/origin을 함께 돌려주는
+    이유(F5, 2026-08-04 감사): 호출부가 조회 응답의 `translation_attribution`/
+    `translation_origin`에 실제로 서빙한 출처를 실어야 한다 — 새 지문 저장이 끝나기를
+    기다리지 않고(백그라운드 태스크라 이 응답 시점엔 아직 커밋 전이다) 이미 손에 쥔
+    `other`의 값을 그대로 돌려준다.
 
-    후보가 없거나 커버리지 미달이면 `segments`를 건드리지 않고 False — 호출부가 (b)
-    상황이었다면 기존 llm 레이어를 그대로 서빙하면 된다."""
+    후보가 없거나 커버리지 미달이면 `segments`를 건드리지 않고 `(False, None, None)` —
+    호출부가 (b) 상황이었다면 기존 llm 레이어를 그대로 서빙하면 된다."""
     other = await repo.find_human_layer_other_fingerprint(search_video_id, lang, fingerprint)
     if other is None:
-        return False
+        return False, None, None
     seg_texts = [seg.get("text", "") or "" for seg in segments]
     if not seg_texts:
-        return False
+        return False, None, None
     remapped = align_translation_lines(seg_texts, other.lines or [])
     matched = sum(1 for value in remapped if value is not None)
     if matched / len(seg_texts) < _CROSS_FINGERPRINT_MIGRATION_MIN_COVERAGE:
-        return False
+        return False, None, None
     for seg, translation in zip(segments, remapped):
         seg["translation"] = translation or ""
     new_lines = [
@@ -816,7 +940,7 @@ async def _try_cross_fingerprint_migration(
         other.attribution,
         other.origin,
     )
-    return True
+    return True, other.attribution, other.origin
 
 
 # translations_by_lang 응답 크기 상한 — 언어가 늘어날수록 응답이 커진다(세그당 배열
@@ -998,8 +1122,17 @@ async def _lazy_attach_pron_variants(
     from everyric2.text.ja_reading import reading_source
 
     segments = resp.timestamps or []
-    if not any(not seg.get("pron") for seg in segments):
-        return  # 전부 이미 표기가 있다 — 할 일 없음
+
+    def _needs_attach(seg: dict) -> bool:
+        pron = seg.get("pron")
+        if not pron:
+            return True
+        # 구세대 라틴 곡의 kana 단독 근사 — attach_pron_variants의 불완전 가드가
+        # 빠진 표기(hangul/romaji/en/ipa)를 보완한다(표시값 E2E 실측 2026-08-03)
+        return set(pron) == {"kana"}
+
+    if not any(_needs_attach(seg) for seg in segments):
+        return  # 전부 이미 완결 표기다 — 할 일 없음
 
     def _attach_all() -> bool:
         # **여기가 스레드인 것이 이 함수의 존재 이유다.** reading_source()의 첫 호출은
@@ -1013,7 +1146,8 @@ async def _lazy_attach_pron_variants(
 
         for seg in segments:
             try:
-                attach_pron_variants(seg)
+                # 곡 언어를 넘긴다 — zh 곡의 순한자 라인이 ja 분기로 새지 않게 하는 게이트
+                attach_pron_variants(seg, language=resp.language)
             except Exception:
                 logger.exception("Lazy pron attach failed for a segment; leaving it as-is")
         return True
@@ -1348,6 +1482,48 @@ async def find_link_candidates(
         )
 
 
+# POST /api/sync/exists — video_id 최대 100개 (POST /api/stats/views와 같은 상한 근거:
+# 배치 조회 하나가 무제한 IN절로 DB를 두들기는 것을 막는다).
+_MAX_EXISTS_VIDEO_IDS = 100
+
+
+class SyncExistsRequest(BaseModel):
+    video_ids: list[str] = Field(max_length=_MAX_EXISTS_VIDEO_IDS)
+
+
+class SyncExistsResponse(BaseModel):
+    exists: dict[str, bool]
+
+
+@router.post("/exists", response_model=SyncExistsResponse)
+async def sync_exists(request: SyncExistsRequest):
+    """요청한 video_id들의 싱크 존재 여부를 일괄 조회한다 (additive, 확장 개편의 영상별
+    싱크 존재 배지용).
+
+    **GET이 아니라 POST여야 한다** — `@router.get("/{video_id}")` 캐치올(바로 아래)이
+    라우트 등록 순서상 GET /api/sync/exists를 "video_id=exists"로 그대로 삼켜 버린다.
+    POST /api/stats/views(stats.py)와 같은 배치 조회 모양을 그대로 따른다.
+
+    `sync_results`(자기 싱크)뿐 아니라 `sync_links`(빌려 온 싱크)도 존재로 친다 —
+    `GET /api/sync/{video_id}`가 자기 싱크 없는 영상에도 링크 폴백을 내주므로(바로
+    아래 `get_sync` 참고), 링크만 있는 영상을 false로 답하면 확장이 "싱크 없음" 배지를
+    잘못 띄운다.
+
+    쿼리는 video_id 열만 본다 — `timestamps` JSON 블롭은 절대 select하지 않는다(존재
+    유무만 필요한 요청 하나가 곡 전체를 실어 나르면 안 된다). 응답은 요청 전체를 덮는
+    dict다(요청하지 않은 video_id는 안 실린다) — 없는 영상은 False.
+    """
+    ids = [vid for vid in request.video_ids if _VIDEO_ID_RE.match(vid)]
+    if len(ids) != len(request.video_ids):
+        raise HTTPException(status_code=422, detail="invalid video_id in video_ids")
+
+    async with get_session() as session:
+        own = await SyncRepository(session).get_existing_video_ids(ids)
+        linked = await SyncLinkRepository(session).get_existing_video_ids(ids)
+        found = own | linked
+        return SyncExistsResponse(exists={vid: vid in found for vid in ids})
+
+
 @router.get("/{video_id}", response_model=SyncLookupResponse)
 async def get_sync(
     video_id: str,
@@ -1391,6 +1567,7 @@ async def get_sync(
             result = await repo.get_by_video_and_hash(video_id, lyrics_hash)
             if result:
                 await repo.set_title_if_missing(result, title, artist)
+                await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(result, result.timestamps)
                 resp.user_offset = user_offset
                 resp = await _apply_translation_lang(session, video_id, resp, lang, background_tasks)
@@ -1402,6 +1579,7 @@ async def get_sync(
             results = await repo.get_by_video(video_id)
             if results:
                 await repo.set_title_if_missing(results[0], title, artist)
+                await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(results[0], results[0].timestamps)
                 resp.user_offset = user_offset
                 resp = await _apply_translation_lang(session, video_id, resp, lang, background_tasks)
@@ -1416,6 +1594,9 @@ async def get_sync(
                 src = source_syncs[0]
                 link_rate = getattr(link, "rate", 1.0) or 1.0
                 shifted = _shift_sync_timestamps(src.timestamps, link.offset_sec, link_rate)
+                # 보는 영상(video_id) 기준 — 원곡(source_video_id)이 아니라 이 링크로 실제
+                # 보고 있는 영상의 조회수를 늘린다(레이어 조회의 video_id 관례와 동일).
+                await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(
                     src,
                     shifted,
@@ -1440,6 +1621,148 @@ async def get_sync(
                 )
 
         return SyncLookupResponse(found=False, user_offset=user_offset)
+
+
+@router.get("/{video_id}/previous", response_model=SyncPreviousVersionResponse)
+async def get_previous_sync_version(video_id: str):
+    """이 영상 **자기 싱크**의 직전(재처리로 덮어써지기 전) 버전 스냅샷을 조회한다.
+
+    확장의 재처리 전/후 A/B 고스트 비교용 — 롤백 자체는 이번 스코프 밖(확장 대개편 때
+    설계). 링크(sync_links)로 빌려온 싱크는 다루지 않는다 — 여기서 보는 건 **이 video_id
+    자신의** 이력뿐이고 링크 해소 로직과는 무관하다(빌려온 영상이 previous를 조회하면
+    항상 found=false).
+
+    스냅샷은 (video_id당 최신 1건) `SyncRepository.create()`가 새 sync_results 행을 넣기
+    직전에 만든다 — 최초 생성뿐이었거나 아직 한 번도 재처리되지 않았으면 스냅샷이 없어
+    found=false다. 미존재를 404가 아니라 found=false로 답하는 것은 기존 GET
+    /api/sync/{video_id}와 같은 관례다."""
+    _validate_video_id(video_id)
+    async with get_session() as session:
+        version = await SyncResultVersionRepository(session).get(video_id)
+        if not version:
+            return SyncPreviousVersionResponse(found=False)
+        return SyncPreviousVersionResponse(
+            found=True,
+            timestamps=(version.timestamps or {}).get("segments", []),
+            language=version.language,
+            quality_score=version.quality_score,
+            created_at=version.created_at.isoformat() if version.created_at else None,
+            replaced_at=version.replaced_at.isoformat() if version.replaced_at else None,
+            lyrics_hash=version.lyrics_hash,
+            engine_variant=version.engine_variant,
+            engine_version=version.engine_version,
+        )
+
+
+def _depth_of(result: "SyncResult") -> str | None:
+    """sync_results 한 행의 timestamps.debug.routing.route — null-safe 추출. 새 정렬
+    스택(라우팅 판정)이 만든 행만 채워진다 — 레거시 스택·라우팅 판정 자체가 없던 행은
+    debug나 routing 키가 아예 없어 그대로 None으로 떨어진다."""
+    debug = (result.timestamps or {}).get("debug") or {}
+    routing = debug.get("routing") or {}
+    return routing.get("route")
+
+
+class SyncVersionSummary(BaseModel):
+    """디버그 패널의 신구/깊이별 비교용 — sync_results 한 행의 요약(무거운 timestamps
+    본문은 뺀다, 목록 하나가 최대 10건이라도 세그 전체를 다 실으면 무거워진다)."""
+
+    id: str
+    engine: str
+    engine_variant: str | None = None
+    engine_version: str | None = None
+    language: str | None = None
+    quality_score: float | None = None
+    created_at: str | None = None
+    # fast|medium|heavy — 새 스택 라우팅 판정(_depth_of). 레거시 행은 None.
+    depth: str | None = None
+
+
+class SyncVersionListResponse(BaseModel):
+    versions: list[SyncVersionSummary]
+
+
+@router.get("/{video_id}/versions", response_model=SyncVersionListResponse)
+async def list_sync_versions(video_id: str):
+    """이 영상의 sync_results 행 목록 — 최신순 최대 10건. SyncResult는 재생성마다 새 행을
+    쌓는(UPDATE가 아니라 INSERT-only, models.SyncResult 독스트링) 이력이라, 이 목록이
+    디버그 패널의 신구/깊이별(fast/medium/heavy) 비교 후보 전체다."""
+    _validate_video_id(video_id)
+    async with get_session() as session:
+        results = await SyncRepository(session).get_by_video(video_id)
+        return SyncVersionListResponse(
+            versions=[
+                SyncVersionSummary(
+                    id=r.id,
+                    engine=r.engine,
+                    engine_variant=r.engine_variant,
+                    engine_version=r.engine_version,
+                    language=r.language,
+                    quality_score=r.quality_score,
+                    created_at=r.created_at.isoformat() if r.created_at else None,
+                    depth=_depth_of(r),
+                )
+                for r in results[:10]
+            ]
+        )
+
+
+class SyncVersionDetailResponse(BaseModel):
+    """한 세대(sync_results 행 하나)의 전체 내용 — 목록에서 고른 두 세대를 실제로 그려
+    비교하는 데 쓴다."""
+
+    id: str
+    timestamps: list[dict[str, Any]]
+    language: str | None = None
+    quality_score: float | None = None
+    created_at: str | None = None
+    engine_version: str | None = None
+    depth: str | None = None
+
+
+@router.get("/{video_id}/versions/{result_id}", response_model=SyncVersionDetailResponse)
+async def get_sync_version_detail(video_id: str, result_id: str):
+    """한 세대의 전체 timestamps(segments) — video_id가 그 행의 실제 소유자가 아니면
+    404(다른 영상의 id로 남의 싱크 본문을 엿보는 것을 막는다)."""
+    _validate_video_id(video_id)
+    async with get_session() as session:
+        result = await SyncRepository(session).get_by_id(result_id)
+        if result is None or result.video_id != video_id:
+            raise HTTPException(status_code=404, detail="해당 세대를 찾을 수 없어요")
+        return SyncVersionDetailResponse(
+            id=result.id,
+            timestamps=(result.timestamps or {}).get("segments", []),
+            language=result.language,
+            quality_score=result.quality_score,
+            created_at=result.created_at.isoformat() if result.created_at else None,
+            engine_version=result.engine_version,
+            depth=_depth_of(result),
+        )
+
+
+@router.post("/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """정렬 품질 별점(1~5) + 선택 오류 제보 수집 (확장 별점 UI, 2026-08-03).
+
+    제출 시점의 최신 싱크 sync_id·engine_version을 함께 새겨 세대별 품질 집계의 재료로
+    남긴다(재생성되면 같은 영상도 다른 세대). 싱크가 없어도 받는다(sync_id=None) —
+    "싱크가 안 만들어져요" 류 제보도 유효하다. 수집 전용이라 응답은 ok 하나뿐."""
+    async with get_session() as session:
+        syncs = await SyncRepository(session).get_by_video(request.video_id)
+        latest = syncs[0] if syncs else None
+        session.add(
+            SyncFeedback(
+                video_id=request.video_id,
+                sync_id=latest.id if latest else None,
+                rating=request.rating,
+                category=request.category,
+                comment=request.comment,
+                engine_version=getattr(latest, "engine_version", None) if latest else None,
+                depth=request.depth,
+            )
+        )
+        # 커밋은 get_session 컨텍스트가 수행한다 (이 모듈의 다른 쓰기 경로와 동일)
+    return {"ok": True}
 
 
 @router.post("/{video_id}/translations", response_model=SaveTranslationLayerResponse)
@@ -2088,6 +2411,8 @@ async def search_by_audio_hash(request: SearchByAudioRequest):
                 quality_score=result.quality_score,
                 audio_hash=result.audio_hash,
                 language=result.language,
+                engine_variant=result.engine_variant,
+                engine_version=result.engine_version,
                 created_at=result.created_at.isoformat() if result.created_at else None,
             )
         return SyncLookupResponse(found=False)
@@ -2107,6 +2432,8 @@ async def list_syncs_for_video(video_id: str):
                     "audio_hash": r.audio_hash,
                     "quality_score": r.quality_score,
                     "language": r.language,
+                    "engine_variant": r.engine_variant,
+                    "engine_version": r.engine_version,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                 }
                 for r in results
@@ -2132,6 +2459,8 @@ async def search_available_syncs(request: SearchSyncRequest):
                     "audio_hash": r.audio_hash,
                     "quality_score": r.quality_score,
                     "language": r.language,
+                    "engine_variant": r.engine_variant,
+                    "engine_version": r.engine_version,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                     "lyrics_preview": _get_lyrics_preview(r.timestamps),
                 }
@@ -2187,7 +2516,11 @@ async def regenerate_sync(
         if request.force:
             # 강제 재생성은 GPU 수십 초를 태우는 파괴적 행위 — 공개 배포에선 일일 한도 적용
             await _check_destructive_limit(session, "regenerate", request.video_id, x_api_key)
-        if not request.force:
+        if not request.force and not request.min_depth:
+            # min_depth(깊이 하한) 요청은 같은 가사의 기존 싱크가 **있어야** 성립하는
+            # 재분석이다 — 이 조기 반환에 걸리면 아무 일도 안 일어나므로 건너뛴다.
+            # (한도는 아래 비force 경로에서 min_depth 유무로 갈라 upgrade/generate 각자
+            # 센다 — 2026-08-04 분리, _check_upgrade_limit 독스트링 참고.)
             existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
             if existing:
                 if request.line_meta or request.attribution:
@@ -2203,6 +2536,18 @@ async def regenerate_sync(
         # 재생성도 같은 잡 진행 중이면 합류 — 연타가 동시 다운로드(WinError 32)를 만들지 않게
         active = await job_repo.get_active_by_video(request.video_id, lyrics_hash_value)
         if active:
+            if request.min_depth:
+                # 코덱스 감사 High(2026-08-03): 이 조기 반환이 min_depth 스태시보다 앞이라
+                # 깊이 상향 요청이 조용히 무시됐다(재생성 연타 직후 깊이 버튼). 활성 잡에
+                # best-effort로 스태시한다 — 잡이 아직 정렬 캡처 전(다운로드/분리 중)이면
+                # 그대로 적용되고, 이미 지났으면 잡 터미널의 _pop_stashes가 걷어간다.
+                # 적용 보장은 못 하지만(그 한계는 결과의 depth 배지가 정직하게 보여준다)
+                # "말없이 버림"보다는 낫다.
+                from everyric2.server.worker import stash_force as _stash_force
+                from everyric2.server.worker import stash_min_depth as _stash_min_depth
+
+                _stash_force(active.id)
+                _stash_min_depth(active.id, request.min_depth)
             return GenerateResponse(
                 job_id=active.id,
                 status="processing",
@@ -2210,12 +2555,17 @@ async def regenerate_sync(
                 line_meta_wait_sec=wait_sec,
             )
         if not request.force:
-            # force는 위에서 이미 훨씬 엄격한 파괴적 한도(기본 2회/24h)를 통과했다 —
-            # 여기서 또 세면 한 번의 재생성이 두 예산을 먹는다. 비force 재생성은 GPU
-            # 소비가 /generate와 같으므로 같은 상한을 쓴다.
-            await _check_action_limit(
-                session, "generate", request.video_id, x_api_key, DAILY_GENERATE_LIMIT
-            )
+            if request.min_depth:
+                # 정렬 업그레이드는 generate와 별개 예산(운영자 결정 2026-08-04) —
+                # _check_upgrade_limit 독스트링 참고.
+                await _check_upgrade_limit(session, request.video_id, x_api_key)
+            else:
+                # force는 위에서 이미 훨씬 엄격한 파괴적 한도(기본 2회/24h)를 통과했다 —
+                # 여기서 또 세면 한 번의 재생성이 두 예산을 먹는다. 비force 재생성은 GPU
+                # 소비가 /generate와 같으므로 같은 상한을 쓴다.
+                await _check_action_limit(
+                    session, "generate", request.video_id, x_api_key, DAILY_GENERATE_LIMIT
+                )
         job = await job_repo.create(
             video_id=request.video_id,
             lyrics=request.lyrics,
@@ -2228,12 +2578,19 @@ async def regenerate_sync(
         stash_attribution,
         stash_force,
         stash_line_meta,
+        stash_min_depth,
         stash_title,
     )
 
     if request.force:
         # 워커의 (audio_hash, lyrics_hash) 재사용 검사까지 건너뛰어야 진짜 재생성이 된다
         stash_force(job_id)
+    if request.min_depth:
+        # 깊이 하한 요청은 같은 (audio_hash, lyrics_hash)의 캐시 재사용에 막히면 아무
+        # 일도 안 일어난다 — force와 같은 우회가 함께 필요하다. force가 이미 켜져
+        # 있으면(위) 중복 무해.
+        stash_force(job_id)
+        stash_min_depth(job_id, request.min_depth)
     if request.line_meta:
         stash_line_meta(
             job_id, [m.model_dump() for m in request.line_meta], request.line_meta_lang

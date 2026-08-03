@@ -26,6 +26,14 @@ from typing import TypeVar
 _TITLE_SPLIT_RE = re.compile(r"\s*[/／|｜ㅣ–—―~〜]\s*|\s+-\s+|\s*[「」『』【】\[\]]\s*")
 _FEAT_RE = re.compile(r"(?:^|\s)(?:feat|ft)\.?\s*\S.*$", re.IGNORECASE)
 
+# 「곡명 cover by 이름」/「곡명 covered by 이름」— 구분자 없이 곡명 뒤에 바로 붙는 커버
+# 업로더 병기(실측, 2026-08). 단순 토큰 제거(_NOISE_TOKEN_RE의 cover(?:ed)?\s*by)만으로는
+# "이름"이 남아 곡명에 알파벳으로 융합된다(둘 다 alnum이라 normalize_title이 공백만
+# 지워도 안 떨어진다 — «첫사랑 cover by 홍길동» → «첫사랑홍길동», 길이비 0.5로 기본
+# 임계값 0.6에 미달해 실패). feat. 접미(_FEAT_RE)와 같은 "표시부터 끝까지 통째로 버린다"
+# 전략을 따른다 — cover by 뒤에 곡명이 다시 오는 관례는 사실상 없다(feat.와 같은 전제).
+_COVER_BY_RE = re.compile(r"\bcover(?:ed)?\s*by\s+\S.*$", re.IGNORECASE)
+
 # 괄호로 묶인 가수/독음 병기 («【初音ミク】곡명», «곡명 (아쿠노)») — 통째로 걷어낸 변형도 후보에 넣는다
 _BRACKETED_RE = re.compile(r"【[^】]*】|「[^」]*」|『[^』]*』|\[[^\]]*\]|\([^)]*\)|（[^）]*）")
 
@@ -40,12 +48,18 @@ _BRACKETED_RE = re.compile(r"【[^】]*】|「[^」]*」|『[^』]*』|\[[^\]]*\
 # 부르다+아/어보다(시도) 활용은 축약(보다→봤다) 여부로 어간 표면형이 갈린다("보"/"봤"는
 # 서로 다른 코드포인트라 접두 매칭 하나로 못 묶는다) — 그래서 두 어간 계열(보-/봤-)을
 # 각각 열거한다. 곡명 자체에 이 어간이 들어갈 일은 사실상 없다(기존 방침과 같은 근거).
+#
+# cover(?:ed)?\s*by (실측, 2026-08): 「covered by」만 잡고 「cover by」(과거형 -ed 없는
+# 표기, 유튜브에 「제목 Cover by 업로더」류로 흔하다)는 못 잡았다 — \bcover\b가 "cover"
+# 단어만 지우고 뒤따르는 "by 업로더"가 곡명에 그대로 들러붙어(둘 다 알파벳이라
+# normalize_title이 공백만 지우면 서로 붙는다) 원제와의 정확 매칭이 깨졌다. by를
+# cover(?:ed)?의 선택적 접미로 묶어 두 표기를 한 알터네이션으로 흡수한다.
 _NOISE_TOKEN_RE = re.compile(
     r"official(?:\s*(?:music|lyric)s?)?(?:\s*video|\s*audio|\s*mv)?"
     r"|music\s*video|lyrics?\s*video|audio\s*only"
     r"|\bmv\b|\bpv\b|\bhd\b|\bhq\b|\b4k\b|\b1080p\b|\b720p\b"
     r"|full\s*ver(?:sion)?\.?|short\s*ver(?:sion)?\.?|tv\s*size"
-    r"|off\s*vocal|instrumental|\binst\b|karaoke|covered\s*by|\bcover\b"
+    r"|off\s*vocal|instrumental|\binst\b|karaoke|cover(?:ed)?\s*by|\bcover\b"
     r"|カラオケ|カバー|歌ってみた|唄ってみた|弾いてみた|叩いてみた|踊ってみた"
     r"|オリジナル曲?|本家|ボカロ"
     r"|커버|불러(?:보다|봄|본|보는|보았\S*|봤\S*)|한글\s*자막|한국어\s*자막|번역\s*자막",
@@ -67,8 +81,13 @@ def strip_noise_tokens(title: str) -> str:
     제거 전에 NFKC로 정규화한다 — 장식 서체(수학 산세리프 «𝖢𝖮𝖵𝖤𝖱» 류)는 NFKC를 거쳐야
     ASCII cover가 되어 패턴에 걸린다. 실측(unite 2026-07-29): 정규화 전 제거 순서 탓에
     «𝖢𝖮𝖵𝖤𝖱» 잡토큰이 살아남아 헛 후보를 만들었다. 공백은 보존하므로 \\b 경계는 유효하다.
+
+    cover(ed) by는 뒤따르는 업로더 이름까지 먼저 통째로 지운다(_COVER_BY_RE) — 그래야
+    「곡명 cover by 이름」처럼 구분자가 없는 표기에서 이름이 곡명에 융합되지 않는다.
+    이 뒤에 _NOISE_TOKEN_RE가 나머지 잡토큰(및 이름 없이 남은 bare cover by)을 처리한다.
     """
-    return _NOISE_TOKEN_RE.sub(" ", unicodedata.normalize("NFKC", title))
+    t = unicodedata.normalize("NFKC", title)
+    return _NOISE_TOKEN_RE.sub(" ", _COVER_BY_RE.sub(" ", t))
 
 
 def _is_pure_noise(raw: str) -> bool:

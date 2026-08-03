@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,6 +70,39 @@ class AudioSettings(BaseSettings):
         "quality averaging (10 shifts = 10× separation time).",
     )
 
+    # 분리기 백엔드 선택 — 이 값을 바꾸는 것만으로 실제 배선(worker.py 등)이 전환되지는
+    # 않는다. VocalSeparator가 이 값을 보고 분기할 뿐이고, 그 분기를 실제로 태우는 것은
+    # 별도 작업(worker.py 배선 전환) 몫이다.
+    separator_backend: Literal["htdemucs", "bs-polarformer-fp16"] = Field(
+        default="bs-polarformer-fp16",
+        description="Which vocal separator backend VocalSeparator uses. 'bs-polarformer-fp16' "
+        "(default since the model-replacement wiring landed) routes to the ported bench "
+        "candidate that measured +26.7pp alignment accuracy on hard songs (no-separation "
+        "47.6 -> polar 74.3; see docs/research/2026-07-30-model-replacement/"
+        "ust-precision-comparison.md) — that's the combination alignment.engine=owsm/omniasr "
+        "was actually measured with, and the Settings cross-field validator enforces the pairing "
+        "(see AlignmentSettings.engine). This path requires CUDA and pre-provisioned model "
+        "assets under separator_model_dir (see everyric2/audio/polarformer_separator.py) — it "
+        "never downloads them at request time and never silently falls back to htdemucs; missing "
+        "assets or a missing CUDA device raise a clear exception instead, because if you don't "
+        "know which separator actually ran, the alignment result becomes uninterpretable. NOTE "
+        "(2026-08-03): the assets are not provisioned on every deployment yet (separate task) — "
+        "until they are, is_available() is False and worker._separate_stems() gracefully "
+        "returns None (logged, not raised), so alignment falls back to the unseparated mix. "
+        "'htdemucs' keeps the original demucs subprocess path completely unchanged — set this "
+        "explicitly to revert.",
+    )
+    separator_model_dir: Path = Field(
+        default=Path.home() / ".cache" / "everyric2" / "models",
+        description="Directory VocalSeparator looks for pre-provisioned bs-polarformer-fp16 "
+        "assets in when separator_backend=bs-polarformer-fp16: model_bs_polarformer_float16."
+        "ckpt/.yaml plus the pinned-commit MSST vendor source under "
+        "msst_src_<commit8>/models/bs_roformer/{attend,bs_roformer}.py — same filenames as "
+        "scripts/bench_adapters/separators_quality.py's benchmark/models layout, so a bench-"
+        "provisioned directory can be pointed at directly. Unused when separator_backend is the "
+        "default 'htdemucs'.",
+    )
+
     # Temp directory
     temp_dir: Path = Field(
         default=Path("/tmp/everyric2"), description="Temporary directory for processing"
@@ -132,8 +165,22 @@ class AudioSettings(BaseSettings):
 class AlignmentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_ALIGNMENT_")
 
-    engine: Literal["ctc", "nemo", "gpu-hybrid", "sofa"] = Field(
-        default="ctc", description="Alignment engine to use"
+    engine: Literal["ctc", "nemo", "gpu-hybrid", "sofa", "owsm", "omniasr"] = Field(
+        default="owsm",
+        description="Alignment engine to use. 'owsm'과 'omniasr' 두 값은 **새 앵커 스택을 "
+        "켜는 스위치**로 취급된다(everyric2/server/worker.py의 _new_stack_enabled) — 둘 중 "
+        "어느 리터럴을 고르든 실제로 어느 모델이 도는지는 요청마다 3단계 라우팅이 정한다 "
+        "(코디네이터 확정, 2026-08-03 정정 — scripts/bench_adapters/routed.py의 "
+        "routed-2mode-lang 재현: 1) 무분리 omniASR 고속 정렬 2) 라인 logConf 중앙값이 "
+        "-11.0 미만이거나 언어가 en이면 분리+앵커 2패스 구원(en 외=owsm, en=omniasr "
+        "자기앵커) 3) en 결과에 좌초 시그니처가 남으면 owsm 3단계 승급, worker.py의 "
+        "_run_new_stack_alignment). 즉 engine='owsm'이어도 정상곡은 대부분 omniasr 고속"
+        "경로로 끝난다 — 이 필드는 '이 엔진 하나만 강제로 써라'가 아니라 '새 스택 켜짐'의 "
+        "동의어 두 가지다. 새 스택이 켜지면 audio.separator_backend도 "
+        "'bs-polarformer-fp16'이어야 한다(아래 Settings의 "
+        "cross-field validator가 어긋나면 기동 시점에 바로 실패시킨다) — 그 조합만 실측됐다 "
+        "(docs/research/2026-07-30-model-replacement/ust-precision-comparison.md). ctc/nemo/"
+        "gpu-hybrid/sofa는 전부 구스택(get_shared_ctc_engine 등 기존 경로) 그대로다.",
     )
     language: Literal["auto", "en", "ja", "ko"] = Field(
         default="auto", description="Language for transcription/alignment"
@@ -142,6 +189,20 @@ class AlignmentSettings(BaseSettings):
     nemo_model_en: str = Field(
         default="nvidia/stt_en_conformer_ctc_large",
         description="NeMo model for English",
+    )
+
+    owsm_python_path: str | None = Field(
+        default=None,
+        description="OwsmEngine이 서브프로세스로 부를 격리 venv 인터프리터 경로. None이면 "
+        "<repo_root>/.venv-owsm/{Scripts/python.exe|bin/python3}(플랫폼별)를 기본으로 "
+        "탐색한다. ESPnet이 메인 .venv(torch>=2.0, transformers>=4.40)와 충돌하는 의존성을 "
+        "고정하므로 owsm_engine.py 모듈 docstring 참고 — 인프로세스로 못 돌린다.",
+    )
+    owsm_dtype: Literal["float32", "bfloat16"] = Field(
+        default="bfloat16",
+        description="OWSM 워커의 인코더 dtype. bfloat16이 벤치 채택 구성(owsm-ctc-v4-1b-bf16, "
+        "fp32 대비 VRAM 절반, 정확도 손실 미측정)과 같다. float16은 이 인코더에서 오버플로해 "
+        "forced_align이 비유한(non-finite) emission을 받는다(벤치 실측) — 선택지에서 제외.",
     )
 
     alignment_sample_rate: int = Field(
@@ -556,6 +617,24 @@ class AlignmentSettings(BaseSettings):
         "times, which run slightly ahead of the voice. Above it the caption time wins.",
     )
 
+    # ── quality_score의 정체 (결함 #6, 감사가 코드로 확정) ──────────────────────────
+    #
+    # SyncResult.quality_score(everyric2/server/db/models.py)에 저장되는 값은 **정렬된 줄들의
+    # 평균 CTC 디코딩 자기확신도**다(정렬 실패로 conf가 없는 줄은 분모에서 빠진다 —
+    # worker._quality_with_coverage). **사람이 매긴 정렬 품질 평가가 아니다.**
+    #
+    # 이 값은 어댑터 vocab 크기에 스케일 의존적이라 **곡 간 비교·정렬에 쓰면 결함**이다 —
+    # 아래 caption_anchors 필드 설명에 이미 실측이 있다(같은 곡이 eng 0.1289 vs kor 0.0492,
+    # zyRt-nBM3dY가 floor-flat 0.001로 보고돼 앵커 실험 자체를 무력화한 사례 포함). 곡 간
+    # 비교가 필요하면 이 값이 아니라 debug.quality_norm(스케일 무관 e^(-α),
+    # worker._scale_free_quality)을 써라.
+    #
+    # 유일한 소비처인 크롬 확장은 절대 임계 `qualityScore < 0.001`만 검사한다
+    # (everyric2-chrome background.ts) — "정렬이 사실상 실패했다"는 이진 신호로만 쓰므로
+    # 이 값의 스케일 의존성과 설계 의도가 우연히 맞아떨어진다(작은 vocab일수록 confidence가
+    # 낮게 눌리므로, 절대 임계가 vocab이 작은 언어에서 더 쉽게 걸리는 비대칭이 있다는
+    # 뜻이기도 하다 — 그 비대칭을 곡 간 순위/정렬에 쓰면 안 되는 이유가 바로 이거다).
+
     caption_anchors: bool = Field(
         default=False,
         description="OFF BY DEFAULT AND MEASURED TO MAKE THINGS WORSE — do not turn this on "
@@ -789,6 +868,117 @@ class AlignmentSettings(BaseSettings):
         "multilingual lyrics by text alone, so it is now left to the aligner.",
     )
 
+    # ── 2패스 정렬(everyric2.alignment.refine_window) ──
+    #
+    # 앵커(무거운 모델)가 라인 경계를 잡고, 그 창 안에서만 경량 CTC 모델이 음절을 다시
+    # 잡는다. 문턱값은 scripts/bench_adapters/two_pass.py의 실측을 그대로 옮긴 것이라
+    # 기본값을 바꾸면 안 된다 — 특히 two_pass_seg_voiced_level(0.12)은 ja 7곡 스윕에서
+    # 유일하게 UST 축이 회귀하지 않은 값이다(주석은 그 필드에). 배선(팩토리·워커 연결)이
+    # 끝나 worker.py(_run_new_stack_alignment)가 이 필드를 실제로 읽으므로 아래
+    # two_pass_enabled 기본값은 True다 — 이 주석은 배선 이전 초안이 남긴 스테일이었다
+    # (2026-08-04 정정).
+    two_pass_enabled: bool = Field(
+        default=True,
+        description="Enable the 2-pass refiner (heavy anchor for line boundaries + light CTC "
+        "for syllable-level resync inside each line window). ON by default now that "
+        "everyric2/server/worker.py wires it (_run_new_stack_alignment) — it only takes effect "
+        "when alignment.engine is 'owsm'/'omniasr' (new stack) and a separation result is "
+        "available; the legacy ctc/nemo/gpu-hybrid/sofa path never reads this field.",
+    )
+    two_pass_window_pad_sec: float = Field(
+        default=0.2,
+        description="Padding (seconds) added on both sides of the anchor's line window before "
+        "the 2nd-pass forced-align runs inside it. Measured basis: pinning the window exactly to "
+        "the anchor's line boundary crops real singing that starts/ends slightly outside it — the "
+        "anchor's own line-start error is itself measured against a <=0.15s bar, so the pad sits "
+        "at the same order of magnitude (scripts/bench_adapters/two_pass.py WINDOW_PAD_SEC).",
+    )
+    two_pass_seg_hold_max_sec: float = Field(
+        default=1.5,
+        description="Upper bound (seconds) on how far a syllable segment's END may be stretched "
+        "toward the next segment's start (karaoke highlight-hold convention). Measured on 15,503 "
+        "UST notes: the 99.5th percentile gap is 1.111s and gaps over 1.5s are only 0.29% of the "
+        "corpus, so anything longer is treated as a rest, not a held note.",
+    )
+    two_pass_seg_hold_max_held_sec: float = Field(
+        default=3.0,
+        description="Relaxed hold cap used only when the extend gate's dominance signal confirms "
+        "the singer is still audibly holding the note (ExtendGate.held) — the 1.5s default is "
+        "reasoned without listening to the audio, so it should not apply where the audio itself "
+        "says the note is still sustained. Only takes effect when the full extend_gate mode is "
+        "wired in; the shipped two_pass_extend_voiced_only path does not use it (see that field).",
+    )
+    two_pass_seg_voiced_level: float = Field(
+        default=0.12,
+        description="ADOPTED THRESHOLD — do not change without re-measuring. Vocal-dominance "
+        "floor gating whether the gap BETWEEN two syllable segments may be stretched through "
+        "(two_pass_extend_voiced_only). Swept on 7 ja songs (clamped, bench "
+        "2pass-owsm-mixed-* family, 2026-08-02): off leaves 104.2s of segments lit over silence "
+        "with span-IoU 49.84/coverage 60.70%; 0.30 (the interlude-vs-singing threshold) cuts "
+        "sustained notes in songs with long held tones (Kikuo/toast, -2.1..-2.7 IoU); 0.20 is "
+        "intermediate (58.9s, 49.66 IoU); 0.12 is the ONLY point where the UST axis does not "
+        "regress (70.5s lit-over-silence, IoU 49.89, coverage 60.16% — span-IoU actually rose "
+        "slightly, syllable accuracy was exactly flat across every threshold tested since this "
+        "axis never touches segment START, only END).",
+    )
+    two_pass_line_tail_max_sec: float = Field(
+        default=2.0,
+        description="Upper bound (seconds) on how far a LINE's final segment end may be pushed "
+        "past the anchor's line end while vocal dominance keeps indicating the singer is still "
+        "holding the last note (two_pass_extend_line_tails). UST note lengths' 99.5th percentile "
+        "is 1.111s (see two_pass_seg_hold_max_sec); 2s comfortably covers genuine held tails while "
+        "dominance itself cuts off anything that overruns further.",
+    )
+    two_pass_line_tail_quiet_sec: float = Field(
+        default=0.12,
+        description="Minimum silence run (seconds) in the dominance curve before a line-tail "
+        "extension is considered to have hit a real gap and stops. Shorter dips are mid-note "
+        "vibrato/breath, not a genuine break — stopping on those truncates real held tails.",
+    )
+    two_pass_line_tail_deep: bool = Field(
+        default=True,
+        description="ADOPTED (2026-08-02). Also stop a line-tail extension on a SHORT but DEEP "
+        "dominance dip (below a lower floor than two_pass_seg_voiced_level), not just a "
+        "sufficiently LONG one. Length-only gating let an 0.08s deep re-attack dip pass through "
+        "and the tail stretched 2s across an ad-lib; adding the depth axis recovered those cases "
+        "while UST metrics stayed neutral (span-IoU 49.93 -> 49.90, syllable axis unchanged).",
+    )
+    two_pass_extend_segments: bool = Field(
+        default=True,
+        description="Stretch each syllable segment's end to the next segment's start (karaoke "
+        "highlight-hold display convention) instead of leaving raw CTC pin-point spans (measured "
+        "median span length ~20ms, far shorter than UST notes' 116-219ms). Production's "
+        "character-mode segmentation already does this; the bench harness had been missing it.",
+    )
+    two_pass_extend_voiced_only: bool = Field(
+        default=True,
+        description="Gate the between-segment stretch (two_pass_extend_segments) on vocal "
+        "dominance staying above two_pass_seg_voiced_level, instead of stretching by raw seconds "
+        "alone. See two_pass_seg_voiced_level for the threshold sweep that adopted this.",
+    )
+    two_pass_extend_line_tails: bool = Field(
+        default=True,
+        description="ADOPTED (2026-08-02, paired 7 songs / 3,837 segments): extend only the LAST "
+        "segment of each line toward the next line's start while dominance says the singer keeps "
+        "holding — never truncates, so no song can regress from this alone. Measured: span-IoU "
+        "50.28 -> 51.15, coverage 60.66% -> 62.09%, syllable axis unchanged (75.29 -> 75.32, "
+        "confirming it never touches segment start). All 7 songs improved, none regressed.",
+    )
+    two_pass_spread_piles: bool = Field(
+        default=True,
+        description="Spread syllable segments that CTC collapsed onto the same timestamp (measured "
+        "8.7% of segments on one song) across the voiced span before the next real segment, "
+        "weighted by frame-level vocal presence rather than evenly — an even split can land a "
+        "syllable on silence if a rest sits inside the collapsed span.",
+    )
+    two_pass_respace_repeats: bool = Field(
+        default=True,
+        description="When a lyric line repeats 3+ times in a row (a chorus hook), detect a gap "
+        "far above the run's median inter-line spacing (a skipped rendition pulling every later "
+        "sibling forward by a full beat) and pull the excess back — only the anomalous gap, "
+        "leaving already-correct siblings untouched.",
+    )
+
 
 class TranslationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_TRANSLATE_")
@@ -851,6 +1041,25 @@ class TranslationSettings(BaseSettings):
         "and truncate the pronunciation JSON array mid-response for multi-line lyrics. "
         "reasoning 모델(gpt-oss 등)은 사고 토큰이 이 예산을 같이 쓰므로 4096이면 "
         "30줄 곡에서 JSON이 잘렸다 — 8192로 상향.",
+    )
+    budget_max_round_trips: int = Field(
+        default=8,
+        description="한 번역 요청(OpenAICompatibleTranslator.translate() 한 번 호출) 안에서 "
+        "NIM에 보내는 누적 왕복(실제 HTTP 요청) 상한. 실측(2026-08, 외부 감사 #9): 요청 789건 "
+        "중 42%가 재시도를 겪고 p95 25.4초·최대 57.5초였는데 원인은 429가 아니라 재귀적 "
+        "미스매치 복구(depth 4까지, _translate_batch)와 저품질 배치 재요청(_retry_low_quality)의 "
+        "무제한 중첩이었다 — 영상 하나는 depth 1~4 전 구간에서 'matched 0/N lines'가 150줄어치 "
+        "반복되며 순차 NIM 왕복을 다수 태웠다. 미스매치 복구·저품질 재요청·429 백오프는 각각 "
+        "정당한 메커니즘이라 그대로 두고, 이 상한은 그 위에 씌우는 공용 브레이크다 — 도달 "
+        "즉시 새 왕복을 만들지 않고 그 시점까지의 결과로 정상 반환한다(예외 아님, 부분 번역이 "
+        "무번역보다 낫다). 0 이하면 비활성(무제한, 기존 동작).",
+    )
+    budget_max_duration_sec: float = Field(
+        default=90.0,
+        description="한 번역 요청의 누적 소요시간 상한(초) — 확장 타임아웃(120s)보다 낮게 잡아 "
+        "예산이 소진돼도 확장이 자기 타임아웃으로 먼저 끊기기 전에 서버가 부분 결과로 응답할 "
+        "여유를 남긴다. budget_max_round_trips와 OR 조건 — 둘 중 먼저 닿는 쪽이 예산을 닫는다. "
+        "0 이하면 비활성(무제한, 기존 동작).",
     )
 
 
@@ -1046,6 +1255,15 @@ class ServerSettings(BaseSettings):
         description="Max force-regenerations/resets per video per 24h for non-admin "
         "callers (only enforced when admin_api_key is set). 0 disables the limit.",
     )
+    daily_upgrade_limit: int = Field(
+        default=10,
+        description="Max depth-upgrade re-analyses (min_depth, non-force) per video per 24h "
+        "for non-admin callers (only enforced when admin_api_key is set). 0 disables the "
+        "limit. Separate from daily_destructive_limit/generate's own limit (operator "
+        "decision 2026-08-04: raising analysis depth on an existing sync isn't the same "
+        "spend as creating a new one). Default sized for a song walking fast->medium->heavy "
+        "(2 upgrade steps) a few times over the window, not for bulk re-analysis.",
+    )
     worker_key: str = Field(
         default="",
         description="원격 GPU 워커 풀 인증 키 (X-Worker-Key). 설정하면 /api/worker/* "
@@ -1064,6 +1282,20 @@ class ServerSettings(BaseSettings):
         description="원격 워커가 클레임한 잡의 리스 만료(초). 진행률 보고(≤2s 간격)가 "
         "하트비트를 겸해 리스를 갱신한다. 만료되면(워커 하트비트 끊김) 다음 claim 처리 "
         "시 잡을 queued로 되돌려 다른 워커가 다시 가져가게 한다.",
+    )
+    orphan_job_ttl_min: int = Field(
+        default=50,
+        description="processing 상태 잡의 마지막 진행 갱신(Job.updated_at) 이후 이 시간(분)이 "
+        "지나면 고아로 보고 회수(failed)한다. worker_lease_sec 기반 리스 스위퍼는 원격 워커가 "
+        "리스를 쥔 잡만 커버한다 — 인프로세스 워커(local_worker=true)와 line_meta 대기 구간"
+        "(worker.LINE_META_WAIT_STAGE, 상한 120s)은 리스 없이 정상적으로 processing이라 그 "
+        "스위퍼의 대상이 아니다. 실측(2026-08, 외부 감사 #7): stage='번역 대기', progress=48로 "
+        "6.3시간 정체한 잡 하나가 확장 폴링을 48시간 동안 10,779회(전체 트래픽 4%) 발생시켰다 "
+        "— 서버는 죽지 않고 잡만 멎어 재기동 시 좀비 정리(db/connection.py init_db)도 발화하지 "
+        "않았다. 번역 경로 p95가 25초, 정상 잡은 수 분 안에 끝나므로 45~60분이면 정상 진행과 "
+        "고아를 넉넉히 가른다. created_at(시작 시각)이 아니라 updated_at(마지막 갱신) 기준 — "
+        "진행 중인 잡은 2~4초 간격으로 진행률을 보고해(_tick_progress/_stage_monitor) "
+        "updated_at이 계속 갱신되므로 실수로 죽이지 않는다. 0 이하면 리퍼 비활성.",
     )
     # ── 중립 연동 (외부 곡 인덱스 / 외부 미디어 캐시) ──────────────────────────
     song_index_url: str = Field(
@@ -1157,7 +1389,7 @@ class ServerSettings(BaseSettings):
         description="같은 (영상, 후보) 쌍의 검증 잡을 다시 제출하기까지의 쿨다운(일). "
         "get_active_pair는 진행 중(queued/processing) 중복만 막아서, 완료·실패한 쌍은 "
         "사용자가 그 영상을 열 때마다 GPU를 다시 태울 수 있다. 최근 이 기간 안에 끝난 "
-        "(done/failed) 이력이 있으면 자동 제출을 건너뛴다. 0이면 쿨다운 비활성.",
+        "(done/failed/declined) 이력이 있으면 자동 제출을 건너뛴다. 0이면 쿨다운 비활성.",
     )
     manual_link_requires_admin: bool = Field(
         default=False,
@@ -1199,6 +1431,28 @@ class Settings(BaseSettings):
 
     # Debug mode
     debug: bool = Field(default=False, description="Enable debug mode")
+
+    @model_validator(mode="after")
+    def _check_new_stack_separator_consistency(self) -> "Settings":
+        """새 정렬 스택(owsm/omniasr 앵커, alignment.engine)이 켜졌는데 분리기가 여전히
+        htdemucs면 조합이 어긋난다 — 이식 근거(무분리 47.6 -> bs-polarformer-fp16 74.3,
+        +26.7pp)는 그 분리 스템을 전제로 실측됐다(docs/research/2026-07-30-model-replacement/
+        ust-precision-comparison.md). 조용히 섞이면 어느 조합이 실제로 돌았는지 해석
+        불가능해지므로(everyric2/audio/polarformer_separator.py의 "조용한 폴백 금지" 정책과
+        같은 결) 기동 시점(Settings() 생성, get_settings()의 첫 호출)에 바로 실패시킨다 —
+        요청이 한참 진행된 뒤 애매하게 저품질로 새는 것보다 낫다.
+        """
+        new_stack = self.alignment.engine in ("owsm", "omniasr")
+        if new_stack and self.audio.separator_backend != "bs-polarformer-fp16":
+            raise ValueError(
+                f"alignment.engine={self.alignment.engine!r} selects the new anchor stack "
+                "(owsm/omniasr), which requires audio.separator_backend='bs-polarformer-fp16' "
+                f"(got {self.audio.separator_backend!r}). Mixing the new anchor with htdemucs "
+                "was never measured and the alignment result would be uninterpretable — set "
+                "EVERYRIC_AUDIO_SEPARATOR_BACKEND=bs-polarformer-fp16, or revert "
+                "EVERYRIC_ALIGNMENT_ENGINE to a legacy engine (ctc/nemo/gpu-hybrid/sofa)."
+            )
+        return self
 
 
 # Global settings instance (lazy loaded)

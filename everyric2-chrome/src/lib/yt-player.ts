@@ -34,6 +34,9 @@ export interface PlaylistEntry {
   byline: string;
   /** 지금 재생 중인 항목 (유튜브가 selected 속성으로 표시) */
   selected: boolean;
+  /** 항목 링크 href에서 뽑은 videoId — 서버 싱크 존재 조회(exists 배지)에 쓴다.
+   *  셀렉터가 안 맞는 레이아웃(뮤직 대기열 등)이면 null(그 항목만 배지를 건너뛴다) */
+  videoId: string | null;
 }
 
 /** 클릭해도 아무 일이 없을 버튼(비활성·숨김)을 걸러낸다 */
@@ -91,6 +94,18 @@ export function playPrevious(): boolean {
   return true;
 }
 
+/** 항목 링크 href에서 videoId 추출 — itemLink 후보를 앞에서부터 시도한다(itemLink의
+ *  마지막 후보 'a'는 링크가 아예 없는 구조에서도 잡힐 수 있어, href가 없거나 워치
+ *  URL이 아니면 다음 후보로 넘어간다). */
+function itemVideoId(node: Element): string | null {
+  for (const sel of SELECTORS.itemLink) {
+    const href = node.querySelector<HTMLAnchorElement>(sel)?.getAttribute('href');
+    const m = href?.match(/[?&]v=([\w-]{11})/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 /** 현재 페이지의 재생목록 항목들 — 재생목록이 없으면 빈 배열 */
 export function getPlaylist(): PlaylistEntry[] {
   const nodes = playlistNodes();
@@ -99,6 +114,7 @@ export function getPlaylist(): PlaylistEntry[] {
     title: textIn(node, SELECTORS.itemTitle) || `${index + 1}번째 항목`,
     byline: textIn(node, SELECTORS.itemByline),
     selected: node.hasAttribute('selected'),
+    videoId: itemVideoId(node),
   }));
 }
 

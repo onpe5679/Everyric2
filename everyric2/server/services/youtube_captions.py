@@ -281,13 +281,34 @@ def body_language(counts: dict[str, int]) -> str | None:
     「가나가 한 글자라도 있으면 ja」(= `script_lang_hint`의 규칙)를 그대로 쓰면 실측에서
     한 건이 깨진다: `2zilNT7hgFc`는 hangul 485자(98%)에 kana가 8자 섞인 한국 곡인데 ja로
     판정된다. 비교로 바꾸면 맞는다.
+
+    **크레딧 오염 방어(2026-08-03 Atvsg_zogxo 실측)**: 독일어 번역 자막 69줄 중 크레딧
+    줄(`ACAね`처럼 콜론 없이 이름만 적혀 `_is_credit_line`을 통과한 줄)의 가나·한자
+    몇 글자만으로 `kana >= hangul`이 성립해 통째로 독일어인 본문이 ja로 오판됐다. 그래서
+    **CJK 문자 전체(가나+한글+한자)가 본문에서 차지하는 비중**이 `_MIN_CJK_PROPORTION`
+    미만이면 어느 분기든 None으로 돌린다 — 절대 개수(`kana=1, han=100`처럼 라틴 오염이
+    전혀 없는 순수 CJK 본문)가 아니라 **라틴에 파묻힌 정도**를 본다. zh 분기(한자만 있고
+    가나·한글이 전혀 없는 경우)도 2026-08-04 감사(F2-b)로 이 게이트를 함께 받는다 —
+    한자 몇 글자 섞인 크레딧 줄이 비CJK 본문에서 zh로 새는 경로가 실측됐다(독일어 340자
+    + 한자 4자류). 순정 zh 본문은 이 게이트를 걸어도 안전하다(비중 1.0 실측, 병음 병기가
+    섞여도 0.231로 문턱을 크게 웃돈다).
     """
     kana, hangul, han = counts.get("kana", 0), counts.get("hangul", 0), counts.get("han", 0)
     if not (kana or hangul or han):
         return None
+    total = counts.get("total") or (kana + hangul + han + counts.get("latin", 0))
+    if total and (kana + hangul + han) / total < _MIN_CJK_PROPORTION:
+        return None
     if kana or hangul:
         return "ja" if kana >= hangul else "ko"
     return "zh"
+
+
+# body_language의 ja/ko 판정 최소 CJK 비중 — Atvsg_zogxo(독일어 69줄 + 크레딧 줄의 가나
+# 2~3자) 실측에서 CJK 비중은 1% 미만이었다. 진짜 ja/ko 가사는 로마자 음차·절반 영어
+# K-pop이 섞여도 이보다 훨씬 높다(로마자 병기 자막 실측 비중 27%대) — 5%는 그 사이에서
+# 여유를 크게 두면서도 크레딧 오염(1% 미만)은 확실히 걸러낸다.
+_MIN_CJK_PROPORTION = 0.05
 
 
 def title_script_hint(info: dict[str, Any]) -> str | None:
@@ -302,11 +323,52 @@ def title_script_hint(info: dict[str, Any]) -> str | None:
     없다. 그때는 None을 돌려주고, 호출부가 «본문이 CJK이기만 하면 받는다»로 느슨하게
     판정한다. 실측(폐기 44건 전수 조사)에서 제목 문자가 ja/ko인 곡이 38건, 로마자인 곡이
     6건이었다.
+
+    **한자만(가나·한글 0) 있는 제목은 None(2026-08-04 감사 F2-a)**: `body_language`는
+    이 경우 무조건 zh를 낸다(한자는 ja·zh 공용 문자라 제목만으로는 못 가른다). 실측
+    (廻廻奇譚): 제목이 한자 4자(가나 없음)인 실제 ja 곡이 zh로 오판돼, `order_manual_
+    tracks`의 하드 리젝트(원어 트랙 없음 사유)가 실재하는 ja 수동 트랙을 "원어(zh) 자막
+    없음"이라는 틀린 사유로 포기시켰다. 여기서 None을 돌리면 `asr_lang_hint`(-orig 트랙
+    언어 코드) 폴백이 자리를 얻는다 — 순정 zh 곡은 대개 zh-orig가 있어 그쪽에서 정답을
+    받고, ja 곡은 ja-orig에서 정답을 받는다. 자막 **본문**(`body_language`) 판정의 zh
+    분기는 그대로다 — 본문은 실제로 그 트랙을 받아 본 뒤라 한자만으로 zh 단정해도
+    `verify_track_body`의 대칭 예외(아래)가 있어 ja 곡을 오탈락시키지 않는다.
     """
     from everyric2.alignment.caption_anchors import script_counts
 
     text = f"{info.get('title') or ''} {info.get('uploader') or ''}"
-    return body_language(script_counts(text))
+    counts = script_counts(text)
+    if counts.get("han") and not counts.get("kana") and not counts.get("hangul"):
+        return None
+    return body_language(counts)
+
+
+def asr_lang_hint(info: dict[str, Any]) -> str | None:
+    """자동 생성(ASR) '-orig' 트랙의 언어 코드 — 오디오 언어의 메타데이터 신호로만 쓴다.
+
+    ASR **본문**은 정책상 가사로 쓰지 않는다(`manual_track_keys`가 자동 생성 트랙을 아예
+    후보에서 뺀다) — 하지만 그 트랙의 **언어 코드**는 여전히 메타데이터다. `title_script_
+    hint`가 None일 때(제목·채널명이 로마자뿐인 곡)만 `order_manual_tracks`의 폴백 힌트로
+    쓴다.
+
+    실측(2026-08-03 c_9UTrrqcLI): 라틴 제목 곡("[MV] TAK - 'Lucky Doki' feat. xei", 실제
+    원어는 한국어)은 제목에 원어 힌트가 전혀 없어 알파벳순 폴백으로 떨어졌다 — en 트랙이
+    먼저 걸려 탈락한 뒤 ja(번역 자막)가 힌트 없이 통과해 원어(ko) 트랙은 받아 보지도
+    못했다. `-orig` 트랙은 유튜브가 원본으로 인식한 오디오에 대해서만 만들어지므로, 제목이
+    아무 신호도 못 주는 곡에서는 알파벳순보다 나은 순서 힌트다.
+
+    자동 더빙·다중 오디오 업로드에서 이 신호가 실제 원어와 다를 수 있다는 것은 이미
+    알려져 있다(`zyRt-nBM3dY`, `caption_require_cjk` 설정 문서 참고) — 그래서 이 힌트는
+    `order_manual_tracks`에서 `title_script_hint`보다 항상 밀리고(제목이 있으면 절대 안
+    쓰인다), `fetch_lyrics_from_captions`의 "힌트 언어에 수동 트랙이 없으면 포기" 규칙과
+    본문 CJK 게이트(`verify_track_body`/`has_cjk_script`)가 여전히 최종 방어선으로
+    남는다 — 제목도 asr도 신호가 없거나 본문이 어긋나면 그 방어선 하나로 버틴다(예전과
+    동일).
+    """
+    for key in info.get("automatic_captions") or {}:
+        if key.endswith("-orig"):
+            return base_lang(key)
+    return None
 
 
 def order_manual_tracks(
@@ -322,20 +384,24 @@ def order_manual_tracks(
       ① lang_hint — 이미 가진 가사의 문자 체계에서 얻은 언어. 앵커 경로에만 있는 신호이고
          (가사가 있어야 나온다) 자막 목록 구성에 흔들리지 않아 가장 강하다.
       ② title_script_hint — 제목·채널명의 문자 체계. 가사가 없는 조달 경로의 주 신호다.
-      ③ 나머지는 키 알파벳순 (재현 가능한 순서)
+      ③ asr_lang_hint — title_script_hint가 없을 때만 쓰는 약한 폴백(`asr_lang_hint`
+         문서 참고). 제목이 로마자뿐인 곡에서 알파벳순보다 나은 순서를 준다.
+      ④ 나머지는 키 알파벳순 (재현 가능한 순서)
 
-    유튜브 쪽 신호(`-orig` ASR 트랙, `info['language']`)는 **쓰지 않는다.** 자동 더빙·다중
-    오디오 업로드에서 일본어 곡에 `vi-orig`·`th-orig`가 붙는 것이 실측으로 확인됐고
-    (`zyRt-nBM3dY`), 그 신호를 순서에 넣으면 틀린 트랙을 먼저 받아 보게 된다. 받아 본 뒤의
-    본문 검증도 그것을 걸러내지 못한다 — 베트남어 ASR 전사가 베트남어 문자를 내는 것은
-    당연하기 때문이다.
+    ③은 ②보다 약하고 신뢰도가 낮다 — 자동 더빙·다중 오디오 업로드에서 일본어 곡에
+    `vi-orig`·`th-orig`가 붙는 것이 실측으로 확인됐다(`zyRt-nBM3dY`). 그 사고의 실제
+    영상에는 제목이 있어(일본어 문자) ②가 먼저 이겨 ③은 쓰이지 않는다 — ③이 실제로
+    관여하는 것은 제목도 채널명도 원어 힌트를 못 주는 소수 사례뿐이고, 그 잔여 위험은
+    `fetch_lyrics_from_captions`의 "힌트에 맞는 수동 트랙이 없으면 포기" 규칙과 본문 CJK
+    게이트가 받는다.
 
     트랙 하나가 yt-dlp 호출 1회이므로 상한을 둔다.
     """
     keys = manual_track_keys(info)
     if not keys:
         return []
-    priors = [base_lang(lang_hint) if lang_hint else None, title_script_hint(info)]
+    hint = title_script_hint(info) or asr_lang_hint(info)
+    priors = [base_lang(lang_hint) if lang_hint else None, hint]
 
     def rank(key: str) -> tuple[int, str]:
         b = base_lang(key)
@@ -366,7 +432,11 @@ def verify_track_body(hint: str | None, counts: dict[str, int]) -> str | None:
     한글도 없이 한자만 있으면 `body_language`는 zh를 내지만, 그것만으로 두 언어를 가릴 수는
     없다 — 짧은 자막이나 한자 위주 줄에서 실제로 일어난다(실측: language=ja 196건의 한자
     비율이 최대 0.500까지 올라간다). 그래서 그 경우는 제목 힌트를 따른다. 반대 방향은
-    거른다 — 가나가 있는 본문은 중국어 곡의 가사가 아니다.
+    거른다 — 가나가 있는 본문은 중국어 곡의 가사가 아니다(`test_verify_does_not_accept_
+    kana_for_a_chinese_title`이 이 방향을 명시적으로 못박는다 — 2026-08-04 감사가 "한자
+    예외 대칭화"를 제안했으나 이 기존 계약과 직접 충돌해 채택하지 않았다. 廻廻奇譚류의
+    실제 결함은 `title_script_hint`가 한자만 있는 제목에 더는 zh를 단정하지 않는 F2-a
+    하나로 이미 해소된다 — asr_lang_hint 폴백이 정답을 준다).
     """
     lang = body_language(counts)
     if lang is None:
@@ -706,8 +776,36 @@ def fetch_lyrics_from_captions(video_id: str) -> CaptionLyrics:
             "이 영상에는 사람이 쓴 자막이 없어요 (자동 생성 자막은 가사로 쓰지 않아요)",
         )
 
-    hint = title_script_hint(info)
+    hint = title_script_hint(info) or asr_lang_hint(info)
     require_cjk = _require_cjk_enabled()
+
+    if hint and len(manual) >= 2 and not any(base_lang(k) == hint for k in manual):
+        # 힌트(제목 스크립트든 asr이든)가 가리키는 언어의 수동 트랙이 아예 없다 — 남은
+        # 트랙은 전부 번역일 가능성이 높다. 실측(2026-08-03 Atvsg_zogxo): 힌트 ja인데 ja
+        # 수동 트랙이 없어(18종 전부 번역) 전원 동순위로 알파벳순 폴백이 de(독일어)를
+        # 골랐다. 엉뚱한 언어를 받아 보는 대신 여기서 포기해 다음 소스(가사 직접 붙여넣기
+        # 등)로 넘긴다.
+        #
+        # **len(manual) >= 2 조건이 필요한 이유**(회귀 실측: test_fetch_lyrics_takes_the_
+        # language_from_the_body_not_the_track_code): 수동 트랙이 **하나뿐**이면 그 하나가
+        # 힌트와 다른 언어 코드를 달고 있어도 "남은 트랙이 전부 번역"이라고 말할 근거가
+        # 없다 — 오히려 한국 팬이 일본어 원문을 ko 트랙에 잘못 올리는 것처럼 **그 하나가
+        # 원문 자체가 잘못 라벨된 경우**가 실측돼 있다(언어 코드는 틀렸지만 트랙 코드 33건
+        # 오염 사례). 트랙이 하나뿐이면 포기하지 않고 기존 본문 검증(`verify_track_body`)
+        # 이 그 트랙의 실제 내용으로 판정하게 둔다 — 힌트와 본문이 맞으면 받아들이고
+        # (트랙 코드가 아니라 본문에서 유도한 언어로 저장한다), 아니면 그 검증이 알아서
+        # 기각한다. 후보가 여럿인데 전부 힌트와 다르면(이 분기) 그 다수가 우연히 전부
+        # 잘못 라벨됐을 확률보다 "전부 번역"일 확률이 훨씬 높다.
+        logger.warning(
+            f"caption lyrics rejected for {video_id}: hint={hint} has no matching manual "
+            f"track among {manual} — the rest are translations, not the original"
+        )
+        raise CaptionUnavailable(
+            "no_original_track",
+            f"사람이 쓴 자막은 있는데 이 곡의 원어({hint}) 자막 트랙이 없어요 — "
+            f"있는 자막은 전부 번역일 가능성이 높아요",
+        )
+
     # (트랙, 사유코드) — 전부 같은 사유로 떨어졌으면 그 사유를 그대로 전한다. 「자막이
     # 효과음뿐이라 줄이 부족하다」를 「원어 트랙이 없다」로 뭉개면 안내가 틀린다.
     rejected: list[tuple[str, str]] = []

@@ -188,6 +188,49 @@ def test_real_japanese_cover_titles_match_the_original(cover_title):
     assert score == 1.0
 
 
+# ── title_match: cover by 접미 융합 수정(실측, 2026-08) ────────────
+#
+# 사용자 제보(«커버를 이을 때 한국어나 영어 cover인 걸 잘 인식 못해»)를 재조사하며 발견한
+# 별도 결함: 「곡명 cover by 이름」(구분자 없이 곡명 뒤에 바로 붙는, 유튜브에 흔한 표기)이
+# 기존 covered\s*by(과거형 -ed 필수)로는 아예 안 잡혔고, \bcover\b 단독 제거로는 "cover"만
+# 지워져 "by 이름"이 곡명에 알파벳으로 융합돼(둘 다 alnum이라 공백 제거만으로 안 떨어짐)
+# 길이비가 기본 임계값(0.6) 밑으로 떨어졌다(예: "첫사랑cover by 홍길동" → "첫사랑홍길동",
+# 비 0.5). feat. 접미와 같은 "표시부터 끝까지 통째로 버린다" 전략(_COVER_BY_RE)으로 고쳤다.
+
+
+def test_strip_noise_tokens_removes_cover_by_without_ed_suffix():
+    for raw, kept in [
+        ("熱異常 cover by 아무개", "熱異常"),
+        ("熱異常 Cover by 아무개", "熱異常"),  # 대문자 C — 흔한 표기
+        ("熱異常 covered by 아무개", "熱異常"),  # 기존 -ed 표기 — 회귀 확인
+    ]:
+        assert title_match.normalize_title(title_match.strip_noise_tokens(raw)) == kept
+
+
+def test_cover_by_suffix_does_not_fuse_uploader_name_into_title():
+    """구분자 없는 「곡명 cover by 이름」에서 "이름"이 곡명에 융합되지 않고 곡명 단독
+    후보가 살아남는다 — 수정 전에는 이 케이스가 candidate_queries에 아예 없었다."""
+    for raw in ["첫사랑 cover by 홍길동", "첫사랑 Cover by 홍길동", "첫사랑 covered by 홍길동"]:
+        candidates = title_match.candidate_queries(raw, drop_noise=True)
+        assert "첫사랑" in candidates, f"{raw!r} -> {candidates!r}"
+
+
+def test_cover_by_without_ed_now_matches_the_original_title():
+    """실측 재현 — 수정 전에는 "cover by"(비-ed)가 아예 안 잡혀 유사도가 0.5 미만(또는 None)
+    이었다. 이제 covered by와 동등하게 원제와 정확히 일치(score=1.0)한다."""
+    for cover_title in ["첫사랑 cover by 홍길동", "打上花火 cover by さユり"]:
+        original = cover_title.split(" cover by ")[0].split(" Cover by ")[0]
+        score, _ = title_match.match_score(cover_title, original)
+        assert score == 1.0, f"{cover_title!r} vs {original!r} -> {score!r}"
+
+
+def test_cover_by_prefix_form_still_isolates_title_via_separator():
+    """"Covered by 이름 - 곡명"(업로더가 앞에 오는 관례)은 접미 소거(_COVER_BY_RE)가 통째로
+    삼켜도 구분자 분할 경로가 살아 있어 곡명이 여전히 후보로 남는다 — 회귀 없음."""
+    candidates = title_match.candidate_queries("Covered by 홍길동 - 첫사랑", drop_noise=True)
+    assert "첫사랑" in candidates
+
+
 # ── title_match: 매칭 점수 ────────────────────────────────────────
 
 
@@ -260,6 +303,90 @@ def test_rank_matches_df_suppresses_shared_producer_and_singer_fragments():
         "DECO*27 - 勘違い性反希望症 feat. 初音ミク", entries, max_fragment_df=None
     )
     assert legacy and legacy[0][1] == 1.0
+
+
+# ── list_titled: 컬럼 프로젝션 회귀(성능 핫픽스 2026-08) ───────────
+#
+# MoRef 실측 감사: list_titled가 select(SyncResult)로 ORM 엔티티 전체를 끌어와 대형 JSON
+# timestamps 컬럼(행당 평균 272KB)까지 통째로 역직렬화 — 요청 한 번에 275MB, 이벤트루프가
+# 5~7초 블로킹돼 /health까지 멈췄다. 필요한 세 컬럼(video_id/title/artist)만 select하고
+# result.all()로 받도록 고쳤다. result.scalars().all()을 다중 컬럼 select에 걸면
+# SQLAlchemy 2.0에서 0번째 컬럼(video_id 문자열)만 남아 row.title이 AttributeError로
+# 터진다 — 이 회귀를 못 잡으면 첫 실호출에서 죽는다.
+
+
+def test_list_titled_returns_rows_with_video_id_title_artist():
+    async def body():
+        async with _env() as sm:
+            await _seed_sync(sm, SOURCE, title=SOURCE_TITLE, artist="いよわ")
+            async with sm() as s:
+                rows = await SyncRepository(s).list_titled()
+                assert len(rows) == 1
+                row = rows[0]
+                # Row는 다중 컬럼 select 결과 — .scalars()를 걸지 않아야 속성 접근이 산다
+                assert row.video_id == SOURCE
+                assert row.title == SOURCE_TITLE
+                assert row.artist == "いよわ"
+
+    asyncio.run(body())
+
+
+def test_list_titled_survives_a_row_with_a_very_large_timestamps_payload():
+    """timestamps가 수백KB짜리 JSON이어도 list_titled는 그 컬럼을 아예 select하지 않으므로
+    역직렬화 비용 없이 동작해야 한다 — 이 테스트가 회귀하면 select(SyncResult) 전체 로드로
+    되돌아갔다는 뜻이다."""
+
+    async def body():
+        async with _env() as sm:
+            huge_segments = [
+                {"text": f"라인{i}", "start": float(i), "end": float(i) + 1.0}
+                for i in range(20000)
+            ]
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=SOURCE,
+                    lyrics_hash="h1",
+                    timestamps=huge_segments,
+                    engine="ctc",
+                    title=SOURCE_TITLE,
+                    artist="いよわ",
+                )
+                await s.commit()
+            async with sm() as s:
+                rows = await SyncRepository(s).list_titled()
+                assert len(rows) == 1
+                assert rows[0].video_id == SOURCE
+                assert rows[0].title == SOURCE_TITLE
+                assert rows[0].artist == "いよわ"
+
+    asyncio.run(body())
+
+
+def test_list_titled_dedupes_to_latest_row_per_video_and_respects_limit():
+    async def body():
+        async with _env() as sm:
+            # 같은 영상에 제목이 채워진 행을 두 번 만든다(force 재생성 시나리오 재현) — 최신
+            # 한 건만 남아야 한다. created_at은 초 단위 문자열이라(server default) 같은 초에
+            # 만들어지면 동률이 나므로, 옛 행을 명시적으로 과거로 되돌려 결정적으로 만든다.
+            await _seed_sync(sm, SOURCE, title="옛 제목", lyrics_hash="h_old")
+            async with sm() as s:
+                old_rows = await SyncRepository(s).get_by_video(SOURCE)
+                old_rows[0].created_at = datetime.now(timezone.utc).replace(
+                    tzinfo=None
+                ) - timedelta(days=1)
+                await s.commit()
+            await _seed_sync(sm, SOURCE, title=SOURCE_TITLE, lyrics_hash="h_new")
+            await _seed_sync(sm, OTHER, title="다른 곡")
+            async with sm() as s:
+                rows = await SyncRepository(s).list_titled()
+                by_video = {r.video_id: r for r in rows}
+                assert set(by_video) == {SOURCE, OTHER}
+                assert by_video[SOURCE].title == SOURCE_TITLE
+
+                limited = await SyncRepository(s).list_titled(limit=1)
+                assert len(limited) == 1
+
+    asyncio.run(body())
 
 
 # ── 후보 탐색 엔드포인트 ──────────────────────────────────────────
@@ -370,7 +497,7 @@ def test_candidates_merges_into_active_job():
     asyncio.run(body())
 
 
-@pytest.mark.parametrize("finished_status", ["done", "failed"])
+@pytest.mark.parametrize("finished_status", ["done", "failed", "declined"])
 def test_candidates_respect_cooldown_after_finished_attempt(finished_status):
     async def body():
         async with _env(link_retry_cooldown_days=14) as sm:

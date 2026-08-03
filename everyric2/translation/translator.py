@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -45,6 +46,59 @@ class TranslationResult:
     # 원문 언어가 대상 언어와 같아 번역을 건너뛴 경우 True (translation은 전부 빈 문자열).
     # 클라이언트가 '번역 실패'와 '번역할 것이 없음'을 구분할 수 있게 결과에 남긴다.
     translation_skipped: bool = False
+
+
+class TranslationBudget:
+    """한 번역 요청(OpenAICompatibleTranslator.translate() 한 번) 안에서 NIM 왕복(실제 HTTP
+    요청) 수·누적 소요시간을 추적하는 공유 예산.
+
+    translate() 진입 시 한 번 만들어 재귀 호출 트리 전체(_translate_lines → _run_batches →
+    _translate_batch → _retry_low_quality → _request_completion → _post_completion)에 그대로
+    넘겨진다. 미스매치 복구(재귀 depth)·저품질 재요청·429 백오프는 각자 정당한 메커니즘이라
+    손대지 않고, 이 예산만 그 위에 공용 브레이크로 얹는다 — exhausted()가 True면 호출자는 새
+    NIM 왕복을 시작하지 않고 그 시점까지의 결과로 예외 없이 반환한다(부분 번역이 무번역보다
+    낫다는 이 파일의 기존 원칙과 동일).
+
+    스레드 세이프 — 배치가 ThreadPoolExecutor로 동시에 뛰므로 카운터에 락을 건다. 한도가
+    0 이하면 그 축은 무제한으로 취급한다(설정 필드의 "0 disables" 관례를 따른다).
+    """
+
+    def __init__(self, max_round_trips: int, max_duration_sec: float):
+        self._max_round_trips = max_round_trips
+        self._max_duration_sec = max_duration_sec
+        self._start = time.monotonic()
+        self._round_trips = 0
+        self._lock = threading.Lock()
+        self._warned = False
+
+    def record_round_trip(self) -> None:
+        """실제 NIM HTTP 요청(429 재시도 포함) 하나가 나갈 때마다 호출한다."""
+        with self._lock:
+            self._round_trips += 1
+
+    def exhausted(self) -> bool:
+        with self._lock:
+            trips = self._round_trips
+        if self._max_round_trips > 0 and trips >= self._max_round_trips:
+            return True
+        return self._max_duration_sec > 0 and (
+            time.monotonic() - self._start
+        ) >= self._max_duration_sec
+
+    def warn_once(self, log_prefix: str) -> None:
+        """예산 소진을 로그에 정확히 한 번만 남긴다(재귀/병렬 경로에서 반복 호출돼도 무해)."""
+        with self._lock:
+            if self._warned:
+                return
+            self._warned = True
+            trips = self._round_trips
+        logger.warning(
+            "%sTranslation budget exhausted (%d round trips, %.1fs elapsed) — "
+            "returning the best-effort result so far",
+            log_prefix,
+            trips,
+            time.monotonic() - self._start,
+        )
 
 
 _HANGUL_RE = re.compile(r"[가-힣]")
@@ -836,11 +890,24 @@ class OpenAICompatibleTranslator(BaseTranslator):
             )
 
         try:
+            # 요청당 총예산 — 재귀적 미스매치 복구(depth 4까지)·저품질 배치 재요청이 특정
+            # 영상에서 무제한으로 중첩되며 p95 25.4s·최대 57.5s를 만든 실측(외부 감사 #9)에 대한
+            # 공용 브레이크. 개별 재시도 메커니즘(미스매치 복구·저품질 재요청·429 백오프)은
+            # 그대로 두고, 이 요청 하나(translate() 한 번 호출)의 재귀 트리 전체에 공유 예산을
+            # 실어 보낸다 — TranslationBudget 클래스 문서 참고.
+            budget = TranslationBudget(
+                self.settings.budget_max_round_trips, self.settings.budget_max_duration_sec
+            )
             # 구조화 응답은 라인 수가 많으면 max_tokens에서 잘려 파싱이 통째로 실패한다(500).
             # 프롬프트/요청/정렬/복구를 _translate_lines에 위임해 잘림·누락·저품질을 감지하고,
             # 최악의 경우에도 원문만 담아 부분 성공으로 마감한다.
             lines = self._translate_lines(
-                original_lines, source_lang, target_lang, context, include_pron=llm_pron
+                original_lines,
+                source_lang,
+                target_lang,
+                context,
+                include_pron=llm_pron,
+                budget=budget,
             )
             if deterministic_pron:
                 self._apply_deterministic_pron(lines, text, source_lang, target_lang)
@@ -886,7 +953,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         wait = min(max(delay, hinted), _RATE_LIMIT_MAX_WAIT_SEC)
         return wait + random.uniform(0.0, wait * _RATE_LIMIT_JITTER)
 
-    def _post_completion(self, payload: dict):
+    def _post_completion(self, payload: dict, budget: "TranslationBudget | None" = None):
         """chat/completions POST + 429(rate limit) 지수 백오프 재시도.
 
         배치를 동시에 던지므로 분당 한도에 걸려 429가 올 수 있다(실측으로 확인된 건 동시
@@ -894,6 +961,10 @@ class OpenAICompatibleTranslator(BaseTranslator):
         상한 안에서 기다렸다 다시 던지고, 상한을 넘으면 429 응답을 그대로 돌려줘 기존
         실패 경로(API error 예외 → 배치 부분 실패 처리)를 타게 한다. 대기하는 동안 다른
         배치는 자기 스레드에서 계속 진행한다.
+
+        budget이 있으면 실제로 나가는 요청마다(429 재시도 포함) record_round_trip으로 센다 —
+        이 안의 재시도 정책 자체는 건드리지 않는다(요청당 총예산은 새 배치/재시도를
+        *시작*할지를 _translate_batch 진입부에서 가른다).
         """
         retries = max(0, self.settings.rate_limit_retries)
         delay = max(0.0, self.settings.rate_limit_backoff_sec)
@@ -904,6 +975,8 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 headers=self._headers(),
                 timeout=self.settings.timeout,
             )
+            if budget is not None:
+                budget.record_round_trip()
             if response.status_code != 429 or attempt >= retries:
                 return response
             wait = self._retry_delay(response, delay)
@@ -919,7 +992,11 @@ class OpenAICompatibleTranslator(BaseTranslator):
         return response
 
     def _request_completion(
-        self, prompt: str, *, allow_empty: bool = False
+        self,
+        prompt: str,
+        *,
+        allow_empty: bool = False,
+        budget: "TranslationBudget | None" = None,
     ) -> tuple[str, str | None]:
         """단발 chat/completions 호출. (content, finish_reason)를 돌려준다.
 
@@ -939,7 +1016,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         content = ""
         finish_reason: str | None = None
         for attempt in range(2):
-            response = self._post_completion(payload)
+            response = self._post_completion(payload, budget=budget)
 
             if not response.ok:
                 raise RuntimeError(f"API error: {response.status_code} - {response.text[:200]}")
@@ -971,6 +1048,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         context: str | None,
         *,
         include_pron: bool,
+        budget: "TranslationBudget | None" = None,
     ) -> list[TranslationLine]:
         """긴 입력은 처음부터 배치로 나눠(잘림 예방) 각 배치를 복구 로직으로 처리한 뒤
         순서대로 이어붙인다. 발음 배치는 라인당 출력이 커서 더 잘게 나눈다.
@@ -992,6 +1070,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 context,
                 include_pron=include_pron,
                 depth=0,
+                budget=budget,
             )
 
         batches = [
@@ -1001,7 +1080,12 @@ class OpenAICompatibleTranslator(BaseTranslator):
         return [
             line
             for batch in self._run_batches(
-                batches, source_lang, target_lang, context, include_pron=include_pron
+                batches,
+                source_lang,
+                target_lang,
+                context,
+                include_pron=include_pron,
+                budget=budget,
             )
             for line in batch
         ]
@@ -1018,6 +1102,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         context: str | None,
         *,
         include_pron: bool,
+        budget: "TranslationBudget | None" = None,
     ) -> list[list[TranslationLine]]:
         """배치들을 설정된 동시성으로 실행하고 **입력 인덱스 순서**의 결과를 돌려준다.
 
@@ -1041,6 +1126,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 context,
                 include_pron=include_pron,
                 depth=0,
+                budget=budget,
             )
 
         def collect(index: int, produce) -> None:
@@ -1086,6 +1172,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         include_pron: bool,
         depth: int,
         quality_retries: int = 0,
+        budget: "TranslationBudget | None" = None,
     ) -> list[TranslationLine]:
         """한 배치를 요청하고 응답을 원문 대조로 입력 라인에 맞춘다. 반환 길이 == len(lines).
 
@@ -1093,13 +1180,21 @@ class OpenAICompatibleTranslator(BaseTranslator):
         ② 절반으로 나눠 재귀, ③ 깊이 한도를 넘거나 단일 라인도 실패하면 원문만 담고
         failed=True로 마감(전체 500 방지). 응답이 완전한데도 번역·발음이 빈 라인이 많으면
         ④ '저품질 배치'로 보고 그 라인들만 한 번 더 요청한다.
+
+        budget이 이미 소진됐으면(요청당 총예산 — TranslationBudget 참고) 새 NIM 왕복을 만들지
+        않고 이 배치 전체를 원문만 담은 failed 라인으로 즉시 마감한다. 재귀(미스매치 복구·절반
+        분할·저품질 재요청)는 전부 이 함수를 다시 부르므로, 이 진입부 한 곳의 체크가 재귀
+        트리 전체에서 예산을 강제한다.
         """
         if not lines:
             return []
+        if budget is not None and budget.exhausted():
+            budget.warn_once(self._log_prefix())
+            return [self._failed_line(line) for line in lines]
 
         text = "\n".join(lines)
         prompt = self._build_prompt(text, source_lang, target_lang, include_pron, context)
-        content, finish_reason = self._request_completion(prompt, allow_empty=True)
+        content, finish_reason = self._request_completion(prompt, allow_empty=True, budget=budget)
 
         slots = self._align_items(self._extract_json_items(content), lines)
         if all(slot is None for slot in slots) and not include_pron:
@@ -1130,6 +1225,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
                     context,
                     include_pron=include_pron,
                     depth=depth + 1,
+                    budget=budget,
                 )
                 for i, line in zip(missing, retried):
                     slots[i] = line
@@ -1138,10 +1234,10 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 mid = len(lines) // 2
                 return self._translate_batch(
                     lines[:mid], source_lang, target_lang, context,
-                    include_pron=include_pron, depth=depth + 1,
+                    include_pron=include_pron, depth=depth + 1, budget=budget,
                 ) + self._translate_batch(
                     lines[mid:], source_lang, target_lang, context,
-                    include_pron=include_pron, depth=depth + 1,
+                    include_pron=include_pron, depth=depth + 1, budget=budget,
                 )
             else:
                 slots[0] = self._failed_line(lines[0])
@@ -1154,6 +1250,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         return self._retry_low_quality(
             resolved, lines, source_lang, target_lang, context,
             include_pron=include_pron, depth=depth, quality_retries=quality_retries,
+            budget=budget,
         )
 
     def _retry_low_quality(
@@ -1167,6 +1264,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         include_pron: bool,
         depth: int,
         quality_retries: int,
+        budget: "TranslationBudget | None" = None,
     ) -> list[TranslationLine]:
         """응답이 절단되지 않았는데도 중간 구간의 번역·발음만 비어 온 경우의 재요청.
 
@@ -1186,6 +1284,12 @@ class OpenAICompatibleTranslator(BaseTranslator):
             or len(blank) / len(lines) < _LOW_QUALITY_RATIO
         ):
             return resolved
+        if budget is not None and budget.exhausted():
+            # 예산 소진 — 이 재요청은 시작하지 않는다. resolved를 그대로 돌려준다(빈 값이지만
+            # failed=False인 라인을 _translate_batch의 소진 마감으로 failed=True로 격하시키지
+            # 않기 위해 여기서 먼저 걸러 재귀 호출 자체를 생략한다).
+            budget.warn_once(self._log_prefix())
+            return resolved
 
         logger.warning(
             "%sLow-quality translation batch: %d/%d lines came back empty (indices %s, "
@@ -1204,6 +1308,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
             include_pron=include_pron,
             depth=depth,
             quality_retries=quality_retries + 1,
+            budget=budget,
         )
         for i, line in zip(blank, retried):
             # 재요청도 비었으면 1차 결과를 유지한다 (failed 표시로 덮어쓰지 않는다)

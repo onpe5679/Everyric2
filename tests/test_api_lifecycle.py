@@ -42,8 +42,10 @@ from everyric2.server.api.sync import (
 )
 from everyric2.server.api.worker import ClaimRequest, claim_job
 from everyric2.server.db import connection as db_conn
+from everyric2.server.db import orphan_reaper
 from everyric2.server.db.models import Base, Job, LinkJob
 from everyric2.server.db.repository import (
+    ActionLogRepository,
     JobRepository,
     LinkJobRepository,
     SyncRepository,
@@ -389,6 +391,9 @@ def test_init_db_requeues_zombie_link_jobs_and_fails_zombie_sync_jobs(monkeypatc
             assert (await repo.get_by_id(queued_link.id)).status == "queued"
             job = await JobRepository(s).get_by_id(zombie_job.id)
             assert job.status == "failed"
+            # 서버 재기동으로 죽은 잡은 진짜 시스템 오류다 — 사용자 취소도 다운로드의 외부
+            # 요인도 아니다 (MoRef 감사 #3, failure_kind 구조화 분류)
+            assert job.failure_kind == "system"
         await engine.dispose()
 
     asyncio.run(body())
@@ -504,6 +509,84 @@ def test_generate_limit_is_off_without_an_admin_key():
                 assert await _count_jobs(sm) == 3
             finally:
                 sync_api.DAILY_GENERATE_LIMIT = prev
+
+    asyncio.run(body())
+
+
+# ── 정렬 업그레이드(min_depth) 한도 분리 (운영자 결정 2026-08-04) ──────────────
+#
+# 처음엔 min_depth(force 없는 재생성)가 action="generate"를 그대로 소비했다 — 운영자
+# 정정("업그레이드도 당연히 생성 쿼터랑은 별개여야지")으로 sync.py가 action="upgrade"
+# 전용 카운터(daily_upgrade_limit)로 분리했다. 아래는 그 분리 자체를 실증한다.
+
+
+def test_regenerate_with_min_depth_consumes_upgrade_not_generate():
+    """force 없는 min_depth 재생성은 action="upgrade"만 늘리고 "generate"는 그대로다."""
+
+    async def body():
+        async with _env(admin_api_key="admin-secret", local_worker=False) as sm:
+            resp = await regenerate_sync(
+                RegenerateRequest(video_id=VIDEO, lyrics=LYRICS, min_depth="heavy"),
+                BackgroundTasks(),
+            )
+            assert resp.status == "processing"
+            assert await _count_jobs(sm) == 1
+
+            async with sm() as s:
+                repo = ActionLogRepository(s)
+                assert await repo.count_recent("upgrade", VIDEO) == 1
+                assert await repo.count_recent("generate", VIDEO) == 0
+
+    asyncio.run(body())
+
+
+def test_regenerate_without_min_depth_still_consumes_generate():
+    """min_depth 없는 일반 재생성(기존 싱크 미존재라 조기 반환을 안 타는 경우)은 예전
+    그대로 "generate"를 소비한다 — 분리는 min_depth 경로만 건드렸다는 회귀 방지."""
+
+    async def body():
+        async with _env(admin_api_key="admin-secret", local_worker=False) as sm:
+            resp = await regenerate_sync(
+                RegenerateRequest(video_id=VIDEO, lyrics=LYRICS), BackgroundTasks()
+            )
+            assert resp.status == "processing"
+
+            async with sm() as s:
+                repo = ActionLogRepository(s)
+                assert await repo.count_recent("generate", VIDEO) == 1
+                assert await repo.count_recent("upgrade", VIDEO) == 0
+
+    asyncio.run(body())
+
+
+def test_regenerate_with_min_depth_hits_429_when_upgrade_limit_exceeded():
+    """daily_upgrade_limit을 다 쓰면 429 — generate 한도(DAILY_GENERATE_LIMIT)와 무관하게
+    독립적으로 걸린다(가사를 매번 바꿔 캐시/합류를 비켜 매번 새 잡을 만들게 한다)."""
+
+    async def body():
+        async with _env(
+            admin_api_key="admin-secret", local_worker=False, daily_upgrade_limit=1
+        ) as sm:
+            await regenerate_sync(
+                RegenerateRequest(
+                    video_id=VIDEO, lyrics=LYRICS, min_depth="medium"
+                ),
+                BackgroundTasks(),
+            )
+            with pytest.raises(HTTPException) as exc:
+                await regenerate_sync(
+                    RegenerateRequest(
+                        video_id=VIDEO, lyrics=LYRICS + "\n두 번째 시도", min_depth="heavy"
+                    ),
+                    BackgroundTasks(),
+                )
+            assert exc.value.status_code == 429
+            assert await _count_jobs(sm) == 1
+
+            async with sm() as s:
+                repo = ActionLogRepository(s)
+                assert await repo.count_recent("upgrade", VIDEO) == 1  # 두 번째는 거절돼 안 늘어남
+                assert await repo.count_recent("generate", VIDEO) == 0  # generate는 전혀 안 건드림
 
     asyncio.run(body())
 
@@ -834,5 +917,141 @@ def test_job_status_falls_back_to_latest_when_the_result_row_is_gone():
             resp = await get_job_status(job.id)
             assert resp.timestamps[0]["text"] == "남아 있는 싱크"
             assert remaining.id  # 폴백이 짚은 대상이 존재한다
+
+    asyncio.run(body())
+
+
+# ── ⑧ 고아 잡 TTL 리퍼 (외부 감사 #7) ─────────────────────────────
+#
+# 리스 스위퍼(①)는 원격 워커가 리스를 쥔 잡만 커버한다. 인프로세스 워커와 "번역 대기"
+# 구간(test_reclaim_leaves_in_process_and_meta_wait_jobs_alone이 못박은 그 케이스)은 리스가
+# 없어 그 스위퍼의 대상이 아니다 — 실측(2026-08)으로 그 구간에서 하트비트가 끊긴 잡 하나가
+# 6.3시간 동안 processing에 정체했다. 이 리퍼는 updated_at(마지막 진행 갱신) 기준의 TTL로
+# 그 구멍을 별도로 메운다.
+
+
+async def _backdate_processing_job(sm, job_id: str, updated_at: datetime, **fields) -> None:
+    """잡을 processing으로 두고 updated_at을 직접 지정해 커밋한다.
+
+    updated_at은 onupdate=func.now()이지만, ORM이 그 속성에 명시적으로 대입된 값을 SET
+    절에 실으므로 onupdate가 덮어쓰지 않는다 — 이 파일의 다른 테스트(예:
+    test_post_link_jobs_respects_the_pair_cooldown)가 created_at에 쓰는 것과 같은 패턴."""
+    async with sm() as s:
+        job = await JobRepository(s).get_by_id(job_id)
+        job.status = "processing"
+        job.updated_at = updated_at
+        for k, v in fields.items():
+            setattr(job, k, v)
+        await s.commit()
+
+
+def test_orphan_sweep_reaps_a_job_whose_heartbeat_went_stale():
+    """실측 사고 재현: stage='번역 대기', progress=48로 하트비트가 끊긴 잡은 TTL을 넘기면
+    failed로 회수되고, 에러 메시지는 사용자에게 보일 한국어 한 문장이어야 한다."""
+
+    async def body():
+        async with _env(orphan_job_ttl_min=50) as sm:
+            job_id = await _seed_queued_job(sm)
+            stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                hours=6, minutes=20
+            )
+            await _backdate_processing_job(sm, job_id, stale, progress=48, stage="번역 대기")
+
+            reaped = await orphan_reaper.sweep_orphan_jobs()
+
+            assert reaped == 1
+            job = await _job(sm, job_id)
+            assert job.status == "failed"
+            assert job.error == orphan_reaper.ORPHAN_RECOVERY_MESSAGE
+
+    asyncio.run(body())
+
+
+def test_orphan_sweep_preserves_a_job_with_a_recent_heartbeat():
+    """방금 진행률을 보고한(updated_at이 최근인) 잡은 TTL 안이므로 건드리지 않는다 —
+    판정 기준이 created_at(시작 시각)이었다면 오래 걸리는 정상 잡까지 죽였을 것이다."""
+
+    async def body():
+        async with _env(orphan_job_ttl_min=50) as sm:
+            job_id = await _seed_queued_job(sm)
+            recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=2)
+            await _backdate_processing_job(sm, job_id, recent, progress=60, stage="타이밍 보정")
+
+            reaped = await orphan_reaper.sweep_orphan_jobs()
+
+            assert reaped == 0
+            job = await _job(sm, job_id)
+            assert job.status == "processing"
+            assert job.progress == 60
+
+    asyncio.run(body())
+
+
+def test_orphan_sweep_ignores_non_processing_jobs():
+    """queued 등 processing이 아닌 잡은 updated_at이 아무리 오래돼도 건드리지 않는다."""
+
+    async def body():
+        async with _env(orphan_job_ttl_min=50) as sm:
+            job_id = await _seed_queued_job(sm)  # status == "queued"
+            stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=10)
+            async with sm() as s:
+                job = await JobRepository(s).get_by_id(job_id)
+                job.updated_at = stale
+                await s.commit()
+
+            reaped = await orphan_reaper.sweep_orphan_jobs()
+
+            assert reaped == 0
+            assert (await _job(sm, job_id)).status == "queued"
+
+    asyncio.run(body())
+
+
+def test_orphan_sweep_disabled_when_ttl_is_non_positive():
+    """TTL을 0 이하로 두면 리퍼가 비활성 — 며칠이 지나도 회수하지 않는다(설정의 "0 disables"
+    관례)."""
+
+    async def body():
+        async with _env(orphan_job_ttl_min=0) as sm:
+            job_id = await _seed_queued_job(sm)
+            stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=3)
+            await _backdate_processing_job(sm, job_id, stale, progress=48, stage="번역 대기")
+
+            reaped = await orphan_reaper.sweep_orphan_jobs()
+
+            assert reaped == 0
+            assert (await _job(sm, job_id)).status == "processing"
+
+    asyncio.run(body())
+
+
+def test_importing_the_app_does_not_start_the_orphan_sweeper():
+    """리스 스위퍼(test_importing_the_app_does_not_start_the_sweeper)와 같은 이유 —
+    임포트만으로 태스크가 뜨면 앱을 띄우지 않는 이 레포의 테스트에 태스크가 남는다."""
+    import everyric2.server.main  # noqa: F401
+
+    assert orphan_reaper._SWEEPER_TASK is None
+
+
+def test_lifespan_starts_and_stops_the_orphan_sweeper(monkeypatch):
+    """lifespan이 고아 잡 스위퍼도 리스 스위퍼와 함께 띄우고, 종료 시 반드시 취소한다."""
+    from everyric2.server import main as server_main
+
+    async def _noop():
+        return None
+
+    monkeypatch.setattr(server_main, "init_db", _noop)
+    monkeypatch.setattr(server_main, "close_db", _noop)
+    monkeypatch.setattr(server_main, "_gpu_available", lambda: True)
+
+    async def body():
+        async with server_main.lifespan(server_main.app):
+            lease_task = worker_api._SWEEPER_TASK
+            orphan_task = orphan_reaper._SWEEPER_TASK
+            assert lease_task is not None and not lease_task.done()
+            assert orphan_task is not None and not orphan_task.done()
+        assert worker_api._SWEEPER_TASK is None
+        assert orphan_reaper._SWEEPER_TASK is None
+        assert orphan_task.cancelled() or orphan_task.done()
 
     asyncio.run(body())

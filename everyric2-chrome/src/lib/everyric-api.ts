@@ -1,4 +1,4 @@
-import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, TranslateResult } from '../types';
+import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LimitsResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, NoticesResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, SyncPreviousVersion, SyncVersionDetail, SyncVersionsResponse, TranslateResult, ViewStatsResponse } from '../types';
 import { affectsServerStatus, failureKindFromStatus, failureToStatus, maskPath, maskSecret, okStatus } from './server-status';
 import { localPermissionBlock, normalizeLoopbackUrl } from './host-permissions';
 
@@ -207,6 +207,63 @@ export function lookupSync(
   );
 }
 
+/** 정렬 품질 별점(1~5) + 선택 오류 제보 — 수집 전용, 응답은 {ok: true}.
+ *  depth는 제보 대상 싱크의 분석 깊이(옵션) — 구버전 서버는 모르는 키를 그냥 무시한다. */
+export function submitFeedback(
+  server: ServerConfig,
+  payload: {
+    video_id: string; rating: number; category?: string; comment?: string;
+    depth?: 'fast' | 'medium' | 'heavy';
+  },
+  sink?: FailureSink,
+): Promise<{ ok: boolean } | null> {
+  return request<{ ok: boolean }>(server, '/api/sync/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }, 8000, sink);
+}
+
+/**
+ * 이 영상 자기 싱크의 직전(재처리로 덮어써지기 전) 세대 — 디버그 패널의 A/B 고스트
+ * 비교용. 이력이 없으면 서버가 found=false를 준다(404가 아니다 — 조회 관례 동일).
+ */
+export async function fetchPreviousSync(
+  server: ServerConfig, videoId: string, sink?: FailureSink,
+): Promise<SyncPreviousVersion | null> {
+  return request<SyncPreviousVersion>(
+    server, `/api/sync/${encodeURIComponent(videoId)}/previous`, undefined, 8000, sink,
+  );
+}
+
+/**
+ * 이 영상 자기 싱크의 저장된 버전 목록(최신순, ≤10) — 디버그 패널의 깊이·버전 비교용.
+ * fetchPreviousSync와 달리 목록 자체가 없다는 소프트 실패 필드가 없다 — 이 엔드포인트가
+ * 없는 구버전 서버는 404 → null이므로 호출부는 조용히 포기한다(다른 additive 엔드포인트와
+ * 같은 규칙).
+ */
+export function fetchSyncVersions(
+  server: ServerConfig, videoId: string, sink?: FailureSink,
+): Promise<SyncVersionsResponse | null> {
+  return request<SyncVersionsResponse>(
+    server, `/api/sync/${encodeURIComponent(videoId)}/versions`, undefined, 8000, sink,
+  );
+}
+
+/**
+ * 목록에서 고른 버전 하나의 전체 타임스탬프 — 디버그 패널이 이걸로 고스트 비교를 그린다.
+ * 서버가 모르는 result_id면 404 → null (이 버전이 만료·삭제됐거나 오타).
+ */
+export function fetchSyncVersion(
+  server: ServerConfig, videoId: string, resultId: string, sink?: FailureSink,
+): Promise<SyncVersionDetail | null> {
+  return request<SyncVersionDetail>(
+    server,
+    `/api/sync/${encodeURIComponent(videoId)}/versions/${encodeURIComponent(resultId)}`,
+    undefined, 8000, sink,
+  );
+}
+
 /**
  * 같은 곡의 다른 영상(원곡·다른 업로드) 후보 탐색.
  *
@@ -285,6 +342,8 @@ export function regenerateSync(
     video_id: string; lyrics: string; line_meta?: LineMeta[];
     attribution?: SourceAttribution; title?: string; artist?: string;
     target_lang?: string; line_meta_lang?: string;
+    /** 분석 깊이 하한 — 서버가 라우팅을 건너뛰고 이 깊이에서 시작한다 (깊이 버튼) */
+    min_depth?: 'medium' | 'heavy';
   },
   sink?: FailureSink,
 ): Promise<GenerateResponse | null> {
@@ -429,6 +488,25 @@ export function listSyncs(
   return request<SyncListItem[]>(server, `/api/sync/list?limit=${limit}`, undefined, 4000, sink);
 }
 
+/** 배치 조회 상한 — 서버 계약과 같다(재생목록 패널의 존재 배지용) */
+const SYNC_EXISTS_MAX = 100;
+
+/**
+ * 여러 영상의 서버 싱크(링크로 빌려온 것 포함) 존재 여부를 한 번에 — 재생목록 패널의
+ * 항목별 "서버 싱크 있음" 점 배지가 쓴다. 빈 배열을 보내면 요청 자체를 생략한다(서버가
+ * 빈 목록도 200으로 받아주지만 왕복이 무의미하다).
+ */
+export function syncExists(
+  server: ServerConfig, videoIds: string[], sink?: FailureSink,
+): Promise<Record<string, boolean> | null> {
+  if (videoIds.length === 0) return Promise.resolve({});
+  return request<{ exists: Record<string, boolean> }>(server, '/api/sync/exists', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_ids: videoIds.slice(0, SYNC_EXISTS_MAX) }),
+  }, 5000, sink).then(res => res?.exists ?? null);
+}
+
 /**
  * 서버를 쓸 수 있는지 + 못 쓴다면 왜인지.
  *
@@ -520,6 +598,47 @@ export function generateSyncFromCaption(
   }, 15000, sink);
 }
 
+// ── 공지 · 쿼터 · 조회수 ─────────────────────────────────────────
+// 셋 다 나중에 붙은 additive 엔드포인트다 — 이게 없는 자체 호스팅 서버에서는 404 → null이
+// 되고 호출부가 기능만 조용히 끈다(다른 additive 경로와 같은 규칙). 어느 것도 가사 표시
+// 경로에 있지 않으므로 타임아웃을 짧게 잡아 실패를 빨리 확정한다.
+
+/** 서버 공지 목록 — 확장 안 공지함이 그대로 그린다 */
+export function fetchNotices(
+  server: ServerConfig, sink?: FailureSink,
+): Promise<NoticesResponse | null> {
+  return request<NoticesResponse>(server, '/api/notices', undefined, 4000, sink);
+}
+
+/** 이 영상 기준 남은 한도(생성·파괴적 동작) — enforced=false면 한도를 안 거는 배포다 */
+export function fetchLimits(
+  server: ServerConfig, videoId: string, sink?: FailureSink,
+): Promise<LimitsResponse | null> {
+  return request<LimitsResponse>(
+    server, `/api/limits/${encodeURIComponent(videoId)}`, undefined, 4000, sink,
+  );
+}
+
+/**
+ * 여러 영상의 조회 수를 한 번에.
+ *
+ * 서버 상한이 100건이라 **여기서 자른다** — 넘겨서 422를 받으면 목록 전체가 빈손이 되는데,
+ * 이 값은 기여 이력의 곁들이 정보라 일부라도 있는 편이 언제나 낫다(제목 상한을 clip하는
+ * 것과 같은 판단). 빈 배열이면 서버를 부르지 않는다.
+ */
+const VIEW_STATS_MAX = 100;
+
+export function fetchViewStats(
+  server: ServerConfig, videoIds: string[], sink?: FailureSink,
+): Promise<ViewStatsResponse | null> {
+  if (videoIds.length === 0) return Promise.resolve({ views: {} });
+  return request<ViewStatsResponse>(server, '/api/stats/views', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_ids: videoIds.slice(0, VIEW_STATS_MAX) }),
+  }, 6000, sink);
+}
+
 export interface VocaroMatchResponse {
   found: boolean;
   slug?: string | null;
@@ -528,12 +647,19 @@ export interface VocaroMatchResponse {
   ja?: string | null;
 }
 
-/** 일본어 원제 등 클라이언트 독음 인덱스로 못 찾는 제목을 서버 원제 인덱스에 묻는다 */
+/** 일본어 원제 등 클라이언트 독음 인덱스로 못 찾는 제목을 서버 원제 인덱스에 묻는다.
+ *  타임아웃 6s — 예전 2.5s는 서버가 생성·정렬로 순간 눌린 사이 쉽게 초과했고, 그 한 번의
+ *  미스로 곡이 자막 폴백으로 생성되면 vocaroRef가 영영 비어 위키 발음·번역을 잃었다
+ *  (실측: 踊っチャイナ). 매칭은 곡 로드당 1회라 넉넉해도 비용이 없다.
+ *
+ *  hint(원 영상 제목)는 배선만 미리 받아 둔다(감사 C8d) — 서버 /api/vocaro/match가 아직
+ *  hint를 받지 않으므로 쿼리에는 싣지 않는다. 다중 버전 페이지 선택은 이 매칭이 반환한
+ *  slug로 이어지는 vocaroPage 호출의 hint가 실제로 담당한다. */
 export function vocaroMatch(
-  server: ServerConfig, title: string, sink?: FailureSink,
+  server: ServerConfig, title: string, sink?: FailureSink, _hint?: string,
 ): Promise<VocaroMatchResponse | null> {
   return request<VocaroMatchResponse>(
-    server, `/api/vocaro/match?title=${encodeURIComponent(title)}`, undefined, 2500, sink,
+    server, `/api/vocaro/match?title=${encodeURIComponent(title)}`, undefined, 6000, sink,
   );
 }
 
@@ -568,10 +694,13 @@ export interface VocaroIndexResponse {
  * 타임아웃은 서버의 위키 조회(예의 간격+백오프)까지 감싼 값이다.
  */
 export function vocaroPage(
-  server: ServerConfig, slug: string, sink?: FailureSink,
+  server: ServerConfig, slug: string, hint?: string, sink?: FailureSink,
 ): Promise<VocaroPageResponse | null> {
+  // hint(영상 제목)는 한 페이지에 여러 버전 가사(원곡/리믹스)가 실린 경우의 표 선택용.
+  // 파라미터를 모르는 구서버는 무시한다 — additive.
+  const q = hint ? `&hint=${encodeURIComponent(hint.slice(0, 300))}` : '';
   return request<VocaroPageResponse>(
-    server, `/api/vocaro/page?slug=${encodeURIComponent(slug)}`, undefined, 10000, sink,
+    server, `/api/vocaro/page?slug=${encodeURIComponent(slug)}${q}`, undefined, 10000, sink,
   );
 }
 

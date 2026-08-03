@@ -6,6 +6,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -160,6 +161,63 @@ def stash_force(job_id: str) -> None:
     _PENDING_FORCE.add(job_id)
 
 
+# 분석 깊이 하한 요청 잡 — 라우팅 판정을 건너뛰고 요청 깊이(medium/heavy)에서 시작한다
+# (확장의 "분석 깊이 올리기" 버튼, 2026-08-03). 다른 스태시와 같은 인메모리 관례.
+_PENDING_MIN_DEPTH: dict[str, str] = {}
+
+
+def stash_min_depth(job_id: str, depth: str | None) -> None:
+    # fast는 하한으로서 무의미(기본 라우팅이 이미 fast에서 시작) — medium/heavy만 새긴다
+    if depth in ("medium", "heavy"):
+        _PENDING_MIN_DEPTH[job_id] = depth
+
+
+# 진행 중 잡의 현재 분석 깊이(fast/medium/heavy) — GET /api/job/{id}가 additive 필드
+# depth로 노출한다(확장의 "지금 heavy로 돌고 있어요" 진행 배지 재료). stage_holder와
+# 같은 인프로세스 관례: 정렬 스레드(run_in_executor)가 라우팅이 결정되는 즉시
+# (_run_new_stack_alignment) 쓰고, en 좌초 heavy 승급 때 다시 쓴다. DB에 쌓지 않는 이유는
+# stage_holder와 동일 — 2초마다 바뀔 수 있는 진행 중 상태를 매번 커밋하면 낭비다(완료
+# 후에는 JobMetric.depth가 영구 기록을 대신 진다).
+#
+# 원격 워커가 처리한 잡은 이 서버 프로세스 안에서 정렬이 돌지 않으므로 이 값이 절대
+# 채워지지 않는다 — 진행 중 조회는 항상 None(원격 배포의 라이브 깊이 노출은 스코프 밖).
+_JOB_DEPTH: dict[str, str] = {}
+
+
+def peek_job_depth(job_id: str) -> str | None:
+    return _JOB_DEPTH.get(job_id)
+
+
+# 잡 실제 처리 시작 시각(monotonic) — JobMetric.duration_sec/ETA(peek_processing_elapsed)의
+# 재료. jobs.updated_at은 진행률 보고마다 onupdate로 갱신되므로 완료 시점엔 이미 "지금"에
+# 수렴해 있어 시작 시각의 근사조차 못 된다(JobMetric.__doc__ 참고) — 그래서 인프로세스
+# 스탬프를 따로 둔다. 인프로세스 워커는 슬롯을 잡는 순간(_process_job_inner 진입), 원격
+# 워커는 claim이 processing을 확정하는 순간(api/worker.claim_job)에 새긴다 — 둘 다 이
+# 서버 프로세스 안에서 시작-종료가 왕복하므로(원격도 claim↔submit_result가 같은 서버
+# 인스턴스를 오간다) 유효하다. 다른 _PENDING_* 스태시와 같은 관례: 터미널 지점에서
+# 반드시 비운다(그 지점이 여럿이라 pop_processing_duration이 1회성으로 스스로 비운다).
+_JOB_PROCESSING_START: dict[str, float] = {}
+
+
+def stash_processing_start(job_id: str) -> None:
+    _JOB_PROCESSING_START[job_id] = time.monotonic()
+
+
+def peek_processing_elapsed(job_id: str) -> float | None:
+    """지금까지 경과한 처리 시간(초) — 비파괴 조회(GET /api/job/{id}의 eta_sec 산출용,
+    같은 잡에 여러 번 부를 수 있다). 시작 스탬프가 없으면(서버 재기동으로 유실 등) None."""
+    start = _JOB_PROCESSING_START.get(job_id)
+    return None if start is None else max(0.0, time.monotonic() - start)
+
+
+def pop_processing_duration(job_id: str) -> float | None:
+    """완료까지 걸린 총 시간(초) — 1회성(팝). JobMetric 기록 지점(인프로세스 성공 경로,
+    원격 워커 submit_result)이 부른다. 스탬프가 없으면 None — 호출부는 JobMetric 기록을
+    건너뛴다(수집 실패가 생성 자체를 막으면 안 된다)."""
+    start = _JOB_PROCESSING_START.pop(job_id, None)
+    return None if start is None else max(0.0, time.monotonic() - start)
+
+
 # 잡별 영상 제목/아티스트 — 완성된 싱크에 함께 저장돼 커버 링크 후보 탐색의 단서가 된다.
 # Job 테이블에 컬럼을 더하지 않고 라인 메타·출처와 같은 인메모리 스태시 관례를 따른다
 # (인프로세스·원격 워커 두 경로 모두 저장은 서버 프로세스에서 일어난다).
@@ -194,7 +252,9 @@ async def _consume_cancel(job_id: str) -> bool:
     from everyric2.server.db.repository import JobRepository
 
     async with get_session() as session:
-        await JobRepository(session).update_status(job_id, "failed", error="요청으로 취소했어요")
+        await JobRepository(session).update_status(
+            job_id, "failed", error="요청으로 취소했어요", failure_kind="cancelled"
+        )
     logger.info(f"Job {job_id} cancelled at a stage boundary")
     return True
 
@@ -209,6 +269,15 @@ STAGE_WINDOWS: dict[str, tuple[int, int]] = {
     # 창을 등록하지 않으면 _stage_monitor의 기본 창(36,88)이 걸려 진행률이 대기 중에
     # 88까지 치솟는다. 전사 정렬의 시작(50) 바로 앞에 둬 진행률이 되돌아가지 않게 한다.
     LINE_META_WAIT_STAGE: (48, 50),
+    # 캐시 확인 직후(라우팅 전, run_pipeline의 정렬 진입 경계)도 이제 이 이름으로 보고한다
+    # (그 시점의 실제 작업 — 오디오 로드·CTC 웜업·정렬 준비 — 가 이 단계의 정의에 속한다).
+    # 창 자체는 넓히지 않는다: _stage_monitor의 ``progress = max(progress, lo)``가 창
+    # 경계와 무관하게 항상 비감소를 보장하고(단조성은 이미 런타임이 담보), 창을 36까지
+    # 넓히면 test_wait_stage_sits_between_separation_and_alignment의 불변식
+    # (``hi <= align_lo``, LINE_META_WAIT_STAGE 창이 항상 이 창보다 앞에 오게 하는 순서
+    # 보장)이 깨진다. 진입 직후 잠깐(36%, 이 창 하한 미만) sub-progress가 0으로 클램프됐다가
+    # 모니터 첫 틱에 50으로 올라가는 것은 기존에도 있던 전이 패턴(예전엔 기본값 "보컬 분리"
+    # 에서 여기로 튀었다)과 동일해 새로운 회귀가 아니다.
     "전사 정렬": (50, 72),
     "타이밍 보정": (72, 80),
     "멜로디 분석": (80, 88),
@@ -245,9 +314,45 @@ def _normalize_line(s: str) -> str:
     return re.sub(r"\s+", "", t)
 
 
+# 느슨한 매칭 키 — 엄격 키(_normalize_line)가 못 찾을 때만 쓰는 폴백. text_fingerprint.
+# loose_normalize_line의 복사본이다(그쪽 docstring과 같은 이유로 이 파일이 그 모듈을
+# 임포트하지 않는다 — 고칠 때는 반드시 양쪽을 함께 고친다). 실측(2026-08 OVwCr2MESfo·
+# vg6pnvn1u10): 두 출처가 같은 줄을 구두점 유무만 다르게 적어("I love you." vs
+# "I love you") 엄격 키로 영원히 못 붙는다. 값이 다른 두 줄이 여기서 우연히 같아져도
+# 실사용 피해가 없다 — 엄격 키가 먼저 시도되고, 정확히 갈리는 구두점 쌍(行く。/行く？)은
+# 둘 다 값이 있어 엄격 키가 이미 각각 집어내므로 이 폴백까지 오지 않는다.
+_LOOSE_PUNCT_RE = re.compile(
+    "[" + ".,!?" + "、。！？…‥・" + "「」『』（）()" + "‘’“”" + "'\"" + "]+"
+)
+_MIN_LOOSE_KEY_LEN = 2
+
+
+def _loose_normalize_line(s: str) -> str | None:
+    """엄격 키가 못 찾을 때만 시도하는 폴백 키 — 구두점까지 지운다. 정규화 후
+    ``_MIN_LOOSE_KEY_LEN`` 미만이면 None(우연 일치 방지)."""
+    t = _LOOSE_PUNCT_RE.sub("", _normalize_line(s))
+    return t if len(t) >= _MIN_LOOSE_KEY_LEN else None
+
+
 def _meta_has_value(m: dict[str, Any]) -> bool:
     """라인 메타가 실제로 쓸 값(발음 또는 번역)을 담고 있는지."""
     return bool((m.get("pronunciation") or "").strip() or (m.get("translation") or "").strip())
+
+
+def _index_line_meta_loose(
+    line_meta: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """``_index_line_meta``와 같은 값 우선 규칙을 느슨한 키(``_loose_normalize_line``)로
+    색인한다 — 엄격 매칭이 놓친 줄만 여기로 폴백한다."""
+    by_loose: dict[str, dict[str, Any]] = {}
+    for m in line_meta or []:
+        t = _loose_normalize_line(m.get("text", "") or "")
+        if not t:
+            continue
+        cur = by_loose.get(t)
+        if cur is None or (not _meta_has_value(cur) and _meta_has_value(m)):
+            by_loose[t] = m
+    return by_loose
 
 
 def _index_line_meta(line_meta: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -281,6 +386,7 @@ def merge_line_meta(
     line_meta: list[dict[str, Any]],
     *,
     with_translation: bool = True,
+    language: str | None = None,
 ) -> int:
     """세그먼트에 발음/번역을 라인 텍스트 매칭으로 병합. 병합된 세그먼트 수를 반환.
 
@@ -289,10 +395,19 @@ def merge_line_meta(
     비ko 번역을 legacy 슬롯으로 밀어 넣으면 안 되는 경로(캐시 재사용)를 위한 문이다.
     """
     by_text = _index_line_meta(line_meta)
+    by_loose: dict[str, dict[str, Any]] | None = None  # 지연 생성 — 엄격 매칭이 다 되면 불필요
 
     merged = 0
     for seg in timestamps:
-        m = by_text.get(_normalize_line(seg.get("text", "") or ""))
+        text = seg.get("text", "") or ""
+        m = by_text.get(_normalize_line(text))
+        if not m:
+            # 엄격 키 실패 — 구두점 차이만으로 못 붙은 줄을 폴백으로 한 번 더 시도한다
+            # (실측 OVwCr2MESfo·vg6pnvn1u10 — text_fingerprint.loose_normalize_line 참고).
+            if by_loose is None:
+                by_loose = _index_line_meta_loose(line_meta)
+            loose_key = _loose_normalize_line(text)
+            m = by_loose.get(loose_key) if loose_key else None
         if not m:
             continue
         # seg["pronunciation"]은 한글 전용 legacy 계약이다(정렬 입력과 같은 계약 —
@@ -315,7 +430,9 @@ def merge_line_meta(
         # 캐시 재사용·늦은 병합으로 들어온 세그먼트도 표기별 발음을 갖게 한다. 직렬화에서
         # 이미 붙였으면 멱등 가드가 지킨다. 심판 개입 라인은 여기에 이긴 읽기의 토큰 열이
         # 없으므로 attach가 romaji를 스스로 생략한다(기본 읽기로 렌더하면 표기가 어긋난다).
-        attach_pron_variants(seg)
+        # language를 흘려야 zh 게이트가 이 경로에서도 동작한다 — 안 넘기면 zh 곡의 순한자
+        # 라인이 ja 분기로 빠져 일본어 독음이 붙는다(엣지 감사 #10, 2026-08-03).
+        attach_pron_variants(seg, language=language)
         merged += 1
     return merged
 
@@ -355,6 +472,8 @@ def _attach_pron_segments(seg: dict[str, Any]) -> None:
 # 일본어 글자 — reading._is_japanese_char와 같은 범위(U+3040~U+30FF 가나, U+3400~U+9FFF 한자).
 # 문자 클래스의 경계 글자는 그 코드포인트의 실제 글자다(편집 시 치환 주의).
 _JA_CHAR_RE = re.compile("[぀-ヿ㐀-鿿]")
+# 가나만(한자 제외) — zh 곡 게이트에서 "일본어 인용이 섞인 라인"을 ja 파생에 남기는 판정용
+_KANA_CHAR_RE = re.compile("[぀-ヿ]")
 
 # 한글 완성형 음절(U+AC00~D7A3). ko_reading._decompose_hangul과 같은 범위다.
 _HANGUL_CHAR_RE = re.compile("[가-힣]")
@@ -644,8 +763,20 @@ def _ja_hangul_segments_from_kana(seg: dict[str, Any]) -> list[dict[str, Any]] |
     except Exception:
         logger.exception("hangul mora decomposition failed; skipping hangul segs")
         return None
-    if not moras or len(moras) != len(kana_segs):
+    if not moras:
         return None
+
+    # 모라 수가 kana 세그와 어긋나면(장음 축약·라틴 음차·표기 차이) 예전엔 통째로
+    # 포기했다 — 하필 기본 표기(hangul)만 카라오케 타이밍이 죽는 실사용 구멍이었다
+    # (실측 2026-08-03 6_toWwEFXyA 세그 2·3: 한자 다수/라틴 혼입 줄). 대신 kana
+    # 세그의 시간축을 모라 위치 비례로 재배분하되 **resolved: False**로 근사임을
+    # 정직하게 표시한다(와이어의 기존 근사 플래그 — 확장 디버그가 그대로 보여준다).
+    exact = len(moras) == len(kana_segs)
+
+    def _kana_index(mora_index: int) -> int:
+        if exact:
+            return mora_index
+        return min(len(kana_segs) - 1, mora_index * len(kana_segs) // len(moras))
 
     out: list[dict[str, Any]] = []
     i = 0
@@ -657,9 +788,11 @@ def _ja_hangul_segments_from_kana(seg: dict[str, Any]) -> list[dict[str, Any]] |
             j += 1
         entry: dict[str, Any] = {
             "text": hangul[cs:ce],
-            "start": kana_segs[i]["start"],
-            "end": kana_segs[j]["end"],
+            "start": kana_segs[_kana_index(i)]["start"],
+            "end": kana_segs[_kana_index(j)]["end"],
         }
+        if not exact:
+            entry["resolved"] = False
         # 공백은 kana 모라 공백(문절)이 아니라 **hangul 표기 자신의** 공백 위치를 따른다 —
         # «표시=세그» 불변식(_rebuild == display)은 표기별로 성립해야 한다
         if ce < len(hangul) and hangul[ce].isspace():
@@ -806,25 +939,110 @@ def _attach_ko_pron_variants(seg: dict[str, Any], text: str) -> None:
         seg.setdefault("pron_segs", {})["romaji"] = romaja_segments
 
 
-def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
-    """라틴(영어) 곡 세그: 일본어권 사용자를 위한 가나 발음만 붙인다.
+def _attach_zh_pron_variants(seg: dict[str, Any], text: str) -> None:
+    """zh 곡 세그: 병음/한글 음차/가나 근사 3형을 표시로 붙인다(``zh_reading``).
 
-    ``latin_hangul``의 느슨 음차를 거쳐 만든 결정론 근사라 글자 스팬을 신뢰할 근거가
-    없다 — CTC 정렬 자체가 라틴 위에서 약하다는 것이 기존 실측이다(``latin_hangul``
-    모듈 docstring). 그래서 ``pron_segs``는 붙이지 않고 표시 문자열만 남긴다.
+    결정론 근사라 글자 스팬을 신뢰할 근거가 없다 — 라틴 경로와 같은 이유로
+    ``pron_segs``는 붙이지 않고 표시 문자열만 남긴다. 다음자 판독은 pypinyin이
+    맡는다(pyproject 의존성 — 없는 배포는 예외를 삼키고 무표기로 남는다).
+
+    ``zh_reading.zh_pron_variants``를 그대로 쓴다 — ``align_target.join_display``(owners를
+    공백 없이 붙이는 범용 조립기)를 쓰면 병음 음절 사이 공백이 사라진다(F3 결함,
+    2026-08-04 감사: word_end가 전부 False라 join이 "wǒbùxiǎngshuōzàijiàn"처럼 못 읽는
+    병음을 만들었다). ``zh_reading.py`` 모듈 docstring의 "표시 문자열은 zh_pron_variants로
+    만든다" 계약이 원래도 이것을 요구했다 — ``zh_to_pinyin()``과 값이 일치한다.
     """
     try:
-        from everyric2.text.ko_reading import latin_to_kana
+        from everyric2.text.zh_reading import zh_pron_variants
 
-        kana = latin_to_kana(text)
+        pron = zh_pron_variants(text)
+    except Exception:
+        logger.exception("zh pron rendering failed")
+        return
+
+    if pron:
+        seg["pron"] = pron
+
+
+def _attach_latin_pron_variants(seg: dict[str, Any], text: str) -> None:
+    """라틴(영어) 곡 세그: 표기 4종(hangul/kana/romaji/en)을 전부 표시로 붙인다.
+
+    ``align_target.derive_en_display_units``(2패스 리파이너가 실측 정렬에 쓰는 것과
+    같은 파생 함수)로 표기별 소유자 배열을 얻어 문자열만 조립한다 — 이 함수 자체는
+    CTC 정렬을 하지 않으므로(``latin_hangul`` 모듈 실측: CTC가 라틴 위에서 약해 글자
+    스팬을 신뢰할 근거가 없다) ``pron_segs``는 붙이지 않는다.
+
+    예전엔 일본어권용 가나 근사(``latin_to_kana``) 하나만 냈다 — 2패스가 안 닿은 en
+    곡(고속 라우팅으로 끝난 곡, 라인별 2패스 폴백 등)의 **한국어 사용자가 기본 표기
+    (hangul)를 아예 못 받는** 결함이었다(운영자 지시, 2026-08-03: 사용자가 표기를
+    바꿀 때마다 재생성하지 않고 즉시 전환하려면 넷 다 있어야 한다). 2패스와 같은
+    파생 함수를 쓰므로 "실측 vs 근사"의 유일한 차이가 타이밍(``pron_segs`` 유무)이지
+    표기 문자열 자체는 갈리지 않는다.
+    """
+    try:
+        from everyric2.text.align_target import derive_en_display_units, join_display
+
+        units = derive_en_display_units(text)
     except Exception:
         logger.exception("latin pron rendering failed")
         return
 
-    seg["pron"] = {"kana": kana}
+    # en 곡의 romaji 정답은 원문 철자다 — "영어→가타카나 음차→로마자 재변환"으로 만든
+    # 근사(za wezaa poreketusu류)는 en 곡에서 의미가 없다. join 직전에 romaji 소유자를
+    # en 소유자로 바꿔치기한다(둘 다 owners 길이가 target과 같은 문자 단위 배열이라
+    # 그대로 교체할 수 있다). ja 곡의 라틴 구간(derive_ja_display_units 경유)은 이 함수를
+    # 타지 않으므로 영향이 없다 — 그쪽은 가나·로마자 변환이 정답이다.
+    units.owners["romaji"] = units.owners["en"]
+
+    pron = {
+        key: joined
+        for key, owners in units.owners.items()
+        if (joined := join_display(owners, units.word_end))
+    }
+    if not pron:
+        return
+    # 기존 키는 절대 덮지 않는다 — 구세대 kana 단독 근사를 보완하는 경로(아래
+    # attach_pron_variants의 불완전 가드)로 들어와도 저장된 값이 이긴다.
+    seg["pron"] = {**pron, **(seg.get("pron") or {})}
 
 
-def attach_pron_variants(seg: dict[str, Any], *, referee_tokens: list | None = None) -> None:
+def _broken_ko_zh_via_en_route(text: str, existing: dict[str, Any], language: str | None) -> bool:
+    """F1 결함(2026-08-04 감사) lazy 치유 — ``refine_window``의 owners 파생이 ko/zh 줄을
+    잘못 en 갈래(``derive_en_display_units``, 라틴 전용 ``_WORD_RE``)로 보내 저장해 둔
+    파손 지문을 알아본다.
+
+    en 갈래는 라틴이 아닌 문자(한글·한자)를 vocab 조회만 통과시키고 변환은 전혀 하지
+    않는다 — 그 결과 ``pron["hangul"]``이 원문에서 공백만 뺀 값과 완전히 같아진다
+    («사랑해 너를 위해» → «사랑해너를위해»). 진짜 변환이 한 번이라도 일어났다면 이
+    값과 우연히 같을 수 없다(초성·종성 변화 없이 원문 그대로일 확률은 0에 가깝다).
+
+    그 줄이 (한글 우세 또는 language가 zh·ko로 확정된 한자만 줄)일 때만 검사한다 —
+    ``everyric2.alignment.refine_window._should_skip_derivation``과 같은 두 조건이다
+    (그 모듈이 이제 이 두 경우를 건너뛰므로 새로 생기는 파손은 없다 — 이 함수는 **이미
+    저장된** 옛 파손 행만 치유한다).
+    """
+    hangul = existing.get("hangul")
+    if not hangul or not text:
+        return False
+    ja_n = len(_JA_CHAR_RE.findall(text))
+    ko_n = len(_HANGUL_CHAR_RE.findall(text))
+    should_have_skipped_en_route = False
+    if ko_n > ja_n:
+        should_have_skipped_en_route = True
+    elif ja_n and not ko_n:
+        lang = (language or "").strip().lower()
+        should_have_skipped_en_route = lang in ("zh", "ko")
+    if not should_have_skipped_en_route:
+        return False
+    return hangul == "".join(text.split())
+
+
+def attach_pron_variants(
+    seg: dict[str, Any],
+    *,
+    referee_tokens: list | None = None,
+    language: str | None = None,
+) -> None:
     """세그먼트에 표기별 발음(``pron``)과 가능하면 모라 스팬(``pron_segs``)을 얹는다.
 
     기존 ``pronunciation``/``pron_segments``(한글, ja 곡 전용)는 손대지 않는다 — 구버전
@@ -842,21 +1060,69 @@ def attach_pron_variants(seg: dict[str, Any], *, referee_tokens: list | None = N
     2. 그렇지 않고 한글이 있으면(즉 한글 수 > 일본어 수) **ko 곡** — 가타카나+RR
        로마자를 그 자리에서 결정론 생성한다(``pronunciation`` 필드 불필요 — 원문
        자체가 독음이다).
-    3. 둘 다 없고 라틴 알파벳(``_LATIN_CHAR_RE``)이 있으면 **라틴 곡** — 일본어권
-       사용자용 가나 근사만 표시로 붙인다.
+    3. 둘 다 없고 라틴 알파벳(``_LATIN_CHAR_RE``)이 있으면 **라틴 곡** — 표기 4종
+       (hangul/kana/romaji/en)을 전부 근사로 붙인다(``_attach_latin_pron_variants``).
     4. 셋 다 없으면(숫자·기호뿐인 줄 등) 아무것도 붙이지 않는다.
 
     멱등 — 이미 ``pron``이 있으면 아무것도 하지 않는다. 캐시 재사용·늦은 메타 병합이
     직렬화 때 만든(심판 판정을 반영한) 값을 덮지 않게 하는 가드다.
     """
-    if seg.get("pron"):
-        return
     text = seg.get("text") or ""
+    existing = seg.get("pron")
+    if existing:
+        # 멱등 가드의 목적은 직렬화가 만든(심판 판정을 반영한) 값을 덮지 않는 것이지,
+        # **불완전한 표기를 영구 동결하는 것이 아니다.** 구세대 라틴 곡은 옛
+        # _attach_latin_pron_variants가 kana 1형만 저장했는데, 이 가드가 그것을 완결로
+        # 취급해 lazy attach가 보완을 영영 못 했다(표시값 E2E 실측 2026-08-03:
+        # weathergirl 57줄 전부 hangul/romaji 부재 → 표기 전환 0줄). kana 단독 모양은
+        # 옛 라틴 경로에서만 나오므로 그 경우에 한해 빠진 키를 더한다 — 기존 kana
+        # 값은 _attach_latin_pron_variants의 merge가 보존한다.
+        if set(existing) == {"kana"} and text and not _JA_CHAR_RE.search(text):
+            _attach_latin_pron_variants(seg, text)
+            return
+        if (
+            text
+            and existing.get("en")
+            and existing.get("romaji")
+            and existing.get("romaji") != existing.get("en")
+            and not _JA_CHAR_RE.search(text)
+            and not _HANGUL_CHAR_RE.search(text)
+            and _LATIN_CHAR_RE.search(text)
+        ):
+            # 구세대 en 곡 구제: romaji가 "영어→가타카나 음차→로마자 재변환" 근사로
+            # 저장돼 있다(za wezaa poreketusu류, 감사 2026-08-03). en(원문 음절 분리
+            # 표기)이 이미 있으면 그것이 정답이므로 romaji를 그 값으로 정정한다.
+            # 멱등 — romaji==en이 되면 조건 자체가 거짓이라 다음 호출은 아무것도 안 한다.
+            seg["pron"]["romaji"] = existing["en"]
+            pron_segs = seg.get("pron_segs")
+            if isinstance(pron_segs, dict) and "en" in pron_segs:
+                pron_segs["romaji"] = pron_segs["en"]
+            return
+        if not _broken_ko_zh_via_en_route(text, existing, language):
+            return
+        # F1 lazy 치유(2026-08-04 감사) — 파손 지문 확인됨. 저장된 pron/pron_segs를
+        # 버리고 아래 새 파생으로 넘어간다. 멱등 — 치유 후 hangul은 실제 ko/zh 파생값이라
+        # 다시는 "원문에서 공백만 뺀 값"과 우연히 같아지지 않는다(다음 호출은 이 분기에
+        # 안 걸린다).
+        seg["pron"] = {}
+        pron_segs = seg.get("pron_segs")
+        if isinstance(pron_segs, dict):
+            for key in ("hangul", "kana", "romaji"):
+                pron_segs.pop(key, None)
     if not text:
         return
 
     ja_n = len(_JA_CHAR_RE.findall(text))
     ko_n = len(_HANGUL_CHAR_RE.findall(text))
+    # zh 곡 게이트 — 순한자 라인은 문자만으로 ja와 구별할 수 없어(한자는 두 언어 공용)
+    # **곡 단위 언어**로 가른다. 게이트가 없으면 중국어 가사가 ja 분기로 빠져 일본어
+    # 한자 독음이 붙는다(오표기 — 무표기가 아니라). 가나가 섞인 라인(일본어 인용 등)은
+    # zh 곡이어도 ja 파생이 맞으므로 제외. language를 모르는 호출부(캐시 병합 등)는
+    # 기존 동작 그대로다 — 게이트는 아는 곳에서만 작동한다.
+    lang = (language or "").strip().lower()
+    if lang.startswith("zh") and ja_n and not _KANA_CHAR_RE.search(text):
+        _attach_zh_pron_variants(seg, text)
+        return
     if ja_n and ja_n >= ko_n:
         _attach_ja_pron_variants(seg, text, referee_tokens=referee_tokens)
     elif ko_n:
@@ -1005,7 +1271,8 @@ def compute_audio_hash(file_path: Path) -> str:
     """확보한 오디오 파일의 md5 — 캐시 키(SyncResult.audio_hash, String(32))다.
 
     **파일 바이트 해시라 확보 경로에 의존한다** — 같은 영상이라도 미디어 캐시 경로(m4a
-    스트림카피)와 yt-dlp 경로(wav 트랜스코드)는 다른 해시가 된다. 아래 `_acquire_audio`에
+    스트림카피)와 yt-dlp 경로(opus 우선 스트림카피, 소스에 따라 m4a/webm)는 다른 해시가
+    된다. 아래 `_acquire_audio`에
     이 비대칭을 왜 그냥 두는지(내용 기반 해시로 못 고치는 이유) 실측과 함께 적어 뒀다.
     """
     md5 = hashlib.md5()
@@ -1135,6 +1402,13 @@ async def _complete_from_cache_db(
                 timestamps=segments,
                 language=existing.language,
                 engine=existing.engine,
+                # 이건 새 정렬이 아니라 기존 행의 **복사**다 — create()의 engine_variant/
+                # engine_version 기본값(None/현행 ENGINE_VERSION)에 맡기면 원본이 어떤
+                # 변형·스택으로 만들어졌는지가 이 복사본에서 조용히 사라지거나(variant),
+                # 실제로는 옛 스택이 만든 결과인데 지금 막 만든 것처럼 현행 스택으로
+                # 잘못 표시된다(version) — 원본 값을 그대로 옮긴다.
+                engine_variant=existing.engine_variant,
+                engine_version=existing.engine_version,
                 quality_score=existing.quality_score,
                 audio_hash=audio_hash,
                 extra=src,
@@ -1164,7 +1438,9 @@ async def _complete_from_cache_db(
             # 남의 언어를 받는다. 언어별 값은 아래 레이어에만 남긴다. 기준은 요청자 언어가
             # 아니라 **이 메타에 실린 번역의 언어**다(resolve_layer_lang).
             # (발음은 언어 무관한 결정론 한글 독음이라 그대로 병합한다.)
-            if merge_line_meta(segs, meta, with_translation=(meta_lang == "ko")):
+            if merge_line_meta(
+                segs, meta, with_translation=(meta_lang == "ko"), language=target.language
+            ):
                 updated["segments"] = segs
                 changed = True
         if attr is not None:
@@ -1203,7 +1479,16 @@ async def _try_complete_from_cache(
 
 
 class PipelineError(Exception):
-    """사용자에게 보이는 파이프라인 실패 (예: 영상 과길이). str(e)가 실패 문구가 된다."""
+    """사용자에게 보이는 파이프라인 실패 (예: 영상 과길이). str(e)가 실패 문구가 된다.
+
+    ``failure_kind``는 jobs.failure_kind에 그대로 실린다 — 기본 None(억지 분류 금지,
+    MoRef 감사 #3: 과길이 등 애매한 정책 거절은 분류하지 않고 NULL로 남긴다). 뚜렷이
+    식별 가능한 사유만 명시적으로 채운다(예: F6의 "language_mismatch",
+    2026-08-04 감사)."""
+
+    def __init__(self, message: str, *, failure_kind: str | None = None) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 def over_length_message(duration_sec: float, max_audio_sec: int) -> str:
@@ -1212,6 +1497,100 @@ def over_length_message(duration_sec: float, max_audio_sec: int) -> str:
         f"영상이 너무 길어요 ({duration_sec / 60:.0f}분). 싱크 생성은 "
         f"{max_audio_sec // 60}분 이하의 노래 영상에서만 지원해요."
     )
+
+
+# ── F6(2026-08-04 감사, 운영자 재지시로 보강): 정렬 붕괴 + 언어 불일치는 저장하지
+# 않고 실패 처리 ──────────────────────────────────────────────────────────
+#
+# 실측 사고 2건 — 잘못된 언어의 가사(일본어 번역 자막을 language=ja로, 독일어 자막을
+# language=ja로)로 생성된 싱크가 quality_score 완전 붕괴(0.00023/0.00032)로도 그대로
+# 저장·서빙됐다(Atvsg_zogxo/c_9UTrrqcLI). 모든 곡이 fast 정렬을 한 번은 거치므로 그
+# 시점(정렬 완료 직후, 저장 직전)에 걸러낼 수 있다.
+#
+# **품질 단독 판정은 어떤 임계로도 불가**하다는 것이 로컬 DB 61행 실측으로 확정됐다 —
+# 정상이지만 어려운 곡의 quality_score가 사고 곡과 완전히 겹친다:
+#
+#   정상(어려운 오디오, 저장돼야 한다):
+#     きゅうくらりん  0.00007
+#     D/N/A          0.00026
+#     熱異常          0.00079, 0.00203
+#     About Me        0.00140
+#   오채택 사고(실패 처리돼야 한다, Atvsg_zogxo/c_9UTrrqcLI):
+#     0.00023, 0.00032
+#
+# きゅうくらりん(0.00007)이 사고 곡 둘(0.00023/0.00032)보다도 **더 낮다** — 즉 "얼마나
+# 낮은가"로는 절대 못 가른다. 그래서 실패 결정권은 전적으로 언어 불일치 신호에 있고,
+# quality_score는 **그 신호가 있을 때만** 발동을 허가하는 프리필터일 뿐이다(신호가
+# 없으면 quality_score가 얼마든 절대 막지 않는다 — 과잉 차단 금지, 운영자 지시).
+# 프리필터 하한 0.001은 사고 2건(0.00023/0.00032) 전부보다 약 3배 넉넉하다.
+_LANGUAGE_MISMATCH_QUALITY_MAX = 0.001
+
+
+def _language_script_mismatch(lyrics_text: str, language: str | None) -> bool:
+    """F6 — 가사 원문에 판정된 곡 ``language``의 문자가 **아예 없는가**(극단 모순만).
+
+    운영자 재지시(2026-08-04): 이 신호는 "우세"가 아니라 "부재"만 봐야 한다 —
+    language=ja인데 가사 전체에 가나가 단 하나도 없거나, language=ko인데 한글이 단
+    하나도 없을 때만 True다. **가나·한글이 조금이라도 있으면**(영어 비중이 아무리
+    높은 혼합곡이라도) 절대 발화하지 않는다 — 그래서 ``youtube_captions.body_
+    language``(F2, 캡션 크레딧 오염 방어용 5% CJK 비중 게이트)는 여기서 못 쓴다. 그
+    게이트를 그대로 재사용하면 "가나·한글이 소량 섞인 영어 위주 혼합곡"이 비중
+    미달로 모순 취급돼 절대 막으면 안 되는 곡을 막는다(이전 구현의 결함이었다) — F6은
+    F2와 판정 목적 자체가 다르다(F2: 캡션 트랙이 원어인지, F6: 정렬이 완전히 엉뚱한
+    언어에 붙었는지).
+
+    ``language``가 en이거나 판정 불가(None)면 이 문자 존재 여부로는 애초에 가를 수
+    없어(라틴 vs 라틴) 항상 False다 — **신호가 없으면 절대 막지 않는다**(과잉 차단
+    금지, 이 함수 단독으로는 아무것도 실패시키지 않고 호출부가 quality_score 하한과
+    AND로 묶는다). zh는 순정 중국어 가사가 한자 없이 존재할 수 없어(한자가 표기
+    체계 자체다) 같은 "부재" 규칙을 그대로 적용해도 안전하다.
+
+    유튜브 ASR 트랙 언어(오디오 언어 메타데이터, c_9UTrrqcLI가 예시로 든 신호)는 이번
+    배선에 포함하지 않았다 — 그 신호는 지금 캡션 조달 경로(``youtube_captions``)에만
+    있고, 가사를 직접 붙여넣는 일반 생성 경로까지 끌어오려면 모든 잡에 대해 yt-dlp
+    메타데이터를 추가로 조회해야 한다(지연·API 비용 증가, JobInput에 새 필드도 필요).
+    Atvsg_zogxo(독일어 텍스트 vs language=ja, 문자 자체가 전혀 없다)는 이 신호만으로
+    확실히 잡히지만, 언어는 같은 문자 계열인데 트랙이 틀린 유형(원어와 문자 계열이
+    같은 오역)은 이 신호로 못 잡는다 — 필요해지면 캡션 조달이 이미 얻은
+    ``asr_lang_hint``를 잡 메타데이터로 실어 오는 별도 배선으로 추가할 수 있다.
+    """
+    lang = (language or "").strip().lower()
+    if lang not in ("ja", "ko", "zh"):
+        return False
+    from everyric2.alignment.caption_anchors import script_counts
+
+    counts = script_counts(lyrics_text)
+    if lang == "ja":
+        return counts.get("kana", 0) == 0
+    if lang == "ko":
+        return counts.get("hangul", 0) == 0
+    return counts.get("han", 0) == 0  # zh
+
+
+def classify_job_failure(exc: BaseException) -> str | None:
+    """예외 → jobs.failure_kind (MoRef 감사 #3). 취소는 다루지 않는다 — cancel API와
+    _consume_cancel이 그 경로를 이미 각자 "cancelled"로 못 박는다.
+
+    audio/downloader.py가 이미 분류해 놓은 실패(로그인요구·나이제한·봉쇄·영상불가·
+    스로틀·네트워크 — DownloadError 계열이고 code가 "unknown"이 아님)는 우리 시스템 바깥
+    요인이라 "external". ffmpeg·JS 런타임 미설치(DependencyError, 또는 code=="js_runtime")는
+    DownloadError를 경유해도 **서버 구성 문제**라 "system"으로 남긴다 — downloader.py 자신의
+    분류 (d)와 같은 성격이다. DownloadError이지만 패턴이 하나도 안 걸려 code="unknown"으로
+    영문 원문이 그대로 노출된 실패는 외부 요인인지 우리 쪽 결함인지 이 함수가 판단할 근거가
+    없어 None(억지 분류 금지). 그 외 전부(CTC/demucs 크래시 등 downloader와 무관한 예외)는
+    "system" — 진짜 시스템 오류가 여기 모인다."""
+    from everyric2.audio.downloader import DependencyError, DownloadError
+
+    if isinstance(exc, DependencyError):
+        return "system"
+    if isinstance(exc, DownloadError):
+        code = getattr(exc, "code", "unknown")
+        if code == "unknown":
+            return None
+        if code == "js_runtime":
+            return "system"
+        return "external"
+    return "system"
 
 
 @dataclass
@@ -1241,6 +1620,9 @@ class JobInput:
     # 진입 직전에 인메모리 스태시를 다시 확인하고 상한을 둔 대기를 한 번 넣는다.
     # 스태시는 서버 프로세스에만 있으므로 원격 워커 경로는 항상 False다 (기존 동작).
     await_line_meta: bool = False
+    # 분석 깊이 하한("medium"|"heavy") — 있으면 새 스택이 라우팅 판정을 건너뛰고 이
+    # 깊이에서 시작한다. 인프로세스는 스태시, 원격은 claim 응답(WorkerJob.min_depth)로 온다.
+    min_depth: str | None = None
 
 
 @dataclass
@@ -1252,6 +1634,9 @@ class PipelineResult:
     quality_score: float | None
     audio_hash: str
     extra: dict[str, Any] | None
+    # MMS 강제 폴백 등 엔진 변형 식별자 — None이면 변형 없음(결함 #5, ctc_engine.py의
+    # _current_engine_variant를 그대로 옮긴다). SyncRepository.create(engine_variant=...)로 간다.
+    engine_variant: str | None = None
 
 
 class PipelineHooks(Protocol):
@@ -1336,8 +1721,14 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
         # 캐시로 완결 — 오디오는 hooks.cache_check가 이미 정리했다
         return None
 
-    # 캐시 미스 → 정렬 진입 (취소 경계 겸)
-    if not await hooks.progress(36, "보컬 분리"):
+    # 캐시 미스 → 정렬 진입 (취소 경계 겸). 이 시점엔 라우팅이 아직 안 끝나 분리가 실제로
+    # 일어날지조차 모른다(새 스택 fast는 아예 안 한다) — "보컬 분리"가 아니라 기존 어휘 중
+    # 지금 실제로 하는 일(오디오 로드·CTC 웜업·정렬 준비)과 맞는 "전사 정렬"로 보고한다.
+    # 분리가 실제로 일어나는 순간에만 "보컬 분리"를 낸다 — 구스택은 바로 아래(_run_alignment의
+    # report("보컬 분리") 호출), 새 스택은 medium/heavy 진입 시(_run_new_stack_alignment의
+    # report("보컬 분리") 호출 두 곳)에만(운영자 지시, 2026-08-04: 실제로 안 하는 작업을
+    # 표시하면 안 된다).
+    if not await hooks.progress(36, "전사 정렬"):
         Path(audio_path).unlink(missing_ok=True)
         return None
 
@@ -1354,9 +1745,21 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
     resolver = _resolve_line_meta if (job.await_line_meta and not job.line_meta) else None
 
     # 정렬(CTC+분리+보정+멜로디)은 수십 초 걸리는 단일 블록 — 정렬 스레드가 단계명을
-    # stage_holder에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 보고한다
-    stage_holder: dict[str, str] = {"stage": "보컬 분리"}
+    # stage_holder에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 보고한다.
+    # 초기값은 바로 위 progress(36, "전사 정렬") 보고와 맞춰 "전사 정렬"이다 — 정렬
+    # 스레드가 아직 report를 한 번도 안 부른 그 짧은 틈(라우팅 전)에 모니터가 먼저
+    # 돌면 이 기본값을 읽는다. 분리가 실제로 확정되는 순간(구스택은 _run_alignment,
+    # 새 스택은 _run_new_stack_alignment의 medium/heavy 진입) on_stage 콜백이
+    # "보컬 분리"로 즉시 덮어쓴다.
+    stage_holder: dict[str, str] = {"stage": "전사 정렬"}
     monitor = asyncio.create_task(_stage_monitor(hooks.report, stage_holder, start=36))
+
+    def _on_depth(depth: str) -> None:
+        # 라우팅이 결정한 분석 깊이를 인프로세스 전역(_JOB_DEPTH)에 새긴다 — GET
+        # /api/job/{id}가 진행 중 배지로 읽어간다(peek_job_depth). job.job_id를 여기서
+        # 캡처하는 이유: 정렬은 별도 스레드(run_in_executor)에서 돌아 job_id를 모른다.
+        _JOB_DEPTH[job.job_id] = depth
+
     try:
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -1369,6 +1772,8 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
             resolver,
             # 자막 앵커 조달용 — 가사 출처와 무관하게 «이 영상»의 사람 자막 시각을 본다
             job.video_id,
+            job.min_depth,
+            _on_depth,
         )
     except JobCancelled:
         # line_meta 대기 중 취소 — 오디오는 _run_alignment의 finally가 이미 지웠다.
@@ -1378,6 +1783,21 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
         return None
     finally:
         monitor.cancel()
+
+    # F6(2026-08-04 감사) — 정렬 붕괴 + 언어 불일치는 저장 전에 실패 처리한다. AND 조건
+    # (품질 하한 + 문자 센서스 모순)이 반드시 둘 다 성립해야 한다 — 신호 없이 품질만
+    # 낮은 곡(진짜 어려운 오디오)은 여기서 걸리지 않는다(_language_script_mismatch
+    # docstring의 과잉 차단 금지 원칙). 재생성(min_depth)·깊이 승급 경로도 이 지점을
+    # 그대로 지나가므로 동일하게 걸린다 — _run_alignment가 어느 깊이로 끝났든 quality_
+    # score/language는 여기서 한 번만 본다.
+    quality_score = result.get("quality_score")
+    if quality_score is not None and quality_score < _LANGUAGE_MISMATCH_QUALITY_MAX:
+        if _language_script_mismatch(job.lyrics, result.get("language")):
+            raise PipelineError(
+                "가사 언어가 오디오와 다르게 들려요 — 가사 원문이 맞는지 확인하고 "
+                "다시 만들어 주세요",
+                failure_kind="language_mismatch",
+            )
 
     # 정렬 완료, 저장 단계 (취소 경계 겸) — 오디오는 _run_alignment의 finally가 정리했다
     if not await hooks.progress(90, "저장"):
@@ -1394,7 +1814,9 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
 
     # 독음 정렬 경로는 발음/번역/pron_segments를 이미 세그먼트에 붙였으므로 재병합 생략
     if line_meta and result.get("alignment_text") != "pronunciation":
-        merged = merge_line_meta(result["timestamps"], line_meta)
+        merged = merge_line_meta(
+            result["timestamps"], line_meta, language=result.get("language")
+        )
         logger.info(f"Line meta merged on {merged} segments")
 
     return PipelineResult(
@@ -1403,19 +1825,31 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
         quality_score=result.get("quality_score"),
         audio_hash=audio_hash,
         extra=_build_extra(result, attribution),
+        engine_variant=result.get("engine_variant"),
     )
 
 
 async def _process_job_inner(job_id: str, job) -> None:
     from everyric2.config.settings import get_settings as _get_settings
     from everyric2.server.db.connection import get_session
-    from everyric2.server.db.repository import JobRepository, SyncRepository, hash_lyrics
+    from everyric2.server.db.repository import (
+        JobMetricRepository,
+        JobRepository,
+        SyncRepository,
+        hash_lyrics,
+    )
+
+    # 이 잡이 실제로 처리 슬롯을 잡은 순간 — JobMetric.duration_sec/ETA 산출의 시작
+    # 스탬프(jobs.updated_at은 진행률 보고마다 갱신되므로 못 쓴다, JobMetric.__doc__ 참고).
+    stash_processing_start(job_id)
 
     # 스태시(발음/번역 메타·출처·강제)를 peek해 코어 입력을 만든다. 정상 완료/실패 시
     # 아래에서 pop한다 (캐시 완결 경로는 _complete_from_cache_db가 이미 pop). force는
     # 코어 입력으로 캡처했으니 여기서 discard한다.
     force = job_id in _PENDING_FORCE
     _PENDING_FORCE.discard(job_id)
+    # 깊이 하한도 캡처 후 즉시 비운다 (_PENDING_FORCE와 같은 관례 — 남아 새는 항목 없음)
+    min_depth = _PENDING_MIN_DEPTH.pop(job_id, None)
     # line_meta 지연 도착 예고도 같은 관례로 캡처 후 즉시 비운다
     await_meta = job_id in _PENDING_META_WAIT
     _PENDING_META_WAIT.discard(job_id)
@@ -1447,6 +1881,7 @@ async def _process_job_inner(job_id: str, job) -> None:
         max_audio_sec=max_audio_sec,
         audio_path=cache_path,
         await_line_meta=await_meta,
+        min_depth=min_depth,
     )
     try:
         result = await run_pipeline(job_input, InProcessHooks(job_id, job))
@@ -1489,6 +1924,7 @@ async def _process_job_inner(job_id: str, job) -> None:
                 timestamps=result.timestamps,
                 language=result.language,
                 engine="ctc",
+                engine_variant=result.engine_variant,
                 quality_score=result.quality_score,
                 audio_hash=result.audio_hash,
                 extra=result.extra,
@@ -1500,19 +1936,33 @@ async def _process_job_inner(job_id: str, job) -> None:
                 job_id, "completed", progress=100, result_id=sync_result.id
             )
             logger.info(f"Job completed: {job_id}")
+
+            # ETA 재료 기록 — 실패 잡은 안 남긴다(완주 못 한 시간을 섞으면 왜곡된다).
+            # depth는 라우팅이 남긴 debug.routing.route를 그대로 옮긴다(레거시 스택이면
+            # 그 키 자체가 없어 None — all-depth 폴백 집계에는 여전히 들어간다).
+            duration = pop_processing_duration(job_id)
+            if duration is not None:
+                depth = ((result.extra or {}).get("debug") or {}).get("routing", {}).get("route")
+                await JobMetricRepository(session).record(
+                    job_id=job_id, video_id=job.video_id, depth=depth, duration_sec=duration
+                )
         _PENDING_LINE_META.pop(job_id, None)
         _PENDING_LINE_META_LANG.pop(job_id, None)
         _PENDING_ATTRIBUTION.pop(job_id, None)
         _PENDING_TITLE.pop(job_id, None)
 
     except PipelineError as e:
-        # 사용자 노출 실패 (과길이 등) — 친절한 한국어 문구를 그대로 보존
+        # 사용자 노출 실패 (과길이·F6 언어 불일치 등) — 친절한 한국어 문구를 그대로 보존.
+        # failure_kind는 PipelineError가 명시한 값을 그대로 옮긴다(기본 None — 과길이 등
+        # 애매한 정책 거절은 억지로 분류하지 않는다, MoRef 감사 #3).
         _PENDING_LINE_META.pop(job_id, None)
         _PENDING_LINE_META_LANG.pop(job_id, None)
         _PENDING_ATTRIBUTION.pop(job_id, None)
         _PENDING_TITLE.pop(job_id, None)
         async with get_session() as session:
-            await JobRepository(session).update_status(job_id, "failed", error=str(e))
+            await JobRepository(session).update_status(
+                job_id, "failed", error=str(e), failure_kind=e.failure_kind
+            )
         logger.info(f"Job {job_id} rejected: {e}")
 
     except Exception as e:
@@ -1524,9 +1974,17 @@ async def _process_job_inner(job_id: str, job) -> None:
         _PENDING_FORCE.discard(job_id)
         async with get_session() as session:
             job_repo = JobRepository(session)
-            await job_repo.update_status(job_id, "failed", error=str(e))
+            await job_repo.update_status(
+                job_id, "failed", error=str(e), failure_kind=classify_job_failure(e)
+            )
 
     finally:
+        # 라이브 깊이 배지·처리 시작 스탬프 정리 — 모든 종료 경로(성공/취소/캐시완결/실패)
+        # 공통. 성공 경로는 이미 pop_processing_duration으로 스탬프를 소비했을 수 있지만
+        # dict.pop(기본값 있음)이라 중복 호출은 무해하다(다른 _PENDING_* 정리와 같은 관례).
+        _JOB_DEPTH.pop(job_id, None)
+        _JOB_PROCESSING_START.pop(job_id, None)
+
         # 잡 경계 VRAM 위생 (인프로세스 워커 경로) — 앨로케이터가 사재기한 활성 스파이크
         # 예약을 반환한다. 원격 워커는 cli._worker_loop가 같은 훅을 부른다.
         from everyric2.gpu_mem import reclaim_after_job
@@ -1605,7 +2063,8 @@ def _acquire_audio(job: "JobInput") -> dict:
 
     **audio_hash는 확보 경로에 의존한다** — 예전 독스트링은 "같은 원본이면 해시도 같다"고
     단언했지만 성립하지 않는다. 미디어 캐시 경로는 ``-acodec copy``로 m4a를 만들고
-    (media_cache._run_ffmpeg) yt-dlp 경로는 wav로 트랜스코드하므로, 같은 영상도 바이트가
+    (media_cache._run_ffmpeg) yt-dlp 경로는 opus 우선 스트림카피(소스 코덱에 따라
+    m4a/webm으로도 갈린다)를 쓰므로, 같은 영상도 바이트가
     달라 다른 해시가 된다. 그래서 같은 영상을 두 경로로 처리하면 캐시가 미스해 GPU 정렬을
     다시 돌린다(교차 영상 재사용도 경로가 갈리면 못 잡는다).
 
@@ -1706,7 +2165,7 @@ def _download_and_hash(video_id: str, job_id: str) -> dict:
 
 
 def _build_extra(result: dict[str, Any], attribution: dict[str, Any] | None) -> dict[str, Any] | None:
-    """싱크 JSON의 segments 밖 부가정보(디버그 메타, 출처 표기, 템포, 키) 조립."""
+    """싱크 JSON의 segments 밖 부가정보(디버그 메타, 출처 표기, 템포, 키, 추임새) 조립."""
     extra: dict[str, Any] = {}
     if result.get("debug"):
         extra["debug"] = result["debug"]
@@ -1714,6 +2173,9 @@ def _build_extra(result: dict[str, Any], attribution: dict[str, Any] | None) -> 
         extra["tempo"] = result["tempo"]
     if result.get("key"):
         extra["key"] = result["key"]
+    if result.get("adlib"):
+        # 새 스택 전용 additive 필드 — 구간 배열 [[start,end],...] (레거시 응답엔 없다).
+        extra["adlib"] = result["adlib"]
     if attribution is not None:
         extra["attribution"] = attribution
     return extra or None
@@ -3727,6 +4189,855 @@ def _anchor_kwargs(forbidden_spans, line_starts=None) -> dict[str, Any]:
     return kwargs
 
 
+# ── 새 정렬 스택 배선 (라우팅 + owsm/omniasr 앵커 + 2패스 리파이너) ─────────────
+#
+# 이식된 부품(everyric2/alignment/{owsm_engine,omniasr_engine,refine_window}.py,
+# everyric2/alignment/display_fixes.py, everyric2/text/align_target.py)과 벤치가 확정한
+# 3단계 라우팅(scripts/bench_adapters/routed.py의 routed-2mode-lang 구성)을 _run_alignment에
+# 배선한다. 레거시 ko/ja 이중정렬·star 토큰·pron_data DP 근사 경로(_align_with_pronunciation
+# 이하)는 완전히 별개로 남겨 둔다 — 섞지 않는다. 새 스택은 앵커·리파이너가 이미 다표기
+# 음절을 **실측**하므로, "DP 근사를 사후에 바로잡는" 레거시 후반 단계(ko/ja 융합·뭉침
+# 세분화·붕괴 재합성)를 다시 태우면 오히려 실측값을 헤친다 — new_stack_active 가드로
+# 그 넷을 건너뛴다(_run_alignment 본문 참고).
+#
+# **조용한 구스택 폴백 금지**(운영자 지시, 2026-08-03 정정). 구스택 코드 자체는 설정으로
+# 선택 가능한 경로로 남아 있다(engine="ctc" 등, 롤백·비교용 — 이건 허용). 하지만 새 스택이
+# *선택된* 상태에서 그 구성요소(분리기 자산·앵커 모델·(two_pass_enabled=True일 때의)
+# 리파이너)가 없거나 실패하면, 조용히 구스택으로 새거나 더 가벼운 결과로 대체하지 않고
+# 예외를 그대로 올려 잡을 failure_kind='system'으로 떨어뜨린다. 이미 이식된 분리기·앵커도
+# 같은 원칙으로 만들어졌다(PolarFormerUnavailableError·EngineNotAvailableError는 절대
+# 조용히 삼켜지지 않는다) — 그 원칙을 배선 층까지 관철한다. VAD 기반 타이밍 보정(레거시
+# 유틸 재사용)처럼 "새 스택 고유 구성요소가 아닌" 보조 장치의 실패만 예외적으로 로그하고
+# 넘어간다 — 해당 지점에 그 이유를 주석으로 달아 뒀다.
+
+
+def _new_stack_enabled(settings) -> bool:
+    """``settings.alignment.engine``이 새 앵커 스택(owsm/omniasr) 중 하나를 가리키면 True.
+
+    둘 다 "새 스택 켜짐"의 동의어다 — 실제로 어느 모델이 도는지는 요청마다 라우팅이
+    정한다(``_run_new_stack_alignment`` docstring). engine이 기존 값("ctc" 등)으로 남아
+    있는 한 이 함수는 False이고 _run_alignment는 구스택(get_shared_ctc_engine)으로
+    정렬한다 — 이건 명시적으로 고른 대안 경로이지 실패 시 새는 폴백이 아니다.
+    """
+    return settings.alignment.engine in ("owsm", "omniasr")
+
+
+# 새 스택 경로에 배선되지 않은 레거시 전용 기능 스위치 — 켜져 있어도 아무 효과가 없다.
+# (설정명, 사람이 읽을 설명) 튜플. 조용히 무시하면 운영자가 "왜 캡션 앵커를 켰는데
+# 효과가 없지"로 시간을 버리므로, 새 스택이 켜진 채 이 스위치들도 켜져 있으면 기동/요청
+# 시점에 경고 로그를 한 번 남긴다(코디네이터 지시, 2026-08-03 정정 ①의 두 번째 자리).
+_IGNORED_LEGACY_SWITCHES: tuple[tuple[str, str], ...] = (
+    ("caption_anchors", "사람 자막 시각을 강제정렬 제약으로 넣는 캡션 앵커"),
+    ("caption_scaffold", "붕괴 곡 줄 시작을 자막 시각으로 고정하는 자막 스캐폴드"),
+    ("star_prior", "star 채널 가격을 보컬 우세도로 성형하는 star 성형"),
+    ("star_tokens", "가사 밖 가창을 흡수하는 star 와일드카드 토큰"),
+)
+
+
+def _warn_ignored_legacy_settings(settings: Any) -> None:
+    """새 스택이 켜졌는데 레거시 전용 기능 스위치도 켜져 있으면 경고 로그 한 줄.
+
+    이 스위치들(caption_anchors/caption_scaffold/star_prior/star_tokens)은 전부 구스택
+    CTC 엔진의 특정 실패 모드(균일 posterior 등)에 맞춰진 장치라 새 앵커/2패스 경로에는
+    전제가 안 맞아 배선하지 않았다(``_run_new_stack_alignment`` docstring) — 그 판단
+    자체는 유효하지만, 설정이 켜져 있는데 조용히 아무 효과가 없으면 운영자가 원인을 못
+    찾고 시간을 버린다. 실패가 아니므로 예외는 안 던진다 — 로그만 남긴다.
+    """
+    ignored = [
+        (name, desc)
+        for name, desc in _IGNORED_LEGACY_SWITCHES
+        if getattr(settings.alignment, name, False)
+    ]
+    if ignored:
+        logger.warning(
+            "New alignment stack is active (alignment.engine=%r) but the following legacy-only "
+            "switches are also on and have NO effect on this request — they are not wired into "
+            "the new anchor/2-pass path: %s",
+            settings.alignment.engine,
+            ", ".join(f"{name}({desc})" for name, desc in ignored),
+        )
+
+
+# ── 난이도 라우팅 상수 (scripts/bench_adapters/routed.py 이식, 전곡 74곡 감사로 확정 —
+#    바꾸지 마라) ──
+#
+# 라우팅 어휘는 **깊이**(fast/medium/heavy)로 통일한다(운영자 지시, 2026-08-04 정정) —
+# "구원(rescue)"은 기전의 이름이고 fast/medium/heavy는 사용자에게 보이는 개념(분석
+# 깊이)의 이름이다. 확장이 나중에 "분석 깊이 올리기" 버튼을 붙일 때 그 버튼이 하는 일이
+# 정확히 이 사다리를 한 칸 올리는 것이므로, 서버 내부 이름과 그 UI 개념이 같은 어휘를
+# 쓰면 배선이 자명해진다. 세 깊이의 구성:
+#   fast   — 무분리 omniASR 단독(_run_fast_stage)
+#   medium — polar 분리 + omniASR **자기앵커** + 2패스(en 강제 진입점)
+#   heavy  — polar 분리 + **owsm 앵커** + 2패스(ja 구원 진입점 / en 좌초 승급 도착점)
+# 앵커 모델은 깊이 하나로 완전히 결정되므로(_DEPTH_ANCHOR) 별도 필드로 안 들고 다닌다 —
+# 예전엔 route+rescue_anchor 두 필드였는데, 한 축(깊이)으로 접었다.
+_ROUTE_THRESHOLD = -11.0
+_DEPTH_FAST = "fast"
+_DEPTH_MEDIUM = "medium"
+_DEPTH_HEAVY = "heavy"
+_DEPTH_ANCHOR: dict[str, str] = {_DEPTH_MEDIUM: "omniasr", _DEPTH_HEAVY: "owsm"}
+# en은 라틴 posterior가 구조적으로 높아 붕괴해도 확신에 차 있어(Madeon logConf −6.38 vs
+# 임계 −11.0) logConf 신호로 원리상 못 잡는다 — 신호를 묻지 않고 곧장 medium 깊이로
+# 진입한다(routed.py EN_FORCED_NOTE).
+_FORCE_MEDIUM_LANGUAGES = ("en",)
+_ROUTE_LOG_FLOOR = math.log(1e-6)
+
+
+def _line_log_conf_median(results: list[Any]) -> float | None:
+    """곡 단위 라우팅 점수 — ``scripts/bench_adapters/routed.py::line_log_conf_median`` 이식
+    (입력을 dict 목록 대신 ``SyncResult`` 목록으로 받는 것만 다르다, 계산은 동일).
+
+    평균이 아니라 중앙값인 이유는 곡 앞뒤 몇 줄(인트로 애드립·페이드아웃)이 통째로 바닥을
+    찍는 일이 흔해서다 — 그 줄들이 평균을 끌어내리면 멀쩡한 곡이 구원으로 샌다.
+    """
+    values = [
+        math.log(r.confidence) if r.confidence > 0 else _ROUTE_LOG_FLOOR
+        for r in results
+        if r.confidence is not None
+    ]
+    return statistics.median(values) if values else None
+
+
+def _separate_stems_required(audio: Any, settings: Any) -> Any:
+    """medium/heavy 깊이 전용 분리 호출 — 새 스택의 필수 구성요소라 조용히 물러서지 않는다.
+
+    ``worker._separate_stems``(레거시·멜로디 공용 유틸)는 어떤 실패든 삼켜 ``None``을
+    돌려준다 — "분리가 있으면 좋고 없어도 그만"인 레거시 VAD 보정에는 맞는 관용이지만,
+    medium/heavy 깊이는 이 분리가 **결과 라벨(alignment_text=medium/heavy*, ENGINE_
+    VERSION)의 근거 자체**다. 조용히 없어지면 저장되는 결과가 실제로는 무분리인데 새
+    스택 라벨을 달게 되어 A/B 판정이 거짓이 된다(운영자 지시). ``is_available()``이
+    False면 여기서 바로 사람이 읽을 수 있는 예외를 던지고, ``separate()`` 자체의 예외
+    (``SeparatorBackendUnavailableError``/``SeparationError``)도 삼키지 않고 그대로
+    전파한다.
+    """
+    import torch
+
+    from everyric2.audio.separator import get_shared_separator
+
+    separator = get_shared_separator(settings.audio)
+    if not separator.is_available():
+        raise RuntimeError(
+            f"medium/heavy depth requires audio.separator_backend="
+            f"{settings.audio.separator_backend!r} but it is not available (missing model "
+            "assets or CUDA — see everyric2/audio/polarformer_separator.py require_available "
+            "for specifics). Provision the assets, or select a legacy engine explicitly "
+            "(EVERYRIC_ALIGNMENT_ENGINE=ctc) instead of silently degrading to an unseparated "
+            "mix under the new-stack label."
+        )
+    return separator.separate(audio, use_gpu=torch.cuda.is_available())
+
+
+class _PathBridgedRefiner:
+    """refine_window.SyllableRefiner 계약과 BaseAlignmentEngine.emission_for 계약 사이의
+    배선층 어댑터.
+
+    두 이식이 ``emission_for``의 입력 타입을 서로 다르게 확정해 뒀다: OmniASREngine은
+    ``BaseAlignmentEngine.emission_for(self, audio: AudioData)``(base.py:88)를 그대로
+    override하는데, ``refine_window.refine_lines``는 ``refiner.emission_for(vocals_path)``로
+    **Path**를 넘긴다(``SyllableRefiner`` 프로토콜과 tests/test_refine_window.py의
+    ``_FakeRefiner.emission_for(self, audio_path: Path)``가 그 계약을 고정한다). 실제
+    엔진을 리파이너로 그대로 넘기면 AudioData 자리에 Path가 들어가 ``AudioLoader.
+    prepare_for_alignment``이 즉시 깨진다. 양쪽 다 각자 테스트로 계약이 고정돼 있어 어느
+    쪽 모듈도 못 고친다 — 배선 층에서 흡수한다.
+    """
+
+    def __init__(self, engine: Any, loader: Any) -> None:
+        self._engine = engine
+        self._loader = loader
+
+    def emission_for(self, audio_path: Path) -> Any:
+        audio = self._loader.load(audio_path)
+        return self._engine.emission_for(audio)
+
+
+def _pron_seg_to_wire(span: Any) -> dict[str, Any]:
+    """``refine_window.PronSegmentSpan`` → 서버 wire ``PronSegment`` 딕셔너리
+    (everyric2-chrome/src/types.ts ``PronSegment``와 필드 단위로 대응)."""
+    out: dict[str, Any] = {"text": span.text, "start": span.start, "end": span.end}
+    if not span.resolved:
+        out["resolved"] = False
+    if span.confidence is not None:
+        out["confidence"] = span.confidence
+    if span.word_end:
+        # PronSegment 계약에 없는 추가 필드 — additive라 구버전 확장은 무시한다
+        # (refine_window.py 모듈의 "표시(발음) 세그" 절 참고).
+        out["word_end"] = True
+    return out
+
+
+def _write_stems_for_two_pass(sep_result: Any) -> tuple[Path, Path]:
+    """분리 결과를 임시 vocals.wav/inst.wav 쌍으로 쓴다.
+
+    ``refine_window._dominance_curve``가 ``vocals_path.with_name("inst.wav")``라는 형제
+    파일 관례로 반주를 찾는다 — 분리기 자체의 산출 파일(예: bs-polarformer-fp16의
+    work_dir)은 서버가 상주 프로세스라 요청마다 이미 정리돼 있으므로(polarformer_
+    separator.py의 finally) 리파이너를 위해 별도로 다시 쓴다. 반환: (지워야 할 임시
+    디렉터리, vocals 경로) — 호출부가 finally에서 디렉터리를 지운다.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="two_pass_stems_"))
+    vocals_path = tmp_dir / "vocals.wav"
+    sep_result.vocals.to_file(vocals_path)
+    sep_result.accompaniment.to_file(tmp_dir / "inst.wav")
+    return tmp_dir, vocals_path
+
+
+@dataclass
+class _NewStackResult:
+    """``_run_new_stack_alignment`` 반환 묶음 — ``_run_alignment``의 공용 꼬리(타임스탬프
+    직렬화 → 멜로디 → 품질 → 응답 조립)가 레거시 분기와 **같은 이름**으로 기대하는 지역
+    변수들에 1:1 대응한다."""
+
+    results: list[Any]
+    alignment_text: str
+    pron_data: dict[int, dict[str, Any]]
+    fixes: dict[int, list[str]]
+    raw_spans: list[tuple[float, float]]
+    vad_regions: list[tuple[float, float]] | None
+    clamped_lines: set[int]
+    engine: Any
+    adlib: list[tuple[float, float]] | None
+    # 이번 요청에서 실제로 분리했다면 그 결과(고속 단계로 끝났으면 None — 분리를 안
+    # 했다는 뜻 그 자체가 라우팅 이득이다). 구원 단계가 채운다 — 멜로디 f0 재사용·좌초
+    # 승급 비교용.
+    sep_result: Any = None
+    activity: Any = None
+    # 사후 감사용 라우팅 판정 근거 — debug.routing으로 그대로 나간다.
+    routing_meta: dict[str, Any] | None = None
+
+
+def _run_fast_stage(
+    audio: Any, lyric_lines: list[Any], language: str | None, settings: Any
+) -> "_NewStackResult":
+    """1단계(고속) — 분리 없이 원곡 믹스 위에서 omniASR-CTC 하나로 정렬한다.
+
+    ``scripts/bench_adapters/routed.py``의 ``RouteConfig.fast_aligner="omniasr-ctc"`` 재현.
+    omniASR vocab은 서브워드가 아니라 전부 단일 글자라(omniasr_engine.py 모듈 docstring)
+    이 결과의 ``word_segments`` 자체가 이미 실측 음절 스팬이다 — medium/heavy 깊이의
+    2패스처럼 별도 리파이너로 다시 잡을 필요가 없다.
+
+    표기 다중 산출(pron/pron_segs)은 이 단계에서 내지 않는다 — 정상곡의 절대다수가 이
+    경로로 끝나는데(라우팅이 곡당 평균 시간을 지키는 근거 자체) 여기서까지 2패스를
+    태우면 라우팅의 존재 이유(분리·리파인 비용 회피)가 사라진다. 대신 하위 호환
+    algorithmic 파생(``attach_pron_variants``, 이 모듈의 기존 함수)이 원문에서 표기를
+    만든다 — 실측이 아니라 근사이지만 화면이 비지는 않는다.
+
+    앵커 모델이 없거나 못 쓰면(=새 스택의 필수 구성요소 부재) 예외를 그대로 올린다 —
+    구스택으로 조용히 새지 않는다(운영자 지시).
+    """
+    from everyric2.alignment.factory import EngineFactory
+
+    anchor = EngineFactory.get_engine("omniasr", settings.alignment)
+    if not anchor.is_available():
+        raise RuntimeError(
+            "omniasr fast-path anchor not available — this is the mandatory first stage for "
+            "every new-stack request (scripts/bench_adapters/routed.py fast_aligner); "
+            "provision the model, or select a legacy engine explicitly "
+            "(EVERYRIC_ALIGNMENT_ENGINE=ctc) instead of silently degrading."
+        )
+    results = anchor.align(audio, lyric_lines, language=language)
+    return _NewStackResult(
+        results=results,
+        alignment_text=_DEPTH_FAST,
+        pron_data={},
+        fixes={},
+        raw_spans=[(r.start_time, r.end_time) for r in results],
+        vad_regions=None,
+        clamped_lines=set(),
+        engine=anchor,
+        adlib=None,
+    )
+
+
+def _run_deep_stage(
+    audio: Any,
+    sep_result: Any,
+    lyric_lines: list[Any],
+    language: str | None,
+    settings: Any,
+    report: Any,
+    depth: str,
+) -> "_NewStackResult":
+    """medium/heavy 깊이 — 분리 필수. ``scripts/bench_adapters/routed.py``의
+    ``rescue_aligner``(비-en: ``2pass-owsm-omniasr``, 여기의 heavy) /
+    ``rescue_by_language["en"]``(``2pass-asr-ipa-hangul``, omniasr 자기앵커, 여기의
+    medium)를 서버 계약으로 재현한다. 앵커 모델은 ``depth`` 하나로 정해진다
+    (``_DEPTH_ANCHOR`` — medium=omniasr 자기앵커, heavy=owsm).
+
+    **분리는 이 함수의 필수 구성요소다** — 없거나 실패하면 조용히 무분리로 물러서지
+    않고 ``_separate_stems_required``가 명시적으로 실패시킨다(운영자 지시). 벤치가 이
+    조합(bs-polarformer-fp16 분리 + owsm/omniasr 앵커)으로만 +26.7pp를 실측했다 — 분리가
+    빠진 채로 이 라벨(``alignment_text="medium*"/"heavy*"``)이 저장되면 A/B 판정이
+    거짓이 된다.
+
+    실행 순서(각 단계 이유는 인라인 주석): 앵커 정렬 → ``display_fixes._clamp_pathological``
+    (그 모듈이 "worker.py 배선 시 더 이른 단계에서 별도로 호출하라"고 지시한 자리) →
+    기존 VAD 보정(``TimingPostProcessor``·``_clamp_stretched_lines`` 재사용, 구스택과 같은
+    함수라 회귀 표면을 늘리지 않는다) → ``display_fixes.apply_stranded_corrections`` →
+    ``adlib_candidates`` → 2패스 ``refine_lines``(최종 확정된 라인 경계 위에서만 — 그
+    모듈의 "라인 경계는 앵커가 정한다" 불변식과 맞물린다: 경계가 이 시점 이후 다시 안
+    움직여야 그 위의 음절 스팬이 어긋나지 않는다).
+
+    ``two_pass_enabled``이 설정으로 꺼져 있으면(명시적 선택, 실패가 아니다) 리파인 없이
+    앵커 결과만 낸다. 켜져 있는데 리파이너가 없거나 ``refine_lines`` 자체가 실패하면
+    예외를 그대로 올린다(운영자 지시 — 리파이너도 "새 스택 구성요소" 목록에 있다).
+    """
+    from everyric2.alignment import display_fixes as df
+    from everyric2.alignment.factory import EngineFactory
+    from everyric2.alignment.refine_window import TwoPassRefineConfig, refine_lines
+    from everyric2.alignment.timing_postprocess import TimingPostProcessor
+    from everyric2.audio.loader import AudioLoader
+    from everyric2.audio.vad import VocalActivityDetector
+
+    anchor_type = _DEPTH_ANCHOR[depth]
+
+    if sep_result is None:
+        sep_result = _separate_stems_required(audio, settings)
+
+    vocals = sep_result.vocals
+    accompaniment = sep_result.accompaniment
+
+    # 분리가 끝나고 실제 정렬이 시작되는 지점 — 단계명을 기존 어휘로 되돌린다(호출부의
+    # "보컬 분리" report 참고, 같은 이유).
+    report("전사 정렬")
+    anchor = EngineFactory.get_engine(anchor_type, settings.alignment)
+    if not anchor.is_available():
+        raise RuntimeError(f"{depth} depth anchor ({anchor_type}) not available")
+
+    results = anchor.align(vocals, lyric_lines, language=language)
+    raw_spans = [(r.start_time, r.end_time) for r in results]
+    fixes: dict[int, list[str]] = {}
+
+    # 우세도(dominance) — display_fixes의 장치 전부와 늘이기 게이트가 공유하는 신호. VAD는
+    # 분리 스템의 간주 블리드에 죽으므로(display_fixes.py 모듈 docstring) 따로 만든다.
+    # None이면(신호 자체가 못 만들어짐 — 예: 진짜 무음곡) display_fixes 모듈 **자신의**
+    # 계약대로 그 장치들만 조용히 건너뛴다 — 분리 자체는 이미 성공했으니 "새 스택
+    # 구성요소 부재"가 아니라 이 곡 특유의 신호 열화다(운영자 지시가 겨냥한 것과 다른
+    # 종류의 상황).
+    activity = df.dominance_activity_from_waveforms(
+        vocals.waveform, accompaniment.waveform, vocals.sample_rate
+    )
+
+    if activity is not None:
+        df._clamp_pathological(results, activity.regions)
+        _diff_fixes(fixes, "dom-clamp", raw_spans, results)
+        raw_spans = [(r.start_time, r.end_time) for r in results]
+
+    vad_regions: list[tuple[float, float]] | None = None
+    clamped_lines: set[int] = set()
+    try:
+        vad_result = VocalActivityDetector().detect(vocals)
+        pp = TimingPostProcessor(settings.segmentation, extend_to_vocal=False).process(
+            results, vad_result, "line"
+        )
+        _diff_fixes(fixes, "pp", raw_spans, pp.results, tol=0.2)
+        results = pp.results
+        results, clamped_lines = _clamp_stretched_lines(results, vad_result, fixes=fixes)
+        vad_regions = [(round(reg.start, 2), round(reg.end, 2)) for reg in vad_result.regions]
+    except Exception:
+        # VAD는 "새 스택 구성요소"가 아니라 재사용한 레거시 보정 유틸이다(분리기·앵커·
+        # 리파이너와 달리 이 스택의 정체성/정확도 근거가 아니다) — 실패해도 앵커 결과
+        # (분리 스템 위에서 이미 실측)는 유효하므로 로그만 남기고 계속한다.
+        logger.exception("Deep-stage VAD timing post-process failed; keeping anchor timing")
+
+    if activity is not None:
+        before_stranded = [(r.start_time, r.end_time) for r in results]
+        df.apply_stranded_corrections(results, activity)
+        _diff_fixes(fixes, "stranded", before_stranded, results)
+
+    adlib = df.adlib_candidates(results, activity) if activity is not None else None
+
+    pron_data: dict[int, dict[str, Any]] = {}
+    if settings.alignment.two_pass_enabled:
+        # 와이어에 나가는 단계명은 기존 어휘("전사 정렬")로 통일한다 — 새 하위 단계
+        # 이름을 그대로 내보내면 (a) STAGE_WINDOWS에 없는 이름이 _stage_monitor의 기본
+        # 창(36,88)에 걸려 진행률이 88%에서 멈췄다 100으로 점프하고 (b) 웹스토어 심사
+        # 중이라 당장 못 고치는 확장 1.5.5가 한국어 단계명을 그대로 노출한다(운영자 지시,
+        # 2026-08-04). 하위 단계 구분은 debug.routing(이미 배선됨)이 진다 — 그건
+        # 디버그/감사용이지 진행 칩이 아니다.
+        report("전사 정렬")
+        refiner = (
+            anchor
+            if anchor_type == "omniasr"
+            else EngineFactory.get_engine("omniasr", settings.alignment)
+        )
+        if not refiner.is_available():
+            raise RuntimeError(
+                "omniasr refiner not available — two_pass_enabled=True requires it for the "
+                f"{depth} depth; not silently dropping to anchor-only segments under the "
+                "2pass-labelled result."
+            )
+        stems_dir: Path | None = None
+        try:
+            stems_dir, vocals_path = _write_stems_for_two_pass(sep_result)
+            bridged = _PathBridgedRefiner(refiner, AudioLoader())
+            lines_text = [ln.text for ln in lyric_lines]
+            # refine_lines 자체의 실패는 여기서 삼키지 않는다 — 그대로 전파해 잡을
+            # failure_kind='system'으로 명시적으로 떨어뜨린다(운영자 지시).
+            refined = refine_lines(
+                results,
+                lines_text,
+                bridged,
+                vocals_path,
+                language=language or "en",
+                config=TwoPassRefineConfig(),
+            )
+        finally:
+            if stems_dir is not None:
+                shutil.rmtree(stems_dir, ignore_errors=True)
+        # refine_lines는 라인별 실패를 예외가 아니라 RefinedLine.fallback_reason으로
+        # 신호한다(refine_window.py의 "앵커·리파이너 계약" — 호출부가 이 신호를 보고
+        # 앵커 세그로 폴백하라는 뜻이다). 여기서 fallback_reason을 안 읽으면, 그 라인은
+        # entry가 비어 pron_data에서 통째로 빠지고, 아래 attach_pron_variants가 원문에서
+        # algorithmic 근사 발음을 채워 넣는다 — 결과 자체는 안전(표시가 비지 않는다)하지만
+        # "이 줄은 실측 2패스가 아니라 근사였다"는 사실이 로그·응답 어디에도 안 남는다.
+        # 판정 불가를 조용히 넘기지 않고 집계해 로그로 남긴다(운영자 지시 — 무엇이
+        # 없어서/왜 실패했는지 담을 것).
+        line_fallbacks: dict[str, int] = {}
+        for i, rl in enumerate(refined):
+            entry: dict[str, Any] = {}
+            if rl.pron.get("hangul"):
+                entry["pronunciation"] = rl.pron["hangul"]
+            if rl.pron_segs.get("hangul"):
+                entry["pron_segments"] = [_pron_seg_to_wire(s) for s in rl.pron_segs["hangul"]]
+            if rl.pron:
+                entry["pron"] = dict(rl.pron)
+            if rl.pron_segs:
+                entry["pron_segs"] = {
+                    key: [_pron_seg_to_wire(s) for s in segs] for key, segs in rl.pron_segs.items()
+                }
+            if entry:
+                pron_data[i] = entry
+            elif rl.fallback_reason:
+                line_fallbacks[rl.fallback_reason] = line_fallbacks.get(rl.fallback_reason, 0) + 1
+        if line_fallbacks:
+            logger.warning(
+                "Two-pass refiner fell back to anchor-only segments for %d/%d line(s) "
+                "(measured syllable timing unavailable for these — algorithmic pron "
+                "approximation used instead): %s",
+                sum(line_fallbacks.values()),
+                len(refined),
+                ", ".join(f"{reason}={count}" for reason, count in sorted(line_fallbacks.items())),
+            )
+
+    return _NewStackResult(
+        results=results,
+        alignment_text=f"{depth}-2pass" if pron_data else depth,
+        pron_data=pron_data,
+        fixes=fixes,
+        raw_spans=raw_spans,
+        vad_regions=vad_regions,
+        clamped_lines=clamped_lines,
+        engine=anchor,
+        adlib=adlib,
+        sep_result=sep_result,
+        activity=activity,
+    )
+
+
+def _stranded_count(stack: "_NewStackResult") -> int:
+    """좌초 시그니처 개수 — ``display_fixes._stranded_sites``. activity가 없으면(신호
+    열화) 비교 자체가 무의미하므로 0(=악화로 안 본다, 승급 판단은 이 함수의 호출부가
+    "개선 여부"만 보므로 0은 안전한 기본값)."""
+    if stack.activity is None:
+        return 0
+    from everyric2.alignment.display_fixes import _stranded_sites
+
+    return _stranded_sites(stack.results, stack.activity.regions)
+
+
+def _resolve_stack_language(language: str | None, lyric_lines: list[Any]) -> tuple[str, str]:
+    """새 스택이 쓸 언어와 그 출처(``"label"`` | ``"script_census"``).
+
+    jobs.language는 실측상 자주 비어 있다(사용자 생성 잡 4/4가 None, 2026-08-03 실측) —
+    이 라벨 하나가 비면 세 layer가 동시에 갈라진다: ① en 강제 medium 진입이 무산돼
+    en 곡이 전부 fast로 새고(``_FORCE_MEDIUM_LANGUAGES`` 판정), ② 2패스 리파이너의
+    ``language or "en"``이 ja 곡을 en으로 리파인하고, ③ 응답의 ``language`` 필드가
+    None으로 남아 표기 파생·재생성의 분기 재료가 사라진다. 그래서 라벨이 없으면 가사
+    문자 계열로 한 번 판정해 **같은 값**을 세 곳에 흘린다 — 표기와 라우팅이 서로
+    다른 판정을 하면 안 된다.
+
+    판정기는 ``ctc_engine.detect_language_from_text`` — 스크립트가 섞이면 "많은 쪽"이
+    아니라 어댑터 vocab이 "덮는 쪽"을 고르는 우세 판정(``_pick_by_coverage``)이라,
+    라틴 53.7%의 ja 곡(numb numb)을 en으로 오진하지 않는다. 라벨이 있으면 정규화만
+    해서 그대로 쓴다 — 라벨은 조달 경로가 명시한 값이므로 추정이 덮지 않는다.
+    """
+    lang = (language or "").strip().lower()
+    if lang:
+        # 지역 서브태그 제거(코덱스 감사 Med, 2026-08-03): "EN-us"/"zh_TW" 류 라벨은
+        # 라우팅(startswith)은 통과하지만 OWSM 언어 심볼 매칭(ko/ja/en/zh 정확 키)이
+        # 실패해 무언어(<nolang>) 정렬로 조용히 저하됐다 — 기본 언어 코드만 남긴다.
+        lang = lang.split("-")[0].split("_")[0]
+        return lang, "label"
+    from everyric2.alignment.ctc_engine import detect_language_from_text
+
+    detected, _ = detect_language_from_text("\n".join(ln.text for ln in lyric_lines))
+    return detected, "script_census"
+
+
+def _run_new_stack_alignment(
+    audio: Any,
+    sep_result: Any,
+    lyric_lines: list[Any],
+    language: str | None,
+    settings: Any,
+    report: Any,
+    min_depth: str | None = None,
+    on_depth: Any | None = None,
+) -> "_NewStackResult":
+    """새 정렬 스택 본체 — 3단계 라우팅(``scripts/bench_adapters/routed.py``의
+    routed-2mode-lang 구성 재현, 코디네이터 확정 2026-08-03/04 정정). 어휘는 **깊이**
+    (fast/medium/heavy, ``_DEPTH_*`` 상수) — "기전"이 아니라 "사용자에게 보이는 개념"
+    (확장이 나중에 붙일 "분석 깊이 올리기" 버튼과 같은 어휘, 위 상수 블록 주석 참고):
+
+      1) **fast**(무분리 omniASR, ``_run_fast_stage``) — 대부분의 곡이 여기서 끝난다
+         (전곡 평균 시간을 지키는 근거). 언어가 en이면 신호가 원리상 무력해 이 단계를
+         건너뛰고 곧장 medium으로 진입한다(``_FORCE_MEDIUM_LANGUAGES``).
+      2) **medium/heavy**(분리 + 앵커 2패스, ``_run_deep_stage``) — fast의 라인 logConf
+         중앙값이 ``_ROUTE_THRESHOLD`` 미만이면 승급한다. en 외 언어는 fast에서 곧장
+         heavy로(medium을 건너뛴다 — owsm 앵커), en은 medium에서 시작한다(omniasr
+         자기앵커 — 2패스 리파이너가 이미 음절 단위라 owsm이 잡을 이유가 없다).
+      3) **en 전용 사후 heavy 승급** — medium 결과에 ``display_fixes._stranded_sites``
+         시그니처가 남으면 heavy(owsm 앵커)로 다시 돌리고, 시그니처가 **줄어드는
+         경우에만** 채택한다(악화 방향으로는 못 간다). butcher가 그 표본, 14곡 스캔
+         오검출 0. medium이 이미 분리해 둔 스템을 그대로 넘긴다(운영자 지시,
+         2026-08-04: 한 요청 안의 승급은 분리를 재사용해야 한다 — 물리적으로 owsm
+         앵커만 추가로 돈다) — ``_run_deep_stage``의 ``sep_result is None`` 가드가
+         재분리를 자동으로 건너뛴다.
+
+    ja는 fast→heavy, en은 medium→heavy로 **진입 지점만 다르고 같은 사다리**를 오른다 —
+    그래서 최종 ``routing_meta["route"]``는 "어떻게 왔는지"가 아니라 "지금 어느
+    깊이인지"만 남긴다(예전엔 route="forced"/"rescue"/"escalated" + 별도
+    rescue_anchor 필드 두 개로 표현했는데, 깊이 하나로 접었다 — 앵커 모델은 깊이가
+    이미 결정한다).
+
+    레거시 ko/ja 이중정렬·star 토큰·pron_data DP 근사·caption 앵커/스캐폴드는 이 경로에
+    배선하지 않는다 — 전부 구스택 CTC 엔진의 특정 실패 모드에 맞춰진 장치라 새 앵커에는
+    전제가 안 맞는다(범위 밖).
+
+    **조용한 폴백 금지**: 이 함수와 그 하위 단계 어디에서도 실패를 삼켜 구스택으로
+    넘어가거나 더 가벼운 구성으로 조용히 대체하지 않는다 — 분리기 자산·앵커 모델·
+    (two_pass_enabled=True일 때의) 리파이너가 없거나 실패하면 예외가 그대로 올라간다
+    (운영자 지시, 2026-08-03 정정).
+    """
+    lang, lang_source = _resolve_stack_language(language, lyric_lines)
+    if lang_source == "script_census":
+        logger.info(
+            f"New-stack routing: job language label is empty -> resolved {lang!r} "
+            "from lyrics script census"
+        )
+
+    # 라이브 진행 중 깊이 배지(worker._JOB_DEPTH) 통지 채널 — report(stage)와 별개다.
+    # report는 이 함수 밖의 테스트가 ``list.append`` 등 1-인자 콜러블을 그대로 넘겨받는
+    # 계약(tests/test_new_stack_wiring.py TestStageReporting)이라 시그니처를 못 건드리므로,
+    # 깊이는 완전히 별도의 선택적 콜백으로 얹는다 — on_depth가 없으면(구 호출부·테스트)
+    # 조용히 무동작이라 회귀가 없다.
+    def _notify_depth(depth: str) -> None:
+        if on_depth is not None:
+            try:
+                on_depth(depth)
+            except Exception:
+                pass
+
+    if min_depth in (_DEPTH_MEDIUM, _DEPTH_HEAVY):
+        # 분석 깊이 하한 요청(확장의 "분석 깊이 올리기" 버튼, 2026-08-03) — 라우팅
+        # 판정을 건너뛰고 요청 깊이에서 바로 시작한다. en 좌초 heavy 자동 승급은 안
+        # 태운다: 요청 깊이 그대로가 예측 가능하고(버튼의 배지 숫자와 결과 깊이가
+        # 일치해야 한다), 더 필요하면 사용자가 한 단계 더 올리면 된다.
+        logger.info(f"New-stack routing: min_depth={min_depth!r} requested -> skipping router")
+        report("보컬 분리")
+        _notify_depth(min_depth)
+        deep = _run_deep_stage(
+            audio, sep_result, lyric_lines, lang, settings, report, min_depth
+        )
+        deep.routing_meta = {
+            "route": min_depth,
+            "language": lang,
+            "language_source": lang_source,
+            "line_log_conf_median": None,
+            "threshold": _ROUTE_THRESHOLD,
+            "requested_min_depth": min_depth,
+        }
+        return deep
+
+    starts_at_medium = any(lang.startswith(prefix) for prefix in _FORCE_MEDIUM_LANGUAGES)
+
+    score: float | None = None
+    if not starts_at_medium:
+        # 단계명은 기존 어휘("전사 정렬")로 통일 — 위 두 번째 report와 같은 이유
+        # (STAGE_WINDOWS 미등록·확장 1.5.5 한국어 노출, 아래 report들도 전부 동일).
+        report("전사 정렬")
+        _notify_depth(_DEPTH_FAST)
+        fast = _run_fast_stage(audio, lyric_lines, lang, settings)
+        score = _line_log_conf_median(fast.results)
+        fast.routing_meta = {
+            "route": _DEPTH_FAST,
+            "language": lang,
+            "language_source": lang_source,
+            "line_log_conf_median": None if score is None else round(score, 3),
+            "threshold": _ROUTE_THRESHOLD,
+        }
+        # score가 None(라인 confidence를 하나도 못 구함)이면 **승급한다** — 벤치
+        # 원본(scripts/bench_adapters/routed.py:228 `if score is not None and score >=
+        # threshold: return fast`)과 같은 방향이다. 판정 불가를 "확신 있는 정상곡"으로
+        # 조용히 넘기면 안 된다 — 극한곡을 놓치는 비용(붕괴 방치)이 정상곡을 잘못
+        # 올리는 비용(몇 초 낭비)보다 훨씬 크다(routed.py 모듈 docstring).
+        if score is not None and score >= _ROUTE_THRESHOLD:
+            return fast
+        logger.info(
+            "New-stack routing: line_log_conf_median=%s (threshold=%s) -> escalating to "
+            "heavy depth",
+            "unavailable" if score is None else f"{score:.3f}",
+            _ROUTE_THRESHOLD,
+        )
+    else:
+        logger.info(
+            f"New-stack routing: language {lang!r} starts at medium depth "
+            "(logConf signal unreliable for it)"
+        )
+
+    # medium/heavy 진입 = 실제로 분리를 태우는 시점이다(fast는 분리를 아예 안 한다 —
+    # 라우팅의 비용 절감 근거 자체) — 그 실행과 단계 보고가 어긋나지 않도록 여기서만
+    # "보컬 분리"를 낸다(운영자 지시: 실제로 안 하는 작업을 표시하면 안 된다). heavy
+    # 승급 재호출은 이미 분리된 스템(deep.sep_result)을 재사용하므로 다시 안 낸다.
+    report("보컬 분리")
+    initial_depth = _DEPTH_MEDIUM if starts_at_medium else _DEPTH_HEAVY
+    _notify_depth(initial_depth)
+    deep = _run_deep_stage(
+        audio, sep_result, lyric_lines, lang, settings, report, initial_depth
+    )
+    deep.routing_meta = {
+        "route": initial_depth,
+        "language": lang,
+        "language_source": lang_source,
+        "line_log_conf_median": None if score is None else round(score, 3),
+        "threshold": _ROUTE_THRESHOLD,
+    }
+
+    if starts_at_medium:
+        stranded_before = _stranded_count(deep)
+        if stranded_before > 0:
+            # 별도 report 없음 — _run_deep_stage가 분리 재사용 여부와 무관하게 자기
+            # 진입 시점에 "전사 정렬"을 낸다(위 정의 참고). 여기서 다시 부르면 같은
+            # 문자열을 한 틱도 안 되는 간격으로 중복 보고할 뿐이다.
+            # deep.sep_result를 그대로 넘긴다 — 이미 medium이 분리해 둔 스템을 재사용
+            # 한다(운영자 지시, 2026-08-04: 한 요청 안의 승급은 재분리하지 않는다).
+            # _run_deep_stage의 sep_result is None 가드가 재분리를 자동으로 건너뛴다.
+            # 깊이 통지는 heavy 계산 **시작 전**에 낸다 — GET /api/job의 ETA median이
+            # 이 깊이를 키로 고르므로, 계산이 도는 내내 medium으로 남아 있으면 ETA가
+            # medium 중앙값 기준 "곧 완료"에 눌러앉는다(실사용 제보). 기각되면 아래서
+            # medium으로 되돌린다 — 시도가 도는 동안만 heavy가 사실이다.
+            _notify_depth(_DEPTH_HEAVY)
+            escalated = _run_deep_stage(
+                audio, deep.sep_result, lyric_lines, lang, settings, report, _DEPTH_HEAVY
+            )
+            stranded_after = _stranded_count(escalated)
+            if stranded_after < stranded_before:
+                logger.info(
+                    f"Heavy-depth escalation adopted: {stranded_before} -> {stranded_after} "
+                    "stranded sites"
+                )
+                escalated.alignment_text += "-escalated"
+                escalated.routing_meta = {
+                    **deep.routing_meta,
+                    "route": _DEPTH_HEAVY,
+                    "stranded_before": stranded_before,
+                    "stranded_after": stranded_after,
+                }
+                return escalated
+            logger.info(
+                f"Heavy-depth escalation rejected (no improvement: {stranded_before} -> "
+                f"{stranded_after} stranded sites) — staying at medium"
+            )
+            _notify_depth(_DEPTH_MEDIUM)
+            deep.routing_meta["stranded_before"] = stranded_before
+            deep.routing_meta["stranded_after"] = stranded_after
+
+    return deep
+
+
+def _finish_new_stack_alignment(
+    audio: Any,
+    sep_result: Any,
+    vocals: Any,
+    lyric_lines: list[Any],
+    language: str | None,
+    settings: Any,
+    report: Any,
+    gloss_folded: Any,
+    melody_extractor: Any,
+    f0_future: Any,
+    f0_executor: Any,
+    min_depth: str | None = None,
+    on_depth: Any | None = None,
+) -> dict[str, Any]:
+    """새 스택 정렬을 실행하고 ``_run_alignment``과 같은 모양의 응답 dict를 조립한다.
+
+    타임스탬프 직렬화 → gloss 되붙이기 → 다표기 부착 → 멜로디 → 품질 → debug_meta 꼬리는
+    레거시 분기(``_run_alignment`` 본문, ``report("전사 정렬")`` 이후)의 같은 단계를
+    의도적으로 **복제**했다 — 둘 다 ``getattr(engine, ..., default)`` 가드 위주라 원래는
+    공유해도 안전하지만, 레거시 쪽 수백 줄 블록을 들여쓰기 수술로 감싸는 것보다 이 함수
+    하나로 **조기 반환**(``_run_alignment``의 try/finally가 f0_executor·anchor_executor
+    정리를 그대로 수행한다)하는 편이 기존 경로를 한 글자도 건드리지 않는다 — 회귀 표면을
+    0으로 유지하는 쪽을 골랐다. 두 사본이 갈리면(예: quality_score 계산 방식이 바뀌면)
+    여기도 함께 고쳐야 한다는 뜻이니 그 사실을 남겨 둔다.
+
+    캡션 앵커·star span·caption scaffold는 새 스택에 배선하지 않았으므로
+    (``_run_new_stack_alignment`` docstring 참고) debug_meta에 그 키들이 아예 없다 —
+    레거시 응답의 "기능이 꺼져 있어 없음"과 달리 "이 스택엔 그 개념이 없음"이다.
+    """
+    stack = _run_new_stack_alignment(
+        audio, sep_result, lyric_lines, language, settings, report,
+        min_depth=min_depth, on_depth=on_depth,
+    )
+    results = stack.results
+    pron_data = stack.pron_data
+    fixes = stack.fixes
+    raw_spans = stack.raw_spans
+    vad_regions = stack.vad_regions
+    clamped_lines = stack.clamped_lines
+    engine = stack.engine
+    alignment_text = stack.alignment_text
+    # 구원 단계가 이미 분리해 둔 스템을 멜로디 f0/노트 부착에 재사용한다 — 고속 단계로
+    # 끝난 곡은 분리를 아예 안 했으므로(라우팅의 존재 이유) 호출부가 넘긴 vocals(보통
+    # None — 새 스택엔 _run_alignment가 분리를 미리 안 돌린다)를 그대로 쓴다.
+    effective_vocals = stack.sep_result.vocals if stack.sep_result is not None else vocals
+
+    timestamps: list[dict[str, Any]] = []
+    pron_referee_tokens: list[Any] = []
+    for i, r in enumerate(results):
+        seg: dict[str, Any] = {"text": r.text, "start": r.start_time, "end": r.end_time}
+        line_conf = r.confidence
+        if line_conf is None and r.word_segments:
+            line_conf = _geomean([w.confidence for w in r.word_segments])
+        if line_conf is not None:
+            seg["confidence"] = round(line_conf, 6)
+        if r.word_segments:
+            seg["words"] = _full_coverage_words(r.text, r.word_segments, r.start_time, r.end_time)
+        pd = pron_data.get(i) or {}
+        if pd.get("pronunciation"):
+            seg["pronunciation"] = pd["pronunciation"]
+        if pd.get("pron_segments"):
+            seg["pron_segments"] = pd["pron_segments"]
+        # 다표기(pron/pron_segs) — 레거시엔 없는 새 필드지만 attach_pron_variants가
+        # seg.get("pron")로 멱등 가드를 거니 순서를 맞출 필요가 없다(먼저 실어도 안전 —
+        # 아래 attach_pron_variants가 그대로 스킵한다).
+        if pd.get("pron"):
+            seg["pron"] = pd["pron"]
+        if pd.get("pron_segs"):
+            seg["pron_segs"] = pd["pron_segs"]
+        debug: dict[str, Any] = {}
+        if vad_regions is not None:
+            dur = max(0.001, r.end_time - r.start_time)
+            vocal = sum(
+                max(0.0, min(e, r.end_time) - max(s, r.start_time)) for s, e in vad_regions
+            )
+            debug["active_ratio"] = round(vocal / dur, 2)
+            debug["clamped"] = i in clamped_lines
+            fx = fixes.get(i)
+            if fx:
+                debug["orig"] = [round(raw_spans[i][0], 2), round(raw_spans[i][1], 2)]
+                debug["fixes"] = fx
+        if debug:
+            seg["debug"] = debug
+        pron_referee_tokens.append(None)
+        timestamps.append(seg)
+
+    if gloss_folded:
+        attached = _fold_gloss_into_segments(timestamps, gloss_folded)
+        logger.info(
+            f"Re-attached {attached} excluded gloss line(s) to their source segment "
+            f"for display (alignment input untouched)"
+        )
+
+    for seg, referee_tokens in zip(timestamps, pron_referee_tokens):
+        # 곡 언어(라벨 없으면 라우팅의 문자 계열 판정값)를 넘긴다 — zh 곡 게이트 재료
+        attach_pron_variants(
+            seg,
+            referee_tokens=referee_tokens,
+            language=(stack.routing_meta or {}).get("language") or language,
+        )
+
+    if vad_regions is not None:
+        for text in _drop_nonvocal_nonlyric_edges(timestamps):
+            logger.info(f"Dropped non-vocal non-lyric edge line: {text!r}")
+
+    report("멜로디 분석")
+    f0_curve = None
+    song_key = None
+    if melody_extractor is not None:
+        try:
+            precomputed_f0 = f0_future.result() if f0_future is not None else None
+            annotated = melody_extractor.annotate_timestamps(
+                audio, timestamps, vocals=effective_vocals, precomputed_f0=precomputed_f0
+            )
+            f0_curve = melody_extractor.last_f0_curve
+            song_key = melody_extractor.last_key
+            logger.info(f"Melody notes annotated on {annotated} spans")
+        except Exception:
+            logger.exception("Melody extraction failed; continuing without notes")
+        finally:
+            if f0_executor is not None:
+                f0_executor.shutdown(wait=True)
+
+    avg_confidence = None
+    confidences = [t.get("confidence") for t in timestamps if t.get("confidence") is not None]
+    if confidences:
+        avg_confidence = sum(confidences) / len(confidences)
+
+    quality_score, coverage_meta = _quality_with_coverage(
+        avg_confidence, len(confidences), len(timestamps)
+    )
+    if coverage_meta.get("failed"):
+        logger.warning(
+            f"Alignment coverage too low: only {coverage_meta['aligned_lines']}/"
+            f"{coverage_meta['total_lines']} line(s) have measured char timing "
+            f"(the rest are interpolated); reporting quality_score="
+            f"{quality_score} instead of {coverage_meta['measured_conf']}"
+        )
+
+    detected_lang = language
+    engine_variant = getattr(engine, "_current_engine_variant", None)
+    if hasattr(engine, "_current_language"):
+        detected_lang = engine._current_language
+    if not detected_lang:
+        # 새 앵커(owsm/omniasr)는 _current_language를 노출하지 않으므로 위 폴백이
+        # 구조적으로 죽어 있다 — 라벨이 비면 라우팅이 이미 판정해 둔 문자 계열
+        # 언어(_resolve_stack_language)를 그대로 쓴다. 라우팅·리파이너·응답이 같은
+        # 값을 봐야 표기와 재생성 분기가 어긋나지 않는다.
+        detected_lang = (stack.routing_meta or {}).get("language")
+
+    quality_adapter = getattr(engine, "_current_adapter", None)
+    quality_norm = _scale_free_quality(avg_confidence, quality_adapter)
+    debug_meta: dict[str, Any] = {
+        "star_spans": [],
+        "vad_regions": [list(v) for v in vad_regions] if vad_regions is not None else None,
+        "alignment_text": alignment_text,
+        "f0_curve": f0_curve,
+        "quality_adapter": quality_adapter,
+        "quality_norm": None if quality_norm is None else round(quality_norm, 6),
+        "align_coverage": coverage_meta,
+        # 라우팅 판정 근거 — 어느 깊이(fast/medium/heavy)가 실제로 채택됐는지, logConf
+        # 중앙값·문턱값(+승급 시도가 있었으면 stranded_before/after). 사후 감사용(캡션
+        # 앵커의 debug.caption_anchors와 같은 결, 이 스택엔 캡션 앵커가 없으니 그 자리를
+        # 대신한다). additive 새 필드.
+        "routing": stack.routing_meta or {},
+    }
+
+    return {
+        "timestamps": timestamps,
+        "language": detected_lang,
+        "engine_variant": engine_variant,
+        "quality_score": quality_score,
+        "debug": debug_meta,
+        "alignment_text": alignment_text,
+        "tempo": _estimate_tempo(audio),
+        "key": song_key,
+        # 곡 단위 추임새 후보 — 새 스택 전용 additive 필드(레거시 응답엔 없다). 프런트
+        # 계약: [[start,end],...] (팀리드 지시 필드명 "adlib" 그대로).
+        "adlib": [[round(s, 3), round(e, 3)] for s, e in stack.adlib] if stack.adlib else None,
+    }
+
+
 def _run_alignment(
     audio_path: str,
     lyrics: str,
@@ -3735,6 +5046,8 @@ def _run_alignment(
     on_stage: Any | None = None,
     line_meta_resolver: Any | None = None,
     video_id: str | None = None,
+    min_depth: str | None = None,
+    on_depth: Any | None = None,
 ) -> dict:
     """정렬 본체. line_meta_resolver를 주면 **보컬 분리·f0 착수 뒤, CTC 진입 직전에** 한 번
     불러 line_meta를 늦게 받아온다 (번역·독음을 클라이언트가 병렬로 만드는 경로).
@@ -3742,7 +5055,12 @@ def _run_alignment(
 
     video_id를 주고 ``caption_anchors``가 켜져 있으면 사람이 만든 유튜브 자막의 타임스탬프에서
     «가사 줄이 놓일 수 없는 구간»을 뽑아 정렬에 제약으로 넣는다 (``_caption_forbidden_spans``).
-    가사 출처와 무관한 별개 신호이므로 자막으로 만든 싱크가 아니어도 동작한다."""
+    가사 출처와 무관한 별개 신호이므로 자막으로 만든 싱크가 아니어도 동작한다.
+
+    on_depth: 새 스택 라우팅이 결정한 분석 깊이(fast/medium/heavy)를 실어 보내는 선택
+    콜백(2026-08-04) — on_stage와 별개 채널이다(``_run_new_stack_alignment``의
+    ``_notify_depth`` 주석 참고: on_stage/report는 테스트가 1-인자 콜러블로 직접 넘겨받는
+    계약이라 시그니처를 못 바꾼다)."""
     from everyric2.audio.loader import AudioLoader
     from everyric2.config.settings import get_settings
     from everyric2.inference.prompt import LyricLine
@@ -3775,14 +5093,23 @@ def _run_alignment(
             lyric_lines, settings.alignment.exclude_gloss_lines
         )
 
-        # CTC 엔진은 웜 캐시 싱글턴 — 같은 언어의 두 번째 잡부터 모델 재로드 0회 (WS2-A).
-        # torch를 최상위 import하는 모듈이라 반드시 여기서 지연 import한다 (API 전용 모드
-        # 프로세스에 torch가 딸려 들어오지 않게 — main.py 지연 임포트 계약).
-        from everyric2.alignment.ctc_engine import get_shared_ctc_engine
+        # 새 정렬 스택(owsm/omniasr 앵커) 게이트 — 켜져 있으면 구스택 CTC 엔진은 아예
+        # 웜업하지 않는다(안 쓸 모델을 GPU에 올려 둘 이유가 없다). 이 값 하나로 아래
+        # 두 지점(엔진 웜업 스킵, 앵커/구스택 이중정렬 분기)이 갈린다.
+        new_stack_active = _new_stack_enabled(settings)
+        if new_stack_active:
+            _warn_ignored_legacy_settings(settings)
 
-        engine = get_shared_ctc_engine(settings.alignment)
-        if not engine.is_available():
-            raise RuntimeError("CTC engine not available")
+        engine = None
+        if not new_stack_active:
+            # CTC 엔진은 웜 캐시 싱글턴 — 같은 언어의 두 번째 잡부터 모델 재로드 0회 (WS2-A).
+            # torch를 최상위 import하는 모듈이라 반드시 여기서 지연 import한다 (API 전용 모드
+            # 프로세스에 torch가 딸려 들어오지 않게 — main.py 지연 임포트 계약).
+            from everyric2.alignment.ctc_engine import get_shared_ctc_engine
+
+            engine = get_shared_ctc_engine(settings.alignment)
+            if not engine.is_available():
+                raise RuntimeError("CTC engine not available")
 
         # 자막 앵커 조달은 네트워크 IO(트랙당 yt-dlp 1회)라 보컬 분리와 **겹쳐서** 돌린다 —
         # 정렬 진입 전에만 있으면 되므로 분리 시간에 그대로 숨는다(f0 병렬과 같은 방식).
@@ -3804,9 +5131,19 @@ def _run_alignment(
         # 보컬 스템 1회 분리 — 원 설계(CLI --separate)대로 정렬 입력으로 쓰고, 아래 VAD
         # 라인 경계 보정과 멜로디 f0 추출에 재사용한다. 반주가 빠진 스템은 CTC emission이
         # 훨씬 깨끗해 고밀도 믹스/이펙트 구간에서 정렬 품질이 오른다. 미설치/실패 시 믹스 폴백.
-        report("보컬 분리")
+        # 새 스택은 여기서 report 안 한다 — 분리를 라우팅 뒤로 미뤘으므로(바로 아래) 이
+        # 시점엔 분리가 실제로 일어날지조차 모른다(고속 경로는 아예 안 한다). 실제로
+        # 분리하는 순간에만 알린다 — 구원 진입 시 _run_new_stack_alignment가, 구스택은
+        # 여기서 바로(운영자 지시: 실제로 안 하는 작업을 표시하면 안 된다).
+        if not new_stack_active:
+            report("보컬 분리")
         need_vocals = settings.melody.separate_vocals or settings.alignment.align_on_vocals
-        sep_result = _separate_stems(audio) if need_vocals else None
+        # 새 스택은 여기서 분리하지 않는다 — 라우팅(fast 깊이)이 애초에 분리를 건너뛰는
+        # 것 자체가 비용 절감의 근거다(scripts/bench_adapters/routed.py 모듈 docstring:
+        # "정상곡에 분리기를 돌리는 14초는 순수 낭비"). 분리가 실제로 필요한지는 medium/
+        # heavy 깊이 진입 여부로만 정해지므로 _run_deep_stage가 그때 가서 분리한다
+        # (_separate_stems_required) — 여기서 미리 돌리면 그 절감이 통째로 사라진다.
+        sep_result = _separate_stems(audio) if (need_vocals and not new_stack_active) else None
         vocals = sep_result.vocals if sep_result is not None else None
         align_audio = (
             vocals if (vocals is not None and settings.alignment.align_on_vocals) else audio
@@ -3869,7 +5206,7 @@ def _run_alignment(
         # 실패·미가용은 평평한 star로 계속한다(성형은 있으면 좋은 신호다). anchor_kw에
         # 싣는 이유: ko/ja/이중정렬/재정렬이 전부 이 dict를 쓰므로 모든 정렬이 같은
         # 가격을 본다 — 한쪽만 성형하면 누출 가드가 성형 차이를 누출로 오독한다.
-        if settings.alignment.star_prior and settings.alignment.star_tokens:
+        if settings.alignment.star_prior and settings.alignment.star_tokens and not new_stack_active:
             presence = None
             try:
                 if sep_result is not None:
@@ -3904,6 +5241,29 @@ def _run_alignment(
                 logger.exception("Star prior: presence derivation failed; star stays flat")
 
         report("전사 정렬")
+        if new_stack_active:
+            # 새 스택은 여기서 조기 반환한다 — 아래 ko/ja 이중정렬·star 토큰·pron_data DP
+            # 근사 블록(레거시 전용, 수백 줄)은 건드리지 않고 그대로 폴백 경로로 남긴다.
+            # try/finally(f0_executor·anchor_executor 정리)는 조기 return에도 그대로 돈다.
+            # align_audio는 안 넘긴다 — 새 스택은 라우팅 단계별로 정렬 입력을 스스로
+            # 정한다(고속=무분리 원곡, 구원=그때 분리한 스템). sep_result/vocals는 위에서
+            # 새 스택이면 항상 None이다(분리를 미리 안 돌렸으므로) — 그래도 시그니처는
+            # 유지한다(구원 단계가 분리하면 그 결과가 멜로디 f0에 재사용된다).
+            return _finish_new_stack_alignment(
+                audio,
+                sep_result,
+                vocals,
+                lyric_lines,
+                language,
+                settings,
+                report,
+                gloss_folded,
+                melody_extractor,
+                f0_future,
+                f0_executor,
+                min_depth=min_depth,
+                on_depth=on_depth,
+            )
         # 독음(ko) 정렬 경로: 커버리지가 충분하면 한국어 발음 텍스트+kor adapter로 정렬하고
         # 원문 라인에 역매핑한다. 미달/실패 시 원문 정렬로 폴백 (회귀 0).
         by_text = _pron_by_text(line_meta)
@@ -4379,7 +5739,8 @@ def _run_alignment(
         # 참고). debug["referee"]는 이미 각 세그에 실려 있어 attach가 심판 개입 라인을
         # 알아본다 — 순서 의존은 그 필드뿐이라 여기로 옮겨도 무관하다.
         for seg, referee_tokens in zip(timestamps, pron_referee_tokens):
-            attach_pron_variants(seg, referee_tokens=referee_tokens)
+            # 레거시 경로는 잡 라벨만 넘긴다(없으면 게이트 미작동 = 기존 동작)
+            attach_pron_variants(seg, referee_tokens=referee_tokens, language=language)
 
         # 앞뒤에 섞여 들어온 비가창 줄(크레딧·출처·URL) 제거 — 발성 근거와 텍스트 근거가
         # 함께 성립할 때만 버린다. 자세한 판정 근거는 _drop_nonvocal_nonlyric_edges 참고.
@@ -4432,9 +5793,15 @@ def _run_alignment(
                 f"{quality_score} instead of {coverage_meta['measured_conf']}"
             )
 
+        # 결함 #5: DB로 흘러가는 language는 반드시 순수 언어여야 한다. 엔진의 _current_lang은
+        # 내부 캐시 키라 force_mms 정렬이면 "{language}_mms"로 뭉쳐 있다(ctc_engine.py 654행) —
+        # 그 값을 그대로 language 컬럼에 썼던 것이 결함의 원인이다. 대신 엔진이 따로 노출하는
+        # 순수 언어(_current_language)와 변형(_current_engine_variant)을 각각 읽는다.
         detected_lang = language
-        if hasattr(engine, "_current_lang"):
-            detected_lang = engine._current_lang
+        engine_variant = None
+        if hasattr(engine, "_current_language"):
+            detected_lang = engine._current_language
+            engine_variant = getattr(engine, "_current_engine_variant", None)
 
         # 곡 단위 디버그 메타 — star가 흡수한 구간(가사 밖 가창)과 VAD 발성 구간,
         # 그리고 어떤 텍스트로 정렬했는지(원문 vs 독음) 클라 디버그 표시용.
@@ -4480,6 +5847,7 @@ def _run_alignment(
         return {
             "timestamps": timestamps,
             "language": detected_lang,
+            "engine_variant": engine_variant,
             "quality_score": quality_score,
             "debug": debug_meta,
             "alignment_text": alignment_text,

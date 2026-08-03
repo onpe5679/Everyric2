@@ -20,6 +20,7 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ensureLocalServerPermissionForServerUrl, isLoopbackServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -31,7 +32,13 @@ const HAS_HANGUL = '[\\uAC00-\\uD7A3]';
 const apiKey = process.env.EVERYRIC_E2E_KEYFILE
   ? readFileSync(process.env.EVERYRIC_E2E_KEYFILE, 'utf8').trim()
   : '';
-if (!apiKey) { console.log('FAIL: EVERYRIC_E2E_KEYFILE 필요 (프로드는 전 /api가 키 요구)'); process.exit(1); }
+// 로컬 서버(EVERYRIC_SERVER_API_KEY 미설정이 기본)는 키를 요구하지 않는다(server/main.py
+// require_api_key — server.api_key가 없으면 통과). 프로드만 전 /api가 키를 요구하므로
+// 키 강제는 SERVER가 실제로 원격일 때만 건다.
+if (!apiKey && !isLoopbackServerUrl(SERVER)) {
+  console.log('FAIL: EVERYRIC_E2E_KEYFILE 필요 (프로드는 전 /api가 키 요구)');
+  process.exit(1);
+}
 
 let failed = false;
 function check(ok, label, detail) {
@@ -119,6 +126,10 @@ try {
   const sw = await acquireServiceWorker();
   console.log('extension loaded:', sw.url());
   const extId = new URL(sw.url()).host;
+  // SERVER가 프로드(기본값)면 무동작 — 필수 host_permissions로 이미 허용됨.
+  // EVERYRIC_E2E_SERVER로 로컬을 가리키면(optional_host_permissions) 실제 옵션 페이지
+  // "허용" 흐름을 재현해 부여한다(scripts/lib/local-server-permission.mjs).
+  await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, SERVER);
   await setSettings(sw, {
     serverUrl: SERVER, apiKey,
     showTranslation: true, showPronunciation: true, debugInfo: true,

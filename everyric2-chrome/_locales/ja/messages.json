@@ -65,6 +65,27 @@
   "pip_controls_videoToggle": {
     "message": "映像表示のオン/オフ"
   },
+  "pip_controls_panelColToggle": {
+    "message": "歌詞ウィンドウの列をたたむ/開く"
+  },
+  "pip_controls_centerColToggle": {
+    "message": "映像・歌詞1行・再生コントロールの列をたたむ/開く — たたむとカラオケレーンだけになります"
+  },
+  "pip_controls_laneColToggle": {
+    "message": "カラオケレーンの列をたたむ/開く"
+  },
+  "pip_controls_playlistColToggle": {
+    "message": "再生リストの列をたたむ/開く"
+  },
+  "pip_controls_shortLyricsToggle": {
+    "message": "映像の下の歌詞1行を表示/非表示"
+  },
+  "pip_controls_dualPosition": {
+    "message": "発音の二重表示 — 位置を切り替え（オフ / 下 / 中央 / 両方）"
+  },
+  "pip_controls_autoCollapsed": {
+    "message": "オンですがウィンドウが狭くたたまれています — 広げると再表示されます"
+  },
   "pip_controls_panelToggle": {
     "message": "歌詞検索パネルの開閉"
   },
@@ -73,6 +94,9 @@
   },
   "pip_controls_videoRatioDrag": {
     "message": "ドラッグで映像/歌詞の比率を調整"
+  },
+  "pip_controls_colWidthDrag": {
+    "message": "ドラッグして列の幅を調整"
   },
   "pip_songKeyLabel": {
     "message": "キー $P1$",
@@ -191,6 +215,101 @@
   "debugPanel_empty": {
     "message": "表示する行がありません"
   },
+  "debugPanel_engine": {
+    "message": "エンジン $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
+  },
+  "debugPanel_engineLegacy": {
+    "message": "旧世代（バージョン刻印なし）"
+  },
+  "debugPanel_engineSummaryTitle": {
+    "message": "このシンクを作った整列スタック。langの後の*はラベルが空で歌詞の文字種から判定した印"
+  },
+  "debugPanel_comparePrev": {
+    "message": "前世代と比較"
+  },
+  "debugPanel_comparePrevNone": {
+    "message": "前世代なし（再処理履歴なし）"
+  },
+  "debugPanel_comparePrevLoaded": {
+    "message": "前世代: $P1$ · 対応 $P2$/$P3$行 (Δ = 現在 − 以前)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      }
+    }
+  },
+  "debugPanel_compareVersions": {
+    "message": "深度・バージョン比較"
+  },
+  "debugPanel_compareVersionsEmpty": {
+    "message": "保存されたバージョンがありません"
+  },
+  "debugPanel_compareVersionsFailed": {
+    "message": "バージョン一覧を読み込めませんでした"
+  },
+  "debugPanel_versionsHint": {
+    "message": "行をクリックすると今の画面とそのバージョンの行の時刻差(Δ)だけを表示します — 実際には切り替わりません。プレビューや復元機能はまだありません。"
+  },
+  "debugPanel_compareVersionLoaded": {
+    "message": "バージョン $P1$ · 深度=$P2$ · 対応 $P3$/$P4$行 (Δ = 現在 − バージョン)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      },
+      "P4": {
+        "content": "$4"
+      }
+    }
+  },
+  "debugPanel_compareVersionNone": {
+    "message": "このバージョンを読み込めませんでした"
+  },
+  "debugPanel_compareVersionRowTitle": {
+    "message": "クリックしてこのバージョンと比較(もう一度クリックで解除)"
+  },
+  "debugPanel_depth_fast": {
+    "message": "高速"
+  },
+  "debugPanel_depth_medium": {
+    "message": "標準"
+  },
+  "debugPanel_depth_heavy": {
+    "message": "精密"
+  },
+  "debugPanel_depth_unknown": {
+    "message": "不明"
+  },
+  "debugPanel_depthBadgeTitle": {
+    "message": "このバージョンを作る際にサーバーが使った解析深度です — 高速 < 標準 < 精密の順で時間はかかりますが結果が良くなることがあります"
+  },
+  "debugPanel_qualityLabel": {
+    "message": "整列信頼度 $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "debugPanel_currentVersionTag": {
+    "message": "今見ているバージョン"
+  },
   "debugPanel_heardPrefix": {
     "message": "認識: $P1$",
     "placeholders": {
@@ -265,7 +384,7 @@
     }
   },
   "panels_paste_placeholder": {
-    "message": "歌詞をここに貼り付けるとAIがタイミングを合わせます\n[Verse]・1番・サビなどのパート表記やコメント行は自動で除外されます。"
+    "message": "歌詞をここに貼り付けるとAIがタイミングを合わせます\n[Verse]・1番・サビなどのパート表記やコメント行は自動で除外されます。\n原文・訳(または原文・読み・訳)が行ごとに対で繰り返される歌詞も、そのまま貼り付ければ自動で読み分けます。"
   },
   "panels_paste_attributionPlaceholder": {
     "message": "出典(任意) — 例: ナムウィキ, Genius"
@@ -286,7 +405,7 @@
     "message": "サーバーが利用できません"
   },
   "panels_serverDown_note": {
-    "message": "歌詞検索自体はサーバーなしでも動きますが、この曲は外部ソースでも見つかりませんでした。同期の生成・再生成・翻訳にはサーバーが必要です。"
+    "message": "歌詞検索自体はサーバーなしでも動きますが、この曲は外部ソースでも見つかりませんでした。同期の生成・初期化・翻訳にはサーバーが必要です。"
   },
   "panels_serverDown_retry": {
     "message": "歌詞を再検索"
@@ -357,11 +476,11 @@
   "overlay_header_pip": {
     "message": "ピクチャーインピクチャーで表示"
   },
-  "overlay_header_regen": {
-    "message": "同期を再生成(サーバーキャッシュを無視)"
+  "overlay_header_resetSync": {
+    "message": "同期を初期化 — サーバー保存分を削除して最初から作り直す"
   },
-  "overlay_header_regenConfirm": {
-    "message": "サーバーの同期データを再生成しますか?\n1分ほどかかりますが、完了するまで今の歌詞はそのまま表示されます。"
+  "overlay_header_resetSyncConfirm": {
+    "message": "サーバーの同期データを削除して最初から作り直しますか?\n削除後は自動的に再検索します。歌詞を貼り間違えたときはここからやり直せます。"
   },
   "overlay_header_search": {
     "message": "歌詞を再検索(別の結果を選ぶ)"
@@ -455,6 +574,75 @@
   },
   "overlay_banner_aiKaraoke": {
     "message": "AI転写でカラオケ(音程・発音)を作成できます"
+  },
+  "overlay_banner_captionPreSync": {
+    "message": "現在はYouTube投稿者の字幕です — Everyricシンク（音程・発音整列）はまだありません"
+  },
+  "overlay_depth_upgradeTitle": {
+    "message": "旧世代のシンクです — 新エンジンへアップグレード"
+  },
+  "overlay_depth_upgradeConfirm": {
+    "message": "この曲のシンクを新エンジンで作り直しますか？（数十秒）"
+  },
+  "overlay_depth_t1": {
+    "message": "解析深度1 — 分離なしASR。クリックで深度2（ボーカル分離+ASR）で再解析します"
+  },
+  "overlay_depth_t2": {
+    "message": "解析深度2 — 分離+ASR 2パス。クリックで深度3（分離+ASR+OWSMアンカー）で再解析します"
+  },
+  "overlay_depth_t3": {
+    "message": "最大解析深度（3）です — 分離+ASR+OWSMアンカー。結果が不正確なら歌詞入力を確認してください"
+  },
+  "overlay_depth_confirm": {
+    "message": "解析深度を一段上げて再解析しますか？（数十秒）"
+  },
+  "overlay_feedback_title": {
+    "message": "この曲の整列品質を評価・不具合を報告"
+  },
+  "overlay_feedback_catNone": {
+    "message": "不具合の種類（任意）"
+  },
+  "overlay_feedback_catTiming": {
+    "message": "タイミングのずれ"
+  },
+  "overlay_feedback_catPron": {
+    "message": "発音表記の誤り"
+  },
+  "overlay_feedback_catLyrics": {
+    "message": "歌詞の誤り"
+  },
+  "overlay_feedback_catOther": {
+    "message": "その他"
+  },
+  "overlay_feedback_commentPh": {
+    "message": "ひとこと（任意）"
+  },
+  "overlay_feedback_send": {
+    "message": "送信"
+  },
+  "overlay_feedback_needRating": {
+    "message": "先に星を選んでください"
+  },
+  "overlay_feedback_thanks": {
+    "message": "ありがとうございます！品質改善に使います"
+  },
+  "overlay_feedback_failed": {
+    "message": "送信失敗 — 後でもう一度お試しください"
+  },
+  "overlay_matched_label": {
+    "message": "見つかった歌詞"
+  },
+  "overlay_matched_notThis": {
+    "message": "この歌詞ではない"
+  },
+  "overlay_matched_notThisTitle": {
+    "message": "誤マッチを報告して正しい歌詞を検索します — 報告はマッチング改善に使われます"
+  },
+  "content_wrongLyrics_thanks": {
+    "message": "報告ありがとうございます！検索で正しい歌詞を選んでください"
+  },
+  "content_fullReset_done": {
+    "message": "拡張機能を初期化しました — 設定が初期値に戻りました"
   },
   "overlay_banner_aiTranscribe": {
     "message": "AI転写を実行"
@@ -613,11 +801,40 @@
       }
     }
   },
+  "overlay_warn_textNeutral": {
+    "message": "転写完了(整列信頼度 $P1$)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
   "overlay_warn_title": {
-    "message": "転写・発音整列の平均信頼度が低いです。原文の歌詞が正しいか確認するか、再生成を試してください。"
+    "message": "転写・発音整列の平均信頼度が低いです。原文の歌詞が正しいか確認するか、同期の初期化を試してください。"
+  },
+  "overlay_warn_titleNeutral": {
+    "message": "高速解析(fast)が自身の信頼度チェックを通過した結果です。数値が低く見えても、難しい曲では正常な場合があります。"
   },
   "overlay_warn_close": {
     "message": "この警告を閉じる(設定でオフにもできます)"
+  },
+  "overlay_warn_expand": {
+    "message": "詳細"
+  },
+  "overlay_warn_collapse": {
+    "message": "閉じる"
+  },
+  "overlay_warn_detail": {
+    "message": "歌詞原文が正確か確認するか、解析の深さを上げてみてください。"
+  },
+  "overlay_warn_detailNeutral": {
+    "message": "この曲は高速解析ルーターが品質を確認した上で保存した結果です。信頼度の数値自体は、正常でも難しい曲では低く出ることがあるため参考程度に見てください。それでもおかしいと感じたら、解析の深さを上げてみてください。"
+  },
+  "overlay_warn_dismissSong": {
+    "message": "この曲では二度と表示しない"
+  },
+  "overlay_warn_dismissSongTitle": {
+    "message": "この動画ではこの警告を二度と表示しません(設定の♻️カテゴリで元に戻せます)"
   },
   "overlay_genList_currentVideo": {
     "message": "$P1$(現在の動画)",
@@ -669,6 +886,9 @@
   "overlay_settings_pronScript_kana": {
     "message": "かな"
   },
+  "overlay_settings_pronScript_ipa": {
+    "message": "IPA（発音記号）"
+  },
   "overlay_settings_sourcePriority_vocaro": {
     "message": "ボカロ歌詞wiki優先"
   },
@@ -703,9 +923,6 @@
   },
   "overlay_settings_pitchFont_small": {
     "message": "小"
-  },
-  "overlay_settings_pronPosition_note": {
-    "message": "ノートの上"
   },
   "overlay_settings_pronPosition_bottom": {
     "message": "画面下部"
@@ -759,6 +976,9 @@
   "overlay_settings_row_fontSize": {
     "message": "フォントサイズ"
   },
+  "overlay_settings_row_mainFontScale": {
+    "message": "フォントサイズ微調整"
+  },
   "overlay_settings_row_theme": {
     "message": "テーマ"
   },
@@ -775,13 +995,19 @@
     "message": "発音表記方式"
   },
   "overlay_settings_row_showPronunciation": {
-    "message": "発音表記を表示(ある場合)"
+    "message": "歌詞の下に発音表記を表示"
+  },
+  "overlay_settings_row_hidePronForEnglish": {
+    "message": "英語の歌詞は発音表記を非表示"
+  },
+  "overlay_settings_row_hidePronForEnglishTitle": {
+    "message": "ラテン文字が優勢な行(英語の曲など)だけ発音行を隠します — 他の言語の行はそのままです"
   },
   "overlay_settings_row_sourcePriority": {
     "message": "歌詞ソースの優先順位"
   },
   "overlay_settings_row_pipKeepPanel": {
-    "message": "PiP中もパネルの歌詞を維持"
+    "message": "PiP中もメインウィンドウのパネルを維持"
   },
   "overlay_settings_row_pipShowVideo": {
     "message": "PiPに映像も一緒に表示"
@@ -811,7 +1037,7 @@
     "message": "発音表記の位置"
   },
   "overlay_settings_row_pronPositionTitle": {
-    "message": "音節タイミングがある曲で発音表記をどこに表示するか選びます。ノートの上 = 各ノートのすぐ下に付ける、画面下部 = 進行度グラデーションで下部中央に表示。"
+    "message": "音節タイミングがある曲で発音表記をどこに表示するか選びます。表示しない = レーンに発音なし、ノートの上 = 各ノートのすぐ下に付ける、画面下部 = 進行度グラデーションで下部中央に表示、レーン中央オーバーレイ = 五線譜の上に半透明で重ねて表示。"
   },
   "overlay_settings_row_melodyPlayback": {
     "message": "メロディ再生(カラオケウィンドウ)"
@@ -880,7 +1106,192 @@
     "message": "キューに入れた転写が終わるとブラウザ通知でお知らせします。別のタブにいても確認できます。"
   },
   "overlay_settings_row_debugInfo": {
-    "message": "デバッグ情報を表示"
+    "message": "デバッグ情報を表示 (Alt+Shift+D)"
+  },
+  "overlay_settings_row_vocalGlow": {
+    "message": "ボーカル区間グロー"
+  },
+  "overlay_settings_pronPosition_both": {
+    "message": "ノート付着＋下部同時"
+  },
+  "overlay_settings_row_pipChromaKey": {
+    "message": "PiPクロマキー — 配信の背景除去用に単色化"
+  },
+  "overlay_settings_row_pipChromaKeyTitle": {
+    "message": "PiPウィンドウの背景を単色キーカラーにします — OBSなどでクロマキー合成し、配信画面に歌詞を重ねられます"
+  },
+  "overlay_settings_row_pipShortLyrics": {
+    "message": "PiP映像の下に歌詞1行"
+  },
+  "overlay_settings_row_pipShortLyricsTitle": {
+    "message": "PiPウィンドウの映像のすぐ下に、いま歌っている行だけを大きく表示します — オフにするとその領域は映像と再生コントロールが使います"
+  },
+  "overlay_settings_row_pipShowPanel": {
+    "message": "PiPにメイン歌詞ウィンドウの列を表示"
+  },
+  "overlay_settings_row_pipShowPanelTitle": {
+    "message": "PiPウィンドウの右側に全機能の歌詞ウィンドウ（検索・設定・オフセット）を開きます — オフにすると映像と現在の行だけになります。ウィンドウが狭いと自動的にたたまれ、広げるとこの設定どおりに戻ります"
+  },
+  "overlay_notice_autoCollapsed": {
+    "message": "ウィンドウの幅が狭いため自動的にたたまれました。広げると再び表示されます"
+  },
+  "overlay_settings_row_streamTextOutline": {
+    "message": "文字の縁取り（配信用）"
+  },
+  "overlay_settings_row_streamTextOutlineTitle": {
+    "message": "歌詞と曲名に縁取りを付けます — キーカラーや映像の上でも文字が背景に埋もれません"
+  },
+  "overlay_settings_chroma_off": {
+    "message": "オフ"
+  },
+  "overlay_settings_chroma_green": {
+    "message": "グリーン（標準）"
+  },
+  "overlay_settings_chroma_blue": {
+    "message": "ブルー"
+  },
+  "overlay_settings_chroma_magenta": {
+    "message": "マゼンタ"
+  },
+  "overlay_settings_row_vocalGlowTitle": {
+    "message": "ボーカルが聞こえる区間で歌詞パネルがほのかに明るくなります（サーバーの発声分析があるシンクのみ）"
+  },
+  "overlay_settings_row_videoCaptions": {
+    "message": "画面上字幕 — 歌詞を字幕のように動画に表示"
+  },
+  "overlay_settings_row_videoCaptionsTitle": {
+    "message": "YouTubeプレイヤー画面自体に現在の歌詞行を字幕のように表示します（発音・翻訳付き）。オンの間はYouTube自体の字幕は隠れます"
+  },
+  "overlay_settings_row_captionFontScale": {
+    "message": "画面上字幕の文字サイズ"
+  },
+  "overlay_settings_row_captionBgOpacity": {
+    "message": "画面上字幕の背景不透明度"
+  },
+  "overlay_settings_row_modPlaylist": {
+    "message": "再生リストパネル — 横に付く一覧・次の曲へ移動"
+  },
+  "overlay_settings_row_modPlaylistTitle": {
+    "message": "歌詞パネルの横にYouTubeの再生リスト全体を表示します — 前後移動・項目クリックでの移動・サーバー同期バッジ付き。再生リストのない動画では次の動画カードを代わりに表示します"
+  },
+  "overlay_settings_row_modMainLane": {
+    "message": "カラオケレーン — 歌詞の下に音程を表示(ピアノロール)"
+  },
+  "overlay_settings_row_modMainLaneTitle": {
+    "message": "PiPウィンドウだけにあった音程レーン（ピアノロール）を歌詞パネルの下にも表示します。音程ノートがある同期でのみ表示され、小節幅や文字サイズなどの設定はPiPと同じ値を使います"
+  },
+  "overlay_mainLane_seekTitle": {
+    "message": "クリックした位置に移動します（ノートの上ならその音の開始位置へ）"
+  },
+  "overlay_mainLane_resizeTitle": {
+    "message": "ドラッグでレーン列の幅を調整できます"
+  },
+  "overlay_quick_lane": {
+    "message": "カラオケレーンのオン/オフ"
+  },
+  "overlay_quick_lanePos": {
+    "message": "レーンの位置を変更"
+  },
+  "overlay_quick_laneSwap": {
+    "message": "レーンと映像の位置を入れ替え"
+  },
+  "overlay_quick_lanePosToLeft": {
+    "message": "レーンを歌詞の左列に移動"
+  },
+  "overlay_quick_lanePosToBottom": {
+    "message": "レーンを歌詞の下に移動"
+  },
+  "overlay_quick_caption": {
+    "message": "動画字幕のオン/オフ"
+  },
+  "overlay_quick_playlist": {
+    "message": "再生リストパネルの表示切替"
+  },
+  "overlay_nextUp_label": {
+    "message": "次 ▸"
+  },
+  "overlay_depthLabel_fast": {
+    "message": "Fast"
+  },
+  "overlay_depthLabel_medium": {
+    "message": "Medium"
+  },
+  "overlay_laneNotice_text": {
+    "message": "音節のタイミングがずれる場合は解析の深さを上げてみてください（現在 $P1$）",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_laneNotice_textNoDepth": {
+    "message": "音節のタイミングがずれる場合は解析の深さを上げてみてください"
+  },
+  "overlay_laneNotice_close": {
+    "message": "閉じる"
+  },
+  "overlay_laneNotice_never": {
+    "message": "今後表示しない"
+  },
+  "overlay_laneNotice_neverTitle": {
+    "message": "この案内を今後表示しません（設定から戻せます）"
+  },
+  "overlay_settings_resetKaraokeNotice": {
+    "message": "カラオケタイミング案内を再表示"
+  },
+  "overlay_settings_resetKaraokeNoticeTitle": {
+    "message": "「今後表示しない」で消した音節タイミング案内を元に戻します"
+  },
+  "content_notice_extensionReloaded": {
+    "message": "拡張機能が更新されました — このタブで使い続けるにはページを再読み込みしてください"
+  },
+  "overlay_nextUp_prefix": {
+    "message": "次 ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_playlist_prev": {
+    "message": "前の動画"
+  },
+  "overlay_playlist_next": {
+    "message": "次の動画"
+  },
+  "overlay_playlist_status": {
+    "message": "再生リスト · $P1$曲",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_playlist_noPlaylist": {
+    "message": "再生リストに含まれていません"
+  },
+  "overlay_playlist_noPlaylistTitle": {
+    "message": "この動画は再生リストの一部ではありません — 次の動画のみ表示します"
+  },
+  "overlay_playlist_empty": {
+    "message": "表示する情報がありません"
+  },
+  "overlay_playlist_existsTitle": {
+    "message": "サーバー同期あり"
+  },
+  "pip_nextUp": {
+    "message": "次 ▸ $P1$",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_settings_row_pitchF0Opacity": {
+    "message": "音程カーブの明るさ"
+  },
+  "overlay_settings_row_pitchF0OpacityTitle": {
+    "message": "音程を見る線（f0カーブ）の明るさです — ノートバーとは別に調整できます。1より大きくすると既定より明るく太く表示されます"
   },
   "overlay_settings_serverRequiredNote": {
     "message": "同期の生成・翻訳にはEveryricサーバーが必要です"
@@ -1327,7 +1738,7 @@
     }
   },
   "content_completion_partialReadyWarning": {
-    "message": "一部の行に$P1$しか付きませんでした — 再生成すると再試行します",
+    "message": "一部の行に$P1$しか付きませんでした — 同期を初期化すると再試行します",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -1349,7 +1760,7 @@
     }
   },
   "content_completion_missingWarning": {
-    "message": "同期はできましたが$P1$が付きませんでした$P2$ — 再生成すると再試行します",
+    "message": "同期はできましたが$P1$が付きませんでした$P2$ — 同期を初期化すると再試行します",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -1509,5 +1920,450 @@
   },
   "overlay_settings_row_pitchLineOpacityTitle": {
     "message": "f0曲線・ノートバーの不透明度を調整します"
+  },
+  "content_genChip_preparingDepth": {
+    "message": "解析深度を上げています — 発音・翻訳の保存を準備中…"
+  },
+  "content_genChip_depthFast": {
+    "message": "Fast"
+  },
+  "content_genChip_depthMedium": {
+    "message": "Medium"
+  },
+  "content_genChip_depthHeavy": {
+    "message": "Heavy"
+  },
+  "content_genChip_depthState": {
+    "message": "$P1$ · $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "content_genChip_etaMinutes": {
+    "message": "残り約$P1$分",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_genChip_etaSoon": {
+    "message": "まもなく完了"
+  },
+  "content_genChip_etaSeconds": {
+    "message": "残り$P1$秒",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_genChip_etaOverrun": {
+    "message": "予想より時間がかかっています"
+  },
+  "content_genChip_stageEta": {
+    "message": "$P1$ · $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "content_genChip_queueEta": {
+    "message": "待機列$P1$番目 · 約$P2$分",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "content_genChip_queueEtaNoPos": {
+    "message": "待機列 · 約$P1$分",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_genChip_depthUpgraded": {
+    "message": "Heavy解析に切り替わりました"
+  },
+  "panels_search_titleHint": {
+    "message": "曲名だけを入力してみてください（アーティスト・【】・MV などは除く）"
+  },
+  "panels_search_useRawTitle": {
+    "message": "動画タイトルそのまま"
+  },
+  "panels_search_useRawTitleTitle": {
+    "message": "整形前の動画タイトルをそのまま入れます: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_sheet_back": {
+    "message": "← 戻る"
+  },
+  "panels_depth_fast": {
+    "message": "Fast"
+  },
+  "panels_depth_medium": {
+    "message": "Medium"
+  },
+  "panels_depth_heavy": {
+    "message": "Heavy"
+  },
+  "panels_date_today": {
+    "message": "今日"
+  },
+  "panels_date_yesterday": {
+    "message": "昨日"
+  },
+  "panels_date_daysAgo": {
+    "message": "$P1$日前",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_filterPlaceholder": {
+    "message": "設定を検索（例: フォント、翻訳、サーバー）"
+  },
+  "panels_settings_noMatch": {
+    "message": "「$P1$」に一致する設定はありません",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_expandAll": {
+    "message": "すべて展開"
+  },
+  "panels_settings_collapseAll": {
+    "message": "すべて折りたたむ"
+  },
+  "panels_settings_section_search": {
+    "message": "歌詞の検索"
+  },
+  "panels_settings_section_display": {
+    "message": "表示"
+  },
+  "panels_settings_section_lane": {
+    "message": "カラオケレーン"
+  },
+  "panels_settings_section_modules": {
+    "message": "追加機能"
+  },
+  "panels_settings_section_pip": {
+    "message": "PIP"
+  },
+  "panels_settings_section_audio": {
+    "message": "オーディオ・マイク"
+  },
+  "panels_settings_section_server": {
+    "message": "サーバー・詳細"
+  },
+  "panels_settings_section_reset": {
+    "message": "リセット"
+  },
+  "panels_settings_row_captionFontScale": {
+    "message": "動画字幕の文字サイズ"
+  },
+  "panels_settings_row_captionBgOpacity": {
+    "message": "動画字幕の背景の濃さ"
+  },
+  "panels_settings_row_mainLaneWidth": {
+    "message": "歌詞ウィンドウのレーン幅"
+  },
+  "panels_settings_row_mainLanePos": {
+    "message": "歌詞ウィンドウのレーン位置"
+  },
+  "panels_settings_mainLanePos_left": {
+    "message": "左"
+  },
+  "panels_settings_mainLanePos_bottom": {
+    "message": "下"
+  },
+  "panels_settings_row_pitchLaneHeight": {
+    "message": "PiP音程レーンの高さ"
+  },
+  "panels_settings_reset_karaokeNotice": {
+    "message": "カラオケタイミングの案内を再表示"
+  },
+  "panels_settings_reset_fullReset": {
+    "message": "拡張機能を全体初期化"
+  },
+  "panels_settings_reset_fullResetTitle": {
+    "message": "すべての設定を初期値に戻し、ウィンドウ位置・動画ごとの参照・お知らせ既読・貢献履歴を削除します"
+  },
+  "panels_settings_reset_fullResetConfirm": {
+    "message": "本当に初期化しますか? — 貢献履歴も消えます(4秒以内にもう一度押すと実行されます)"
+  },
+  "panels_settings_reset_karaokeNoticeTitle": {
+    "message": "一度閉じた案内バナーを次の曲から再表示します"
+  },
+  "panels_settings_reset_warnDismiss": {
+    "message": "低信頼度警告をすべて再表示"
+  },
+  "panels_settings_reset_warnDismissTitle": {
+    "message": "曲ごとにオフにした低信頼度警告の抑制をすべて元に戻します"
+  },
+  "panels_settings_reset_done": {
+    "message": "リセットしました"
+  },
+  "panels_rating_title": {
+    "message": "この同期はどうですか？"
+  },
+  "panels_rating_starTitle": {
+    "message": "$P1$点",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_rating_report": {
+    "message": "整列品質を報告"
+  },
+  "panels_rating_reportTitle": {
+    "message": "整列品質の問題を教えてください（歌詞・タイミング・発音）"
+  },
+  "panels_rating_sending": {
+    "message": "送信中…"
+  },
+  "panels_rating_thanks": {
+    "message": "ありがとうございます！"
+  },
+  "panels_rating_failed": {
+    "message": "送信に失敗しました"
+  },
+  "panels_report_title": {
+    "message": "整列品質の報告 — 何が問題でしたか？"
+  },
+  "panels_report_commentPh": {
+    "message": "何が起きたか書いてください（任意）"
+  },
+  "panels_report_cancel": {
+    "message": "キャンセル"
+  },
+  "panels_report_send": {
+    "message": "報告"
+  },
+  "panels_report_confirmTitle": {
+    "message": "報告しますか？"
+  },
+  "panels_report_confirmBody": {
+    "message": "送信内容は品質改善のみに使われます。キャンセルすれば何も送信されません。"
+  },
+  "panels_report_confirmSend": {
+    "message": "報告する"
+  },
+  "panels_report_thanks": {
+    "message": "報告しました。ありがとうございます！"
+  },
+  "panels_report_failed": {
+    "message": "送信に失敗しました。しばらくしてからお試しください"
+  },
+  "panels_report_depthHint": {
+    "message": "この結果は「$P1$」の深さで作られました。解析の深さを上げると良くなる可能性があります。",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_report_depthUpgrade": {
+    "message": "深さを上げる"
+  },
+  "panels_report_depthAnyway": {
+    "message": "それでも報告"
+  },
+  "panels_wrongLyrics_title": {
+    "message": "この歌詞ではありませんか？"
+  },
+  "panels_wrongLyrics_matched": {
+    "message": "現在のマッチ: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_wrongLyrics_body": {
+    "message": "表示中の歌詞を報告して検索を開きます。"
+  },
+  "panels_wrongLyrics_cancel": {
+    "message": "キャンセル"
+  },
+  "panels_wrongLyrics_confirm": {
+    "message": "報告"
+  },
+  "panels_notices_title": {
+    "message": "お知らせ"
+  },
+  "panels_notices_loading": {
+    "message": "読み込み中…"
+  },
+  "panels_notices_empty": {
+    "message": "新しいお知らせはありません"
+  },
+  "panels_notices_unavailable": {
+    "message": "現在お知らせを表示できません"
+  },
+  "panels_notices_levelInfo": {
+    "message": "お知らせ"
+  },
+  "panels_notices_levelWarning": {
+    "message": "注意"
+  },
+  "panels_notices_levelCritical": {
+    "message": "重要"
+  },
+  "panels_contrib_title": {
+    "message": "私の貢献"
+  },
+  "panels_contrib_loading": {
+    "message": "読み込み中…"
+  },
+  "panels_contrib_empty": {
+    "message": "まだ作成した同期はありません"
+  },
+  "panels_contrib_headline": {
+    "message": "あなたが作った$P1$曲は$P2$回再生されました",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_headlineNoViews": {
+    "message": "あなたが作った$P1$曲",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_rowViews": {
+    "message": "再生 $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_openTitle": {
+    "message": "この動画を開く"
+  },
+  "panels_contrib_privacy": {
+    "message": "貢献履歴はこのブラウザーにのみ保存され、サーバーは追跡できません。ブラウザーのデータを消すと失われることがあります。"
+  },
+  "panels_contrib_quotaTitle": {
+    "message": "残り回数"
+  },
+  "panels_contrib_quotaGenerate": {
+    "message": "同期の作成"
+  },
+  "panels_contrib_quotaDestructive": {
+    "message": "リセット・解除"
+  },
+  "panels_contrib_quotaLink": {
+    "message": "同期リンク"
+  },
+  "panels_contrib_quotaUpgrade": {
+    "message": "深度アップグレード"
+  },
+  "panels_contrib_quotaValue": {
+    "message": "$P1$ / $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_quotaUnlimited": {
+    "message": "無制限 · 使用$P1$回",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_quotaWindow": {
+    "message": "直近$P1$時間の使用量基準 — 使用ごとに個別に回復します(深夜に一斉リセットではありません)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_quotaNextReset": {
+    "message": "次回復: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_translation_tooLong": {
+    "message": "歌詞が長すぎて翻訳・読みを作れません (最大 $P1$ 行)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_header_notices": {
+    "message": "お知らせ"
+  },
+  "overlay_header_contrib": {
+    "message": "自分の貢献・残り回数"
+  },
+  "overlay_settings_pronPosition_off": {
+    "message": "表示しない"
+  },
+  "overlay_settings_pronPosition_center": {
+    "message": "レーン中央オーバーレイ"
+  },
+  "panels_settings_mainLanePos_attached": {
+    "message": "アタッチ(パネル外)"
+  },
+  "overlay_quick_lanePosToAttached": {
+    "message": "レーンをパネルの外側左に固定"
+  },
+  "panels_settings_row_attachedLaneWidth": {
+    "message": "アタッチレーン幅"
+  },
+  "overlay_settings_row_pipLyricsList": {
+    "message": "PiP歌詞リスト — 右側にスクロール一覧を追加"
+  },
+  "overlay_settings_row_pipLyricsListTitle": {
+    "message": "PiPウィンドウの右にスクロール可能な歌詞リストを表示します。オンにするとウィンドウの最大幅が広がります。"
+  },
+  "pip_controls_lyricsListToggle": {
+    "message": "歌詞リスト列の切り替え"
+  },
+  "pip_controls_pronPositionToggle": {
+    "message": "レーン発音行の位置切り替え(オフ/下部/中央)"
   }
 }

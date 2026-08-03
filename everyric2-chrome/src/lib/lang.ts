@@ -1,6 +1,6 @@
 import type { LyricLine, PronSegment, Settings } from '../types';
 
-export type PronScript = 'hangul' | 'romaji' | 'kana';
+export type PronScript = 'hangul' | 'romaji' | 'kana' | 'ipa';
 
 /**
  * 발음 표기 방식 해석 — 'auto'면 번역 언어 기준 자동 결정표를 따른다
@@ -19,6 +19,16 @@ export function resolveScript(
 }
 
 /**
+ * 라틴 문자 우세 판정 — 영어 곡 구제(오염된 구세대 romaji 표기 교체)와 가라오케 노트
+ * 원문 부착에 쓴다. 라틴 문자 수가 가나+한자+한글 합보다 많으면 참.
+ */
+export function isLatinDominant(text: string): boolean {
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const cjk = (text.match(/[぀-ヿ㐀-鿿가-힣]/g) ?? []).length;
+  return latin > cjk;
+}
+
+/**
  * 표시용 발음 문자열 — line.pron[script]가 있으면 그 값, 없으면 레거시 pronunciation(한글)
  * 으로 폴백한다. 표시 지점은 항상 이 함수를 거쳐야 한다(직접 line.pronunciation을 읽지
  * 않는다) — 서버가 아직 pron dict를 안 주는 동안에도 이 폴백 덕분에 오늘과 동일하게 동작한다.
@@ -27,14 +37,83 @@ export function resolveScript(
  * romaji·kana를 보는 사용자(en·ja 유저)에게 그대로 돌려주면 자기 표기가 아닌 한글 독음이
  * 뜬다(ja 유저 감사에서 실측 — pron dict에 kana 키가 없는 곡마다 한글이 새어나왔다).
  * hangul 외 표기에서 dict에 값이 없으면 undefined를 그대로 돌려줘 발음 줄 자체를 생략한다.
+ *
+ * **영어 곡 구제**: script가 'romaji'이고 원문이 라틴 우세인 줄은 romaji 대신 line.pron['en']을
+ * 쓴다 — 구세대 서버가 영어 가사를 "영어→가타카나→로마자"로 오염시켜 저장한 곡들이
+ * 이미 많이 쌓여 있다("za wezaa..."류). 서버는 이제 새로 만드는 곡에 romaji=en(원문
+ * 철자)을 넣지만, 이미 저장된 곡은 클라이언트가 이렇게 구제한다.
+ *
+ * **ipa 폴백**: ipa는 서버 en 정렬 스택의 부산물이라(derive_en_display_units가 en 곡에만
+ * owners['ipa']를 얹는다) ja·ko 곡에는 애초에 존재하지 않는다. script가 'ipa'인데 이
+ * 줄에 값이 없으면 IPA_FALLBACK_ORDER(hangul→romaji→kana) 순으로 대신 찾는다 — hangul을
+ * 최우선으로 두는 이유는 attach_pron_variants가 ja·ko 곡에도 hangul은 항상 채우므로
+ * (가나 근사·결정론 RR) 이 순서가 "발음 줄이 통째로 빈다"를 가장 넓게 막기 때문이다.
  */
+const IPA_FALLBACK_ORDER: readonly Exclude<PronScript, 'ipa'>[] = ['hangul', 'romaji', 'kana'];
+
 export function resolvedPronunciation(line: LyricLine, script: PronScript): string | undefined {
+  if (script === 'romaji' && line.pron?.['en'] && isLatinDominant(line.text)) return line.pron['en'];
+  if (script === 'ipa' && !line.pron?.['ipa']) {
+    for (const fallback of IPA_FALLBACK_ORDER) {
+      const v = resolvedPronunciation(line, fallback);
+      if (v) return v;
+    }
+    return undefined;
+  }
   return line.pron?.[script] ?? (script === 'hangul' ? line.pronunciation : undefined);
 }
 
-/** 표시용 발음 음절 타이밍 — 규칙은 resolvedPronunciation과 동일(표기별 값 → hangul만 레거시 폴백) */
+/** 표시용 발음 음절 타이밍 — 규칙은 resolvedPronunciation과 동일(표기별 값 → hangul만 레거시
+ *  폴백, 라틴 우세 romaji 줄은 'en' 세그로 구제, ipa 부재 줄은 IPA_FALLBACK_ORDER로 대체).
+ *  worker.py의 attach_pron_variants는 ipa 문자열만 얹고 pron_segs(모라 타이밍)는 CTC가
+ *  라틴 위에서 신뢰할 수 없어 붙이지 않는다 — 그래서 ipa 세그는 사실상 항상 이 폴백을 탄다. */
 export function resolvedPronSegments(line: LyricLine, script: PronScript): PronSegment[] | undefined {
+  if (script === 'romaji' && line.pronSegsByScript?.['en'] && isLatinDominant(line.text)) {
+    return line.pronSegsByScript['en'];
+  }
+  if (script === 'ipa' && !line.pronSegsByScript?.['ipa']) {
+    for (const fallback of IPA_FALLBACK_ORDER) {
+      const v = resolvedPronSegments(line, fallback);
+      if (v) return v;
+    }
+    return undefined;
+  }
   return line.pronSegsByScript?.[script] ?? (script === 'hangul' ? line.pronSegments : undefined);
+}
+
+/** 비교용 정규화 — shouldShowPron의 "원문과 발음이 사실상 같은 문자열인가" 판정에 쓴다.
+ *  NFKC로 정준 결합(전각·호환 문자 통일) 후 소문자화, 그다음 공백(\s)과 유니코드 구두점
+ *  (\p{P} — 쉼표·마침표·따옴표·대시 등)을 전부 제거한다. 공백만 접던 이전 버전은
+ *  "morning, just"(원문)와 "morning ,just"(발음)처럼 구두점 위치·공백 유무만 다른 줄을
+ *  "다른 텍스트"로 오판해 en 곡×en 사용자의 원문이 발음 줄로 한 번 더 뜨는 결함이 있었다
+ *  (실사용 제보). 진짜 로마자 발음(가나 곡의 romaji 등)은 이 정규화를 거쳐도 원문과 계속
+ *  다르므로 계속 표시된다.
+ *  shouldShowPron이 이 판정의 유일한 지점이라 메인 패널·PIP·자막(video-caption.ts)이
+ *  전부 이 규칙을 공유한다 — 사용처마다 따로 정규화하지 않는다. */
+function normalizeForPronCompare(s: string): string {
+  return s.normalize('NFKC').toLowerCase().replace(/[\s\p{P}]+/gu, '');
+}
+
+/**
+ * 발음 줄을 이 줄에서 보여줄지 — 전체 끔(showPronunciation)과 영어만 끔
+ * (hidePronForEnglish)을 한 판정으로 합친다. 레인(pitch-lane.ts)의 노트 부착 발음은
+ * 이 함수를 거치지 않는다 — PIP·레인 노트의 발음 표시는 운영자 제약으로 항상 유지된다.
+ *
+ * resolvedPron을 함께 주면(감사 C4) 원문과 정규화 비교(공백·대소문자 무시)로 사실상
+ * 같을 때 발음 줄 자체를 숨긴다 — en 곡×en 사용자는 romaji가 원문 철자 그대로라서,
+ * 이 게이트가 없으면 원문 줄 바로 아래 같은 글자가 한 번 더 뜬다.
+ */
+export function shouldShowPron(
+  lineText: string,
+  settings: Pick<Settings, 'showPronunciation' | 'hidePronForEnglish'>,
+  resolvedPron?: string,
+): boolean {
+  if (!settings.showPronunciation) return false;
+  if (settings.hidePronForEnglish && isLatinDominant(lineText)) return false;
+  if (resolvedPron !== undefined && normalizeForPronCompare(resolvedPron) === normalizeForPronCompare(lineText)) {
+    return false;
+  }
+  return true;
 }
 
 export interface WikiMatchLine {
@@ -136,6 +215,27 @@ export function matchWikiLinesToSegments(
       [i, j] = anchor;
     } else {
       i++; j++; // 앵커를 못 찾았다 — 이 쌍은 포기하고 계속 스캔
+    }
+  }
+
+  // 반복 원문 재사용(감사 후속, 熱異常 실측) — 위 순차 2포인터는 앞으로만 나아가서,
+  // 위키가 반복되는 원문 줄을 딱 한 번만 적어 두면 두 번째 이후 등장은 대응할 위키
+  // 줄이 이미 지나가 버려 영영 undefined로 남는다("どこに送るあてもなく" 사례). 이번
+  // 패스에서 이미 성공 매칭된 세그들을 정규화 텍스트→번역 맵으로 한 번만 인덱싱해,
+  // 아직 undefined인 세그의 원문이 그 맵에 있으면 같은 번역을 재사용한다("같은 문장은
+  // 같은 번역"). 위키가 반복을 전부 적어 둔 경우(黒い星が 8회류)는 순차 매칭이 이미
+  // 각자 제 위키 줄에 대응시키므로 이 보강이 나설 일이 없다 — 반대로 진짜 위키 결측
+  // (그 원문이 매칭된 적 자체가 없음)은 맵에도 없으니 그대로 undefined로 남는다(번역을
+  // 지어내지 않는다).
+  const byText = new Map<string, string | undefined>();
+  for (let k = 0; k < segs.length; k++) {
+    if (translations[k] !== undefined && !byText.has(segNorm[k])) {
+      byText.set(segNorm[k], translations[k]);
+    }
+  }
+  for (let k = 0; k < segs.length; k++) {
+    if (translations[k] === undefined && byText.has(segNorm[k])) {
+      translations[k] = byText.get(segNorm[k]);
     }
   }
 

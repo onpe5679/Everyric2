@@ -7,6 +7,7 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -27,7 +28,14 @@ const ctx = await chromium.launchPersistentContext(userDataDir, {
 });
 
 try {
-  await (ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: 15000 }));
+  const sw = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: 15000 });
+  const extId = new URL(sw.url()).host;
+  const localServerUrl = 'http://127.0.0.1:8000';
+  // serverUrl 기본값이 프로드로 바뀐 뒤로는(host-permissions.ts) 여기서 로컬을 명시하고
+  // optional_host_permissions도 실제 흐름으로 부여해야 "서버 싱크가 즉시 로드"(DB에 있음)
+  // 전제가 성립한다 — 이전엔 빠져 있어서 실제로는 프로드를 보고 있었다.
+  await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, localServerUrl);
+  await sw.evaluate(s => chrome.storage.local.set({ settings: s }), { serverUrl: localServerUrl });
   const page = ctx.pages()[0] ?? await ctx.newPage();
   await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForSelector('#everyric-root', { state: 'attached', timeout: 30000 });
@@ -65,9 +73,19 @@ try {
       winH: window.innerHeight,
       videoVisible: visible('.ey-pip-video'),
       videoH: hOf('.ey-pip-video'),
-      stageH: hOf('.ey-pip-stage'),
-      pitchH: hOf('.ey-pip-pitch'),
-      curFontPx: q('.ey-pip-line.current') ? parseFloat(getComputedStyle(q('.ey-pip-line.current')).fontSize) : 0,
+      // 가사 영역 = 패널 인스턴스의 호스트. 2026-08-04 재작업으로 PiP 안 가사 UI가
+      // 메인 가사창과 **같은 인스턴스**가 되면서 .ey-pip-stage / .ey-pip-pitch는 사라졌다 —
+      // 물어보는 것은 그대로다: 영상과 가사가 좁고 넓은 창에서 함께 살아남는가.
+      panelH: hOf('#everyric-root'),
+      footerH: hOf('.ey-pip-footer'),
+      lineCount: document.getElementById('everyric-root')?.shadowRoot
+        ?.querySelectorAll('.ey-line').length ?? 0,
+      laneH: document.getElementById('everyric-root')?.shadowRoot
+        ?.querySelector('.ey-lane-wrap')?.clientHeight ?? 0,
+      curFontPx: (() => {
+        const el = document.getElementById('everyric-root')?.shadowRoot?.querySelector('.ey-line.active');
+        return el ? parseFloat(getComputedStyle(el).fontSize) : 0;
+      })(),
     };
   });
 
@@ -80,10 +98,11 @@ try {
   const wide = await measure();
   console.log('wide 1100x330 =', JSON.stringify(wide));
 
-  // 가라오케 레인이 켜지면 스테이지는 의도적으로 숨겨진다(중복 표시 제거) — 레인 높이로 판정
-  const lyricsH = wide.stageH > 0 ? wide.stageH : wide.pitchH;
-  const ok = lyricsH >= 90 && (!wide.videoVisible || wide.videoH >= 40);
-  console.log(`${ok ? 'PASS' : 'FAIL'}: 넓은 창에서 가사영역 ${lyricsH}px (stage=${wide.stageH}/lane=${wide.pitchH}) / 영상 ${wide.videoH}px 공존`);
+  // 패널 호스트는 filled 인스턴스가 사는 자리다 — 0이면 가사창이 통째로 접힌 것이다
+  // (overlay.ts의 filled host min-height가 지키는 값과 같은 관심사).
+  const lyricsH = wide.panelH;
+  const ok = lyricsH >= 90 && wide.lineCount > 0 && (!wide.videoVisible || wide.videoH >= 40);
+  console.log(`${ok ? 'PASS' : 'FAIL'}: 넓은 창에서 가사영역 ${lyricsH}px (줄=${wide.lineCount} 레인=${wide.laneH}) / 영상 ${wide.videoH}px 공존`);
   await pipPage.screenshot({ path: resolve(__dirname, '../pip-wide-video.png') });
   console.log('screenshot: pip-wide-video.png');
   process.exitCode = ok ? 0 : 1;

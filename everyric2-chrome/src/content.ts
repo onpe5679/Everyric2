@@ -1,14 +1,17 @@
 import { detectSong, getCurrentVideoId, getVideoElement } from './lib/song-detector';
+import { getPlaylist, playNext, playPlaylistItem, playPrevious } from './lib/yt-player';
+import type { PlaylistEntry } from './lib/yt-player';
 import { SyncEngine, type SyncHandlers } from './lib/sync-engine';
 import { KaraokeAudio, collectMelodyNotes } from './lib/karaoke-audio';
 import { parseTriLineLyrics } from './lib/tri-line';
 import { describeRemoved, stripPartMarkers } from './lib/lyrics-clean';
 import { MicPitch } from './lib/mic-pitch';
-import { getGeometry, getSettings, saveGeometry, saveSettings } from './lib/settings';
+import { DEFAULT_SETTINGS, getGeometry, getSettings, saveGeometry, saveSettings } from './lib/settings';
 import { matchWikiLinesToSegments, resolveScript, resolvedPronunciation } from './lib/lang';
 import { setUiLanguage, t } from './lib/i18n';
-import { LyricsOverlay } from './ui/overlay';
+import { LyricsOverlay, type OverlayCallbacks } from './ui/overlay';
 import { PipController } from './ui/pip';
+import { VideoCaption } from './ui/video-caption';
 import {
   captionSourceLabel,
   getCaptionTracks,
@@ -17,11 +20,13 @@ import {
   selectTranslationTrack,
   type YtCaptionTrack,
 } from './lib/yt-captions';
+import { CONTRIB_MAX, CONTRIB_STORAGE_KEY } from './types';
 import type {
   ApiFailure,
   BgRequest,
   CaptionLine,
   ContentMessage,
+  ContribEntry,
   GenerateResponse,
   JobStatusResponse,
   LinkCandidatesResponse,
@@ -39,6 +44,7 @@ import type {
   SongInfo,
   SourceAttribution,
   SyncListItem,
+  SyncPreviousVersion,
   TranslateResult,
   TranslatedLine,
 } from './types';
@@ -53,6 +59,8 @@ let initialGeometry: PanelGeometry | null = null;
 let overlay: LyricsOverlay | null = null;
 const pip = new PipController();
 const engine = new SyncEngine();
+// 영상 자막 모듈 (Language Reactor식) — 플레이어 화면 자체에 현재 줄을 자막처럼 띄운다
+const videoCaption = new VideoCaption();
 const karaokeAudio = new KaraokeAudio(() => engine.getVideo() ?? getVideoElement());
 const micPitch = new MicPitch();
 
@@ -71,13 +79,42 @@ let lastVocaro: { videoId: string; lines: VocaroLine[] } | null = null; // 싱�
  */
 let keptLyrics: { videoId: string; data: LyricsData } | null = null;
 /** 진행 중인 전사 잡 — videoId 키. 영상을 이동해도 백그라운드로 계속 추적한다 */
-const generatingJobs = new Map<string, {
+interface TrackedJob {
   jobId: string; progress: number; queueLabel?: string;
   stage?: string; stageProgress?: number; title?: string;
-}>();
+  /** 서버가 알려준 분석 깊이 — 라우팅 판정 뒤부터 실린다(구버전 서버는 영영 없다) */
+  depth?: 'fast' | 'medium' | 'heavy';
+  /** 남은 예상 시간(초) / 큐 대기 예상(초) — 없으면 화면은 퍼센트로 폴백한다 */
+  etaSec?: number;
+  /** etaSec을 마지막으로 서버와 동기화한 시각(Date.now) — 폴링 사이 1초 카운트다운의 기준 */
+  etaSyncedAt?: number;
+  queueEtaSec?: number;
+  queuePosition?: number;
+  /** 경과가 서버 추정 중앙값을 초과 — ETA 문구 대신 단계·퍼센트로 갈아탄다 */
+  etaOverrun?: boolean;
+  /** heavy 승격을 이미 알렸는가 — 폴링마다 같은 칩이 다시 뜨지 않게 하는 일회성 표식 */
+  heavyNoticed?: boolean;
+  /**
+   * **이 탭이 직접 낸 잡인가** — 폴링 주체와 실패 알림 자격을 함께 정한다.
+   *
+   * 폴링: 모든 탭이 모든 잡을 폴링하면 요청이 탭수×잡수로 곱해진다(유튜브를 여러 개 열어
+   * 두는 것이 이 확장의 표준 사용 형태다). 남의 잡은 그 탭이 폴링해 storage에 반영하고,
+   * 이 탭은 그 반영을 이어받아 칩에만 비춘다.
+   *
+   * 알림: 서버에 기록이 없는 잡(gone)을 실패로 알릴 자격도 여기서 갈린다. storage에서
+   * 복원한 잡은 이전 세션의 잔해라 서버 기록이 이미 없는 것이 정상인데(탭을 진행 중에
+   * 닫으면 항목이 남는다), 그것까지 알리면 사용자는 **아무것도 시키지 않은 브라우저 시작
+   * 직후에** "싱크 생성 실패"를 받는다. 내가 방금 낸 잡이 사라진 것만 사고다.
+   */
+  owned?: boolean;
+}
+const generatingJobs = new Map<string, TrackedJob>();
 // 생성 요청 준비 단계(LLM 번역·독음 대기, 수십 초) 중인 영상 — 잡 등록 전이라
 // generatingJobs가 비어 있어, 이 가드가 없으면 버튼 연타가 전부 서버로 나간다
 const preparingGenerate = new Set<string>();
+// 그중 **깊이 올리기**로 시작된 준비 — 같은 준비 단계라도 사용자에게는 다른 사건이라
+// 칩 문구를 가른다(updateGenChip). 생성 가드는 위 preparingGenerate가 그대로 담당한다.
+const preparingDepthUpgrade = new Set<string>();
 // 진행 중 잡을 탭 간 공유하는 storage 키 — 다른 탭/새 탭에서도 진행 칩이 이어진다
 const JOBS_STORAGE_KEY = 'activeJobs';
 /**
@@ -116,32 +153,57 @@ const pendingTranslate = new Map<string, Promise<TranslatedLine[] | undefined>>(
 async function init(): Promise<void> {
   settings = await getSettings();
   setUiLanguage(settings.uiLanguage); // 이 콘텐츠 스크립트가 실제로 t()를 쓰는 유일한 곳 — 세션 시작 시 한 번 맞춘다
+  videoCaption.applyDisplay(
+    resolveScript(settings), settings.showPronunciation, settings.showTranslation, settings.hidePronForEnglish,
+  );
+  videoCaption.applyStyle({ fontScale: settings.captionFontScale, bgOpacity: settings.captionBgOpacity });
+  videoCaption.setEnabled(settings.videoCaptions);
   [cssText, initialGeometry] = await Promise.all([loadCss(), getGeometry()]);
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+  await loadWarnDismissed(); // 저신뢰 경고를 처음 그리기 전에 곡별 억제 목록이 준비돼 있어야 한다
   await restoreActiveJobs();
   watchJobsFromOtherTabs();
+  watchSettingsFromOtherTabs();
   observeNavigation();
   checkCurrentPage();
 }
 
-/** 다른 탭이 새로 시작한 전사 잡을 실시간으로 이어받는다 (storage 이벤트).
- *  삭제 동기화는 하지 않는다 — 다른 탭이 마감한 잡은 이 탭 폴링도 곧
- *  completed/404를 보고 스스로 정리하므로, 이벤트 순서 경합으로 산 잡을
- *  잘못 지우는 위험만 남기 때문. */
+/**
+ * 다른 탭의 전사 잡 목록 변화를 이어받는다 (storage 이벤트) — 추가와 **삭제 양쪽**.
+ *
+ * 예전에는 추가만 반영했다. 그때는 모든 탭이 모든 잡을 폴링해서 남이 마감한 잡도 이 탭
+ * 폴링이 곧 completed/404로 보고 스스로 정리했기 때문이다(그래서 삭제 동기화의 경합
+ * 위험만 피하는 것이 맞았다). 폴링을 자기 잡으로 좁힌 지금은 그 자가 정리가 없다 —
+ * 삭제를 안 받으면 남의 탭에서 이미 끝난 잡이 이 탭 칩에 "다른 영상 전사 중 1건"으로
+ * 영원히 남는다.
+ *
+ * **지우는 것은 내 잡이 아닌 것뿐이다.** persistActiveJobs는 탭 간 read-merge-write라,
+ * 다른 탭이 내 쓰기 직전 상태를 읽어 저장하면 방금 낸 내 잡이 잠깐 빠진 스냅샷이 돌 수
+ * 있다 — 그걸 근거로 내 산 잡을 지우면 진행 추적이 통째로 끊긴다. 남의 잡은 그 사이
+ * 다시 나타나면 아래 추가 경로가 도로 넣으므로 잘못 지워도 자가 복구된다.
+ */
 function watchJobsFromOtherTabs(): void {
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local' || !changes[JOBS_STORAGE_KEY]) return;
       const jobs = (changes[JOBS_STORAGE_KEY].newValue ?? {}) as
         Record<string, { jobId: string; title?: string }>;
-      let added = false;
+      let dirty = false;
       for (const [videoId, job] of Object.entries(jobs)) {
         if (job?.jobId && !generatingJobs.has(videoId)) {
+          // 남의 탭 잡 — owned를 세우지 않는다. 지금 이 탭이 보고 있는 영상이 아니면
+          // 폴링하지 않고 칩에만 비춘다(pollableJobs 참고).
           generatingJobs.set(videoId, { jobId: job.jobId, progress: 0, title: job.title });
-          added = true;
+          dirty = true;
         }
       }
-      if (added) {
+      for (const [videoId, job] of [...generatingJobs]) {
+        if (!job.owned && !jobs[videoId]) {
+          generatingJobs.delete(videoId);
+          dirty = true;
+        }
+      }
+      if (dirty) {
         ensurePolling();
         updateGenChip();
       }
@@ -158,6 +220,8 @@ async function restoreActiveJobs(): Promise<void> {
     if (!jobs) return;
     for (const [videoId, job] of Object.entries(jobs)) {
       if (job?.jobId && !generatingJobs.has(videoId)) {
+        // owned를 세우지 않는다 — 이전 세션의 잔해일 수 있어 서버 기록 소실이 사고가
+        // 아니다(TrackedJob.owned 주석). 지금 보는 영상의 것이면 그래도 폴링된다.
         generatingJobs.set(videoId, { jobId: job.jobId, progress: 0, title: job.title });
       }
     }
@@ -174,20 +238,59 @@ function removeJob(videoId: string): void {
   void persistActiveJobs();
 }
 
-/** 진행 중 잡 목록을 storage에 반영 — 다른 탭이 이어받을 수 있게.
- *  통째로 덮어쓰면 탭끼리 서로의 잡을 지우므로 read-merge-write:
- *  이 탭의 잡은 얹고, 이 탭이 마감한 잡만 걷어낸다. */
-async function persistActiveJobs(): Promise<void> {
-  try {
-    const stored = await chrome.storage.local.get(JOBS_STORAGE_KEY);
-    const merged: Record<string, { jobId: string; title?: string }> = {
-      ...(stored[JOBS_STORAGE_KEY] as Record<string, { jobId: string; title?: string }> | undefined),
-    };
-    for (const v of finishedJobs) delete merged[v];
-    finishedJobs.clear();
-    for (const [v, j] of generatingJobs) merged[v] = { jobId: j.jobId, title: j.title };
-    await chrome.storage.local.set({ [JOBS_STORAGE_KEY]: merged });
-  } catch { /* storage 실패는 치명적이지 않다 */ }
+/**
+ * 진행 중 잡 목록을 storage에 반영 — 다른 탭이 이어받을 수 있게.
+ *
+ * 통째로 덮어쓰면 탭끼리 서로의 잡을 지우므로 read-merge-write: 이 탭의 잡은 얹고, 이 탭이
+ * 마감한 잡만 걷어낸다.
+ *
+ * **저장은 한 줄로 세운다(saveChain과 같은 이유).** read-merge-write가 비원자라 겹치면
+ * 나중 것이 먼저 것의 결과를 덮는데, 여기서는 그 손해가 더 크다: `finishedJobs.clear()`가
+ * 두 실행 사이에 끼면 **아직 반영되지 않은 삭제 목록이 사라져** 마감된 잡이 storage에
+ * 영구히 남는다. 그 유령 항목은 브라우저를 켤 때마다 복원돼 죽은 잡을 폴링한다.
+ */
+let persistJobsChain: Promise<void> = Promise.resolve();
+
+function persistActiveJobs(): Promise<void> {
+  const next = persistJobsChain.catch(() => undefined).then(async () => {
+    try {
+      const stored = await chrome.storage.local.get(JOBS_STORAGE_KEY);
+      const merged: Record<string, { jobId: string; title?: string }> = {
+        ...(stored[JOBS_STORAGE_KEY] as Record<string, { jobId: string; title?: string }> | undefined),
+      };
+      for (const v of finishedJobs) delete merged[v];
+      finishedJobs.clear();
+      for (const [v, j] of generatingJobs) merged[v] = { jobId: j.jobId, title: j.title };
+      await chrome.storage.local.set({ [JOBS_STORAGE_KEY]: merged });
+    } catch { /* storage 실패는 치명적이지 않다 — 마감 목록은 다음 저장에서 다시 시도된다 */ }
+  });
+  persistJobsChain = next;
+  return next;
+}
+
+/**
+ * 이 브라우저가 만든 싱크 이력에 한 건 적는다 (로컬 전용, ContribEntry 문서 참고).
+ *
+ * 서버에는 "누가 만들었나"가 없으므로 완료를 **관측한 탭**이 적는 것이 유일한 기록 경로다.
+ * jobId로 중복을 막는다 — 같은 영상을 두 탭이 함께 보고 있으면 완료도 양쪽이 관측한다.
+ * 저장은 잡 목록과 같은 이유로 직렬화한다(read-merge-write 경합).
+ */
+let contribChain: Promise<void> = Promise.resolve();
+
+function recordContribution(entry: ContribEntry): Promise<void> {
+  const next = contribChain.catch(() => undefined).then(async () => {
+    try {
+      const stored = await chrome.storage.local.get(CONTRIB_STORAGE_KEY);
+      const list = (stored[CONTRIB_STORAGE_KEY] as ContribEntry[] | undefined) ?? [];
+      if (list.some(e => e.jobId === entry.jobId)) return; // 다른 탭이 이미 적었다
+      list.push(entry);
+      // 상한 초과분은 앞(오래된 것)부터 버린다 — 최근 기여가 화면의 관심사다
+      const capped = list.length > CONTRIB_MAX ? list.slice(list.length - CONTRIB_MAX) : list;
+      await chrome.storage.local.set({ [CONTRIB_STORAGE_KEY]: capped });
+    } catch { /* 기록 실패는 표시에만 영향 — 조용히 넘어간다 */ }
+  });
+  contribChain = next;
+  return next;
 }
 
 async function loadCss(): Promise<string> {
@@ -256,12 +359,17 @@ function observeNavigation(): void {
   document.addEventListener('yt-navigate-finish', () => window.setTimeout(checkCurrentPage, 300));
   window.setInterval(checkCurrentPage, 1500);
   window.setInterval(watchVideoBinding, 3000);
+  // 다음 영상 카드·재생목록 패널 결함 수리(2026-08-03): 예전엔 엔진 tick에만 의존해서
+  // 싱크 없는 영상(엔진이 아예 안 돈다 — startEngine 참고)에서는 영원히 안 갱신됐다.
+  // 엔진과 무관한 자체 타이머로 갈아탄다 — 각 함수 안의 스로틀이 중복 호출을 거른다.
+  window.setInterval(() => refreshNextUp(), 5000);
+  window.setInterval(() => refreshPlaylist(), PLAYLIST_REFRESH_MS);
   // 유튜브 다크모드 토글(html[dark])을 실시간 반영 — theme=auto일 때 패널·PiP·레인 색 갱신.
   // PiP는 유튜브 페이지 컨텍스트가 없어 스스로 판정할 수 없으므로 여기서 판정해 밀어넣는다.
   new MutationObserver(() => {
     if (settings.theme !== 'auto') return;
-    overlay?.applySettings(settings);
-    pip.setTheme(resolveTheme(settings)); // 레인 색 재판독은 setTheme이 함께 처리
+    broadcast('applySettings', settings);
+    pip.setTheme(resolveTheme(settings)); // 패널 색은 applySettings, PiP 문서 배경은 이쪽
   }).observe(document.documentElement, { attributes: true, attributeFilter: ['dark'] });
 }
 
@@ -403,11 +511,45 @@ let deferCount = 0;
  */
 const MAX_FOLLOW_DEFERS = 4;
 
+/**
+ * 영상 전환 직후 남는 "이전 영상의 흔적" — docTitle은 전환 직전까지 추종하던 페이지
+ * 제목, songTitle은 직전에 채택했던 곡 제목. waitForSongInfo가 이 흔적과 같은 후보를
+ * 재시도 한도 안에서 받지 않는다.
+ *
+ * 패널이 열려 있으면 추종 판정은 미루지 않는데(checkCurrentPage 주석 — shouldFollow가
+ * DOM을 안 보므로), 그것이 **검색까지 이전 DOM으로 해도 된다**는 뜻은 아니었다:
+ * detectSong은 mediaSession·문서 제목을 읽으므로 전환 직후에는 이전 곡을 돌려주고,
+ * 자동재생·연속 시청에서 곡을 넘길 때마다 이전 곡으로 검색되는 실사용 불만이 됐다
+ * (2026-08-03). 한도가 소진되면 그대로 받는다: 제목이 정말 같은 영상(재업로드)이면
+ * 그 값이 새 영상의 값이기도 하므로 판정이 옳다(MAX_FOLLOW_DEFERS와 같은 근거).
+ */
+let staleTraces: { docTitle: string; songTitle: string | null } | null = null;
+
 /** 이 영상을 추종하기 시작한다 — 판정 기준이 되는 제목도 이 시점 값으로 함께 새긴다 */
 function beginFollowing(videoId: string): void {
   currentVideoId = videoId;
   followedPageTitle = document.title;
   deferredVideoId = null;
+  // 다음 영상 카드는 5초 스로틀을 타므로, 곡이 바뀐 순간 지워 주지 않으면 새 영상 위에
+  // **이전 곡의 "다음 ▸"**가 몇 초간 남는다(카드로 커지면서 눈에 띄게 됐다). PiP는
+  // 곡 전환에서 이미 setNextUp(null)을 하고 있었고 메인 패널만 빠져 있었다.
+  broadcast('setNextUp', null);
+  lastNextUpPush = 0; // 다음 틱이 스로틀에 막히지 않고 새 값을 즉시 채우게
+  // 전환 지점에서 즉시 한 번 — 이후는 observeNavigation의 자체 타이머가 이어받는다.
+  // (SPA 이동 직후라 DOM이 아직 이전 영상 것일 수 있다는 점은 checkCurrentPage의
+  // stale 판정과 같은 한계다 — 다음 tick/interval에서 스스로 바로잡는다)
+  refreshNextUp(true);
+  refreshPlaylist(true);
+  // 재생목록의 "현재 재생 중" 강조(ey-pl-row.current)는 유튜브 재생목록 패널 DOM의
+  // selected 속성을 읽는데, 그 속성이 전환 직후 즉시 갱신되지 않을 때가 있다(실측:
+  // 행을 클릭해 이동해도 강조가 안 따라옴). 60초 주기 갱신을 기다리지 않고 짧은 지연
+  // 뒤 한 번 더 다시 긁어 스스로 바로잡는다 — videoId가 그 사이 또 바뀌면(빠른 연속
+  // 전환) 실행 시점에 다시 확인해 낡은 재조회가 최신 상태를 덮지 않게 한다.
+  for (const delayMs of [500, 1500]) {
+    window.setTimeout(() => {
+      if (videoId === currentVideoId) refreshPlaylist(true);
+    }, delayMs);
+  }
 }
 
 function checkCurrentPage(): void {
@@ -417,6 +559,16 @@ function checkCurrentPage(): void {
     return;
   }
   if (videoId === currentVideoId) return;
+  if (currentVideoId !== null) {
+    // 전환을 감지한 첫 tick에만 흔적을 새긴다 — 보류 중 cleanupForPage가 currentSong을
+    // 비운 뒤 다시 덮으면 songTitle 흔적을 잃는다(docTitle은 cleanup이 안 건드린다).
+    staleTraces = { docTitle: followedPageTitle, songTitle: currentSong?.title ?? null };
+  } else {
+    // 무영상 페이지(홈·검색)를 거쳐 온 경우 — 이전 전환의 흔적은 이미 낡았고, 남기면
+    // 같은 영상으로 복귀했을 때 자기 자신의 정상 결과를 stale로 오판한다(A→홈→A,
+    // 코덱스 감사 Low). 무영상 경유는 DOM이 정착할 시간이 있었으므로 흔적이 불필요.
+    staleTraces = null;
+  }
   // SPA 이동 직후에는 **주소만 새 영상이고 DOM은 아직 이전 영상의 것**이다 — document.title과
   // 채널명이 이전 값으로 남는 것이 실측됐다(새 videoId + 이전 제목인 표본: 한 번은 750ms까지,
   // 다른 런에서는 2초까지). 그 창에서 판정하면 이전 곡의 음악성이 새 영상에 상속된다:
@@ -480,15 +632,22 @@ function cleanupForPage(): void {
   // 사용법인데 여기서 pip.close()를 부르면 그때마다 창이 증발했다(pip.ts의 "창은 사용자가
   // 직접 닫기 전까지 살아 있다"는 설계와 정면으로 어긋난다). 대신 이전 곡의 내용을 비운
   // 빈 상태로 남겨, 그 창에서 바로 검색·붙여넣기를 계속할 수 있게 한다.
-  if (pip.isOpen()) {
-    pip.setLines([]); // 스테이지·레인에 남은 이전 곡 가사·노트 제거
-    pip.setSong('', '');
-    pip.setTempo(null);
-    pip.setKey(null);
-    pip.setDebugMeta(null);
-    overlay?.setDebugMeta(null);
-    pip.setGenerationChip(null);
-    pip.showPanelEmpty(null);
+  overlay?.setDebugMeta(null);
+  const pipPanel = pip.panelInstance();
+  if (pipPanel) {
+    // **PiP 인스턴스에만** 건다 — 방송으로 비우면 메인 패널의 가사까지 지운다.
+    // 메인은 아래에서 setVisible(false)로 숨기기만 하고 내용은 그대로 둔다: 사용자가
+    // 다시 열면 보던 곡이 그 자리에 있어야 한다. 반대로 PiP 창은 계속 보이는 채로
+    // 남으므로 «이전 곡이 새 영상 위에 떠 있는» 상태가 되지 않게 빈 화면으로 되돌린다.
+    pipPanel.setSong(null);
+    pipPanel.setDebugMeta(null);
+    pipPanel.setLaneMeta(null, null);
+    pipPanel.setGenerationChip(null);
+    pipPanel.setPlaylist(null);
+    pipPanel.setOffsetValue(0);
+    // showEmpty는 본문을 검색·붙여넣기 화면으로 바꾸고 lines를 비운다(레인도 함께 꺼진다) —
+    // 그 창에서 바로 다음 가사를 찾을 수 있다는 것이 PiP를 닫지 않는 이유다
+    pipPanel.showEmpty(null);
     // 미러를 **반드시** 다시 붙인다 — 미러는 captureStream()이라 영상이 바뀌면 이전 트랙이
     // 끝나 프레임이 멈추고, PiP 영상 영역이 순수 검정(videoWidth=0)으로 남는다.
     // 예전에는 이 함수가 pip.close()를 불러 "미러가 죽은 빈 창"이 존재할 수 없었는데,
@@ -500,7 +659,12 @@ function cleanupForPage(): void {
   }
   karaokeAudio.setNotes([]);
   karaokeAudio.setTempo(null);
+  videoCaption.setLines([]); // 이전 곡 자막이 새 영상 위에 남으면 안 된다
   overlay?.setVisible(false);
+  // 재생목록 패널도 영상 없는 페이지(홈·검색)에서는 비운다 — 남으면 이전 페이지의
+  // 목록이 새 무영상 페이지 위에 떠 있는 것처럼 보인다
+  broadcast('setPlaylist', null);
+  lastPlaylistItems = [];
 }
 
 async function toggleOverlay(): Promise<void> {
@@ -517,9 +681,48 @@ async function toggleOverlay(): Promise<void> {
   }
 }
 
-function ensureOverlay(): LyricsOverlay {
-  if (overlay) return overlay;
-  overlay = new LyricsOverlay(cssText, settings, {
+/**
+ * 살아 있는 패널 인스턴스 전부 — 메인(항상) + PiP(열려 있을 때만).
+ *
+ * PiP를 «반쪽으로 다시 구현»하지 않고 같은 클래스를 두 번 세우는 구조라, content는
+ * "어느 창에 그릴지"를 몰라도 되고 이 목록에만 대고 말한다. 목록이 하나면 예전과
+ * 완전히 같은 동작이고, 둘이면 두 창이 같은 화면이 된다.
+ */
+function panels(): LyricsOverlay[] {
+  const out: LyricsOverlay[] = [];
+  if (overlay) out.push(overlay);
+  const p = pip.panelInstance();
+  if (p) out.push(p);
+  return out;
+}
+
+/**
+ * 표시 갱신을 살아 있는 모든 패널에 방송한다 — **반환값이 없는 메서드 전용**이다.
+ *
+ * 반환값이 필요한 질문("지금 무엇이 보이는가")은 방송으로 답할 수 없으므로 인스턴스를
+ * 골라 직접 물어야 한다(isVisible·isShowingPipPlaceholder). 창 자체의 상태를 바꾸는 것
+ * (setVisible·showPipPlaceholder·setPipEnabled)도 방송 대상이 아니다 — 그쪽은 클래스
+ * 안에서 filled가 스스로 막지만, 뜻이 메인에만 있다는 것을 호출부에서도 드러내 둔다.
+ *
+ * updateTime은 여기 없다: PiP 인스턴스의 시간 렌더는 **PiP 창의 rAF**가 부른다
+ * (pip.ts renderFrame). 방송으로 함께 밀면 숨은 탭에서 4Hz로 떨어진다.
+ */
+function broadcast<K extends keyof LyricsOverlay>(
+  method: K,
+  ...args: LyricsOverlay[K] extends (...a: infer A) => void ? A : never
+): void {
+  for (const p of panels()) (p[method] as (...a: unknown[]) => void)(...args);
+}
+
+/**
+ * 패널 콜백 묶음 — 메인 인스턴스와 PiP 인스턴스가 **같은 것을 공유한다**.
+ *
+ * 곡별 상태의 단일 진실 소스는 content에 있고 패널은 표시용 복제본만 갖는다(오프셋이
+ * 대표적: videoOffset이 정본, overlay의 offsetSec는 라벨용). 그래서 어느 창에서 조작해도
+ * 같은 핸들러를 태우면 되고, 정본이 바뀐 뒤 **양쪽에 되돌려 방송**하기만 하면 된다.
+ */
+function overlayCallbacks(): OverlayCallbacks {
+  return {
     onSeek: time => engine.seekTo(time),
     onGenerate: text => void handleGenerate(text),
     onRetrySearch: query => void searchLyrics(query),
@@ -530,13 +733,66 @@ function ensureOverlay(): LyricsOverlay {
       karaokeAudio.setOffset(offsetSec);
       videoOffset = offsetSec;
       scheduleOffsetSave();
+      // 정본을 고친 뒤 **전 인스턴스에 되돌려 방송한다.** 예전에는 이 줄이 없었고 그게
+      // 맞는 최적화였다 — 값을 바꾼 창은 이미 그 값을 표시하고 있으니까. 인스턴스가
+      // 둘이 되면서 전제가 깨졌다: PiP에서 오프셋을 밀면 메인 패널이 옛 값을 계속
+      // 보여준다. setOffsetValue는 라벨만 쓰는 멱등 연산이라 자기 창에 되돌려도 무해하다.
+      broadcast('setOffsetValue', offsetSec);
     },
     onCloseSearch: () => {
       applyLyricsData(currentData);
       updateGenChip();
     },
     onSettingsChange: patch => void handleSettingsChange(patch),
-    onRegenerate: () => void handleRegenerate(),
+    // onRegenerate(가사 보존한 채 다시 정렬만)는 더 이상 없다 — 헤더 버튼이 onResetSync로
+    // 바뀌면서(overlay.ts resetSyncBtn) 이 콜백을 부르는 곳이 사라졌다. handleRegenerate
+    // 자체는 살아 있다 — onDepthUpgrade(깊이 올리기)가 여전히 이 함수로 REGENERATE_SYNC를
+    // 부른다(가사를 지우지 않는 진짜 "재생성"이라 이름을 그대로 둔다).
+    onDepthUpgrade: minDepth => void handleRegenerate(minDepth),
+    onSubmitFeedback: async (rating, category, comment) => {
+      const videoId = currentVideoId;
+      if (!videoId) return false;
+      const res = await sendToBackground<{ ok: boolean }>({
+        // 어느 깊이로 만든 싱크에 대한 평가인지 함께 — 같은 곡도 깊이마다 결과가 달라서,
+        // 이게 없으면 별점이 "이 곡" 평가로만 남아 깊이별 품질을 가를 수 없다
+        type: 'SYNC_FEEDBACK', payload: { videoId, rating, category, comment, depth: currentSyncDepth() },
+      });
+      return Boolean(res.data?.ok);
+    },
+    onWrongLyrics: () => {
+      // 오매칭 제보 — 기존 피드백 시스템으로 수집(가사 오류=최저 별점 의미론), 매칭
+      // 근거(페이지 제목·URL)를 코멘트에 자동 첨부한다. 제보 직후 검색 시트를 열어
+      // 사용자가 그 자리에서 올바른 가사를 고를 수 있게 한다.
+      const videoId = currentVideoId;
+      if (!videoId) return;
+      // 서버 싱크(생성 완료분)에서는 matchedTitle이 없다 — 조달 출처(attribution)가
+      // 매칭 근거다 (applyLyricsData의 matchedLabel과 같은 규칙)
+      const matched = currentData?.matchedTitle ?? currentData?.attribution?.name ?? '';
+      const url = currentSourceUrl ?? currentData?.attribution?.url ?? '';
+      void sendToBackground({
+        type: 'SYNC_FEEDBACK',
+        payload: {
+          videoId,
+          rating: 1,
+          category: 'lyrics',
+          comment: `[오매칭] matched=${matched} url=${url}`,
+        },
+      });
+      showNotice(t('content.wrongLyrics.thanks'), 6000);
+      broadcast('openSearch');
+    },
+    // 재생목록 패널 — DOM 조작은 lib/yt-player.ts, 실패하면(셀렉터 불일치·항목 사라짐)
+    // 목록을 강제로 다시 스크랩해 화면을 실제 상태와 맞춘다(PiP의 refreshPlayerControls
+    // 재판정과 같은 복구 규칙).
+    onPlaylistPrev: () => { if (!playPrevious()) refreshPlaylist(true); },
+    onPlaylistNext: () => { if (!playNext()) refreshPlaylist(true); },
+    onPlaylistSelect: index => { if (!playPlaylistItem(index)) refreshPlaylist(true); },
+    onNextUpClick: videoId => handleNextUpClick(videoId),
+    onWarnDismissSong: () => {
+      const videoId = currentVideoId;
+      if (videoId) void dismissWarnForVideo(videoId);
+    },
+    onResetWarnDismiss: () => void resetAllWarnDismissed(),
     onPipToggle: () => void handlePipToggle(),
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),
@@ -545,13 +801,52 @@ function ensureOverlay(): LyricsOverlay {
     onCancelGenerate: () => void handleCancelGenerate(),
     onUnlinkSync: () => void handleUnlinkSync(),
     onRequestSyncList: () => void handleRequestSyncList(),
+    getVideoId: () => currentVideoId,
+    onLoadPreviousSync: async () => {
+      const videoId = currentVideoId;
+      if (!videoId) return null;
+      const res = await sendToBackground<SyncPreviousVersion>({ type: 'SYNC_PREVIOUS', payload: { videoId } });
+      return res.data ?? null;
+    },
     onResetSync: () => void handleResetSync(),
+    onFullReset: () => void handleFullReset(),
     onRecheckServer: () => void refreshServerStatus(),
     onOpenPermissions: () => void openPermissionsPage(),
     loadServerLog: () => fetchServerLog(),
-  }, initialGeometry);
+    getMicSamples: () => micPitch.samples(),
+  };
+}
+
+function ensureOverlay(): LyricsOverlay {
+  if (overlay) return overlay;
+  overlay = new LyricsOverlay(cssText, settings, overlayCallbacks(), initialGeometry);
+  // 마운트는 더 이상 생성자의 부수효과가 아니다 — 인스턴스가 둘(유튜브 페이지 + PiP 문서)이
+  // 되면서 "어느 문서에 붙는가"를 호출부가 정해야 한다(overlay.ts mountInto 주석)
+  overlay.mountInto(document);
   overlay.setServerStatus(serverStatus); // 이미 알고 있는 상태를 새 패널에 즉시 반영
   return overlay;
+}
+
+/**
+ * 서버가 준 깊이 문자열 중 **이 확장이 아는 것만** 통과시킨다.
+ *
+ * 타입에 유니온을 적어 두어도 네트워크 값은 무엇이든 올 수 있다 — 서버가 깊이 어휘를
+ * 넓히면(예: 새 단계 추가) 라벨 표에 없는 값이 그대로 들어와 `t(undefined)`로 진행 칩
+ * 렌더가 통째로 터진다. 모르는 값은 "모름"으로 다루는 편이 언제나 낫다(단계명 표가
+ * 모르는 stage를 원문 그대로 흘려보내는 것과 같은 전방 호환 규칙).
+ */
+function knownDepth(value: string | null | undefined): 'fast' | 'medium' | 'heavy' | undefined {
+  return value === 'fast' || value === 'medium' || value === 'heavy' ? value : undefined;
+}
+
+/**
+ * 지금 보고 있는 싱크가 어느 깊이로 만들어졌는가 — 서버 라우팅 판정(debugMeta.routing.route).
+ *
+ * 구세대 싱크·비 everyric 소스에는 이 메타가 없다(undefined) — 그때는 값을 지어내지 않는다.
+ * 서버가 나중에 route 어휘를 넓혀도 모르는 값은 걸러 보내지 않는다(빈 값이 틀린 값보다 낫다).
+ */
+function currentSyncDepth(): 'fast' | 'medium' | 'heavy' | undefined {
+  return knownDepth(currentData?.debugMeta?.routing?.route);
 }
 
 /** 최근 서버 요청 기록 — 백그라운드가 마스킹까지 마친 것을 그대로 받는다 */
@@ -665,7 +960,10 @@ async function handleLinkSync(sourceVideoId: string, offsetSec: number, rate: nu
       return;
     }
     for (const key of [...translationCache.keys()]) {
-      if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+      if (key.startsWith(`${videoId}:`)) {
+        translationCache.delete(key);
+        translationOriginCache.delete(key);
+      }
     }
   }
   const res = await sendToBackground<Record<string, unknown>>({
@@ -694,7 +992,8 @@ async function handleUnlinkSync(): Promise<void> {
     ensureOverlay().setLinkStatus(t('content.link.unlinkFailed', [note ? ` — ${note}` : t('content.link.unlinkFailedCheckServer')]));
     return;
   }
-  ensureOverlay().setLinked(null);
+  ensureOverlay();
+  broadcast('setLinked', null);
   void searchLyrics();
 }
 
@@ -780,20 +1079,88 @@ async function pollLinkJobs(): Promise<void> {
 async function handleRequestSyncList(): Promise<void> {
   const res = await sendToBackground<SyncListItem[]>({ type: 'SYNC_LIST' });
   noteFailure(res.failure); // 빈 목록이 "없음"인지 "못 받음"인지 상태로 남긴다
-  overlay?.showSyncList(res.data ?? []);
+  broadcast('showSyncList', res.data ?? []);
 }
 
+/**
+ * 이 탭에서 설정을 바꿨다 — 저장하고 그 자리에서 반영한다.
+ *
+ * `settings`를 저장 **전에** 낙관적으로 선반영하는 것이 자기 쓰기 되울림을 막는 장치다:
+ * storage.onChanged는 `set()`의 await보다 먼저 올 수 있어 순서에 기댈 수 없는데, 값이 이미
+ * 같으면 아래 watchSettingsFromOtherTabs의 차이 계산이 빈 patch를 내놓아 저절로 무시된다
+ * (별도 플래그·타임스탬프 없이 값 자체로 판정한다). saveSettings의 반환값이 최종 권위다 —
+ * 다른 탭이 그 사이 쓴 값까지 병합돼 오므로 그것으로 덮어쓴다.
+ */
 async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
+  settings = { ...settings, ...patch };
   settings = await saveSettings(patch);
+  applySettingsPatch(patch);
+}
+
+/**
+ * 다른 탭·옵션 페이지의 설정 변경을 이 탭에도 실시간 반영한다.
+ *
+ * 지금까지 이 리스너는 잡 목록(activeJobs)만 봤다 — 그래서 옵션 페이지에서 서버 주소나
+ * 표시 설정을 바꿔도 열려 있던 유튜브 탭은 **새로고침 전까지** 옛 설정으로 돌았다(설정을
+ * 바꾼 사용자는 당연히 즉시 바뀔 것으로 기대한다). 적용은 이 탭의 설정 시트가 쓰는 것과
+ * 같은 applySettingsPatch를 그대로 태운다 — 경로가 갈리면 "여기서만 되는 설정"이 생긴다.
+ */
+function watchSettingsFromOtherTabs(): void {
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes.settings) return;
+      const next = changes.settings.newValue as Partial<Settings> | undefined;
+      if (!next) return;
+      // 실제로 달라진 키만 추린다 — 이 탭이 방금 쓴 값이면 차이가 없어 빈 patch가 된다
+      const patch: Partial<Settings> = {};
+      for (const key of Object.keys(next) as (keyof Settings)[]) {
+        if (next[key] !== undefined && next[key] !== settings[key]) {
+          (patch as Record<string, unknown>)[key] = next[key];
+        }
+      }
+      if (Object.keys(patch).length === 0) return;
+      settings = { ...settings, ...patch };
+      applySettingsPatch(patch);
+    });
+  } catch { /* 이벤트 미지원 환경 — 이 탭의 설정 변경만 반영된다(기존 동작) */ }
+}
+
+/** 설정 patch를 실행 중인 화면에 반영 — 저장은 하지 않는다(호출부가 이미 했거나 남의 쓰기다) */
+function applySettingsPatch(patch: Partial<Settings>): void {
   if (patch.uiLanguage !== undefined) setUiLanguage(settings.uiLanguage);
-  overlay?.applySettings(settings);
+  // 표시 설정은 **이 한 줄**이 전부다. 예전에는 여기 아래로 `pip.setXxx`가 한 줄씩 17줄
+  // 늘어서 있었다(마디 창·글자 크기·계이름·밝기·발음 위치·신뢰도·계이름…) — 설정을
+  // 하나 늘릴 때마다 두 곳에 배선하고 한쪽을 빠뜨리면 두 창이 조용히 갈라지는 구조였다.
+  // 인스턴스가 같은 클래스가 된 지금은 방송 한 번이 두 창을 모두 덮는다.
+  broadcast('applySettings', settings);
   // 키를 고치는 것이 인증 실패의 정상 복구 경로다 — URL과 함께 즉시 재확인한다
   if (patch.serverUrl !== undefined || patch.apiKey !== undefined) void refreshServerStatus();
-  if (patch.debugInfo !== undefined) pip.setDebug(patch.debugInfo);
-  // 메인 패널은 위 applySettings에서 이미 바뀐다 — PiP도 같은 판정값으로 함께 맞춘다
+  // 패널 색은 위 applySettings가 맡는다 — 남는 것은 PiP «문서»(배경·스크롤바)뿐이다
   if (patch.theme !== undefined) pip.setTheme(resolveTheme(settings));
 
   if (patch.translationLanguage && settings.showTranslation) {
+    // 승격(감사 C1 P1): 새 언어가 currentData의 고정 언어 위키 출처(miraheze=en·vocaro=ko)와
+    // 같으면, wikiTranslation에 언어 무관하게 보존해 둔 사람 번역을 translation으로
+    // 끌어올린다 — LLM을 다시 부르기 전에 이미 손에 든 정답을 먼저 쓴다. clearTranslations
+    // **앞에** 둬야 한다: 승격 직후 data.translationLang을 새 언어로 맞추면 곧바로 아래
+    // hasMatchingHumanTranslation 보호 대상이 되어 clearTranslations·loadTranslations
+    // 둘 다 조기 반환하고, 승격된 값이 그대로 화면에 남는다.
+    if (currentData) {
+      const fixedLang = fixedSourceLang(currentData);
+      if (fixedLang && patch.translationLanguage === fixedLang) {
+        let promoted = false;
+        for (const line of currentData.lines) {
+          if (!line.translation && line.wikiTranslation) {
+            line.translation = line.wikiTranslation;
+            promoted = true;
+          }
+        }
+        if (promoted) {
+          currentData.translationLang = fixedLang;
+          broadcast('refreshTranslations');
+        }
+      }
+    }
     // 언어를 바꿨으면 **이미 실린 번역을 먼저 비운다.** loadTranslations의 조기 반환은
     // "모든 줄에 번역이 있으면 끝"이라 어느 언어의 번역인지 보지 않는다 — 비우지 않으면
     // ko→en으로 바꿔도 재요청이 일어나지 않고 한국어 번역이 그대로 남는다(브라우저 검증에서
@@ -821,55 +1188,66 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
     pip.setVideoEnabled(patch.pipShowVideo, engine.getVideo() ?? getVideoElement());
   }
 
-  // 발음 표기 토글 즉시 반영 (패널은 applySettings에서 처리됨)
-  if (patch.showPronunciation !== undefined) {
-    pip.setShowPronunciation(patch.showPronunciation);
+  // 발음 표기(전체 끔·영어만 끔·표기 방식) — 이미 그려 놓은 줄을 다시 만들어야 반영된다.
+  // 표기 방식은 'auto'일 때 translationLanguage에 따라 해석이 달라지므로 함께 본다.
+  // (레인 쪽 반영은 위 applySettings의 lane.setOptions가 이미 처리했다.)
+  if (
+    patch.showPronunciation !== undefined || patch.hidePronForEnglish !== undefined
+    || patch.pronunciationScript !== undefined || patch.translationLanguage !== undefined
+  ) {
+    broadcast('refreshTranslations');
   }
 
-  // 발음 표기 방식(hangul/romaji/kana) 즉시 반영 — pronunciationScript 자체를 바꿨을 때는
-  // 물론, 'auto'일 때는 translationLanguage가 바뀌어도 해석 결과가 달라지므로 함께 본다.
-  // 메인 패널도 refreshTranslations로 함께 재렌더한다 — 감사 #8: 서버가 표기별 발음
-  // (pron dict)을 이미 주기 시작한 뒤로(다국어 배포) "화면상 차이 없음" 전제가 거짓이
-  // 됐는데도 pip만 즉시 반영하고 메인 패널은 다음 곡 전환까지 옛 표기를 그대로 보여주고
-  // 있었다.
-  if (patch.pronunciationScript !== undefined || patch.translationLanguage !== undefined) {
-    pip.setPronScript(resolveScript(settings));
-    overlay?.refreshTranslations();
+  // 영상 자막 모듈 — 켜고 끄기 + 표시 방식(표기/발음/번역) 즉시 반영
+  if (patch.videoCaptions !== undefined) {
+    videoCaption.setEnabled(patch.videoCaptions);
+  }
+  if (patch.captionFontScale !== undefined || patch.captionBgOpacity !== undefined) {
+    videoCaption.applyStyle({
+      fontScale: settings.captionFontScale, bgOpacity: settings.captionBgOpacity,
+    });
+  }
+  // 다음 영상 정보 모듈 — 토글 즉시 반영(끄면 즉시 숨김, 켜면 즉시 조회)
+  if (patch.modNextUp !== undefined) {
+    refreshNextUp(true);
+  }
+  // 재생목록 패널 — 토글 즉시 반영. 하단 카드와의 표시 전환(showNextUp)은
+  // overlay.applySettings(위에서 이미 호출됨)가 렌더 시점에 처리한다.
+  if (patch.modPlaylist !== undefined) {
+    refreshPlaylist(true);
+    // 재생목록이 없는 페이지의 대체 카드(다음 영상)도 즉시 채운다 — modNextUp이
+    // 꺼져 있으면 refreshNextUp이 지금까지 한 번도 안 돌았을 수 있다
+    refreshNextUp(true);
+  }
+  if (
+    patch.pronunciationScript !== undefined || patch.translationLanguage !== undefined
+    || patch.showPronunciation !== undefined || patch.showTranslation !== undefined
+    || patch.hidePronForEnglish !== undefined
+  ) {
+    videoCaption.applyDisplay(
+      resolveScript(settings), settings.showPronunciation, settings.showTranslation,
+      settings.hidePronForEnglish,
+    );
   }
 
-  // 디버그 토글 → 레인 신뢰도 색상도 함께
-  if (patch.debugInfo !== undefined) {
-    pip.setShowConfidence(patch.debugInfo);
+  // 크로마키는 PiP **문서** 배경이라 패널 설정이 아니다
+  if (patch.pipChromaKey !== undefined) {
+    pip.setChromaKey(patch.pipChromaKey);
+  }
+  // 창 레이아웃(단축 표시 on/off·열 폭)은 패널 **바깥**의 일이라 창 주인이 직접 받는다
+  if (
+    patch.pipShortLyrics !== undefined || patch.attachedLaneWidth !== undefined
+    || patch.pipPanelWidth !== undefined || patch.pipShowPanel !== undefined
+    || patch.pitchPronPosition !== undefined || patch.pipLaneSwapped !== undefined
+    || patch.pipShowCenter !== undefined
+    || patch.pipLaneWidth !== undefined || patch.pipPlaylist !== undefined
+  ) {
+    pip.applyLayoutSettings(settings);
   }
 
-  // 레인 표시 구간/진행 방식/글자 크기/카운트다운 즉시 반영
-  if (patch.pitchWindowMeasures !== undefined) {
-    pip.setPitchWindow(patch.pitchWindowMeasures);
-  }
-  if (patch.pitchScrollMode !== undefined) {
-    pip.setPitchScrollMode(patch.pitchScrollMode);
-  }
-  if (patch.pitchFontScale !== undefined) {
-    pip.setPitchFontScale(patch.pitchFontScale);
-  }
-  if (patch.pitchCountdown !== undefined) {
-    pip.setPitchCountdown(patch.pitchCountdown);
-  }
-  if (patch.pitchPronPosition !== undefined) {
-    pip.setPitchPronPosition(patch.pitchPronPosition);
-  }
-  // K2: 계이름 표기, K3: 음정선 밝기 — 즉시 반영
-  if (patch.solfegeNotation !== undefined) {
-    pip.setSolfegeNotation(patch.solfegeNotation);
-  }
-  if (patch.pitchLineOpacity !== undefined) {
-    pip.setPitchLineOpacity(patch.pitchLineOpacity);
-  }
-
-  // 가라오케 음정 바 토글 즉시 반영
-  if (patch.pitchGuide !== undefined) {
-    pip.setPitchEnabled(patch.pitchGuide);
-  }
+  // 레인 표시 취향(마디 창·진행 방식·글자 크기·카운트다운·발음 위치·계이름·밝기·
+  // 신뢰도 색·f0 곡선)은 전부 위 applySettings 한 줄이 반영한다 — 예전엔 여기 아래로
+  // pip.setXxx가 한 줄씩 늘어서 있었다(2-B 유지비의 실체).
 
   // 멜로디/메트로놈/마이크 — 토글·볼륨·배속·시작박·기기 변경 즉시 반영
   if (
@@ -881,19 +1259,10 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
   ) {
     applyAudioSettings();
   }
-  if (patch.metronomeRate !== undefined || patch.metronomeBeat !== undefined) {
-    pip.setMetronomeConfig(settings.metronomeRate, settings.metronomeBeat);
-  }
-  if (patch.micOctave !== undefined) {
-    pip.setMicOctave(settings.micOctave);
-  }
-  if (patch.pitchF0Curve !== undefined) {
-    pip.setShowF0(settings.pitchF0Curve);
-  }
 
   // 저신뢰 경고 토글 즉시 반영
   if (patch.lowConfWarning !== undefined) {
-    overlay?.setQualityWarning(
+    broadcast('setQualityWarning',
       settings.lowConfWarning && currentData?.synced && currentData.source === 'everyric'
         && currentData.qualityScore != null && currentData.qualityScore < 0.001
         ? currentData.qualityScore
@@ -944,7 +1313,7 @@ function pushDebug(time: number | null): void {
   const lineDebug = line?.debug
     ? `act=${Math.round((line.debug.activeRatio ?? 0) * 100)}%${line.debug.clamped ? ' CLAMP' : ''}`
     : null;
-  overlay.updateDebug({
+  broadcast('updateDebug', {
     zone: debugZoneAt(time ?? (video ? video.currentTime : null)),
     lineDebug,
     videoId: currentVideoId,
@@ -1022,8 +1391,18 @@ function lineConfSummary(): {
 /**
  * 서버 싱크(everyric) 라인에 보카로 위키의 발음/사람 번역을 텍스트 매칭으로 입힌다.
  * 싱크가 위키 가사로 생성됐다면 라인 텍스트가 그대로 보존되므로 대부분 1:1로 매칭된다.
+ *
+ * 반환값은 "번역을 1줄이라도 병합했는가" — 발음만 병합됐거나 아무것도 못 붙였으면 false.
+ * 호출부(searchLyrics)가 applyLyricsData 이후 이 값으로 번역 출처 배지(U2)를 세운다
+ * (감사 C2b) — 이 함수 안에서 직접 overlay를 건드리면 안 된다: 이 시점엔 아직
+ * applyLyricsData가 안 돌아 overlay가 **이전 곡**을 보여주고 있고, 뒤이은
+ * applyLyricsData의 showSyncedLyrics/showPlainLyrics가 resetBody로 배지를 곧바로
+ * 지워 버린다.
  */
-async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void> {
+/** 늦은 재매칭을 이미 시도한 영상 — 세션당 한 번만 (미스가 확정인 곡에 매 로드 요청 방지) */
+const vocaroRematchTried = new Set<string>();
+
+async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<boolean> {
   let lines: VocaroLine[] | null = lastVocaro?.videoId === videoId ? lastVocaro.lines : null;
   if (!lines) {
     let slug: string | null = null;
@@ -1033,18 +1412,54 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
       const raw = stored[`vocaroRef:${videoId}`] as string | { slug?: string } | undefined;
       slug = typeof raw === 'string' ? raw : raw?.slug ?? null;
     } catch { /* storage 실패 → 병합 생략 */ }
-    if (!slug) return;
-    const res = await sendToBackground<VocaroResult | null>({ type: 'VOCARO_PAGE', payload: { slug } });
+    // 재매칭으로 새로 얻은 슬러그 — VOCARO_PAGE가 실제 줄을 돌려준 뒤에야 storage에
+    // 영구 저장한다(감사 C8d). 미리 저장하면 이 슬러그가 실은 빈손이었을 때도
+    // vocaroRef에 박혀, 다음부터는 위 조회가 "slug 있음"으로 성공해 재매칭
+    // 자체를 다시 타지 않는 영구 미스로 굳는다.
+    let rematchedSlug: string | null = null;
+    if (!slug && currentSong && videoId === currentVideoId && !vocaroRematchTried.has(videoId)) {
+      // 원 조회가 무산된 채 생성된 싱크(예: 서버 순간 부하로 매칭 타임아웃 → 자막 폴백)는
+      // vocaroRef가 영영 비어 위키 발음·번역 병합이 시작조차 안 됐다(실측: 踊っチャイナ —
+      // 위키에 발음·번역이 다 있는데 자막 가사로 생성됨). 서버 원제 인덱스에 늦은
+      // 재매칭을 한 번 시도해 스스로 치유한다.
+      vocaroRematchTried.add(videoId);
+      const m = await sendToBackground<{ found: boolean; slug?: string | null } | null>({
+        // hint(rawTitle)는 서버 /api/vocaro/match가 아직 안 받는다 — vocaroMatch에는
+        // 배선만 관통시키고(장래 지원 대비) 쿼리에는 안 싣는다. 이 재매칭이 만든 slug로
+        // 곧바로 이어지는 VOCARO_PAGE 조회가 실제 hint 사용처다(아래).
+        type: 'VOCARO_MATCH', payload: { title: currentSong.title, hint: currentSong.rawTitle },
+      });
+      if (videoId !== currentVideoId) return false;
+      if (m.data?.found && m.data.slug) {
+        slug = m.data.slug;
+        rematchedSlug = m.data.slug;
+      }
+    }
+    if (!slug) return false;
+    // hint는 이 videoId가 아직 현재 영상일 때만 — SPA 이동 뒤 늦게 도는 병합에 다른
+    // 영상의 제목을 힌트로 주면 버전 선택이 엉뚱한 표로 튈 수 있다
+    const hint = videoId === currentVideoId ? currentSong?.rawTitle : undefined;
+    const res = await sendToBackground<VocaroResult | null>({
+      type: 'VOCARO_PAGE', payload: { slug, hint },
+    });
     lines = res.data?.lines ?? null;
-    if (lines) lastVocaro = { videoId, lines };
+    if (lines) {
+      lastVocaro = { videoId, lines };
+      if (rematchedSlug) {
+        try {
+          await chrome.storage.local.set({ [`vocaroRef:${videoId}`]: { slug: rematchedSlug, t: Date.now() } });
+        } catch { /* 저장 실패해도 이번 병합은 진행 — 세션 내 캐시로도 동작 */ }
+      }
+    }
   }
-  if (!lines) return;
+  if (!lines) return false;
 
   const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
   const byText = new Map<string, VocaroLine>();
   for (const l of lines) {
     if (l.text && !byText.has(norm(l.text))) byText.set(norm(l.text), l);
   }
+  let translationMerged = false;
   for (const line of data.lines) {
     const v = byText.get(norm(line.text));
     if (!v) continue;
@@ -1060,36 +1475,76 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
       line.translation = v.translation;
       data.humanTranslated = true;
       data.translationLang = settings.translationLanguage;
+      translationMerged = true;
     }
   }
+  return translationMerged;
+}
+
+/**
+ * 이 데이터가 고정 언어 위키 출처(miraheze=en, vocaro=ko)라면 그 언어를, 아니면 null을
+ * 반환한다 — hasMatchingHumanTranslation과 언어 전환 승격 패스(applySettingsPatch)가
+ * 공유한다. sourceId로 실제 출처를 가르되, 구데이터(vocaro 직접 채택분은 attribution
+ * 자체가 없다 — adoptVocaroResult 참고)는 source==='vocaro' 폴백을 유지한다.
+ */
+function fixedSourceLang(data: LyricsData): 'en' | 'ko' | null {
+  const sourceId = data.attribution?.sourceId;
+  if (sourceId === 'miraheze') return 'en';
+  if (sourceId === 'vocaro') return 'ko';
+  if (!sourceId && data.source === 'vocaro') return 'ko';
+  return null;
 }
 
 /**
  * 이 데이터의 사람 번역이 지금 보는 번역 언어와 같은 언어인가 — 같으면 지우지도, LLM으로
  * 다시 받지도 않는다(clearTranslations·loadTranslations가 공유하는 가드).
  *
- * vocaro는 한국어 전용, miraheze는 영어 전용이다 — attribution.sourceId로 실제 출처를
- * 가른다(구데이터 vocaro 채택분은 attribution이 없으므로 source==='vocaro' 폴백을
- * 유지한다 — adoptVocaroResult는 손대지 않았다). 이 둘은 단일 언어 소스라 언어 자체가
- * 고정이지만, 그 밖의 humanTranslated(서버 sync의 wiki 병합분·유튜브 수동 자막 등)는
- * **임의 언어**일 수 있으므로 data.translationLang(그 번역이 실제로 실린 언어)이 내
- * 번역 언어와 같을 때만 보호한다 — 예전엔 여기도 한국어로 고정돼 있어서 en/ja 타깃에
- * 실제로 자막 병합이 있어도 매번 지우고 LLM을 다시 불렀다.
+ * 고정 언어 출처(miraheze/vocaro)는 **실적재**까지 확인한다(감사 C1) — sourceId만으로
+ * "그 출처에서 온 싱크"라고 판정하면, enrichFromVocaro가 miraheze 출처 싱크에 ko 번역을
+ * 병합한 뒤 en으로 전환했을 때도 "미라헤즈=en이니 이미 맞다"로 잘못 참이 나서 한국어
+ * 번역이 지워지지도 en이 재요청되지도 않고 영구 잔류했다. 내 번역 언어가 고정 언어와
+ * 같고, 실제로 번역이 실린 줄이 있고, translationLang 도장(있다면)도 고정 언어와 같을
+ * 때만 보호한다.
+ *
+ * 그 밖의 humanTranslated(서버 sync의 wiki 병합분·유튜브 수동 자막 등)는 **임의 언어**일
+ * 수 있으므로 data.translationLang(그 번역이 실제로 실린 언어)이 내 번역 언어와 같을
+ * 때만 보호한다 — 예전엔 여기도 한국어로 고정돼 있어서 en/ja 타깃에 실제로 자막 병합이
+ * 있어도 매번 지우고 LLM을 다시 불렀다.
+ *
+ * **실적재 확인은 every여야 한다(#45-1, 2026-08-04 실증)** — .some()이었을 때는
+ * enrichFromVocaro의 텍스트 매칭(byText.get(norm(line.text)), 완전 일치만 인정)이
+ * CTC 정렬이 만든 줄과 위키 페이지의 줄 나눔이 갈리는 지점에서 일부 줄만 우연히
+ * 맞아도 그 한 줄만으로 "이미 다 있음"이 참이 됐다. 그러면 loadTranslations이 여기서
+ * 조기 반환해, 결합 매칭(matchWikiLinesToSegments, 쪼갬·합침·재동기화까지 다루는 더
+ * 정확한 매처)을 쓰는 tryWikiTranslationLayer로 넘어가지 못하고 나머지 줄은 영영
+ * 비어 있었다(실사용 제보: 생성 직후 번역 대부분 미표시, 새로고침해야 보임 — 새로고침은
+ * harvestTranslations가 그 사이 서버에 조용히 저장해 둔 완전한 매칭 결과를 새로 받아온
+ * 것뿐, 화면 쪽 조기 반환 자체는 안 고쳐진다). every로 바꾸면 부분 매칭은 "아직
+ * 부족함"으로 정확히 판정돼 loadTranslations가 계속 진행하고, applyTranslations의
+ * "사람 번역 우선"(!line.translation) 규칙 덕에 enrichFromVocaro가 이미 맞춘 줄은
+ * 유지된 채 나머지만 채워진다. loadTranslations 자신의 "이미 다 있음" 게이트(위,
+ * data.lines.every(l => l.translation))와도 이제 기준이 일치한다.
  */
 function hasMatchingHumanTranslation(data: LyricsData): boolean {
-  if (data.attribution?.sourceId === 'miraheze') return settings.translationLanguage === 'en';
-  if (data.source === 'vocaro') return settings.translationLanguage === 'ko';
+  const fixedLang = fixedSourceLang(data);
+  if (fixedLang) {
+    return settings.translationLanguage === fixedLang
+      && data.lines.every(l => l.translation)
+      && (data.translationLang ?? fixedLang) === fixedLang;
+  }
   return Boolean(data.humanTranslated) && data.translationLang === settings.translationLanguage;
 }
 
 function clearTranslations(): void {
-  overlay?.setTranslationStatus(null);
+  broadcast('setTranslationStatus', null);
   if (!currentData) return;
   // 사람 번역(위키 등)은 가사 자체의 일부 — 지우지 않는다(내 번역 언어와 같은 위키일 때만).
   if (hasMatchingHumanTranslation(currentData)) return;
   for (const line of currentData.lines) delete line.translation;
-  overlay?.refreshTranslations();
-  pip.refresh();
+  // 실제로 지우는 경로에서만 배지도 내린다 — 위 보호 반환 경로는 기존 출처 표기를
+  // 그대로 유지해야 한다(감사 C2a).
+  broadcast('setTranslationSource', null);
+  broadcast('refreshTranslations');
 }
 
 /**
@@ -1205,7 +1660,8 @@ async function fetchWikiMatch(
     if (res.data) wikiAttribution = attributionFromSource(res.data);
   } else {
     const res = await sendToBackground<VocaroResult | null>({
-      type: 'VOCARO_LOOKUP', payload: { title: currentSong.title },
+      type: 'VOCARO_LOOKUP',
+      payload: { title: currentSong.title, hint: currentSong.rawTitle },
     });
     if (videoId !== currentVideoId) return null;
     wikiLines = res.data?.lines ?? null;
@@ -1363,7 +1819,11 @@ async function tryServerLayerRefresh(
   // 경로와 동일하게 맞아떨어진다. 발음도 서버가 준 값을 그대로 실어 보낸다(fetchLlmLineMeta
   // 경로와 달리 이건 서버 자신이 만든 값이라 문자 체계 재검증이 필요 없다).
   const translated = fresh.lines.map(l => ({ original: l.text, translation: l.translation ?? '', pronunciation: l.pronunciation }));
-  applyTranslations(data, translated, { kind: 'server' });
+  // 서버가 translation_origin을 함께 내려주면(additive) 'server'(출처 불명, 배지 숨김)
+  // 특례 대신 실제 출처를 쓴다 — 구서버는 필드가 없어 기존 동작(숨김) 그대로다(감사 C2c).
+  applyTranslations(data, translated, fresh.translationOrigin
+    ? { kind: fresh.translationOrigin, wikiName: fresh.translationAttribution?.name }
+    : { kind: 'server' });
   // 세션 캐시에도 남긴다(V2) — 서버가 이미 갖고 있던 레이어라도 캐시에 없으면 언어를
   // 다시 바꿨다 되돌아올 때 또 서버를 두드린다. setTranslationCache 문서 참고.
   setTranslationCache(translationKey(videoId, lang, data.lines.map(l => l.text)), translated, { kind: 'server' });
@@ -1382,6 +1842,23 @@ async function tryServerLayerRefresh(
  */
 let translationLoadSeq = 0;
 
+/** 서버 /api/translate의 거절 조건과 **같은 값**(translate.py:152). 두 곳이 갈리면
+ *  클라이언트가 통과시킨 요청이 서버에서 400으로 죽으므로, 값을 바꿀 땐 함께 바꾼다. */
+const TRANSLATE_MAX_LINES = 400;
+const TRANSLATE_MAX_CHARS = 15000;
+const TRANSLATE_MAX_LINE_CHARS = 1000;
+
+/** 번역 상한 초과 여부 — 초과한 첫 기준과 그 한도를 돌려준다(사용자에게 숫자를 보여 준다) */
+function translationLimitExceeded(lines: string[]): { kind: 'lines' | 'chars' | 'line'; limit: number } | null {
+  if (lines.length > TRANSLATE_MAX_LINES) return { kind: 'lines', limit: TRANSLATE_MAX_LINES };
+  const total = lines.reduce((n, ln) => n + ln.length, 0);
+  if (total > TRANSLATE_MAX_CHARS) return { kind: 'chars', limit: TRANSLATE_MAX_CHARS };
+  if (lines.some(ln => ln.length > TRANSLATE_MAX_LINE_CHARS)) {
+    return { kind: 'line', limit: TRANSLATE_MAX_LINE_CHARS };
+  }
+  return null;
+}
+
 async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promise<void> {
   const data = currentData;
   const videoId = currentVideoId;
@@ -1393,6 +1870,15 @@ async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promis
     || currentVideoId !== videoId || !settings.showTranslation;
   const srcLines = data.lines.map(l => l.text);
   const lang = settings.translationLanguage;
+  // 서버 번역 상한을 **미리** 잰다(/api/translate:152와 같은 값). 생성 상한은 500줄인데
+  // 번역 상한은 400줄이라 401~500줄 곡은 싱크만 만들어지고 번역·발음이 영영 비는데,
+  // 실패 사유가 일반 문구로 뭉개져 원인을 알 수 없었고 **영상을 열 때마다 같은 400을
+  // 다시 쐈다**(캐시에 아무것도 안 남으므로). 여기서 끊으면 헛호출도 사라진다.
+  const tooLong = translationLimitExceeded(srcLines);
+  if (tooLong) {
+    broadcast('setTranslationStatus', t('content.translation.tooLong', [String(tooLong.limit)]));
+    return;
+  }
   // 대각선(J3) — 곡 원문 스크립트가 내 번역 언어와 같으면 서버는 번역을 만들지 않는다
   // (expectsPronunciation의 `script === lang` 분기와 같은 사실을 여기서도 재사용할 뿐,
   // 그 매트릭스 자체는 건드리지 않는다). 이전에는 이 사실을 모른 채 매 로딩마다 요청을
@@ -1405,7 +1891,7 @@ async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promis
   // clearTranslations가 이미 setTranslationStatus(null)로 이전 상태를 지운 뒤이므로
   // 여기서 새로 세팅해도 이전 문구와 겹치지 않는다.
   if (detectSongScript(srcLines) === lang) {
-    overlay?.setTranslationStatus(t('content.translation.originalOnly'));
+    broadcast('setTranslationStatus', t('content.translation.originalOnly'));
     return;
   }
   // 위키 사람 번역(내 번역 언어와 같을 때만)이 있으면 발동하지 않는다
@@ -1457,8 +1943,8 @@ async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promis
   // return하든 pending은 반드시 꺼진다 — 예전엔 이 지점에서만 세팅·해제가 붙어 있어도
   // 문제가 없었지만, 앞으로 당기면서 "성공해서 조기 반환"하는 경로들도 전부 스스로
   // 해제해야 하므로 흩어놓지 않고 한 곳에 모았다.
-  overlay?.setTranslationStatus(t('content.translation.generating'));
-  overlay?.setLangPending(lang);
+  broadcast('setTranslationStatus', t('content.translation.generating'));
+  broadcast('setLangPending', lang);
   try {
     // 언어 전환 직후라면 로컬 체인보다 먼저 서버 레이어부터 다시 확인한다(감사 #9) —
     // 이미 싱크가 있는 곡이 여기까지 내려왔다는 것은 지금 손에 든 data가 이 언어로 조회된
@@ -1485,7 +1971,7 @@ async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promis
 
     // 번역은 서버 전용이다 — 고장난 걸 알면서 "생성 중…"을 띄우는 건 작동하는 척하는 것
     if (serverKnownBad(serverStatus)) {
-      overlay?.setTranslationStatus(t('content.translation.unavailable', [statusLine(serverStatus)]));
+      broadcast('setTranslationStatus', t('content.translation.unavailable', [statusLine(serverStatus)]));
       return;
     }
     const lines = await requestTranslation(videoId, srcLines);
@@ -1497,7 +1983,7 @@ async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promis
 
     if (!lines || lines.length === 0) {
       // requestTranslation이 실패 사유를 이미 상태에 반영했다 — 그 사유를 그대로 보여 준다
-      overlay?.setTranslationStatus(serverKnownBad(serverStatus)
+      broadcast('setTranslationStatus', serverKnownBad(serverStatus)
         ? t('content.translation.failedWithStatus', [statusLine(serverStatus)])
         : t('content.translation.failedNoResult'));
       return;
@@ -1506,7 +1992,7 @@ async function loadTranslations(opts: { languageSwitch?: boolean } = {}): Promis
   } finally {
     // 제목바 언어 칩 로딩 표시 해제 — 위 어느 단계에서 return하든(성공·실패·곡 전환)
     // 반드시 여기서 한 번 꺼진다.
-    overlay?.setLangPending(null);
+    broadcast('setLangPending', null);
   }
 }
 
@@ -1530,7 +2016,7 @@ function applyTranslations(data: LyricsData, translated: TranslatedLine[], origi
   // 서버 응답이 줄을 합치거나 빠뜨리는 경우는 지문으로 걸러지지 않으므로 여기서 확인한다.
   // 어긋난 번역을 붙이는 것보다 안 붙이고 사유를 말하는 편이 낫다.
   if (translated.length !== data.lines.length) {
-    overlay?.setTranslationStatus(
+    broadcast('setTranslationStatus',
       t('content.translation.lineCountMismatch', [String(translated.length), String(data.lines.length)]),
     );
     return;
@@ -1549,14 +2035,19 @@ function applyTranslations(data: LyricsData, translated: TranslatedLine[], origi
   // availableLangsForChip을 거쳐야 곡 자신의 언어 칩이 계속 "보유" 스타일을 유지한다 —
   // 여기서 data.availableLangs를 그대로 넘기면 방금 병합한 목록으로 덮어써서 잃는다.
   if (currentData === data) {
-    overlay?.setAvailableLangs(availableLangsForChip(data));
+    broadcast('setAvailableLangs', availableLangsForChip(data));
     // 번역 출처 병기(U2) — 이 배치가 어디서 왔는지 배지에 반영한다. origin이 없으면
     // (tryServerLayerRefresh 등 출처를 확정 못하는 경우) 숨긴다.
-    overlay?.setTranslationSource(origin && origin.kind !== 'server' ? origin.kind : null, origin?.wikiName);
+    broadcast('setTranslationSource', origin && origin.kind !== 'server' ? origin.kind : null, origin?.wikiName);
   }
   // 이 배치의 발음을 실을 스크립트 — 매 줄 동일하므로 루프 밖에서 한 번만 정한다.
   const pronScript = resolveScript(settings);
-  let pronApplied = false;
+  // ipa는 LLM이 만들 수 있는 표기가 아니다(서버 en 정렬 스택의 부산물일 뿐 — lib/lang.ts
+  // IPA_FALLBACK_ORDER 주석 참고). 사용자가 ipa를 선택했어도 이 translate 응답을 pron.ipa에
+  // 그대로 적으면 LLM이 만든 한글·가나류 근사를 IPA로 잘못 라벨링하게 된다. auto 판정
+  // 스크립트로 대신 저장한다 — 표시는 resolvedPronunciation의 ipa 폴백이 그 값을 자동으로
+  // 대신 보여주므로 사용자에게는 차이가 없다.
+  const writeScript = pronScript === 'ipa' ? resolveScript({ ...settings, pronunciationScript: 'auto' }) : pronScript;
   data.lines.forEach((line, i) => {
     const t = translated[i]?.translation?.trim();
     // '[NO API KEY]'는 구버전 서버의 키 미설정 플레이스홀더 — 번역으로 표시하지 않는다.
@@ -1569,30 +2060,28 @@ function applyTranslations(data: LyricsData, translated: TranslatedLine[], origi
     }
     // 발음표기 — translate 응답의 legacy pronunciation은 요청 시점 target_lang에 따라
     // 이미 한글이 아닐 수 있다(로마자·가나, 번역 API의 결정론 매트릭스 — 감사 E1).
-    // pronScript==='hangul'일 때만 레거시 한글 전용 슬롯에 쓰고, 그 밖은 pron[script]
+    // writeScript==='hangul'일 때만 레거시 한글 전용 슬롯에 쓰고, 그 밖은 pron[script]
     // 딕셔너리에 표시 문자열만 싣는다(pronSegsByScript는 안 건드린다 — 음절 타이밍은
     // 서버가 세그로 줄 때만 정본이고, 여기서 만들 수 있는 게 아니다). 사람이 단 발음이
     // 있으면(보카로 위키 등) 어느 쪽이든 건드리지 않는다.
     const p = translated[i]?.pronunciation?.trim();
     if (p) {
-      if (pronScript === 'hangul') {
-        if (!line.pronunciation) { line.pronunciation = p; pronApplied = true; }
-      } else if (!line.pron?.[pronScript]) {
-        line.pron = { ...line.pron, [pronScript]: p };
-        pronApplied = true;
+      if (writeScript === 'hangul') {
+        if (!line.pronunciation) line.pronunciation = p;
+      } else if (!line.pron?.[writeScript]) {
+        line.pron = { ...line.pron, [writeScript]: p };
       }
     }
   });
   // 서버가 복구하지 못한 줄(응답 잘림 등)은 failed로 온다. 조용히 비워 두면 사용자는
   // 왜 그 줄만 번역이 없는지 알 수 없다 — 완료 알림까지 기다리지 않고 여기서 바로 말한다.
   const failed = translated.filter(tl => tl?.failed).length;
-  overlay?.setTranslationStatus(
+  broadcast('setTranslationStatus',
     failed > 0 ? t('content.translation.partialFailure', [String(failed)]) : null,
   );
-  overlay?.refreshTranslations();
-  // 발음이 새로 붙었으면 PiP 내부 변환 캐시(setLines 시점 복사)도 다시 채운다
-  if (pronApplied && currentData === data) pip.setLines(data.lines);
-  pip.refresh();
+  // 늦게 붙은 번역·발음을 두 창에 함께 반영한다 — 레인의 사전 계산본까지 이 안에서
+  // 다시 만들어지므로(overlay.refreshTranslations) 노트에 붙는 음절도 따라온다
+  broadcast('refreshTranslations');
 }
 
 /**
@@ -1787,13 +2276,20 @@ function safeHangulPronunciation(raw: string | undefined): string | undefined {
 
 /** LLM 번역·한글 독음을 받아 line_meta로 변환 — 캐시 우선, 실패 시 undefined(원문 정렬 폴백).
  *  LLM이 echo한 original 대신 넘겨받은 원문으로 인덱스 매핑한다 (서버 병합은 텍스트 매칭이라
- *  원문이 정확해야 하고, 서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치). */
+ *  원문이 정확해야 하고, 서버 번역도 같은 규칙으로 줄을 나누므로 인덱스가 일치).
+ *
+ *  반환에 lang을 함께 싣는다(감사 C6) — 이 함수 내부의 실제 번역은 **진입 시점**의
+ *  settings.translationLanguage로 만들어진다. requestTranslation의 await 도중 사용자가
+ *  언어를 또 바꾸면, 호출부가 그 뒤에 settings.translationLanguage를 다시 읽어
+ *  lineMetaLang으로 찍는 것은(생성 경로) 방금 만든 meta의 실제 언어와 어긋나고, 호출
+ *  전에 미리 읽어 둔 값을 쓰는 것도(재생성 경로) 같은 이유로 어긋날 수 있다 — 어느
+ *  방향이든 호출부가 이 반환값의 lang을 그대로 도장으로 써야 내용과 표기가 일치한다. */
 async function fetchLlmLineMeta(
   videoId: string, srcLines: string[],
-): Promise<{ text: string; pronunciation?: string; translation?: string }[] | undefined> {
+): Promise<{ meta: LineMeta[]; lang: string } | undefined> {
   const lang = settings.translationLanguage;
   try {
-    overlay?.setTranslationStatus(t('content.translation.aiGenerating'));
+    broadcast('setTranslationStatus', t('content.translation.aiGenerating'));
     let translated = translationCacheGet(translationKey(videoId, lang, srcLines));
     // 발음이 빠진 캐시(구버전 응답 등)는 다시 받아온다 — isUsablePronunciation으로
     // 검증한다(감사 E3와 같은 종류: 레거시 flat 필드라도 hangul 스크립트인데 한글이
@@ -1806,16 +2302,17 @@ async function fetchLlmLineMeta(
       translated = await requestTranslation(videoId, srcLines);
     }
     if (translated && translated.length > 0) {
-      return srcLines
+      const meta = srcLines
         .map((t, i) => ({
           text: t,
           pronunciation: safeHangulPronunciation(translated![i]?.pronunciation?.trim() || undefined),
           translation: translated![i]?.translation?.trim() || undefined,
         }))
         .filter(m => m.pronunciation || m.translation);
+      return { meta, lang };
     }
   } catch { /* 번역 실패 — 메타 없이 진행 */ } finally {
-    if (videoId === currentVideoId) overlay?.setTranslationStatus(null);
+    if (videoId === currentVideoId) broadcast('setTranslationStatus', null);
   }
   return undefined;
 }
@@ -1826,14 +2323,18 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
   const seq = ++searchSeq;
   const panel = ensureOverlay();
   panel.setVisible(true);
-  panel.showLoading();
+  // 두 창이 같은 검색 상태를 따라간다 (예전에는 PiP만 반쪽 로딩 화면을 따로 그렸다)
+  broadcast('showLoading');
   // 가사 자체가 아직 없는 상태(검색 중) — 이전 곡의 언어 칩이 그대로 남아 있으면
   // 로딩 중에 엉뚱한 언어 목록이 보인다. applyLyricsData가 새 데이터로 다시 채울 때까지
   // 명시적으로 숨긴다(availableLangsForChip(null)과 같은 값이지만 여기는 data가 아직
   // 없는 로딩 구간이라 그 함수를 거치지 않고 직접 부른다).
-  panel.setAvailableLangs(null);
-  if (pip.isOpen()) pip.showPanelLoading(); // PiP도 같은 검색 상태를 따라간다
+  broadcast('setAvailableLangs', null);
   updateGenChip(); // 이 영상(또는 다른 영상)의 전사 진행 칩은 검색과 무관하게 유지
+  // 이 영상의 잡이 추적 목록에 있으면 폴링을 (다시) 켠다 — 남의 탭이 시작한 잡은 폴링
+  // 대상이 아니라 타이머가 꺼져 있을 수 있는데, 그 영상으로 이동한 지금은 이 탭이 결과를
+  // 화면에 반영해야 하는 자리다(pollableJobs 참고)
+  if (generatingJobs.has(videoId)) ensurePolling();
   // 알림 칩은 영상별 사건이다 — **영상이 바뀔 때만** 지난 알림을 지우고, 이 영상의 검증이
   // 아직 돌고 있으면 배지를 되살린다(돌아왔을 때도 진행 중임을 알 수 있게).
   // 같은 영상의 재조회에서 지우면 안 된다: 자동 연결 성공은 "알림 → 재조회" 순서라
@@ -1859,6 +2360,11 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
   }
   if (seq !== searchSeq || videoId !== currentVideoId) return;
 
+  // 곡 정보가 확정된 시점의 제목으로 추종 기준을 다시 새긴다 — beginFollowing 시점에는
+  // DOM이 아직 이전 영상의 것일 수 있어(staleTraces 주석), 그 낡은 값이 기준으로 남으면
+  // **다음** 전환의 신선도 판정이 어긋난다.
+  followedPageTitle = document.title;
+
   // 곡 인식 시점엔 video 메타데이터가 아직 없을 수 있음 — duration 없이 LRCLIB에
   // 조회하면 길이가 다른 버전이 매칭될 수 있으므로 한 번 더 읽는다
   if (song && song.duration === 0) {
@@ -1870,15 +2376,12 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     // 곡 인식 실패도 "이 영상엔 가사가 없다"와 같은 상태 — 이전 곡의 가사/노트/오프셋/PiP가
     // 남지 않도록 성공 경로와 같은 리셋(applyLyricsData(null))을 태운다
     currentSong = null;
-    panel.setSong(null);
+    broadcast('setSong', null);
     applyLyricsData(null);
     return;
   }
   currentSong = song;
-  panel.setSong(song);
-  // PiP 제목도 함께 갱신한다 — 지금까지 PiP는 **창을 열 때 한 번만** 제목을 받아서, 곡을
-  // 넘겨도 이전 제목이 남았다(열던 순간 광고가 돌고 있었다면 광고 제목이 계속 남는다)
-  if (pip.isOpen()) pip.setSong(song.title, song.artist ?? '');
+  broadcast('setSong', song);
 
   // 소스 우선순위: 서버 싱크는 항상 최우선, 그 다음은 설정에 따라
   // 보카로 위키(발음·사람 번역) → LRCLIB 순서 또는 그 반대
@@ -1898,8 +2401,7 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     // (currentSong은 인식에 성공한 새 곡이므로 유지)
     applyLyricsData(null);
     const note = failureNote(lookupFailure);
-    panel.showError(t('content.error.lyricsLoadFailed'), note);
-    if (pip.isOpen()) pip.showPanelError(t('content.error.lyricsLoadFailed'), note);
+    broadcast('showError', t('content.error.lyricsLoadFailed'), note);
     return;
   }
   // 가사 로딩 성공(U1) — lookupFailure가 없다는 것은 fetchLyricsChain의 lookupSync
@@ -1923,8 +2425,9 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     data = lr.data ?? null;
   }
   // 서버 싱크(위키 가사로 생성된 것)에 위키의 발음/사람 번역을 텍스트 매칭으로 병합
+  let vocaroTranslationMerged = false;
   if (data && data.source === 'everyric' && data.synced) {
-    await enrichFromVocaro(videoId, data);
+    vocaroTranslationMerged = await enrichFromVocaro(videoId, data);
     if (seq !== searchSeq || videoId !== currentVideoId) return;
   }
   // 초기화 직후라면 방금 지운 가사를 자막보다 **먼저** 되돌린다 — 정확한 원문이 이미
@@ -1936,6 +2439,13 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     if (seq !== searchSeq || videoId !== currentVideoId) return;
   }
   applyLyricsData(data);
+  // enrichFromVocaro가 번역을 병합했으면 배지에 반영 — applyLyricsData **뒤**여야 한다
+  // (그 안의 showSyncedLyrics/showPlainLyrics가 resetBody로 배지를 지운 뒤라야 남는다,
+  // 위 enrichFromVocaro 문서 참고). currentData===data 확인은 이 사이 await이 없어
+  // 사실상 항상 참이지만, 다른 호출부와 같은 방어를 맞춘다.
+  if (vocaroTranslationMerged && currentData === data) {
+    overlay?.setTranslationSource('wiki', t('overlay.source.vocaro'));
+  }
 
   // 서버 싱크가 없는 영상(=조회가 found:false였던 경우)에서만 같은 곡 후보를 물어본다.
   // 이미 싱크가 있는 다수 케이스에는 요청이 아예 나가지 않아 지연이 없다. 화면을 먼저
@@ -1982,6 +2492,7 @@ function adoptVocaroResult(videoId: string, vocaro: VocaroResult): LyricsData {
     synced: false,
     lines,
     plainText: lines.map(l => l.text).join('\n'),
+    matchedTitle: vocaro.pageTitle,
     humanTranslated: showTranslation ? lines.some(l => l.translation) : undefined,
     translationLang: showTranslation ? 'ko' : undefined,
   };
@@ -2034,6 +2545,7 @@ function adoptSourceResult(result: SourceResult): LyricsData {
     synced: false,
     lines,
     plainText: lines.map(l => l.text).join('\n'),
+    matchedTitle: result.pageTitle,
     attribution: attributionFromSource(result),
     humanTranslated: showTranslation ? lines.some(l => l.translation) : undefined,
     translationLang: showTranslation ? result.translationLang : undefined,
@@ -2060,7 +2572,9 @@ async function lookupWikiSources(
     if (src === 'vocaro') {
       const vocaro = await sendToBackground<VocaroResult | null>({
         type: 'VOCARO_LOOKUP',
-        payload: { title },
+        // hint: 검색어가 아니라 영상의 정리 전 제목 — 다중 버전 페이지의 표 선택은
+        // "이 영상이 어느 버전인가"의 문제라 사용자가 좁힌 검색어와 무관하다
+        payload: { title, hint: currentSong?.rawTitle },
       });
       if (seq !== searchSeq || videoId !== currentVideoId) return { stale: true };
       if (vocaro.data && vocaro.data.lines.length > 0) {
@@ -2096,6 +2610,71 @@ async function pruneVocaroRefs(): Promise<void> {
     refs.sort((a, b) => a.t - b.t);
     await chrome.storage.local.remove(refs.slice(0, refs.length - VOCARO_REF_MAX).map(r => r.key));
   } catch { /* 정리 실패는 무시 */ }
+}
+
+// ── 곡별 저신뢰 경고 억제 (#36) ─────────────────────────────────────
+// "이 곡에서 다시 보지 않기"로 끈 영상은 storage에 `warnDismiss:<videoId>`로 남는다.
+// 매 곡마다 storage를 왕복하면 applyLyricsData(동기 함수, 여러 곳에서 호출됨)가 async가
+// 돼야 해 파급이 크므로, 세션 시작 시 한 번 통째로 읽어 메모리 Set에 캐시한다(다른 탭에서의
+// 변경은 이 탭이 새로고침되기 전까지 반영되지 않는다 — activeJobs 같은 실시간 동기화가
+// 필요할 만큼 자주 바뀌는 상태가 아니라 감내할 수 있는 트레이드오프다).
+const WARN_DISMISS_PREFIX = 'warnDismiss:';
+const WARN_DISMISS_MAX = 200;
+const warnDismissedVideos = new Set<string>();
+
+async function loadWarnDismissed(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    for (const k of Object.keys(all)) {
+      if (k.startsWith(WARN_DISMISS_PREFIX)) warnDismissedVideos.add(k.slice(WARN_DISMISS_PREFIX.length));
+    }
+  } catch { /* 조회 실패 — 이번 세션은 억제 없이 진행(경고가 다시 뜨는 것뿐, 안전한 방향) */ }
+}
+
+/** vocaroRef와 같은 LRU 정리 패턴 — 시청 이력만큼 무한히 쌓이지 않게 오래된 것부터 정리 */
+async function pruneWarnDismissed(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const refs = Object.entries(all)
+      .filter(([k]) => k.startsWith(WARN_DISMISS_PREFIX))
+      .map(([k, v]) => ({
+        key: k,
+        t: typeof v === 'object' && v !== null ? ((v as { t?: number }).t ?? 0) : 0,
+      }));
+    if (refs.length <= WARN_DISMISS_MAX) return;
+    refs.sort((a, b) => a.t - b.t);
+    const doomed = refs.slice(0, refs.length - WARN_DISMISS_MAX);
+    await chrome.storage.local.remove(doomed.map(r => r.key));
+    for (const r of doomed) warnDismissedVideos.delete(r.key.slice(WARN_DISMISS_PREFIX.length));
+  } catch { /* 정리 실패는 무시 */ }
+}
+
+/** 경고 바의 "이 곡에서 다시 보지 않기" — 메모리에 즉시 반영 후 저장(먼저 반영해야
+ *  저장이 늦거나 실패해도 이번 세션 안에서는 확실히 억제된다) */
+async function dismissWarnForVideo(videoId: string): Promise<void> {
+  warnDismissedVideos.add(videoId);
+  broadcast('setQualityWarning', null);
+  try {
+    await chrome.storage.local.set({ [`${WARN_DISMISS_PREFIX}${videoId}`]: { t: Date.now() } });
+    void pruneWarnDismissed();
+  } catch { /* 저장 실패 — 메모리 억제는 이미 반영됐으니 이번 세션은 정상 동작한다 */ }
+}
+
+/** 설정 시트 ♻️ 범주 — 곡별로 끈 억제를 전부 되살린다 */
+async function resetAllWarnDismissed(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const keys = Object.keys(all).filter(k => k.startsWith(WARN_DISMISS_PREFIX));
+    if (keys.length > 0) await chrome.storage.local.remove(keys);
+  } catch { /* 삭제 실패는 무시 — 메모리는 아래에서 어차피 비운다 */ }
+  warnDismissedVideos.clear();
+  // 지금 보던 곡이 억제 대상이었다면 즉시 되살린다
+  if (
+    settings.lowConfWarning && currentData?.synced && currentData.source === 'everyric'
+    && currentData.qualityScore != null && currentData.qualityScore < 0.001
+  ) {
+    broadcast('setQualityWarning', currentData.qualityScore);
+  }
 }
 
 /**
@@ -2140,7 +2719,8 @@ async function handleCandidateSearch(query: { title: string; artist: string }): 
     );
     return;
   }
-  ensureOverlay().showSearchResults(res.data);
+  ensureOverlay();
+  broadcast('showSearchResults', res.data);
 }
 
 /** 후보 선택: 해당 소스에서 가사를 받아 현재 가사를 교체한다 (잘못 가져온 가사 롤백 경로) */
@@ -2153,7 +2733,10 @@ async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
   // 이미 막히지만, 갈아탄 원문의 캐시를 들고 있을 이유가 없다(다시 쓸 일이 없는 항목이
   // LRU 자리만 차지한다). 후보 교체는 "이 가사가 아니었다"는 사용자의 선언이다.
   for (const key of [...translationCache.keys()]) {
-    if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+    if (key.startsWith(`${videoId}:`)) {
+      translationCache.delete(key);
+      translationOriginCache.delete(key);
+    }
   }
   updateGenChip();
   engine.stop();
@@ -2165,7 +2748,7 @@ async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
   if (candidate.source === 'vocaro') {
     const page = await sendToBackground<VocaroResult | null>({
       type: 'VOCARO_PAGE',
-      payload: { slug: candidate.slug },
+      payload: { slug: candidate.slug, hint: currentSong?.rawTitle },
     });
     if (seq !== searchSeq || videoId !== currentVideoId) return;
     if (page.data && page.data.lines.length > 0) data = adoptVocaroResult(videoId, page.data);
@@ -2209,117 +2792,287 @@ function prefillTranslationCacheFromServer(data: LyricsData): void {
   for (const [lang, arr] of Object.entries(data.translationsByLang)) {
     if (arr.length !== data.lines.length) continue; // 인덱스 정합 불확실 — 안전하게 건너뜀
     if (!arr.some(Boolean)) continue; // 이 언어는 사실상 빈 레이어 — 캐시할 게 없다
+    const key = translationKey(videoId, lang, srcLines);
+    // 이미 이 키로 사람 번역(자막·위키)이 캐시돼 있으면 이 벌크 선채움(항상 origin=
+    // 'server', 출처 불명 취급)으로 덮지 않는다 — 세션 안에서 이미 확보한 더 정확한
+    // 출처 표기를 잃을 이유가 없다(감사 C8b).
+    const existingOrigin = translationOriginCache.get(key)?.kind;
+    if (existingOrigin === 'wiki' || existingOrigin === 'caption') continue;
     const translated = data.lines.map((line, i) => ({ original: line.text, translation: arr[i] ?? '' }));
-    setTranslationCache(translationKey(videoId, lang, srcLines), translated, { kind: 'server' });
+    setTranslationCache(key, translated, { kind: 'server' });
     if (!data.availableLangs?.includes(lang)) {
       data.availableLangs = [...(data.availableLangs ?? []), lang];
     }
   }
 }
 
+/** 다음 영상 정보 모듈 — 유튜브 다음 버튼 툴팁에서 제목을 읽는다(재생목록·자동재생 공용).
+ *  DOM 조회는 5초 스로틀 — onTick마다 querySelector를 돌릴 만큼 자주 바뀌는 값이 아니다. */
+let lastNextUpPush = 0;
+function refreshNextUp(force = false): void {
+  // modPlaylist도 이 데이터를 쓴다 — 재생목록이 없는 단일 영상 페이지에서 부착 패널이
+  // "다음 영상" 카드로 대체 표시한다(overlay.renderPlaylistPanel). modNextUp이 꺼져
+  // 있어도 modPlaylist만으로 스크랩은 계속 돌아야 그 대체 카드가 채워진다.
+  if (!settings.modNextUp && !settings.modPlaylist) {
+    if (force) {
+      broadcast('setNextUp', null);
+    }
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - lastNextUpPush < 5000) return;
+  lastNextUpPush = now;
+  const nextEl = document.querySelector('a.ytp-next-button');
+  const title = nextEl?.getAttribute('data-tooltip-text') ?? null;
+  // videoId가 있으면 카드가 썸네일까지 그린다(없으면 제목만 — 하위호환 문자열 API 유지).
+  // 유튜브가 next 버튼을 <a href>로 두지 않는 배치도 있어 못 뽑아도 정상 동작해야 한다.
+  const nextVideoId = nextEl?.getAttribute('href')?.match(/[?&]v=([\w-]{11})/)?.[1];
+  broadcast('setNextUp', title ? { title, videoId: nextVideoId } : null);
+  // PiP 알림은 modNextUp 전용으로 남긴다 — modPlaylist는 메인 패널 부착 패널만의
+  // 기능이라(운영자 지시 범위) PiP에 새 표시를 추가하지 않는다.
+}
+
+/**
+ * 다음 영상 카드 클릭(재생목록 부착 패널의 폴백 카드) — 눌러도 아무 일도 안 일어난다는
+ * 실사용 제보. videoId는 애초에 이 next 버튼의 href에서 뽑은 값이라(refreshNextUp),
+ * 버튼이 아직 살아 있으면 그 버튼을 실제로 클릭하는 것이 곧 "그 영상으로 이동"이다
+ * (onPlaylistSelect가 재생목록 행의 실제 링크를 클릭하는 것과 같은 원칙 — 유튜브 자신의
+ * 클릭 핸들러가 SPA 내비게이션을 처리하므로 새로고침 없이 넘어간다).
+ *
+ * 5초 스로틀 창 사이 버튼이 사라졌거나 가리키는 영상이 바뀌었을 수 있다 — videoId를
+ * 알면 카드가 보여준 그 영상으로 직접 이동해 "보여준 것과 다른 곳으로 간다"를 막는다
+ * (표준 전체 내비게이션 — 유튜브 내부 SPA 라우터 구현에 기대지 않는 확실한 폴백).
+ */
+function handleNextUpClick(videoId?: string): void {
+  if (playNext()) return;
+  if (videoId) location.assign(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`);
+}
+
+/**
+ * 재생목록 부착 패널 모듈(설정 modPlaylist) — 유튜브 재생목록 패널 DOM(lib/yt-player.ts)에서
+ * 항목을 읽어 채운다. 60초 간격이면 충분하다(운영자 지시 — 5fps 감사 규약처럼 고빈도
+ * 타이머를 새로 만들지 않는다) + 영상 전환 지점(beginFollowing)에서 1회.
+ *
+ * exists 배지는 여기서 바로 채우지 않는다 — 서버 왕복이 있어 목록을 우선 그린 뒤
+ * refreshPlaylistExists가 뒤늦게 배지만 병합해 다시 밀어넣는다(체감상 목록이 먼저
+ * 뜨고 점이 뒤따라 켜지는 편이, 배지를 기다리느라 목록 자체가 늦게 뜨는 것보다 낫다).
+ */
+let lastPlaylistPush = 0;
+const PLAYLIST_REFRESH_MS = 60000;
+/** 마지막으로 스크랩한 재생목록 — exists 병합이 DOM을 다시 읽지 않고 이 사본 위에 적용한다
+ *  (재조회 사이 목록이 바뀌면 병합 대상이 어긋날 수 있어, 응답이 낡았으면 seq로 버린다) */
+let lastPlaylistItems: { title: string; channel?: string; videoId?: string; index: number; current: boolean; syncExists?: boolean }[] = [];
+let playlistExistsSeq = 0;
+/** refreshPlaylist가 통과할 때마다 증가 — 아래 빈손 재시도가 그 사이 성공한 최신
+ *  스크랩 결과를 뒤늦게 덮지 못하게 하는 펜스(모든 refreshPlaylist 호출 경로 공유) */
+let playlistRefreshSeq = 0;
+/** URL이 재생목록(list=)인데 스크랩이 빈 손일 때 재시도할 지연(ms) — 백오프 */
+const PLAYLIST_EMPTY_RETRY_DELAYS_MS = [500, 1000, 2000, 4000];
+
+/** 지금 주소가 재생목록 컨텍스트(list= 파라미터)인가 — 스크랩이 빈 손이어도 이 경우엔
+ *  "재생목록 없음"을 바로 확정하지 않는다(아래 refreshPlaylist 참고) */
+function isPlaylistUrl(): boolean {
+  try {
+    return new URL(location.href).searchParams.has('list');
+  } catch {
+    return false;
+  }
+}
+
+function applyPlaylistEntries(entries: PlaylistEntry[]): void {
+  lastPlaylistItems = entries.map(e => ({
+    title: e.title,
+    channel: e.byline || undefined,
+    videoId: e.videoId ?? undefined,
+    index: e.index,
+    current: e.selected,
+  }));
+  broadcast('setPlaylist', lastPlaylistItems);
+  const ids = [...new Set(lastPlaylistItems.map(it => it.videoId).filter((v): v is string => Boolean(v)))];
+  if (ids.length > 0) void refreshPlaylistExists(ids);
+}
+
+function refreshPlaylist(force = false): void {
+  if (!settings.modPlaylist) {
+    if (force && lastPlaylistItems.length > 0) {
+      broadcast('setPlaylist', null);
+      lastPlaylistItems = [];
+    }
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - lastPlaylistPush < PLAYLIST_REFRESH_MS) return;
+  lastPlaylistPush = now;
+  const seq = ++playlistRefreshSeq;
+  const entries = getPlaylist();
+  if (entries.length > 0 || !isPlaylistUrl()) {
+    applyPlaylistEntries(entries);
+    return;
+  }
+  // URL은 재생목록(list=)인데 스크랩은 빈 손이다 — SPA 내비 직후 유튜브 재생목록 패널
+  // DOM이 아직 안 붙었을 수 있다(실측: 재생목록 링크로 들어와도 "재생목록에 속하지
+  // 않아요"가 뜨는 멤버십 오탐). 빈 결과를 바로 확정 짓지 않고 백오프로 재시도한다 —
+  // 재시도 중엔 화면을 안 건드려(이전 상태 유지) 오탐 문구가 잠깐이라도 뜨지 않게
+  // 한다. 마지막 재시도까지 실패해야만 빈 목록으로 정착한다.
+  PLAYLIST_EMPTY_RETRY_DELAYS_MS.forEach((delay, i) => {
+    window.setTimeout(() => {
+      // 그 사이 다른 refreshPlaylist 호출(성공이든 또 다른 빈손이든)이 있었으면 이
+      // 재시도는 낡았다 — 지금 상태를 덮지 않고 조용히 버린다
+      if (seq !== playlistRefreshSeq || !settings.modPlaylist) return;
+      const retried = getPlaylist();
+      const isLast = i === PLAYLIST_EMPTY_RETRY_DELAYS_MS.length - 1;
+      if (retried.length > 0 || isLast) applyPlaylistEntries(retried);
+    }, delay);
+  });
+}
+
+/** 재생목록 항목들의 서버 싱크 존재 여부를 배치로 물어 배지만 병합한다 */
+async function refreshPlaylistExists(videoIds: string[]): Promise<void> {
+  const seq = ++playlistExistsSeq;
+  const res = await sendToBackground<Record<string, boolean>>({
+    type: 'SYNC_EXISTS', payload: { videoIds },
+  });
+  // 그 사이 목록이 다시 스크랩됐거나(seq 낡음) 모듈이 꺼졌으면 조용히 버린다
+  if (seq !== playlistExistsSeq || !res.data || !settings.modPlaylist) return;
+  const exists = res.data;
+  lastPlaylistItems = lastPlaylistItems.map(it => ({
+    ...it, syncExists: it.videoId ? exists[it.videoId] : undefined,
+  }));
+  broadcast('setPlaylist', lastPlaylistItems);
+}
+
+/**
+ * **지금 상태를 패널에 그린다 — 그리기만 하고 아무 상태도 바꾸지 않는다.**
+ *
+ * applyLyricsData(상태 전이 + 엔진 재시작 + 번역 요청)에서 그리기만 떼어낸 함수다.
+ * 떼어낸 이유는 인스턴스가 둘이기 때문이다: PiP를 열면 «지금 화면»을 그대로 옮겨
+ * 그려야 하는데, 그것을 위해 applyLyricsData를 다시 태우면 엔진 정지·재시작과 번역
+ * 재요청까지 딸려 온다(창 하나 여는 일에 파이프라인 전체를 다시 돌리는 셈이다).
+ *
+ * 인자로 대상 목록을 받는다 — 곡이 바뀔 때는 panels()(둘 다), PiP를 새로 열 때는
+ * 그 인스턴스 하나. 화면을 만드는 코드는 이 한 곳뿐이라 두 경로가 갈라질 수 없다.
+ */
+function paintPanels(targets: LyricsOverlay[], data: LyricsData | null): void {
+  if (targets.length === 0) return;
+  // 자동 매칭 표시줄 — 위키가 고른 곡 제목(매칭 단계에서는 항상), 또는 **자동 조달
+  // 가사로 생성된 서버 싱크가 품질 붕괴 상태일 때만** 출처명. 후자가 없으면 잘못
+  // 생성된 싱크(자막 오채택 등)에서 "이 가사가 아니에요"에 닿을 길이 없다(실사용
+  // 질문으로 발견). 단 자동 조달의 다수는 정답이므로 멀쩡한 싱크에까지 매번 띄우면
+  // 소음이다(운영자 지적) — 저신뢰 경고와 같은 임계(<0.001)로만 연다. 출처 자체는
+  // 푸터에 항상 병기되므로 정보 손실은 없다. 수동 붙여넣기 생성은 attribution이 없어
+  // 기존처럼 숨는다.
+  const qualityCollapsed = data?.qualityScore != null && data.qualityScore < 0.001;
+  const matchedLabel = data?.matchedTitle
+    ?? (data?.source === 'everyric' && data.attribution?.name && qualityCollapsed
+      ? data.attribution.name : null);
+  // 곡 전체 정렬 신뢰도가 매우 낮으면 경고 바 (설정으로 끌 수 있음, 곡별 억제는 warnDismissedVideos)
+  const warnScore = settings.lowConfWarning && data?.synced && data.source === 'everyric'
+    && data.qualityScore != null && data.qualityScore < 0.001
+    && !(currentVideoId && warnDismissedVideos.has(currentVideoId))
+    ? data.qualityScore
+    : null;
+  const attribution = data?.attribution
+    ?? (data?.source === 'vocaro' ? { name: '보카로 가사 위키', url: currentSourceUrl } : null);
+  // 자동 생성 자막은 싱크 생성의 원문으로 쓸 수 없다(handleGenerate가 막는다) — 배너에
+  // 버튼 대신 사유를 띄워, 눌러 보고 거절당하는 경험을 만들지 않는다
+  const generateBlocked = data?.source === 'caption' && data.captionAuto
+    ? t('content.generate.blockedAutoCaption')
+    : undefined;
+  const langs = availableLangsForChip(data);
+
+  for (const p of targets) {
+    // 곡 제목·아티스트 — 방송은 searchLyrics 시점에 한 번 나가므로, **그 뒤에 세워진**
+    // 인스턴스(PiP를 나중에 연 경우)는 그것을 받은 적이 없다. 여기서 다시 얹지 않으면
+    // PiP 헤더에 "노래 인식 중…"이 그대로 남는다(실브라우저 스크린샷에서 확인).
+    p.setSong(currentSong);
+    p.setMatchedSource(matchedLabel);
+    p.setOffsetValue(videoOffset);
+    // 번역 상태 문구는 **그 곡의** 진행/실패 보고다 — 곡이 바뀌면 반드시 버린다.
+    // 예전에는 곡이 바뀔 때 loadTranslations·fetchLlmLineMeta가 그냥 return하면서 문구를
+    // 비우지 않았고(finally도 videoId가 아직 현재일 때만 지운다), 문구 자리가 푸터라
+    // resetBody()도 건드리지 않아 B의 푸터에 "번역·발음 생성 중…"이 영구히 남았다.
+    p.setTranslationStatus(null);
+    p.setQualityWarning(warnScore);
+    p.setAttribution(attribution ?? null);
+    // 다른 영상 싱크를 빌려온 상태면 출처 배지·검색 시트 해제 UI에 반영
+    p.setLinked(data?.source === 'everyric' ? data.linked ?? null : null);
+    // 제목바 언어 칩 — everyric 소스에만 의미가 있다(availableLangs는 서버 번역 레이어 목록,
+    // 곡 자신의 언어는 availableLangsForChip이 항상 합쳐 넣는다 — 대각선 칩 참고).
+    // 곡이 바뀌면 이전 곡에 걸려 있던 로딩 표시도 함께 지운다.
+    p.setAvailableLangs(langs);
+    p.setLangPending(null);
+    p.setPlaylist(lastPlaylistItems.length > 0 ? lastPlaylistItems : null);
+
+    if (!data) {
+      p.showEmpty(currentSong);
+      continue;
+    }
+    if (data.synced) {
+      // 깊이 버튼·디버그 패널의 재료 — PiP 여부와 무관하게 싣는다
+      p.setDebugMeta(data.debugMeta ?? null);
+      // [모듈] 가라오케 레인의 마디 격자·키 라벨 재료
+      p.setLaneMeta(data.tempo ?? null, data.key ?? null);
+      // placeholder("PiP로 보는 중")는 메인 패널에만 뜻이 있다 — PiP 창 안에 "PiP로
+      // 보는 중"을 띄우는 것은 무의미하다. pipKeepPanel을 **켠 경우에만**(기본은 꺼짐)
+      // 두 창이 함께 가사를 보여주고, 그때는 이 분기가 성립하지 않는다.
+      if (p === overlay && pip.isOpen() && !settings.pipKeepPanel) {
+        p.showPipPlaceholder();
+      } else {
+        p.showSyncedLyrics(data.lines, data.source, data.plainText, generateBlocked);
+        p.setPipEnabled(PipController.isSupported());
+      }
+      p.setPipActive(pip.isOpen());
+    } else {
+      p.showPlainLyrics(data.lines, data.source, data.plainText);
+    }
+    // 서버가 번역 출처를 함께 내려주면(additive, 서버 동시 배포 중) 배지에 반영한다 —
+    // tryServerLayerRefresh의 origin 'server' 특례(출처 불명이라 배지를 숨기던 것)를 이
+    // 값이 있는 응답부터는 실제 출처로 대체하는 첫 지점이다. 위 show*가 이미 resetBody로
+    // 배지를 지운 **뒤**라야 이 설정이 남는다 — enrichFromVocaro의 같은 이유(감사 C2b)와
+    // 동일한 순서 제약. 필드가 없으면(구서버) 아무 것도 하지 않는다(기존 동작 그대로).
+    if (data.translationOrigin) {
+      p.setTranslationSource(data.translationOrigin, data.translationAttribution?.name ?? null);
+    }
+  }
+}
+
 function applyLyricsData(data: LyricsData | null): void {
-  const panel = ensureOverlay();
+  ensureOverlay();
   currentData = data;
   lastLineIndex = -1;
   engine.stop();
-  // 영상별 저장 오프셋 복원 (서버에 저장된 값, 없으면 0) — UI 라벨도 함께
+  // 영상 자막 모듈 — 싱크가 있으면 같은 라인 배열을 공유한다(번역이 늦게 라인 객체에
+  // 붙어도 다음 렌더에 자연 반영). 없으면 비운다.
+  videoCaption.setLines(data?.synced ? data.lines : []);
+  // 영상별 저장 오프셋 복원 (서버에 저장된 값, 없으면 0) — 화면 라벨은 paintPanels가 읽는다
   videoOffset = data?.userOffset ?? 0;
-  panel.setOffsetValue(videoOffset);
   karaokeAudio.setOffset(videoOffset);
-  // 번역 상태 문구는 **그 곡의** 진행/실패 보고다 — 곡이 바뀌면 반드시 버린다.
-  // 예전에는 곡이 바뀔 때 loadTranslations·fetchLlmLineMeta가 그냥 return하면서 문구를
-  // 비우지 않았고(finally도 videoId가 아직 현재일 때만 지운다), 문구 자리가 푸터라
-  // resetBody()도 건드리지 않아 B의 푸터에 "번역·발음 생성 중…"이 영구히 남았다.
-  // 아래에서 이 곡의 번역이 다시 시작되면(loadTranslations) 문구는 그때 새로 쓰인다.
-  panel.setTranslationStatus(null);
   // 멜로디·메트로놈도 **지금 화면의 곡**을 따라야 한다. 갱신이 「싱크 있음 + PiP 열림」
   // 분기에만 있었고 비우는 곳은 cleanupForPage뿐이라, 멜로디를 켠 채 가사 없는 곡·플레인
   // 가사 곡으로 넘어가면 이전 곡의 노트와 BPM이 새 곡 위에서 계속 울렸다. 곡이 바뀌는
   // 지점이 여기 하나이므로 여기서 한 번에 맞춘다 (타이밍이 없는 가사는 노트도 없다).
   karaokeAudio.setNotes(data?.synced ? collectMelodyNotes(data.lines) : []);
   karaokeAudio.setTempo(data?.synced ? data.tempo ?? null : null);
-  // 곡 전체 정렬 신뢰도가 매우 낮으면 경고 바 (설정으로 끌 수 있음)
-  panel.setQualityWarning(
-    settings.lowConfWarning && data?.synced && data.source === 'everyric'
-      && data.qualityScore != null && data.qualityScore < 0.001
-      ? data.qualityScore
-      : null,
-  );
-  const attribution = data?.attribution
-    ?? (data?.source === 'vocaro' ? { name: '보카로 가사 위키', url: currentSourceUrl } : null);
-  panel.setAttribution(attribution ?? null);
-  // 다른 영상 싱크를 빌려온 상태면 출처 배지·검색 시트 해제 UI에 반영
-  panel.setLinked(data?.source === 'everyric' ? data.linked ?? null : null);
   // 서버가 동봉한 언어별 번역을 세션 캐시에 선채움한다(V2 확장) — availableLangs를
-  // 갱신할 수도 있으므로 반드시 setAvailableLangs보다 먼저 부른다.
+  // 갱신할 수도 있으므로 반드시 paintPanels(setAvailableLangs)보다 먼저 부른다.
   if (data) prefillTranslationCacheFromServer(data);
-  // 제목바 언어 칩 — everyric 소스에만 의미가 있다(availableLangs는 서버 번역 레이어 목록,
-  // 곡 자신의 언어는 availableLangsForChip이 항상 합쳐 넣는다 — 대각선 칩 참고).
-  // 곡이 바뀌면 이전 곡에 걸려 있던 로딩 표시도 함께 지운다.
-  panel.setAvailableLangs(availableLangsForChip(data));
-  panel.setLangPending(null);
+
+  // 화면은 여기 한 줄이 전부다 — 살아 있는 인스턴스 전부에 같은 그림을 그린다.
+  // 싱크가 없다고 PiP를 닫지 않는다: 재생목록을 돌리다 가사 없는 곡이 나오면 창이
+  // 증발해 매번 브라우저 창으로 돌아가야 했다. PiP 인스턴스도 같은 패널이라 검색·
+  // 붙여넣기·생성 화면을 그 자리에서 그대로 받는다(예전의 반쪽 showPanelEmpty 대체).
+  paintPanels(panels(), data);
+  // 가사가 없거나 타이밍이 없어도 창은 살아 있다 — 영상만 이전 곡에 멈춰 있으면 안 된다
+  if (!data?.synced) refreshPipMirror();
+
   // 수확 트리거 (b) — 이미 싱크가 있는 곡의 첫 로딩에서, availableLangs에 빠진 언어가
   // 있으면 수확을 시도한다. harvestTranslations 내부의 harvestedVideos 가드가 세션당
   // videoId 1회로 제한하므로(트리거 a와 공유) 매 로딩마다 반복되지 않는다 — 여기서는
   // 무조건 불러도 안전하다(놓친 언어가 없으면 harvestTranslations가 스스로 no-op한다).
   if (data?.source === 'everyric' && data.synced && currentVideoId) void harvestTranslations(currentVideoId);
 
-  if (!data) {
-    // 싱크가 없다고 PiP를 닫지 않는다 — 재생목록을 돌리다 가사 없는 곡이 나오면
-    // 창이 증발해 매번 브라우저 창으로 돌아가야 했다. 같은 패널 조각을 PiP 안에
-    // 띄워 거기서 바로 검색·붙여넣기·생성 요청을 할 수 있게 한다.
-    if (pip.isOpen()) {
-      // 패널은 스테이지를 덮을 뿐 **비우지는 않는다** — setLines를 안 하면 이전 곡의 가사·
-      // 노트가 그대로 남아, 좌상단 패널 토글로 새 영상 위에서 A의 스테이지가 다시 나왔다
-      pip.setLines([]);
-      pip.showPanelEmpty(currentSong);
-    }
-    refreshPipMirror(); // 가사가 없어도 창은 살아 있다 — 영상만 이전 곡에 멈춰 있으면 안 된다
-    panel.showEmpty(currentSong);
-    return;
-  }
-  // 자동 생성 자막은 싱크 생성의 원문으로 쓸 수 없다(handleGenerate가 막는다) — 배너에
-  // 버튼 대신 사유를 띄워, 눌러 보고 거절당하는 경험을 만들지 않는다
-  const generateBlocked = data.source === 'caption' && data.captionAuto
-    ? t('content.generate.blockedAutoCaption')
-    : undefined;
-
-  if (data.synced) {
-    if (pip.isOpen()) {
-      // 검색을 시작할 때 띄운 패널(pip.showPanelLoading)을 반드시 접는다 — 레인 표시
-      // 조건에 !panelActive가 들어 있어, 안 접으면 싱크가 도착해도 가라오케가 닫힌
-      // 채로 남는다(영상을 넘길 때마다 가라오케가 풀리는 증상의 원인이었다).
-      pip.clearPanel();
-      pip.setTempo(data.tempo ?? null);
-      pip.setKey(data.key ?? null);
-      pip.setDebugMeta(data.debugMeta ?? null);
-      panel.setDebugMeta(data.debugMeta ?? null);
-      pip.setShowF0(settings.pitchF0Curve);
-      pip.setLines(data.lines);
-      // 노트·템포는 위에서 이미 이 곡 값으로 맞췄다 (분기마다 갱신하던 것을 한곳으로 모았다)
-      if (settings.pipKeepPanel) {
-        panel.showSyncedLyrics(data.lines, data.source, data.plainText, generateBlocked);
-        panel.setPipEnabled(PipController.isSupported());
-      } else {
-        panel.showPipPlaceholder();
-      }
-      panel.setPipActive(true);
-    } else {
-      panel.showSyncedLyrics(data.lines, data.source, data.plainText, generateBlocked);
-      panel.setPipEnabled(PipController.isSupported());
-    }
-    void startEngine(data.lines);
-  } else {
-    // 싱크 없는 플레인 가사도 PiP를 유지한 채 창 안에 보여준다
-    if (pip.isOpen()) {
-      // 타이밍이 없는 가사는 스테이지·레인에 그릴 것이 없다 — 비워야 이전 곡 가사가
-      // 패널 뒤에 남지 않는다(토글 버튼도 함께 사라져 빈 스테이지로 갈 길이 막힌다)
-      pip.setLines([]);
-      pip.showPanelPlain(data.lines, data.plainText);
-    }
-    refreshPipMirror();
-    panel.showPlainLyrics(data.lines, data.source, data.plainText);
-  }
+  if (!data) return;
+  if (data.synced) void startEngine(data.lines);
   if (settings.showTranslation) void loadTranslations();
   pushDebug(null);
 }
@@ -2328,11 +3081,12 @@ function makeEngineHandlers(): SyncHandlers {
   return {
     onLineChange: index => {
       lastLineIndex = index;
-      overlay?.highlightLine(index);
-      pip.update(index);
+      broadcast('highlightLine', index);
     },
     onTick: time => {
-      overlay?.updateTime(time);
+      overlay?.updateTime(time, engine.isPaused()); // [모듈] 레인도 이 시각으로 그린다
+      videoCaption.updateTime(time);
+      refreshNextUp();
       pip.tick(time, engine.getDuration(), engine.isPaused());
       const video = engine.getVideo();
       if (video) {
@@ -2427,8 +3181,7 @@ function refreshSongTitle(): void {
     && (info.artist ?? '') === (currentSong.artist ?? '')
   ) return; // 바뀐 게 없으면 아무것도 하지 않는다
   currentSong = { ...info, duration: currentSong?.duration || info.duration };
-  overlay?.setSong(currentSong);
-  if (pip.isOpen()) pip.setSong(currentSong.title, currentSong.artist ?? '');
+  broadcast('setSong', currentSong);
 }
 
 async function waitForVideo(maxRetries = 10, delayMs = 500): Promise<HTMLVideoElement | null> {
@@ -2444,10 +3197,23 @@ async function waitForSongInfo(seq: number, maxRetries = 6, delayMs = 700): Prom
   for (let i = 0; i < maxRetries; i++) {
     if (seq !== searchSeq) return null; // 새 검색이 시작됨 — 즉시 중단
     const info = detectSong();
-    if (info?.title) return info;
+    if (info?.title && !isStaleSongInfo(info)) {
+      staleTraces = null;
+      return info;
+    }
     await sleep(delayMs);
   }
+  // 한도 소진 — 이 시점 값을 그대로 받는다(제목이 정말 같은 재업로드라면 이 값이 곧
+  // 새 영상의 값이기도 하다). 흔적은 지워 다음 검색을 방해하지 않는다.
+  staleTraces = null;
   return detectSong();
+}
+
+/** 전환 직후 의심 구간에서 이전 영상의 흔적과 같은 후보인가 — staleTraces 주석 참조 */
+function isStaleSongInfo(info: SongInfo): boolean {
+  if (!staleTraces) return false;
+  if (staleTraces.docTitle !== '' && document.title === staleTraces.docTitle) return true;
+  return staleTraces.songTitle !== null && info.title === staleTraces.songTitle;
 }
 
 // ── 싱크 생성 ───────────────────────────────────────────────────
@@ -2617,7 +3383,7 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
     if (!alreadyDone) {
       // 패널을 점유하지 않는다 — 현재 화면(가사/검색)은 그대로 두고 작은 칩으로 진행률만 표시.
       // 다른 영상으로 이동해도 잡은 계속 추적되고, 완료 후 돌아오면 조회 시 자동 반영된다.
-      generatingJobs.set(videoId, { jobId, progress: 0, title: currentSong?.title });
+      generatingJobs.set(videoId, { jobId, progress: 0, title: currentSong?.title, owned: true });
       void persistActiveJobs();
       ensurePolling();
     }
@@ -2627,8 +3393,16 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
       // 실패해도 **빈 배열로 반드시 한 번 보낸다** — 안 보내면 서버가 정렬 직전에 이 메타를
       // 대기 상한까지 기다려 잡이 헛되게 서 있다(빈 배열 = "붙일 것 없음" 확정 신호).
       let meta: LineMeta[] = [];
+      // fetchLlmLineMeta가 실제로 번역을 만든(진입 시점) 언어로 도장 찍는다 — await 도중
+      // 사용자가 언어를 또 바꾸면 여기서 settings.translationLanguage를 다시 읽는 것은
+      // 더 최신 값이라 방금 만든 meta의 실제 언어와 어긋난다(감사 C6).
+      let lineMetaLang = settings.translationLanguage;
       try {
-        meta = (await fetchLlmLineMeta(videoId, srcLines)) ?? [];
+        const result = await fetchLlmLineMeta(videoId, srcLines);
+        if (result) {
+          meta = result.meta;
+          lineMetaLang = result.lang;
+        }
       } catch {
         meta = []; // 번역 실패 — 서버는 원문 정렬로 폴백한다
       }
@@ -2640,8 +3414,7 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
           attribution,
           title: currentSong?.title,
           artist: currentSong?.artist ?? undefined,
-          // 지연 첨부 번역은 내 언어로 만든 것 — 서버가 그 언어 레이어에 넣는다
-          lineMetaLang: settings.translationLanguage,
+          lineMetaLang,
         },
       });
     }
@@ -2658,13 +3431,20 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
   }
 }
 
-/** 재생성: 현재 everyric 싱크의 가사·발음·출처 그대로 서버 캐시를 무시하고 다시 정렬 */
-async function handleRegenerate(): Promise<void> {
+/** 재생성: 현재 everyric 싱크의 가사·발음·출처 그대로 서버 캐시를 무시하고 다시 정렬.
+ *  **UI명은 지금도 "재생성"이다** — 헤더의 "초기화"(resetSyncBtn→handleResetSync, 삭제 후
+ *  재검색)와는 다른 동작이라 이름을 안 바꿨다: 이쪽은 가사·발음·번역을 지우지 않고 서버
+ *  정렬만 다시 돌린다(깊이 올리기 onDepthUpgrade가 부르는 경로). 와이어(REGENERATE_SYNC)도
+ *  그대로 "regenerate" 계약 — 이름이 클라이언트·서버·와이어 세 층 모두 일치한다. */
+async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
   const videoId = currentVideoId;
   const data = currentData;
   if (!videoId || !data?.synced || data.source !== 'everyric') return;
   if (generatingJobs.has(videoId) || preparingGenerate.has(videoId)) return;
   preparingGenerate.add(videoId);
+  // 깊이 올리기와 단순 재생성은 준비 단계에서 하는 일이 같지만(발음·번역 재조달) 사용자
+  // 입장에서는 다른 사건이다 — 칩 문구를 가르기 위한 표식만 따로 세운다
+  if (minDepth) preparingDepthUpgrade.add(videoId);
   updateGenChip();
 
   try {
@@ -2700,7 +3480,8 @@ async function handleRegenerate(): Promise<void> {
         lineMetaLang = wiki.data?.translationLang ?? 'en';
       } else {
         const wiki = await sendToBackground<VocaroResult | null>({
-          type: 'VOCARO_LOOKUP', payload: { title: currentSong.title },
+          type: 'VOCARO_LOOKUP',
+          payload: { title: currentSong.title, hint: currentSong.rawTitle },
         });
         lineMeta = (wiki.data?.lines ?? [])
           .filter(l => l.pronunciation || l.translation)
@@ -2711,10 +3492,19 @@ async function handleRegenerate(): Promise<void> {
     if (lineMeta.length === 0 && expectsPronunciation(texts)) {
       // 세션 번역 캐시도 비운다 — 안 비우면 이 영상의 낡은 응답이 그대로 다시 실린다
       for (const key of [...translationCache.keys()]) {
-        if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+        if (key.startsWith(`${videoId}:`)) {
+          translationCache.delete(key);
+          translationOriginCache.delete(key);
+        }
       }
       const fetched = await fetchLlmLineMeta(videoId, texts);
-      if (fetched && fetched.length > 0) lineMeta = fetched;
+      // fetchLlmLineMeta가 실제로 사용한(진입 시점) 언어로 lineMetaLang을 다시 찍는다 —
+      // 위에서 미리 잡아 둔 값은 이 await 이전 시점 것이라 그 사이 언어가 바뀌면
+      // 어긋난다(감사 C6, 재생성 경로는 생성 경로와 반대 방향으로 어긋났었다).
+      if (fetched && fetched.meta.length > 0) {
+        lineMeta = fetched.meta;
+        lineMetaLang = fetched.lang;
+      }
     }
 
     const res = await sendToBackground<GenerateResponse>({
@@ -2729,6 +3519,8 @@ async function handleRegenerate(): Promise<void> {
         artist: currentSong?.artist ?? undefined,
         targetLang: settings.translationLanguage,
         lineMetaLang,
+        // 분석 깊이 올리기(헤더 깊이 버튼) — 서버가 라우팅을 건너뛰고 이 깊이에서 시작한다
+        minDepth,
       },
     });
     if (res.error || !res.data) {
@@ -2737,16 +3529,27 @@ async function handleRegenerate(): Promise<void> {
       if (videoId === currentVideoId) reportFailure(t('content.failure.regenerateRequest'), note);
       return;
     }
-    generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0, title: currentSong?.title });
+    generatingJobs.set(videoId, {
+      jobId: res.data.job_id, progress: 0, title: currentSong?.title, owned: true,
+      // 깊이를 지정해 다시 만드는 중이면 그 깊이가 곧 이 잡의 깊이다 — 서버 응답을
+      // 기다리지 않고 배지를 먼저 세운다(첫 폴링 전 2초 동안 배지가 비지 않게).
+      depth: minDepth,
+      // 사용자가 스스로 올린 깊이는 "전환됐다"고 알릴 사건이 아니다
+      heavyNoticed: minDepth === 'heavy',
+    });
     void persistActiveJobs();
     ensurePolling();
   } finally {
     preparingGenerate.delete(videoId);
+    preparingDepthUpgrade.delete(videoId);
     updateGenChip();
   }
 }
 
-/** 이 영상의 서버 싱크 전부 삭제(초기화) 후 처음부터 다시 검색 — 잘못 붙여넣은 가사 복구용 */
+/** 이 영상의 서버 싱크 전부 삭제(초기화) 후 처음부터 다시 검색 — 잘못 붙여넣은 가사 복구용.
+ *  **UI명은 "초기화"** — 헤더 버튼(overlay.ts resetSyncBtn)이 이 함수를 부른다. 와이어는
+ *  그대로 SYNC_RESET(프로토콜이라 안 바꾼다) — 그 이름이 원래부터 "reset"이라 이 함수와
+ *  이미 일치했었다(개명이 필요했던 건 헤더 버튼·라벨·onRegenerate 콜백 쪽이었다). */
 async function handleResetSync(): Promise<void> {
   const videoId = currentVideoId;
   if (!videoId) return;
@@ -2765,11 +3568,57 @@ async function handleResetSync(): Promise<void> {
     : null;
   // 세션 캐시(언어별 번역·발음)와 진행 중 잡 추적도 함께 비워 완전히 처음부터
   for (const key of [...translationCache.keys()]) {
-    if (key.startsWith(`${videoId}:`)) translationCache.delete(key);
+    if (key.startsWith(`${videoId}:`)) {
+      translationCache.delete(key);
+      translationOriginCache.delete(key);
+    }
   }
   removeJob(videoId);
   updateGenChip();
+  // 확장 쪽 표시 상태도 이 영상 것만 함께 초기화한다(운영자 지시 2026-08-04) — 전역
+  // 설정(settings)은 안 건드린다. 번역·발음·배지는 이미 위 캐시 비우기 + 아래 searchLyrics
+  // 재조회(→applyLyricsData)가 자연히 새 상태로 덮어써 준다. 오프셋과 저신뢰 경고 억제는
+  // **그 재조회로도 안 지워진다** — video_offsets·warnDismiss 저장은 sync_results와
+  // 별개 테이블/키라 SYNC_RESET이 안 건드린다. 그대로 두면 재생성 뒤에도 옛 오프셋이나
+  // "이 곡에서 다시 보지 않기"가 되살아나므로 여기서 직접 민다.
+  videoOffset = 0;
+  clearTimeout(offsetSaveTimer);
+  void sendToBackground({ type: 'SYNC_OFFSET', payload: { videoId, offsetSec: 0 } });
+  broadcast('setOffsetValue', 0);
+  warnDismissedVideos.delete(videoId);
+  try {
+    await chrome.storage.local.remove(`${WARN_DISMISS_PREFIX}${videoId}`);
+  } catch { /* 저장 삭제 실패는 무시 — 메모리 값은 이미 지워졌고, 다음 경고 판정은 그걸 본다 */ }
   void searchLyrics();
+}
+
+/**
+ * 확장 전체 초기화 — 설정 시트 ♻️ 범주의 2단계 확인(같은 버튼 재클릭) 뒤에만 불린다.
+ *
+ * `settings`는 remove가 아니라 **기본값으로 덮어쓴다**(saveSettings에 DEFAULT_SETTINGS
+ * 전체를 patch로 넘기면 병합 결과가 곧 기본값이다) — watchSettingsFromOtherTabs가
+ * `chrome.storage.onChanged`에서 `newValue`가 없으면(remove) 아예 무시하므로
+ * (`if (!next) return`, 위 watchSettingsFromOtherTabs 주석), remove로는 이 탭 말고
+ * 다른 열린 유튜브 탭에 초기화가 전파되지 않는다.
+ *
+ * 나머지는 remove한다: geometry: 접두(창 위치)·vocaroRef: 접두·vocaroIdx: 접두(곡별 캐시)는
+ * 영상마다 쌓이는 부가 상태라 기본값이랄 게 없고, ey_notices_seen·ey_contrib·
+ * activeJobs는 세션 이력이라 남기면 "초기화했는데 기여 이력이 그대로"가 된다.
+ */
+async function handleFullReset(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const removeKeys = Object.keys(all).filter(k =>
+      k.startsWith('geometry:') || k.startsWith('vocaroRef:') || k.startsWith('vocaroIdx:')
+      || k.startsWith(WARN_DISMISS_PREFIX)
+      || k === 'ey_notices_seen' || k === CONTRIB_STORAGE_KEY || k === JOBS_STORAGE_KEY,
+    );
+    if (removeKeys.length > 0) await chrome.storage.local.remove(removeKeys);
+  } catch { /* 스캔·삭제 실패는 무시 — 설정 초기화는 계속 진행한다 */ }
+  warnDismissedVideos.clear();
+  settings = await saveSettings(DEFAULT_SETTINGS);
+  applySettingsPatch(settings);
+  showNotice(t('content.fullReset.done'), 6000);
 }
 
 /** 타임싱크를 벗긴 사본 — 초기화 뒤에 남기는 가사는 타이밍이 없는 가사여야 한다.
@@ -2794,6 +3643,10 @@ function withoutTiming(data: LyricsData): LyricsData {
       endTime: null,
       text: l.text,
       pronunciation: l.pronunciation,
+      // 표기별 발음(en·ja 사용자가 실제로 보는 값)도 남긴다 — 레거시 pronunciation(한글)만
+      // 남기던 예전엔 en·ja 사용자만 초기화 후 발음을 통째로 잃는 비대칭이 있었다(감사 C7).
+      pron: l.pron,
+      pronSegsByScript: l.pronSegsByScript,
       translation: l.translation,
       wikiTranslation: l.wikiTranslation,
     })),
@@ -2825,18 +3678,38 @@ async function handleCancelGenerate(): Promise<void> {
   updateGenChip();
 }
 
+/**
+ * 이 탭이 실제로 서버에 물어볼 잡들.
+ *
+ * 예전에는 열린 모든 유튜브 탭이 **모든** 잡을 폴링했다 — restoreActiveJobs와
+ * watchJobsFromOtherTabs가 남의 탭 잡까지 generatingJobs에 넣기 때문이다. 탭 N개 ×
+ * 진행 잡 M개면 2초마다 N×M 요청이 나가고, 같은 잡의 완료를 여러 탭이 각자 관측해
+ * removeJob·알림이 중복됐다. 폴링 주체를 좁혀도 화면은 손해가 없다 — 남의 잡은 그 탭이
+ * 폴링해 storage에 반영하고, 이 탭은 storage 이벤트로 그 상태를 이어받아 칩에 비춘다.
+ *
+ * 지금 보고 있는 영상의 잡만은 남이 시작했어도 직접 폴링한다: 완료 즉시 이 화면을 새
+ * 싱크로 갈아야 하는 곳이라, 남의 탭 반영을 기다릴 수 없다.
+ */
+function pollableJobs(): [string, TrackedJob][] {
+  return [...generatingJobs].filter(([videoId, job]) => job.owned || videoId === currentVideoId);
+}
+
 async function pollJobs(): Promise<void> {
-  // 커버 자동 연결 검증 잡도 같은 타이머에 얹혀 돈다 — 둘 다 비어야 타이머를 멈춘다
-  if (generatingJobs.size === 0 && linkJobs.size === 0) {
+  const targets = pollableJobs();
+  // 물어볼 것이 없으면 타이머를 멈춘다 — 커버 자동 연결 검증 잡도 같은 타이머에 얹혀
+  // 도므로 둘 다 비어야 한다. **남의 탭 잡만 남은 경우도 여기서 멈춘다**: 그 상태는
+  // storage 이벤트로 갱신되므로 2초마다 깨어 있을 이유가 없고, 이 탭이 그 영상으로
+  // 이동하면 searchLyrics가 다시 켠다.
+  if (targets.length === 0 && linkJobs.size === 0) {
     stopPolling();
     updateGenChip();
     return;
   }
   // 폴링 간격 백오프는 **전사 잡** 응답만 근거로 한다 (아래 for 루프가 도는 경우).
   // 전사 잡이 없는데 anyResponse=false로 읽히면 멀쩡한 서버에서 간격이 늘어난다.
-  const hadSyncJobs = generatingJobs.size > 0;
+  const hadSyncJobs = targets.length > 0;
   let anyResponse = false;
-  for (const [videoId, job] of [...generatingJobs]) {
+  for (const [videoId, job] of targets) {
     const res = await sendToBackground<JobStatusResponse>({ type: 'JOB_STATUS', payload: { jobId: job.jobId } });
     if (generatingJobs.get(videoId)?.jobId !== job.jobId) continue; // 그 사이 교체/취소됨
     const status = res.data;
@@ -2845,7 +3718,21 @@ async function pollJobs(): Promise<void> {
 
     if (status.status === 'completed') {
       removeJob(videoId);
+      // 재생목록 존재 배지 캐시(background.ts existsCache)가 이 영상을 "없음"으로 들고
+      // 있었을 수 있다 — 웹사이트발 완료(SYNC_COMPLETE)는 이미 무효화하지만 확장 자신의
+      // 완료 경로는 그 채널을 안 타서 최대 2분(EXISTS_TTL_MISS_MS)까지 배지가 낡아
+      // 있었다(감사 A3). 어느 영상을 보고 있든(다른 탭 잡이어도) 서버엔 방금 생겼으므로
+      // 무조건 지운다.
+      void sendToBackground({ type: 'SYNC_CREATED', payload: { videoId } });
       const label = job.title ?? videoId;
+      // 이 브라우저의 기여 이력에 적는다 — 서버엔 "누가 만들었나"가 없다(ContribEntry 문서)
+      void recordContribution({
+        videoId,
+        jobId: job.jobId,
+        title: label,
+        completedAt: Date.now(),
+        depth: knownDepth(status.depth) ?? job.depth,
+      });
       if (videoId === currentVideoId) {
         // 결과를 불러온 **뒤에** 알린다 — 잡 성공만 보고 "준비됐어요"라고 하면 발음·번역이
         // 한 줄도 안 붙은 싱크까지 성공으로 보고된다(실측: 자막 경로 0/35줄)
@@ -2867,7 +3754,12 @@ async function pollJobs(): Promise<void> {
       }
     } else if (status.status === 'failed') {
       removeJob(videoId);
-      // gone = 서버에 잡 기록이 없음(재시작 등) — 무한 폴링 대신 명시적으로 마감
+      // 이전 세션에서 복원한 잡의 gone(서버에 기록 없음)은 **사고가 아니라 만료다.**
+      // 탭을 진행 중에 닫으면 항목이 storage에 남고, 며칠 뒤 브라우저를 켜면 이미 지워진
+      // 잡을 되살려 폴링한다 — 그 404를 실패로 알리면 사용자는 시키지도 않은 "싱크 생성
+      // 실패"를 브라우저 시작마다 받는다(실측 증상). 내가 방금 낸 잡이 사라진 경우(owned)는
+      // 여전히 알린다 — 그건 진짜로 알아야 하는 사고다.
+      if (status.gone && !job.owned) continue;
       const errMsg = status.gone
         ? t('content.error.jobGone')
         : (status.error || t('content.error.syncGenerationFailed'));
@@ -2881,6 +3773,43 @@ async function pollJobs(): Promise<void> {
       job.progress = status.progress ?? job.progress;
       job.stage = status.stage ?? undefined;
       job.stageProgress = status.stage_progress ?? undefined;
+      // 깊이 비교를 ETA 계산보다 먼저 한다 — 아래 클램프가 "깊이가 바뀌었는가"를
+      // 신호로 써야 한다(depthChanged). 깊이가 도중에 heavy로 바뀌는 것은 **서버가
+      // 판단을 바꿨다**는 사건이다(라우팅이 얕게 잡았다가 결과가 나빠 다시 깊게 간다).
+      // 시간이 갑자기 늘어나는 이유를 말해 주지 않으면 멈춘 것처럼 보인다 — 승격
+      // 순간에 한 번만 알린다.
+      const prevDepth = job.depth;
+      job.depth = knownDepth(status.depth) ?? job.depth;
+      const depthChanged = prevDepth !== undefined && job.depth !== undefined && job.depth !== prevDepth;
+      if (job.depth === 'heavy' && prevDepth !== undefined && prevDepth !== 'heavy'
+        && !job.heavyNoticed && videoId === currentVideoId) {
+        job.heavyNoticed = true;
+        showNotice(t('content.genChip.depthUpgraded'), 12000);
+      }
+      // ETA는 표시값을 단조 감소로 눌러 둔다 — 서버 추정이 폴마다 흔들리면(24→28→22)
+      // 숫자가 오르내려 표시를 못 믿게 된다. 30초 넘게 뛰는 증가는 진짜 재추정으로 받아
+      // 들이고, 소폭 증가는 로컬 카운트다운(effectiveEtaSec)을 유지한다 — 단, **깊이가
+      // 실제로 바뀐 폴은 증가폭과 무관하게 무조건 새 값을 그대로 받는다**(운영자 요구:
+      // "정확한 남은 초수를 다시 보이게"). 30초 문턱만 보면 fast의 잔여 추정이 우연히
+      // heavy 중앙값에 가까워 증가폭이 30초 이내인 경우(예: fast 45s → heavy 60s)
+      // 깊이가 바뀌었는데도 클램프가 낡은 fast 기반 카운트다운을 계속 감쇠시켜 버린다 —
+      // 서버가 depth 전환 순간 이미 새 깊이 중앙값 기준 eta_sec을 보내주므로(worker.py
+      // 계약), 그 값을 믿지 않을 이유가 없다.
+      const nextEta = status.eta_sec ?? undefined;
+      if (nextEta == null) {
+        job.etaSec = undefined;
+        job.etaSyncedAt = undefined;
+      } else if (depthChanged) {
+        job.etaSec = nextEta;
+        job.etaSyncedAt = Date.now();
+      } else {
+        const eff = effectiveEtaSec(job);
+        job.etaSec = eff != null && nextEta > eff && nextEta - eff <= 30 ? eff : nextEta;
+        job.etaSyncedAt = Date.now();
+      }
+      job.etaOverrun = status.eta_overrun ?? false;
+      job.queueEtaSec = status.queue_eta_sec ?? undefined;
+      job.queuePosition = status.queue_position ?? undefined;
       job.queueLabel = status.queue_position != null && status.queue_position > 0
         ? t('content.queue.position', [String(status.queue_position)])
         : (status.status === 'queued' || status.status === 'pending' ? t('content.queue.label') : undefined);
@@ -2977,6 +3906,72 @@ function stageLabel(stage: string): string {
   return key ? t(key) : stage;
 }
 
+/** 분석 깊이 라벨 — 헤더 깊이 버튼의 1·2·3과 같은 것을 사람 말로 부른 것 */
+const DEPTH_LABEL_KEYS: Record<string, string> = {
+  fast: 'content.genChip.depthFast',
+  medium: 'content.genChip.depthMedium',
+  heavy: 'content.genChip.depthHeavy',
+};
+
+/**
+ * 남은 시간 문구 — **초 단위 카운트다운**이 기본이다.
+ *
+ * 대부분의 잡이 1분 안에 끝나므로(운영자 실측) 분 뭉갬이나 "곧 완료" 뭉갬은 표시의
+ * 존재 이유(몇 초 남았는지)를 없앤다. 예전 60초 미만 일괄 "곧 완료"가 정확히 그
+ * 사고였다(실사용 제보 "곧 완료에서 10초 이상"). 숫자 튐(90→40→70)은 폴 수신부의
+ * 증가 클램프 + effectiveEtaSec의 로컬 감쇠가 흡수하므로 초를 그대로 보여도 안전하다.
+ * 숫자는 1초까지 그대로 보여준다(운영자 지시) — "곧 완료"는 카운트다운이 0에 닿은
+ * 순간(서버 바닥값 5초를 로컬 감쇠가 다 소진한 뒤)에만 남는다.
+ * 추정 초과(overrun)는 jobStateText가 이 함수에 오기 전에 갈라 처리한다.
+ */
+function etaText(sec: number): string {
+  if (sec <= 0) return t('content.genChip.etaSoon');
+  if (sec < 60) return t('content.genChip.etaSeconds', [String(sec)]);
+  return t('content.genChip.etaMinutes', [String(Math.round(sec / 60))]);
+}
+
+/** 표시용 잔여 초 — 마지막 서버 동기값에서 흐른 시간을 빼 폴링(2초) 사이에도 1초씩 준다 */
+function effectiveEtaSec(job: TrackedJob): number | null {
+  if (job.etaSec == null) return null;
+  const decayed = job.etaSyncedAt != null
+    ? job.etaSec - (Date.now() - job.etaSyncedAt) / 1000
+    : job.etaSec;
+  return Math.max(0, Math.round(decayed));
+}
+
+/** 진행 칩의 상태 조각 — 대기열 → ETA → 단계·퍼센트 순으로 아는 것 중 가장 구체적인 것 */
+function jobStateText(job: TrackedJob): string {
+  // 대기 중: 순번과 예상 대기를 함께 (둘 중 아는 것만)
+  if (job.queueLabel) {
+    if (job.queueEtaSec != null) {
+      const minutes = String(Math.max(1, Math.round(job.queueEtaSec / 60)));
+      return job.queuePosition != null && job.queuePosition > 0
+        ? t('content.genChip.queueEta', [String(job.queuePosition), minutes])
+        : t('content.genChip.queueEtaNoPos', [minutes]);
+    }
+    return job.queueLabel;
+  }
+  // 추정 초과: eta_sec은 바닥값에 눌려 있어 거짓 "곧 완료"가 된다 — 시간 약속 대신
+  // 지금 어느 단계인지(단계·퍼센트)에 초과 사실을 붙여 정직하게 말한다
+  if (job.etaOverrun) {
+    const base = job.stage
+      ? t('content.genChip.stageProgress', [stageLabel(job.stage), String(job.stageProgress ?? 0), String(job.progress)])
+      : t('content.genChip.percentOnly', [String(job.progress)]);
+    return `${base} · ${t('content.genChip.etaOverrun')}`;
+  }
+  // 진행 중: 서버가 남은 시간을 알려주면 퍼센트보다 그것이 사용자에게 쓸모 있다.
+  // 퍼센트는 폴백으로 남긴다 — 구버전 서버는 eta_sec 자체가 없다.
+  const eta = effectiveEtaSec(job);
+  if (eta != null) {
+    return job.stage
+      ? t('content.genChip.stageEta', [stageLabel(job.stage), etaText(eta)])
+      : etaText(eta);
+  }
+  return job.stage
+    ? t('content.genChip.stageProgress', [stageLabel(job.stage), String(job.stageProgress ?? 0), String(job.progress)])
+    : t('content.genChip.percentOnly', [String(job.progress)]);
+}
+
 /** 진행 칩 갱신 — 현재 영상 잡의 진행률, 그 외 영상 잡은 건수로 요약.
  *  메인 패널과 PiP 양쪽에 같은 문구를 밀어넣는다 (닫혀 있는 쪽은 no-op) — PiP만 보며
  *  '싱크 생성'을 누른 사용자에게 지금까지 진행 표시가 아예 없었다. */
@@ -2985,59 +3980,113 @@ function updateGenChip(): void {
   const others = generatingJobs.size - (cur ? 1 : 0);
   let text: string | null = null;
   if (!cur && currentVideoId && preparingGenerate.has(currentVideoId)) {
-    // 잡 등록 전 준비 단계 — 버튼이 무반응처럼 보이지 않게 즉시 표시
-    text = t('content.genChip.preparing');
+    // 잡 등록 전 준비 단계 — 버튼이 무반응처럼 보이지 않게 즉시 표시.
+    // 깊이 올리기도 같은 준비(발음·번역 재조달)를 하지만 문구는 가른다: 여기서
+    // "AI 번역·독음 요청"이라고 말하면, 정렬만 다시 시키려던 사용자는 자기가 누르지 않은
+    // 번역이 왜 도는지 알 수 없다(사용자 혼란 제보). 하는 일이 아니라 **무엇을 위한
+    // 일인지**를 말한다 — 발음·번역은 재생성 요청에 함께 실어 보내야 보존된다(그 배선이
+    // handleRegenerate의 lineMeta 재조달이다).
+    text = preparingDepthUpgrade.has(currentVideoId)
+      ? t('content.genChip.preparingDepth')
+      : t('content.genChip.preparing');
   } else if (cur) {
-    // 단계명이 오면 "보컬 분리 60% · 전체 68%"처럼 무슨 과정인지 함께 보여준다
-    const state = cur.queueLabel
-      ?? (cur.stage
-        ? t('content.genChip.stageProgress', [stageLabel(cur.stage), String(cur.stageProgress ?? 0), String(cur.progress)])
-        : t('content.genChip.percentOnly', [String(cur.progress)]));
-    text = t('content.genChip.transcribing', [state, others > 0 ? t('content.genChip.othersSuffix', [String(others)]) : '']);
+    // 단계명·남은 시간이 오면 무슨 과정이 얼마나 남았는지 함께 보여준다
+    const state = jobStateText(cur);
+    // 깊이는 알 때만 앞에 붙인다 — 라우팅 판정 전과 구버전 서버에서는 배지가 없다
+    const labeled = cur.depth
+      ? t('content.genChip.depthState', [t(DEPTH_LABEL_KEYS[cur.depth]), state])
+      : state;
+    text = t('content.genChip.transcribing', [labeled, others > 0 ? t('content.genChip.othersSuffix', [String(others)]) : '']);
   } else if (others > 0) {
     text = t('content.genChip.othersOnly', [String(others)]);
   }
   // 칩 클릭 시 펼칠 내 대기열 목록 — 곡명+상태. activeJobs에 이 브라우저가 시킨
   // 잡만 저장되므로 다른 사용자의 큐는 구조적으로 노출되지 않는다.
   const items = [...generatingJobs.entries()]
-    .map(([v, j]) => ({
-      title: j.title ?? v,
-      state: j.queueLabel
-        ?? (j.stage ? t('content.genChip.stageOnly', [stageLabel(j.stage), String(j.stageProgress ?? 0)]) : t('content.genChip.percentOnly', [String(j.progress)])),
-      isCurrent: v === currentVideoId,
-    }))
+    .map(([v, j]) => {
+      const eta = effectiveEtaSec(j);
+      return {
+        title: j.title ?? v,
+        state: j.queueLabel
+          ?? (eta != null && !j.etaOverrun
+            ? etaText(eta)
+            : j.stage ? t('content.genChip.stageOnly', [stageLabel(j.stage), String(j.stageProgress ?? 0)]) : t('content.genChip.percentOnly', [String(j.progress)])),
+        isCurrent: v === currentVideoId,
+      };
+    })
     .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
-  overlay?.setGenerationList(items);
+  broadcast('setGenerationList', items);
   // 잡이 등록된 뒤에만 취소 가능 (준비 단계는 잡 id가 아직 없다)
-  overlay?.setGenerationChip(text, Boolean(cur));
-  // PiP에는 대기열 목록·취소 UI가 없다 — 같은 진행 문구만 창 안 칩으로 보여 준다
-  pip.setGenerationChip(text);
+  broadcast('setGenerationChip', text, Boolean(cur));
+  syncEtaTicker();
+}
+
+/** ETA 1초 카운트다운 티커 — 폴링(2초) 사이에도 초가 줄어 보이게 칩만 다시 그린다.
+ *  ETA를 아는 잡이 있을 때만 돌고 스스로 꺼진다(유휴 시 타이머 0개 — 5fps 감사 규약). */
+let etaTicker: number | undefined;
+function syncEtaTicker(): void {
+  const needed = [...generatingJobs.values()].some(j => j.etaSec != null && !j.queueLabel && !j.etaOverrun);
+  if (needed && etaTicker === undefined) {
+    etaTicker = window.setInterval(() => updateGenChip(), 1000);
+  } else if (!needed && etaTicker !== undefined) {
+    clearInterval(etaTicker);
+    etaTicker = undefined;
+  }
 }
 
 const POLL_MS_NORMAL = 2000;
 const POLL_MS_SLOW = 10000;
 let pollMs = POLL_MS_NORMAL;
 let pollFailStreak = 0;
+/** 폴링 사이클이 살아 있는가 — 타이머 대기 중이거나 pollJobs 실행 중 */
+let pollActive = false;
 
+/**
+ * 폴링을 **자기 예약 체인**으로 돈다 (setInterval 아님).
+ *
+ * setInterval(2초)로 돌리면 pollJobs가 그보다 오래 걸릴 때 회차가 겹친다 — 잡마다 순차
+ * await이고 한 건이 최대 4초(JOB_STATUS 타임아웃)까지 걸리므로 잡이 두엇만 있어도 늘
+ * 겹쳤다. 겹친 두 회차가 같은 완료를 각자 보고 removeJob·완료 알림·searchLyrics를 두 번씩
+ * 실행했다. 다음 회차를 **이전 회차가 끝난 뒤에** 예약하면 겹침 자체가 구조적으로 불가능해
+ * 별도 in-flight 플래그가 필요 없다.
+ */
 function ensurePolling(): void {
-  if (pollTimer === undefined) {
-    pollTimer = window.setInterval(() => void pollJobs(), pollMs);
-  }
+  if (pollActive) return;
+  pollActive = true;
+  schedulePoll();
 }
 
-/** 폴링 주기 변경 — 진행 중이면 타이머를 새 주기로 갈아 끼운다 */
+function schedulePoll(): void {
+  pollTimer = window.setTimeout(() => {
+    pollTimer = undefined;
+    void runPollCycle();
+  }, pollMs);
+}
+
+async function runPollCycle(): Promise<void> {
+  try {
+    await pollJobs();
+  } catch { /* 한 회차의 예외로 폴링이 죽으면 진행 표시가 영원히 멈춘다 — 다음 회차로 */ }
+  // pollJobs가 stopPolling()으로 마감했으면 여기서 끝난다
+  if (pollActive) schedulePoll();
+}
+
+/** 폴링 주기 변경 — 대기 중인 타이머는 새 주기로 갈아 끼운다.
+ *  실행 중이면 타이머가 없다(끝난 뒤 새 pollMs로 예약되므로 따로 할 일이 없다). */
 function setPollInterval(ms: number): void {
   if (pollMs === ms) return;
   pollMs = ms;
   if (pollTimer !== undefined) {
-    clearInterval(pollTimer);
-    pollTimer = window.setInterval(() => void pollJobs(), ms);
+    clearTimeout(pollTimer);
+    pollTimer = undefined;
+    schedulePoll();
   }
 }
 
 function stopPolling(): void {
+  pollActive = false;
   if (pollTimer !== undefined) {
-    clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = undefined;
   }
 }
@@ -3053,23 +4102,12 @@ async function handlePipToggle(): Promise<void> {
   const videoId = currentVideoId;
   const panel = ensureOverlay();
   const opened = await pip.open(cssText, {
-    // 메인 가사창과 같은 패널 조각(panels.ts)을 PiP 안에서도 쓴다 — 싱크가 없는 곡에서
-    // 창이 닫히는 대신 검색·붙여넣기·생성 UI를 그대로 띄우기 위한 배선
-    panel: {
-      onGenerate: (lyrics, attribution) => void handleGenerate(lyrics, attribution),
-      onRetrySearch: query => void searchLyrics(query),
-      onCandidateSearch: query => void handleCandidateSearch(query),
-      onPickCandidate: candidate => void handlePickCandidate(candidate),
-      onOpenSearch: () => { /* PiP는 자기 창 안에서 연다 (pip.openPanelSearch) */ },
-      // 설정 UI는 메인 패널에만 있다 — PiP에서 누르면 유튜브 탭의 패널에 설정을 펼쳐 준다
-      onOpenSettings: () => ensureOverlay().openSettings(),
-      onRecheckServer: () => void refreshServerStatus(),
-      onOpenPermissions: () => void openPermissionsPage(),
-    },
-    serverStatus,
+    // PiP 창 안의 가사 UI는 **메인 가사창과 같은 클래스의 두 번째 인스턴스**다.
+    // 여기서 넘기는 것은 그 인스턴스를 세울 재료뿐이고, 콜백은 메인과 **같은 묶음**을
+    // 공유한다 — 어느 창에서 눌러도 같은 핸들러를 타므로 두 창의 기능이 갈라질 수 없다.
+    settings,
+    callbacks: overlayCallbacks(),
     theme: resolveTheme(settings), // 판정은 페이지 컨텍스트에서만 가능 — PiP는 받아 쓴다
-    debug: settings.debugInfo,
-    loadServerLog: () => fetchServerLog(),
     showVideo: settings.pipShowVideo,
     // 저장된 창 크기가 있으면 그대로, 없으면(0) 기존 기본값(440 / 영상 유무에 따라 500·260)
     width: settings.pipWidth > 0 ? settings.pipWidth : 440,
@@ -3079,22 +4117,7 @@ async function handlePipToggle(): Promise<void> {
       void saveSettings({ pipWidth: w, pipHeight: h });
     },
     initialVideoRatio: settings.pipVideoRatio,
-    showPronunciation: settings.showPronunciation,
-    pronScript: resolveScript(settings),
-    pitchEnabled: settings.pitchGuide,
-    pitchLaneHeight: settings.pitchLaneHeight,
-    pitchWindowMeasures: settings.pitchWindowMeasures,
-    pitchScrollMode: settings.pitchScrollMode,
-    pitchFontScale: settings.pitchFontScale,
-    pitchCountdown: settings.pitchCountdown,
-    solfegeNotation: settings.solfegeNotation,
-    pitchLineOpacity: settings.pitchLineOpacity,
-    pitchPronPosition: settings.pitchPronPosition,
-    showConfidence: settings.debugInfo,
-    onPitchHeightChange: px => {
-      settings = { ...settings, pitchLaneHeight: px };
-      void saveSettings({ pitchLaneHeight: px });
-    },
+    pipChromaKey: settings.pipChromaKey,
     onSeek: time => engine.seekTo(time),
     onSeekRatio: ratio => {
       const video = engine.getVideo() ?? getVideoElement();
@@ -3114,8 +4137,7 @@ async function handlePipToggle(): Promise<void> {
     },
     // PiP 창에 포커스가 있을 때의 Alt+Shift+D — 핫키 경로와 같은 함수를 탄다.
     // 패널을 여는 부분까지 그대로 재사용하는 것이 맞다: PiP만 보고 있어도 디버그를 켰으면
-    // 메인 패널에서도 보이는 것이 일관적이고, PiP의 디버그 표시는 handleSettingsChange가
-    // pip.setDebug로 함께 맞춘다.
+    // 메인 패널에서도 보이는 것이 일관적이고, 두 창의 디버그 표시는 설정 방송이 함께 맞춘다.
     onToggleDebug: () => void toggleDebugInfo(),
     onVolumeChange: volume => {
       const video = engine.getVideo() ?? getVideoElement();
@@ -3131,23 +4153,32 @@ async function handlePipToggle(): Promise<void> {
       settings = { ...settings, pipVideoRatio: ratio };
       void saveSettings({ pipVideoRatio: ratio });
     },
+    // 열 폭 두 개 — 레인은 부착 레인 폭 설정을 그대로 이어 쓴다(설정을 새로 늘리지 않는다)
+    onLaneColWidthChange: px => {
+      settings = { ...settings, attachedLaneWidth: px };
+      void saveSettings({ attachedLaneWidth: px });
+    },
+    onPanelColWidthChange: px => {
+      settings = { ...settings, pipPanelWidth: px };
+      void saveSettings({ pipPanelWidth: px });
+    },
     melodyOn: settings.melodyPlayback,
     onMelodyToggle: () => void handleSettingsChange({ melodyPlayback: !settings.melodyPlayback }),
     metronomeOn: settings.metronome,
     onMetronomeToggle: () => void handleSettingsChange({ metronome: !settings.metronome }),
-    metronomeRate: settings.metronomeRate,
-    onMetronomeRateChange: rate => void handleSettingsChange({ metronomeRate: rate }),
-    metronomeBeat: settings.metronomeBeat,
-    onMetronomeBeatChange: beat => void handleSettingsChange({ metronomeBeat: beat }),
-    micOctave: settings.micOctave,
-    onPitchWindowChange: measures => void handleSettingsChange({ pitchWindowMeasures: measures }),
-    onPitchScrollModeChange: mode => void handleSettingsChange({ pitchScrollMode: mode }),
-    onKaraokeToggle: on => void handleSettingsChange({ pitchGuide: on }),
     onVideoToggle: on => void handleSettingsChange({ pipShowVideo: on }),
-    getMicSamples: () => micPitch.samples(),
+    onPanelToggle: on => void handleSettingsChange({ pipShowPanel: on }),
+    onCenterToggle: on => void handleSettingsChange({ pipShowCenter: on }),
+    onDualPositionChange: position => void handleSettingsChange({ pitchPronPosition: position }),
+    // 코너의 열 토글 — 패널 퀵 줄과 같은 설정을 뒤집는다(경로가 둘일 뿐 값은 하나다)
+    onLaneToggle: on => void handleSettingsChange({ pitchGuide: on }),
+    onPlaylistToggle: on => void handleSettingsChange({ pipPlaylist: on }),
+    onShortLyricsToggle: on => void handleSettingsChange({ pipShortLyrics: on }),
     onClosed: () => {
       karaokeAudio.setActive(false);
       micPitch.stop();
+      // 이 시점에 PiP 인스턴스는 이미 destroy됐다(pip.ts pagehide) — panels()는 다시
+      // 메인 하나뿐이므로 아래 복원이 사라진 창을 건드릴 일이 없다
       overlay?.setPipActive(false);
       // 패널이 placeholder 상태일 때만 복원 (동시 표시 모드면 이미 가사가 떠 있음)
       if (overlay?.isShowingPipPlaceholder()) restoreOverlayState();
@@ -3159,13 +4190,17 @@ async function handlePipToggle(): Promise<void> {
     pip.close();
     return;
   }
-  pip.setSong(currentSong?.title ?? '', currentSong?.artist ?? '');
-  pip.setTempo(currentData.tempo ?? null);
-  pip.setKey(currentData.key ?? null);
-  pip.setDebugMeta(currentData.debugMeta ?? null);
-  panel.setDebugMeta(currentData.debugMeta ?? null);
-  pip.setShowF0(settings.pitchF0Curve);
-  pip.setLines(currentData.lines);
+  const pipPanel = pip.panelInstance();
+  // 새로 세운 인스턴스에 «지금 화면»을 그대로 옮겨 그린다. applyLyricsData를 다시
+  // 부르지 않는 이유는 그쪽이 엔진 정지·재시작과 번역 재요청까지 함께 하기 때문이다 —
+  // 창을 하나 여는 일에 파이프라인 전체를 다시 태울 이유가 없다(paintPanels 주석).
+  if (pipPanel) {
+    paintPanels([pipPanel], currentData);
+    updateGenChip(); // 전사가 돌고 있으면 새 창에도 같은 진행 칩이 이어져야 한다
+  }
+  // pipKeepPanel이 꺼져 있으면 메인은 "PiP로 보는 중" 안내로 접는다(기본값은 동시 표시)
+  panel.setPipActive(true);
+  if (!settings.pipKeepPanel) panel.showPipPlaceholder();
   karaokeAudio.setNotes(collectMelodyNotes(currentData.lines));
   karaokeAudio.setTempo(currentData.tempo ?? null);
   karaokeAudio.setActive(true);
@@ -3175,8 +4210,6 @@ async function handlePipToggle(): Promise<void> {
     if (video) pip.attachVideo(video);
   }
   engine.resync(); // PiP에 현재 라인을 즉시 반영
-  panel.setPipActive(true);
-  if (!settings.pipKeepPanel) panel.showPipPlaceholder();
 }
 
 function restoreOverlayState(): void {
@@ -3206,13 +4239,12 @@ let serverStatusSeq = 0;
 
 function applyServerStatus(next: ServerStatus): void {
   serverStatusSeq++;
-  const kindChanged = serverStatus.kind !== next.kind;
   serverStatus = next;
-  overlay?.setServerStatus(next);
-  pip.setServerStatus(next); // PiP도 같은 규칙·같은 배너로 잠근다
-  // "가사 없음" 화면은 서버 상태에 따라 문구 자체가 달라진다 — 상태 판정이 검색보다
-  // 늦게 도착했으면 PiP 쪽도 다시 그린다 (메인 패널은 setServerStatus가 알아서 한다)
-  if (kindChanged && currentData === null && pip.isOpen()) pip.showPanelEmpty(currentSong);
+  // 두 창이 같은 규칙·같은 배너로 함께 잠긴다. "가사 없음" 화면 문구가 서버 상태에
+  // 따라 달라지는 것도 setServerStatus 안에서 스스로 다시 그리므로(상태 종류가 바뀌고
+  // 지금 화면이 'empty'면 showEmpty를 다시 태운다), 예전처럼 PiP 쪽을 따로 다시 그려
+  // 줄 필요가 없다 — 그 판정이 이제 두 인스턴스 안에서 각자 돈다.
+  broadcast('setServerStatus', next);
 }
 
 async function refreshServerStatus(): Promise<void> {
@@ -3272,12 +4304,13 @@ function clearServerFailureOnSuccess(): void {
  */
 function reportFailure(message: string, detail?: string): void {
   const full = detail ? `${message} — ${detail}` : message;
-  const panel = ensureOverlay();
-  if (panel.hasPreservableContent()) panel.setNoticeChip(full, 15000);
-  else panel.showError(message, detail);
-  if (pip.isOpen()) {
-    if (pip.hasPreservableContent()) pip.setNoticeChip(full, 15000);
-    else pip.showPanelError(message, detail);
+  ensureOverlay();
+  // 판정은 **인스턴스마다** 따로 한다 — "이 창을 오류로 덮으면 사용자가 잃는 것이
+  // 있는가"는 그 창이 지금 무엇을 보여주는지에 달렸다. 한쪽에서 가사를 붙여넣는 중이고
+  // 다른 쪽은 빈 화면이면, 앞쪽엔 칩으로 알리고 뒤쪽은 오류 화면으로 덮는 것이 맞다.
+  for (const p of panels()) {
+    if (p.hasPreservableContent()) p.setNoticeChip(full, 15000);
+    else p.showError(message, detail);
   }
 }
 
@@ -3289,9 +4322,8 @@ function reportFailure(message: string, detail?: string): void {
  * 지우는 호출(null)로는 패널을 새로 만들지 않는다 — 없던 패널이 알림 없이 튀어나오면 안 된다.
  */
 function showNotice(text: string | null, autoHideMs?: number): void {
-  if (text) ensureOverlay().setNoticeChip(text, autoHideMs);
-  else overlay?.setNoticeChip(null);
-  pip.setNoticeChip(text, autoHideMs);
+  if (text) ensureOverlay();
+  broadcast('setNoticeChip', text, autoHideMs);
 }
 
 /**
@@ -3330,10 +4362,27 @@ function failureNote(failure: ApiFailure | undefined): string | undefined {
   return detail ? `${statusLine(status)} — ${detail}` : statusLine(status);
 }
 
+/** 확장 리로드/업데이트 뒤 orphan 탭 안내를 한 번만 띄우기 위한 표식 — 무반응 조사 가설5:
+ *  리로드 후 기존 탭에서는 chrome.runtime이 무효화돼 모든 요청이 조용히 실패하는데,
+ *  감지 코드가 없어 사용자에겐 "눌러도 반응 없음"으로만 보였다(2026-08-03). */
+let contextInvalidatedNoticeShown = false;
+
+function noticeExtensionReloaded(): void {
+  if (contextInvalidatedNoticeShown) return;
+  contextInvalidatedNoticeShown = true;
+  // autoHideMs 생략 = 영구 표시 — 이 탭은 새로고침 전까지 복구되지 않으므로 계속 보여야 한다
+  showNotice(t('content.notice.extensionReloaded'));
+}
+
 async function sendToBackground<T>(message: BgRequest): Promise<MessageResponse<T>> {
   try {
+    if (!chrome.runtime?.id) {
+      noticeExtensionReloaded();
+      return { error: 'extension context invalidated' };
+    }
     return await chrome.runtime.sendMessage(message) as MessageResponse<T>;
   } catch (error) {
+    if (String(error).includes('Extension context invalidated')) noticeExtensionReloaded();
     return { error: error instanceof Error ? error.message : String(error) };
   }
 }

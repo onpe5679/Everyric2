@@ -131,6 +131,39 @@
 나중에 사용자 지정 서버까지 다루려면 `LOCAL_SERVER_ORIGINS`를 사용자가 추가한 origin
 목록으로 넓히면 된다.
 
+## 2026-08 추가분 (신 정렬 스택 + 차기 확장)
+
+전부 additive — 구버전 확장(1.5.5)은 모르는 필드/엔드포인트를 무시하면 그만이다.
+
+### 조회 응답 추가 필드 (`GET /api/sync/{videoId}`)
+- `engine_version` — 이 싱크를 만든 정렬 스택 식별자. **null/부재 = 스탬프 도입 전
+  구세대**(확장은 이 경우 노란 "새 엔진으로 업그레이드" 버튼을 재생성 버튼 자리에 띄운다).
+- `engine_variant` — 엔진 변형(MMS 강제 폴백 등, 없으면 null).
+- `debug.routing` — `{route: "fast"|"medium"|"heavy", language, language_source:
+  "label"|"script_census", ...}`. route가 확장 깊이 배지(1/2/3)의 재료다.
+- `debug.alignment_text` — `"fast"`/`"medium"`/`"heavy-2pass"` 등 실제 깊이+2패스 여부.
+- `adlib` — `[[start,end],...]` 가사가 주장하지 않은 가창 구간 후보(신 스택 전용).
+- 세그 `pron`/`pron_segs`의 표기 키에 `en`(원문 음절)·`ipa`(정렬 타깃 IPA)가 추가될 수
+  있다 — 확장은 아는 키만 골라 쓴다.
+
+### `GET /api/sync/{videoId}/previous` — 직전 세대 스냅샷 (A/B 고스트 비교)
+재처리로 덮어써지기 전 세대. 이력이 없으면 `{"found": false}`(404 아님). 응답:
+`timestamps/language/quality_score/created_at/replaced_at/lyrics_hash/engine_variant/
+engine_version`. 확장 디버그 패널의 「이전 세대와 비교」가 소비한다.
+
+### `POST /api/sync/regenerate` 추가 필드
+- `min_depth`: `"medium" | "heavy"`(선택) — 분석 깊이 하한. 서버가 라우팅 판정을
+  건너뛰고 이 깊이에서 시작한다(확장 깊이 버튼). 같은 가사의 기존 싱크 조기 반환과
+  캐시 재사용을 우회한다. 한도는 비force generate 한도와 동일.
+
+### `POST /api/sync/feedback` — 정렬 품질 별점·오류 제보 (수집 전용)
+```jsonc
+{ "video_id": "...", "rating": 4,             // 1~5 필수
+  "category": "timing",                        // 선택: timing|pronunciation|lyrics|other
+  "comment": "후렴이 밀려요" }                  // 선택, ≤1000자
+```
+응답 `{"ok": true}`. 제출 시점의 최신 싱크 sync_id·engine_version이 서버에 함께 남는다.
+
 ## 참고 구현
 
 이 저장소의 FastAPI 서버가 참고 구현이다 (큐 순번 필드만 미구현):

@@ -295,26 +295,105 @@ def notes_for_span(
     return notes
 
 
+OCTAVE_MIN_DEV = 8.0
+OCTAVE_MAX_RESIDUAL = 1.5
+
+
+def octave_fold_shift(
+    dev: np.ndarray,
+    *,
+    min_dev: float = OCTAVE_MIN_DEV,
+    max_residual: float = OCTAVE_MAX_RESIDUAL,
+) -> np.ndarray:
+    """기준 대비 편차(반음)를 되돌릴 ±12k 이동량 — 옥타브 인공물에만 반응한다.
+
+    서브하모닉/배음 락온은 **정확히** ±12의 배수만큼 어긋난다 (f0 잡음 때문에 ±1반음
+    정도 흔들릴 뿐). 반면 실제 멜로디의 넓은 도약은 16·19반음처럼 12의 배수가 아닌
+    임의 음정이다. 그래서 "많이 벗어났으니 접는다"가 아니라 "12의 배수 근처로
+    벗어났을 때만 접는다"가 옳은 판정이다 — 편차가 min_dev 이상이면서 가장 가까운
+    12의 배수와의 잔차가 max_residual 이내일 때만 이동량을 낸다 (아니면 0).
+
+    벤치 실측(scripts/bench_melody_ust.py, UST 12곡 7502노트): 잔차 게이팅 없는
+    구버전은 잡음 없는 f0에서도 정답 노트 811개를 ±12/±24로 파괴했다 (음역이 넓은
+    라인이 통째로 접힘). 잔차 게이팅 후 같은 조건에서 파괴 0.
+    """
+    dev = np.asarray(dev, dtype=np.float64)
+    k = np.round(dev / 12.0)
+    ok = (np.abs(dev) >= min_dev) & (k != 0) & (np.abs(dev - 12.0 * k) <= max_residual)
+    return np.where(ok, -12.0 * k, 0.0)
+
+
+def _side_medians(vals: np.ndarray, width: int) -> tuple[np.ndarray, np.ndarray]:
+    """각 원소의 **직전 width개**와 **직후 width개** 중앙값을 따로 낸다 (끝은 edge 패딩).
+
+    앞뒤를 합친 중앙창을 쓰면 진짜 도약 직후 프레임에서 창이 도약 이전 값에 지배돼
+    기준이 지연된다 — 옥타브 도약이면 그 지연이 그대로 "12반음 이탈"로 보여 정답을
+    파괴한다. 좌우를 분리해야 "도약(한쪽만 다름)"과 "이탈(양쪽 다 다름)"이 갈린다.
+    """
+    n = len(vals)
+    width = max(1, min(width, n))
+    pad = np.pad(vals, width, mode="edge")
+    win = np.lib.stride_tricks.sliding_window_view(pad, width)
+    # win[i]는 pad[i:i+width] — prev는 원소 i 직전 width개, next는 직후 width개
+    prev = np.median(win[:n], axis=1)
+    nxt = np.median(win[width + 1 : width + 1 + n], axis=1)
+    return prev, nxt
+
+
+def _agreed_octave_shift(
+    vals: np.ndarray,
+    prev_ref: np.ndarray,
+    next_ref: np.ndarray,
+    *,
+    min_dev: float = OCTAVE_MIN_DEV,
+) -> np.ndarray:
+    """앞뒤 기준이 **둘 다** 같은 ±12k 이탈을 가리킬 때만 그 이동량을 낸다.
+
+    서브하모닉 락온은 궤적에서 잠깐 벗어났다 **되돌아오는** 이탈이라 앞뒤 문맥 모두와
+    옥타브만큼 어긋난다. 반대로 멜로디가 진짜로 한 옥타브 올라가 머무르면 뒤 문맥은
+    새 음역과 일치하므로 판정이 갈려 접지 않는다. 이 비대칭이 둘을 가르는 유일한
+    신호다 — 편차 크기만으로는 구분되지 않는다.
+    """
+    sp = octave_fold_shift(vals - prev_ref, min_dev=min_dev)
+    sn = octave_fold_shift(vals - next_ref, min_dev=min_dev)
+    return np.where((sp != 0.0) & (sp == sn), sp, 0.0)
+
+
 def fold_line_octaves(
     track: F0Track,
     spans: list[tuple[float, float]],
     *,
-    window: float = 14.0,
-    global_guard: float = 9.0,
+    context_sec: float = 0.8,
+    global_guard: float = 20.0,
+    context_lines: int = 3,
 ) -> int:
-    """라인별 지배 옥타브 창으로 f0를 접는다 — 체인 스냅의 구조적 함정 대체.
+    """라인 안의 국소 궤적에서 옥타브만큼 튄 프레임을 되돌린다. 반환: 접힌 프레임 수.
 
     프레임 체인 스냅(직전 프레임 기준 ±12 접기)은 리셋 직후 첫 프레임이
     서브하모닉이면 라인 전체가 저옥타브에 갇히고, 접힌 값이 다시 기준이 되어
-    이중 폴딩(-24)까지 발생한다 (로키 벌스 실측: 라인 중앙값 59→26).
-    여기서는 라인마다 (1) 유성 프레임이 가장 많이 모이는 window 반음 창을 찾아
-    창 밖 프레임을 ±12k로 창 안에 접고, (2) 라인 전체가 전곡 기준(라인 중앙값들의
-    중앙값)보다 global_guard 반음 이상 벗어난 서브하모닉/배음이면 라인 통째로
-    ±12 이동한다. 반환: 접힌 프레임 수.
+    이중 폴딩(-24)까지 발생한다 (로키 벌스 실측: 라인 중앙값 59→26). 그렇다고
+    라인의 지배 옥타브 창(고정 14반음)을 기준으로 삼으면 이번엔 **음역이 넓은 라인이
+    통째로 망가진다** — 한 프레이즈가 2옥타브를 오가는 곡이 실제로 있다
+    (numb numb: 라인 음역 23~26반음, 32라인 중 6라인).
+
+    그래서 기준은 (1) 각 프레임의 **직전/직후 context_sec 중앙값 두 개**이고, 둘 다
+    같은 ±12k 이탈을 가리킬 때만 접는다 (_agreed_octave_shift). 국소 기준은 넓은
+    음역도 따라가고, 좌우 분리 덕에 "잠깐 튀었다 돌아오는 락온"과 "올라가서 머무르는
+    진짜 도약"이 갈린다. 이동량은 octave_fold_shift의 잔차 게이팅을 거쳐 12의 배수
+    근처 이탈에만 적용된다.
+    (2) 라인 전체가 잠긴 경우는 라인 안에 기준이 없으므로 라인 중앙값을 **앞뒤
+    context_lines개 이웃 라인 + 전곡 중앙값**과 비교해 셋 다 같은 판정일 때만 라인을
+    통째로 이동한다. 다만 이 판정은 global_guard=20반음부터, 즉 **2옥타브 이상 이탈
+    (이중 폴딩 인공물)에만** 건다 — 한 옥타브짜리 라인 이탈은 실제로 옥타브 낮게
+    부르는 벌스와 음고 증거만으로는 구분이 불가능하다는 것이 벤치 결론이다
+    (1옥타브까지 걸면 구제 0 · 파괴 162노트). 라인 통째 락온의 실제 복구는 f0 백엔드의
+    salience 같은 별도 증거가 필요하며 이 계층의 문제가 아니다.
     """
     folded = 0
     line_medians: list[float | None] = []
     span_indices: list[np.ndarray] = []
+    frame_dt = float(track.times[1] - track.times[0]) if len(track.times) > 1 else 0.01
+    half = max(1, int(round(context_sec / max(frame_dt, 1e-6))))
     for s, e in spans:
         mask = (track.times >= s) & (track.times < e) & track.voiced
         idx = np.where(mask)[0]
@@ -323,47 +402,102 @@ def fold_line_octaves(
             line_medians.append(None)
             continue
         vals = track.midi[idx]
-        lo = int(np.floor(np.nanmin(vals)))
-        hi = int(np.ceil(np.nanmax(vals)))
-        best_w, best_c = lo, -1
-        for w in range(lo, max(lo, hi - int(window)) + 1):
-            c = int(((vals >= w) & (vals < w + window)).sum())
-            if c > best_c:
-                best_c, best_w = c, w
-        center = best_w + window / 2
-        for i in idx:
-            m = float(track.midi[i])
-            if best_w <= m < best_w + window:
-                continue
-            k = round((m - center) / 12.0)
-            cand = m - 12.0 * k
-            if best_w - 1 <= cand < best_w + window + 1:
-                track.midi[i] = cand
-                folded += 1
+        prev_ref, next_ref = _side_medians(vals, half)
+        shift = _agreed_octave_shift(vals, prev_ref, next_ref)
+        hit = shift != 0.0
+        if hit.any():
+            track.midi[idx[hit]] += shift[hit]
+            folded += int(hit.sum())
         line_medians.append(float(np.nanmedian(track.midi[idx])))
 
-    valid = [m for m in line_medians if m is not None]
-    if valid:
-        g = float(np.median(valid))
-        for idx, m in zip(span_indices, line_medians):
-            if m is None or len(idx) == 0:
-                continue
-            # 2옥타브(이중 폴딩·서브서브하모닉)까지 잡도록 개선이 될 때까지 반복 이동
+    # 라인 통째 락온: 라인 안에는 기준이 없으니 **이웃 라인**을 문맥으로 쓴다.
+    # 전곡 중앙값 하나를 기준으로 삼으면 실제로 옥타브 낮게 부르는 벌스 구간이
+    # 통째로 끌어올려진다 (벤치 실측: 그 하나 때문에 정답 185노트 파괴 — numb numb·
+    # みむかｩわ처럼 곡 음역이 2옥타브를 넘는 곡에서 집중 발생).
+    valid_idx = [i for i, m in enumerate(line_medians) if m is not None]
+    if valid_idx:
+        song_ref = float(np.median([line_medians[j] for j in valid_idx]))
+    for pos, i in enumerate(valid_idx):
+        idx = span_indices[i]
+        if len(idx) == 0:
+            continue
+        before = [line_medians[j] for j in valid_idx[max(0, pos - context_lines) : pos]]
+        after = [line_medians[j] for j in valid_idx[pos + 1 : pos + 1 + context_lines]]
+        if not before and not after:
+            continue
+        # 첫/마지막 라인은 한쪽 문맥밖에 없으므로 그쪽만으로 판정한다
+        prev_ref = float(np.median(before or after))
+        next_ref = float(np.median(after or before))
+        cur = np.array([float(line_medians[i])])
+        shift = float(
+            _agreed_octave_shift(
+                cur, np.array([prev_ref]), np.array([next_ref]), min_dev=global_guard
+            )[0]
+        )
+        # 이웃 두 쪽에 더해 **전곡 기준**까지 같은 판정이어야 라인을 통째로 옮긴다.
+        # 높은 후렴 사이에 낀 진짜 저음 라인은 이웃과의 차가 우연히 12에 걸릴 수 있지만
+        # 전곡 중앙값과는 12의 배수로 떨어지지 않는다 (실측: 花めかない 162노트 오폴딩).
+        if shift and shift != float(
+            octave_fold_shift(cur - song_ref, min_dev=global_guard)[0]
+        ):
             shift = 0.0
-            cur = m
-            for _ in range(2):
-                if g - cur >= global_guard and abs(cur + 12 - g) < abs(cur - g):
-                    shift += 12.0
-                    cur += 12.0
-                elif cur - g >= global_guard and abs(cur - 12 - g) < abs(cur - g):
-                    shift -= 12.0
-                    cur -= 12.0
-                else:
-                    break
-            if shift:
-                track.midi[idx] += shift
-                folded += len(idx)
+        if shift:
+            track.midi[idx] += shift
+            folded += len(idx)
     return folded
+
+
+def _span_pitch(track: F0Track, i0: int, i1: int) -> tuple[int, float, int] | None:
+    """프레임 구간 [i0, i1)의 대표 반음 → (midi, confidence, 유성 프레임 수).
+
+    최빈 반음 = 구간에서 가장 오래 유지된 음 (모음 정상 상태). 중앙값은 음절 시작부
+    (자음/브레시 온셋)의 서브하모닉 프레임에 쉽게 오염된다.
+    """
+    if i1 <= i0:
+        return None
+    voiced = track.voiced[i0:i1]
+    n_voiced = int(voiced.sum())
+    if n_voiced < 3:
+        return None
+    rounded = np.round(track.midi[i0:i1][voiced]).astype(int)
+    values, counts = np.unique(rounded, return_counts=True)
+    midi = int(values[np.argmax(counts)])
+    conf = float(counts.max()) / max(1, i1 - i0)
+    return midi, conf, n_voiced
+
+
+def _refine_boundary(
+    track: F0Track, i0: int, ib: int, i1: int, pa: int, pb: int, window: int
+) -> int:
+    """앵커 경계 ib를 두 음(pa→pb)이 실제로 갈리는 f0 전이점으로 옮긴다.
+
+    정렬(CTC) 앵커는 자음 길이·발음 사전 때문에 실제 음 전환보다 수십 ms 앞뒤로
+    어긋난다. f0에는 전환 지점이 그대로 남아 있으므로, 경계 후보를 창 안에서 훑어
+    "앞은 pa에 가깝고 뒤는 pb에 가까운" 프레임 수가 최대가 되는 지점을 고른다.
+    창(window) 밖으로는 절대 나가지 않아 가사-노트 잠금은 유지된다.
+    """
+    lo = max(i0 + 1, ib - window)
+    hi = min(i1 - 1, ib + window)
+    if hi <= lo:
+        return ib
+    seg = track.midi[lo:hi]
+    ok = track.voiced[lo:hi] & np.isfinite(seg)
+    # near_a[i] = 그 프레임이 pb보다 pa에 가까운가
+    near_a = np.zeros(len(seg), dtype=np.int32)
+    near_a[ok] = (np.abs(seg[ok] - pa) <= np.abs(seg[ok] - pb)).astype(np.int32)
+    voiced_n = ok.astype(np.int32)
+    # 분할점 s(로컬 인덱스)에서의 점수 = [0,s)에서 pa에 가까운 수 + [s,end)에서 pb에 가까운 수
+    pre_a = np.concatenate(([0], np.cumsum(near_a)))
+    pre_v = np.concatenate(([0], np.cumsum(voiced_n)))
+    total_v = int(pre_v[-1])
+    if total_v < 4:
+        return ib
+    scores = pre_a + (total_v - pre_v) - (pre_a[-1] - pre_a)
+    best = int(np.argmax(scores))
+    # 원 경계보다 확실히 나을 때만 옮긴다 (증거가 팽팽하면 정렬 결과를 존중)
+    if scores[best] - scores[ib - lo] < 2:
+        return ib
+    return lo + best
 
 
 def notes_from_anchor_spans(
@@ -374,6 +508,8 @@ def notes_from_anchor_spans(
     max_gap_sec: float = 0.12,
     min_voiced_ratio: float = 0.15,
     long_span_sec: float = 1.0,
+    boundary_snap_sec: float = 0.06,
+    trim_tail: bool = True,
 ) -> list[dict]:
     """정렬된 음절(글자) 앵커 경계에서 노트를 자른다 — 노트 타이밍이 가사와 잠긴다.
 
@@ -383,16 +519,27 @@ def notes_from_anchor_spans(
     리듬이 보여야 하기 때문 (병합하면 통짜 긴 막대가 되어 리듬 정보가 사라진다).
     길게 끄는 음절(멜리스마, long_span_sec 초과)만 내부 run 분할을 허용하되
     첫 노트 시작은 앵커 시작에 스냅한다.
+
+    앵커 경계를 그대로 쓰면 노트 경계 정확도가 정렬 정확도에 그대로 묶인다. 그래서
+    (1) 음이 바뀌는 인접 앵커 사이 경계는 boundary_snap_sec 안에서 f0 전이점으로
+    미세 조정하고, (2) 앵커 끝이 발성보다 길게 잡힌 경우(다음 글자까지 확장하다
+    쉼표를 넘은 경우) 노트 끝을 마지막 유성 프레임까지 줄인다. 둘 다 창 안 조정이라
+    가사-노트 잠금은 유지된다.
     """
-    raw: list[dict] = []
+    times = track.times
+    n_frames = len(times)
+    if n_frames == 0:
+        return []
+    frame_dt = float(times[1] - times[0]) if n_frames > 1 else 0.01
+    snap_w = max(0, int(round(boundary_snap_sec / max(frame_dt, 1e-6))))
+
+    # 1패스: 앵커별 프레임 구간과 대표 반음 (경계 조정 전)
+    spans: list[dict] = []
     for a0, a1 in anchors:
         if a1 <= a0:
             continue
-        in_span = (track.times >= a0) & (track.times < a1)
-        mask = in_span & track.voiced
-        n_voiced = int(mask.sum())
-        if n_voiced < 3:
-            continue
+        i0 = int(np.searchsorted(times, a0, side="left"))
+        i1 = int(np.searchsorted(times, a1, side="left"))
         if a1 - a0 > long_span_sec:
             sub = notes_for_span(
                 track,
@@ -404,38 +551,83 @@ def notes_from_anchor_spans(
             )
             if sub:
                 sub[0]["start"] = round(a0, 3)
-                raw.extend(sub)
+                spans.append({"melisma": sub, "i0": i0, "i1": i1})
                 continue
-        # 최빈 반음 = 스팬에서 가장 오래 유지된 음 (모음 정상 상태).
-        # 중앙값은 음절 시작부(자음/브레시 온셋)의 서브하모닉 프레임에 쉽게 오염된다.
-        rounded = np.round(track.midi[mask]).astype(int)
-        values, counts = np.unique(rounded, return_counts=True)
-        midi = int(values[np.argmax(counts)])
-        conf = round(float(counts.max()) / max(1, int(in_span.sum())), 3)
-        raw.append({"midi": midi, "start": round(a0, 3), "end": round(a1, 3), "confidence": conf})
+        pitch = _span_pitch(track, i0, i1)
+        if pitch is None:
+            continue
+        spans.append({"midi": pitch[0], "conf": pitch[1], "i0": i0, "i1": i1, "a0": a0, "a1": a1})
 
+    # 2패스: 음이 바뀌는 인접 앵커의 공유 경계를 f0 전이점으로 옮긴다
+    if snap_w > 0:
+        for prev, cur in zip(spans, spans[1:]):
+            if "melisma" in prev or "melisma" in cur:
+                continue
+            if prev["i1"] != cur["i0"] or prev["midi"] == cur["midi"]:
+                continue  # 붙어 있지 않거나(쉼표 사이) 같은 음이면 옮길 근거가 없다
+            nb = _refine_boundary(
+                track, prev["i0"], cur["i0"], cur["i1"], prev["midi"], cur["midi"], snap_w
+            )
+            if nb == cur["i0"]:
+                continue
+            prev["i1"] = cur["i0"] = nb
+            prev["a1"] = cur["a0"] = float(times[nb])
+
+    # 3패스: 조정된 구간으로 반음 재계산 + 발성 끝으로 트림
+    raw: list[dict] = []
+    for sp in spans:
+        if "melisma" in sp:
+            raw.extend(sp["melisma"])
+            continue
+        pitch = _span_pitch(track, sp["i0"], sp["i1"])
+        if pitch is None:
+            continue
+        midi, conf, _ = pitch
+        start, end = float(sp["a0"]), float(sp["a1"])
+        if trim_tail:
+            # 앵커 끝은 다음 글자 시작까지 늘어나 있어 쉼표·간주를 넘길 수 있다.
+            # 마지막 유성 프레임까지 줄이면 노트 막대가 실제 발성 길이와 맞는다.
+            voiced_idx = np.flatnonzero(track.voiced[sp["i0"] : sp["i1"]])
+            if len(voiced_idx):
+                last = sp["i0"] + int(voiced_idx[-1])
+                end = min(end, float(times[last]) + frame_dt)
+        if end <= start:
+            end = start + frame_dt
+        raw.append(
+            {
+                "midi": midi,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "confidence": round(conf, 3),
+            }
+        )
     return raw
 
 
-def _fold_notes_to_line_median(notes: list[dict], *, threshold: float = 9.0) -> None:
-    """라인 노트 중앙값 기준 옥타브 이탈 노트를 접는다 (제자리 수정).
+def _fold_notes_to_local_median(notes: list[dict], *, context: int = 3) -> None:
+    """프레임 폴딩이 놓친 옥타브 이탈 노트를 이웃 노트 문맥으로 마무리한다 (제자리 수정).
 
-    한 라인 안에서 인접 음절이 옥타브를 오가는 멜로디는 사실상 없다 — threshold
-    반음을 초과해 벗어난 노트가 ±12 이동으로 중앙값에 가까워지면 접는다.
-    실제 고음 이탈(±9 이내)은 보존된다.
+    기준은 라인 전체 중앙값이 아니라 **자기를 뺀 앞 context개 / 뒤 context개 중앙값
+    두 개**이고, 둘 다 같은 ±12k 이탈을 가리킬 때만 접는다. 라인 중앙값을 쓰면 음역이
+    넓은 라인(한 프레이즈가 2옥타브를 오가는 곡이 실제로 있다)에서 양 끝 노트가 서로를
+    이상치로 만들고, 좌우를 합치면 옥타브 도약 직후 노트가 이탈로 오판된다.
     """
     if len(notes) < 3:
         return
-    midis = sorted(n["midi"] for n in notes)
-    med = midis[len(midis) // 2]
-    for n in notes:
-        d = n["midi"] - med
-        if abs(d) <= threshold:
+    midis = [n["midi"] for n in notes]
+    for i, n in enumerate(notes):
+        before = midis[max(0, i - context) : i]
+        after = midis[i + 1 : i + 1 + context]
+        if not before or not after:
             continue
-        k = round(d / 12.0)
-        cand = n["midi"] - 12 * k
-        if abs(cand - med) < abs(d):
-            n["midi"] = int(cand)
+        cur = np.array([float(n["midi"])])
+        shift = float(
+            _agreed_octave_shift(
+                cur, np.array([float(np.median(before))]), np.array([float(np.median(after))])
+            )[0]
+        )
+        if shift:
+            n["midi"] = int(n["midi"] + shift)
 
 
 def anchor_spans_from_words(words: list[dict], seg_end: float) -> list[tuple[float, float]]:
@@ -704,9 +896,9 @@ class MelodyExtractor:
                     max_gap_sec=self.config.max_gap_sec,
                     min_voiced_ratio=self.config.min_voiced_ratio,
                 )
-                # 라인 창(14반음)은 서브하모닉(-12)과 실음이 공존할 수 있어,
-                # 라인 노트 중앙값에서 9반음 초과 이탈만 ±12 접어 마무리한다
-                _fold_notes_to_line_median(notes)
+                # 프레임 폴딩이 놓친 잔여 옥타브 이탈을 노트 레벨에서 마무리한다
+                # (이웃 노트 기준, 12의 배수 근처 이탈만)
+                _fold_notes_to_local_median(notes)
             if not notes:
                 notes = notes_for_span(track, float(start), float(end), **kwargs)
             if notes:

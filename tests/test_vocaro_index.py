@@ -135,3 +135,146 @@ def test_parse_title_cell_returns_none_when_missing():
 
 def test_normalize_title_strips_spaces_and_symbols_case_insensitively():
     assert vi._normalize_title("Roki ロキ!") == "rokiロキ"
+
+
+# ── 아티스트 토큰 오매핑 가드 (2026-08-03 실측: ダミーロマンス → cinderella-deco-27) ──
+
+def test_artist_token_does_not_match_a_different_song_by_the_same_artist():
+    # 위키에 없는 신곡의 풀 제목 — 아티스트 후보 "DECO*27"이 같은 아티스트의 다른 곡
+    # 항목(ko 필드에 아티스트가 붙는 표기)에 포함 매칭돼 엉뚱한 가사가 붙었다.
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
+
+
+def test_full_title_of_the_actual_song_still_matches():
+    # 같은 인덱스 항목이라도 진짜 그 곡의 풀 제목은 여전히 붙는다(ja 정확 일치 경로)
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    result = vi.match("DECO*27 - シンデレラ feat. 初音ミク")
+    assert result is not None
+    assert result.slug == "cinderella-deco-27"
+
+
+def test_whole_query_as_partial_title_is_still_a_legitimate_match():
+    # 가드는 부분 후보(q != 풀 쿼리)에만 적용된다 — 쿼리 전체가 위키 제목의 부분
+    # 문자열인 기존 정당 케이스는 그대로 살아 있어야 한다.
+    _set_entries([SongEntry(slug="song", ko="긴 제목의 노래 입니다", ja=None)])
+    result = vi.match("노래 입니다")
+    assert result is not None
+    assert result.slug == "song"
+
+
+def test_short_entry_title_inside_artist_token_is_rejected():
+    # 실측 2호: 3글자 곡 "Dec."이 아티스트 후보 "deco27" 안에 포함(길이비 정확히 0.5)돼
+    # 붙었다 — 역방향(n ⊂ q) 포함은 비율 엄격 초과만 허용한다.
+    _set_entries([SongEntry(slug="dec", ko="Dec.", ja="Dec.")])
+    assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
+
+
+def test_entry_title_covering_most_of_a_segment_still_matches():
+    # 정당한 역방향 포함(세그 후보 "シンデレラmv" 안의 "シンデレラ", 비율 5/7 > 0.5)은 유지
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    result = vi.match("DECO*27 - シンデレラ MV")
+    assert result is not None
+    assert result.slug == "cinderella-deco-27"
+
+
+def test_same_title_different_artist_is_disambiguated_by_query_artist_token():
+    # 동명이곡(실측: シンデレラ ZIG판 vs DECO*27판) — 정확 일치가 여럿이면 쿼리의
+    # 아티스트 토큰이 항목 ko/슬러그에 나타나는 쪽을 고른다.
+    _set_entries([
+        SongEntry(slug="cinderella-zig", ko="신데렐라/ZIG", ja="シンデレラ"),
+        SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ"),
+    ])
+    result = vi.match("DECO*27 - シンデレラ feat. 初音ミク")
+    assert result is not None
+    assert result.slug == "cinderella-deco-27"
+
+
+def test_same_title_without_artist_hint_keeps_deterministic_first_entry():
+    _set_entries([
+        SongEntry(slug="cinderella-zig", ko="신데렐라/ZIG", ja="シンデレラ"),
+        SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ"),
+    ])
+    result = vi.match("シンデレラ")
+    assert result is not None
+    assert result.slug == "cinderella-zig"  # 힌트 없으면 기존 순서 유지(결정론)
+
+
+# ── 슬러그 영문 별칭 (2026-08-03 실측: candy-cookie-chocolate) ──
+
+
+def test_english_transliterated_title_matches_via_slug_alias():
+    # 인덱스는 ko/ja만 갖는데 영상 제목이 영문 전사인 곡 — 슬러그가 그 전사다.
+    _set_entries([
+        SongEntry(slug="candy-cookie-chocolate", ko="캔디 쿠키 초콜릿", ja="キャンディークッキーチョコレート"),
+    ])
+    result = vi.match("Candy Cookie Chocolate / Hatsune Miku")
+    assert result is not None
+    assert result.slug == "candy-cookie-chocolate"
+
+
+def test_decorated_english_title_resolves_via_candidate_decomposition():
+    # 장식이 붙어도 candidate_queries가 괄호를 벗긴 후보를 만들어 정확 일치로 잡힌다 —
+    # 슬러그 별칭을 포함 매칭에 넣지 않아도 되는 근거.
+    _set_entries([
+        SongEntry(slug="candy-cookie-chocolate", ko="캔디 쿠키 초콜릿", ja=None),
+    ])
+    result = vi.match("Candy Cookie Chocolate (Official MV)")
+    assert result is not None
+    assert result.slug == "candy-cookie-chocolate"
+
+
+def test_slug_alias_is_not_a_containment_candidate():
+    # 동명이곡 넘버링 슬러그(melt-2)의 별칭 "melt2"가 쿼리 "melt"의 포함 매칭에 걸리면
+    # rest="2"가 2자 미만이라 가드를 통과해 버린다 — 슬러그는 정확 일치 전용이다(엣지 감사 #8).
+    _set_entries([SongEntry(slug="melt-2", ko="멜트 (다른 곡)", ja=None)])
+    assert vi.match("melt") is None
+
+
+def test_slug_alias_does_not_bypass_artist_token_guard():
+    # 슬러그에 아티스트 구분자가 붙은 항목(cinderella-deco-27)의 별칭이 아티스트
+    # 토큰("deco27")만으로 엉뚱한 곡에 붙으면 안 된다 — 기존 3중 가드가 필드
+    # 무관하게 적용되는지 고정.
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
+
+
+# ── 보컬로이드 보컬명 오매칭 가드 (2026-08-03 실측: depresso. → hatsune-miku-song) ──
+
+
+def test_vocal_name_fragment_does_not_shadow_the_real_song():
+    # 실측: match('depresso. / 初音ミク') → ryo의 곡 「初音ミク」(색인에 실재)로 오매칭.
+    # depresso.는 색인에 없다 — 쿼리 속 보컬명이 우연히 다른 곡 제목과 같아서 생긴 사고.
+    _set_entries([SongEntry(slug="hatsune-miku-song", ko="하츠네 미쿠", ja="初音ミク")])
+    assert vi.match("depresso. / 初音ミク") is None
+
+
+def test_vocal_name_fragment_guard_applies_to_containment_pass_too():
+    # 정확 일치가 아니라 포함 매칭으로도 같은 오탐이 날 수 있다 — 위키 항목 제목이
+    # 보컬명을 포함하는 더 긴 표기("初音ミクの唄" 등)여도 가드가 적용돼야 한다.
+    _set_entries([SongEntry(slug="hatsune-miku-no-uta", ko="하츠네 미쿠의 노래", ja="初音ミクの唄")])
+    assert vi.match("depresso. / 初音ミク") is None
+
+
+def test_whole_query_being_just_the_vocal_name_is_a_legitimate_search():
+    # 쿼리 전체가 보컬명뿐이면(진짜 그 곡을 찾는 경우) 가드가 걸리지 않는다
+    _set_entries([SongEntry(slug="hatsune-miku-song", ko="하츠네 미쿠", ja="初音ミク")])
+    result = vi.match("初音ミク")
+    assert result is not None
+    assert result.slug == "hatsune-miku-song"
+
+
+def test_vocal_name_guard_does_not_affect_unrelated_matches():
+    # 보컬명이 쿼리에 아예 없으면 가드가 개입할 이유가 없다 — 기존 동작 그대로.
+    _set_entries([SongEntry(slug="roki", ko="로키", ja="ロキ")])
+    result = vi.match("ロキ / 초저녁")
+    assert result is not None
+    assert result.slug == "roki"
+
+
+def test_multiple_known_vocal_names_are_all_guarded():
+    _set_entries([SongEntry(slug="rin-song", ko="린 노래", ja="鏡音リン")])
+    assert vi.match("어떤곡 / 鏡音リン") is None
+    # 로마자 표기도 같은 정규화 키로 걸린다
+    _set_entries([SongEntry(slug="kaito-song", ko="카이토 노래", ja="KAITO")])
+    assert vi.match("어떤곡 / KAITO") is None

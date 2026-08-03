@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from everyric2.alignment.emission import EngineEmission
 from everyric2.audio.loader import AudioData
 from everyric2.config.settings import AlignmentSettings
 from everyric2.inference.prompt import LyricLine, SyncResult
@@ -74,12 +75,23 @@ class BaseAlignmentEngine(ABC):
         return self.config.language if self.config.language != "auto" else "en"
 
     @staticmethod
-    def get_engine_type() -> Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid", "sofa"]:
+    def get_engine_type() -> (
+        Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid", "sofa", "owsm", "omniasr"]
+    ):
         raise NotImplementedError
 
     # Optional methods - subclasses can override these
     def get_status_string(self) -> str | None:
         """Get current processing status string for progress display."""
+        return None
+
+    def emission_for(self, audio: AudioData) -> EngineEmission | None:
+        """곡 전체 CTC emission 노출 (2패스 리파이너용). 기본은 미지원 — ``None``.
+
+        지원하는 엔진(예: ``OmniASREngine``)만 override한다. 서브프로세스로 격리된 엔진은
+        emission 텐서가 프로세스 경계를 못 넘으므로 구현하지 않는다 —
+        ``everyric2/alignment/emission.py`` 모듈 docstring 참고.
+        """
         return None
 
     def get_transcription_sets(

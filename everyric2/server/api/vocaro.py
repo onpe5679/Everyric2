@@ -151,11 +151,18 @@ class VocaroIndexResponse(BaseModel):
 
 
 @router.get("/page", response_model=VocaroPageResponse)
-async def song_page(slug: str = Query(..., min_length=2, max_length=200)):
-    """슬러그로 곡 페이지를 받아 파싱해 준다 — 원문/발음/번역 줄 목록 + 출처."""
+async def song_page(
+    slug: str = Query(..., min_length=2, max_length=200),
+    hint: str | None = Query(None, max_length=300),
+):
+    """슬러그로 곡 페이지를 받아 파싱해 준다 — 원문/발음/번역 줄 목록 + 출처.
+
+    ``hint``(영상 제목)는 한 페이지에 여러 버전 가사가 실린 경우(원곡/리믹스 등)
+    맞는 버전의 표를 고르는 데 쓴다. 없으면 첫 표 — 구버전 확장과 동작 동일.
+    """
     if not _PAGE_SLUG_RE.match(slug):
         return VocaroPageResponse(found=False)
-    song = await asyncio.to_thread(vocaro_source.fetch_song, slug)
+    song = await asyncio.to_thread(vocaro_source.fetch_song, slug, None, hint)
     if song is None:
         return VocaroPageResponse(found=False)
     return VocaroPageResponse(

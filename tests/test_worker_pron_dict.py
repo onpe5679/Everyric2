@@ -402,17 +402,39 @@ def test_ko_segment_display_survives_when_timing_is_unavailable():
     assert "pron_segs" not in seg
 
 
-def test_latin_segment_gets_kana_display_only():
-    # 라틴 곡은 일본어권용 가나 근사만 표시로 붙는다 — CTC 정렬이 라틴 위에서 약해서
-    # (latin_hangul 모듈 실측) pron_segs는 만들지 않는다.
-    from everyric2.text.ko_reading import latin_to_kana
-
+def test_latin_segment_gets_all_four_display_scripts():
+    # 결함 수정(2026-08-03, 운영자 지시): 라틴 곡도 표기 4종(hangul/kana/romaji/en)을
+    # 전부 받는다 — 예전엔 가나 근사 하나뿐이라 2패스가 안 닿은 en 곡(고속 라우팅으로
+    # 끝난 곡 등)의 한국어 사용자가 기본 표기(hangul)를 아예 못 받았다. CTC 정렬이 라틴
+    # 위에서 약해서(latin_hangul 모듈 실측) pron_segs(타이밍)는 여전히 안 만든다 — 표기
+    # 문자열만 결정론 근사다.
+    #
+    # romaji==en(2026-08-03 추가 수정): en 곡의 romaji 정답은 원문 철자다 — 이전엔
+    # "teiku ito iiずぃ"처럼 가나 음차를 다시 로마자로 되돌린 근사가 나갔다(za wezaa
+    # poreketusu류 오염). en 곡에서는 romaji가 en과 같아진다.
     seg = _seg("Take it easy", "", words=True)
     attach_pron_variants(seg)
 
-    assert seg["pron"] == {"kana": latin_to_kana("Take it easy")}
+    assert seg["pron"] == {
+        "hangul": "테익 잇 이지",
+        "kana": "テイク イト イーズィー",
+        "romaji": "Take it easy",
+        "en": "Take it easy",
+        # ipa는 정렬 타깃 자체(IPA 표시 옵션, 2026-08-03) — 파생이 아니라 타깃 문자열
+        "ipa": "teik it izi",
+    }
     assert "pron_segs" not in seg
-    assert "romaji" not in seg["pron"]  # 라틴 곡 세그는 romaji 표기를 만들지 않는다(원문이 이미 로마자)
+
+
+def test_latin_segment_display_has_no_doubled_word_gaps():
+    # derive_en_display_units가 낱말 사이 원문 공백도 owners에 그 글자 그대로 얹으므로
+    # (align_target 모듈의 "낱말 사이 공백·구두점" 패스스루), word_end 플래그가 넣는
+    # 공백과 겹쳐 두 칸으로 벌어지지 않아야 한다(_join_display_units 회귀 방지).
+    seg = _seg("Take it easy", "", words=True)
+    attach_pron_variants(seg)
+
+    for script, display in seg["pron"].items():
+        assert "  " not in display, (script, display)
 
 
 def test_mora_segments_follow_the_given_tokens():
@@ -576,12 +598,17 @@ def test_ja_hangul_segments_merge_final_consonant_moras():
     assert segs[0]["end"] == kana[1]["end"]
 
 
-def test_ja_hangul_segments_bail_on_mora_mismatch():
-    # 표기 모라 수가 kana 세그와 어긋나면 조용히 포기 — 틀린 카라오케보다 없는 쪽
+def test_ja_hangul_segments_mora_mismatch_now_yields_flagged_approximation():
+    # 계약 변경(2026-08-03): 모라 수 불일치를 통째로 포기하면 하필 기본 표기(hangul)만
+    # 카라오케 타이밍이 죽는다(실측 6_toWwEFXyA 세그 2·3). kana 시간축 비례 근사를
+    # resolved: False로 정직하게 내린다 — "틀린 카라오케보다 없는 쪽"에서 "근사임을
+    # 표시한 카라오케"로.
     seg = _seg(NEKURA, "아루")
     attach_pron_variants(seg)
 
-    assert "hangul" not in (seg.get("pron_segs") or {})
+    hangul_segs = (seg.get("pron_segs") or {}).get("hangul")
+    assert hangul_segs, "근사 폴백이 hangul 세그를 내야 한다"
+    assert all(s.get("resolved") is False for s in hangul_segs)
 
 
 def test_ja_hangul_segments_not_derived_over_alignment_output():
@@ -592,3 +619,262 @@ def test_ja_hangul_segments_not_derived_over_alignment_output():
     attach_pron_variants(seg)
 
     assert "hangul" not in (seg.get("pron_segs") or {})
+
+
+# ---------------------------------------------------------------------------
+# zh 곡 게이트 — 순한자 라인은 곡 언어로만 ja와 갈린다 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def test_zh_song_gate_attaches_chinese_readings():
+    # 순한자 라인은 문자만으로 ja와 구별할 수 없다(한자는 두 언어 공용) — 곡 언어(zh)로
+    # 게이트한다. 게이트가 없으면 중국어 가사에 일본어 한자 독음이 붙는다(오표기).
+    seg = _seg("月亮代表我的心", "", words=False)
+    attach_pron_variants(seg, language="zh")
+    assert set(seg["pron"]) >= {"hangul", "kana", "romaji"}
+    # 병음 성조 문자가 실렸다는 것 자체가 zh 분기의 증거다 — ja 분기는 병음을 못 만든다
+    assert "yuè" in seg["pron"]["romaji"]
+
+
+def test_zh_gate_leaves_kana_mixed_lines_to_ja():
+    # zh 곡이어도 가나가 섞인 라인(일본어 인용 등)은 ja 파생이 맞다
+    seg = _seg("愛してる", "", words=False)
+    attach_pron_variants(seg, language="zh")
+    assert seg["pron"]["kana"]
+    assert "ì" not in seg["pron"]["romaji"]  # 헵번 로마자 — 병음 성조가 아니다
+
+
+def test_no_language_keeps_existing_ja_behavior_for_pure_han():
+    # language를 모르는 호출부(캐시 병합 등)는 기존 동작 그대로 — 게이트 미작동
+    gated = _seg("月亮代表我的心", "", words=False)
+    attach_pron_variants(gated, language="zh")
+    ungated = _seg("月亮代表我的心", "", words=False)
+    attach_pron_variants(ungated)
+    assert ungated.get("pron") != gated.get("pron")
+
+
+# ---------------------------------------------------------------------------
+# F3 — zh 병음 음절 공백 (2026-08-04 감사)
+#
+# align_target.join_display(owners를 공백 없이 붙이는 범용 조립기)를 쓰면 병음 음절
+# 사이 공백이 사라져 "wǒbùxiǎngshuōzàijiàn"처럼 못 읽는 문자열이 된다.
+# ---------------------------------------------------------------------------
+
+
+def test_zh_pron_romaji_keeps_spaces_between_pinyin_syllables():
+    from everyric2.text.zh_reading import zh_to_pinyin
+
+    text = "月亮代表我的心"
+    seg = _seg(text, "", words=False)
+    attach_pron_variants(seg, language="zh")
+    # zh_reading.zh_pron_variants(text)와 정확히 같은 값이어야 한다 — join_display를 쓰면
+    # 공백이 사라져 이 등식이 깨진다(F3 결함의 회귀 표지).
+    assert seg["pron"]["romaji"] == zh_to_pinyin(text)
+    assert seg["pron"]["romaji"].count(" ") == len(text) - 1, seg["pron"]["romaji"]
+
+
+# ---------------------------------------------------------------------------
+# 구세대 kana 단독 근사 보완 — 멱등 가드는 동결이 아니라 보존이다 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_kana_only_latin_pron_is_augmented_not_frozen():
+    # 구세대 라틴 곡은 옛 경로가 kana 1형만 저장했다 — 표시값 E2E 실측(weathergirl):
+    # 이 모양이 완결로 취급돼 한국어 사용자가 hangul 표기를 영영 못 받았다.
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {"kana": "テイクイットイージー"}
+    attach_pron_variants(seg)
+    # 기존 키는 덮지 않는다 (저장된 값이 이긴다)
+    assert seg["pron"]["kana"] == "テイクイットイージー"
+    # 빠진 표기가 전부 보완된다
+    for key in ("hangul", "romaji", "en", "ipa"):
+        assert seg["pron"].get(key), key
+
+
+def test_complete_pron_dict_is_still_frozen():
+    # 멱등 가드의 본래 목적(직렬화·심판 판정 반영값 보존)은 그대로다 — kana 단독이
+    # 아닌 pron은 어떤 키도 추가·변경되지 않는다.
+    seg = _seg(NEKURA, NEKURA_HANGUL)
+    custom = {"hangul": "커스텀", "kana": "カスタム", "romaji": "custom"}
+    seg["pron"] = dict(custom)
+    attach_pron_variants(seg)
+    assert seg["pron"] == custom
+
+
+def test_ja_text_with_kana_only_pron_is_not_latin_augmented():
+    # kana 단독이라도 원문이 일본어면 옛 라틴 근사가 아니다 — 라틴 파생을 덧대면
+    # 엉뚱한 표기가 생기므로 그대로 둔다.
+    seg = _seg(NEKURA, "", words=False)
+    seg["pron"] = {"kana": "アルバイトハネクラモード"}
+    attach_pron_variants(seg)
+    assert seg["pron"] == {"kana": "アルバイトハネクラモード"}
+
+
+# ---------------------------------------------------------------------------
+# en 곡 romaji 오염 — "영어→가타카나 음차→로마자 재변환" 근사 제거 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def test_en_song_romaji_matches_the_original_spelling_not_a_katakana_roundtrip():
+    """en 곡의 romaji 정답은 원문 철자다 — 가타카나 음차를 거친 재변환(za wezaa
+    poreketusu류)이 아니다. en 곡은 derive_en_display_units가 두 표기(romaji/en)를
+    동시에 내므로, romaji가 그냥 en과 같아지는지로 오염 여부를 검산한다."""
+    seg = _seg("weather vane", "", words=False)
+    attach_pron_variants(seg)
+    assert seg["pron"]["romaji"] == seg["pron"]["en"]
+    # en 표시 자체가 원문 철자 기반이라 원문 낱말이 그대로(음절 구분 하이픈 정도만) 보여야 한다
+    assert "weather" in seg["pron"]["en"].lower().replace("-", "")
+
+
+def test_ja_song_latin_run_keeps_kana_derived_romaji():
+    """ja 곡(라틴 리퍼리 경로가 아니다)에서는 이 수정이 영향을 주면 안 된다 — 가나·로마자
+    변환이 여전히 정답이다. attach_pron_variants의 ja 분기(_attach_ja_pron_variants)는
+    애초에 _attach_latin_pron_variants를 타지 않으므로 romaji가 en과 같아질 이유가 없다."""
+    seg = _seg(NEKURA, NEKURA_HANGUL)
+    attach_pron_variants(seg)
+    assert seg["pron"]["romaji"] == NEKURA_ROMAJI
+    assert "en" not in seg["pron"]  # ja 곡 표기에는 애초에 en 키가 없다
+
+
+def test_legacy_contaminated_en_romaji_is_corrected_by_lazy_attach():
+    """구세대 en 곡 구제 — romaji가 예전 버그로 en과 다르게 저장돼 있으면(가타카나
+    재변환 근사) lazy 보완이 en 값으로 정정한다."""
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {
+        "hangul": "테이크 잇 이지",
+        "kana": "テイクイットイージー",
+        "romaji": "teikuittoiizii",  # 옛 근사(가타카나 재변환) — 오염된 값
+        "en": "take it ea-sy",
+    }
+    attach_pron_variants(seg)
+    assert seg["pron"]["romaji"] == "take it ea-sy"
+
+
+def test_legacy_correction_is_idempotent():
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {
+        "hangul": "테이크 잇 이지",
+        "kana": "テイクイットイージー",
+        "romaji": "teikuittoiizii",
+        "en": "take it ea-sy",
+    }
+    attach_pron_variants(seg)
+    first = dict(seg["pron"])
+    attach_pron_variants(seg)
+    assert seg["pron"] == first
+
+
+def test_legacy_correction_skips_when_romaji_already_matches_en():
+    """이미 romaji==en이면 손댈 것이 없다 — 조건 자체가 거짓이라 아무 일도 안 한다."""
+    seg = _seg("Take it easy", "", words=False)
+    seg["pron"] = {"hangul": "테이크 잇 이지", "romaji": "take it ea-sy", "en": "take it ea-sy"}
+    before = dict(seg["pron"])
+    attach_pron_variants(seg)
+    assert seg["pron"] == before
+
+
+# ---------------------------------------------------------------------------
+# F1 lazy 치유 — refine_window가 en 갈래로 잘못 보내 저장한 ko/zh 파손 pron 복구
+# (2026-08-04 감사). 파손 지문: hangul 값이 원문에서 공백만 뺀 것과 완전히 같다.
+# ---------------------------------------------------------------------------
+
+
+def test_broken_ko_route_pron_is_healed_by_lazy_attach():
+    """F1 실측 재현 — «사랑해 너를 위해»가 예전엔 en 갈래(라틴 전용 _WORD_RE)로 새
+    hangul이 «사랑해너를위해»(공백만 소실된 원문)로 저장됐다. attach_pron_variants가
+    그 파손 지문을 알아보고 버린 뒤 올바른 ko 파생(가타카나/RR 로마자)으로 재생성한다."""
+    text = "사랑해 너를 위해"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}  # 파손 지문
+    attach_pron_variants(seg, language="ko")
+    # 순한글 줄은 hangul 표기 키를 새로 만들지 않는다(원문 자체가 표시라는 공유 계약,
+    # _attach_ko_pron_variants) — 파손된 값이 남아 있지 않은 것이 핵심이다.
+    assert "hangul" not in seg["pron"]
+    assert seg["pron"]["kana"]
+    assert seg["pron"]["romaji"]
+
+
+def test_broken_ko_route_healing_is_idempotent():
+    text = "사랑해 너를 위해"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}
+    attach_pron_variants(seg, language="ko")
+    first = dict(seg["pron"])
+    attach_pron_variants(seg, language="ko")
+    assert seg["pron"] == first
+
+
+def test_broken_zh_route_pron_is_healed_by_lazy_attach():
+    """zh 곡의 순한자 줄이 en 갈래를 거쳐 저장된 파손 지문을 치유한다 — 병음(공백
+    포함, F3)이 실제로 생성된다."""
+    text = "我不想说再见"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}
+    attach_pron_variants(seg, language="zh")
+    assert seg["pron"]["hangul"] != "".join(text.split())
+    assert seg["pron"]["romaji"]
+
+
+def test_broken_zh_route_healing_is_idempotent():
+    text = "我不想说再见"
+    seg = _seg(text, "", words=False)
+    seg["pron"] = {"hangul": "".join(text.split())}
+    attach_pron_variants(seg, language="zh")
+    first = dict(seg["pron"])
+    attach_pron_variants(seg, language="zh")
+    assert seg["pron"] == first
+
+
+def test_pron_that_is_not_a_broken_fingerprint_is_left_alone():
+    # 우연히 hangul 키가 없어도(파손 지문이 아니면) 멱등 가드가 그대로 지킨다 — 이미
+    # 올바르게 파생된 ko pron(원문과 다른 실제 변환값)은 건드리지 않는다.
+    text = "사랑해 너를 위해"
+    seg = _seg(text, "", words=False)
+    correct = {"kana": "サランヘ ノルル ウィヘ", "romaji": "saranghae neoreul wihae"}
+    seg["pron"] = dict(correct)
+    attach_pron_variants(seg, language="ko")
+    assert seg["pron"] == correct
+
+
+def test_broken_fingerprint_check_ignores_lines_that_should_not_have_skipped():
+    # 한자가 한글보다 많은 mixed 줄(_should_skip_derivation이 False를 내는 자리) 등
+    # 정말로 en/ja 갈래가 정답인 원문은 우연히 fingerprint 모양이어도 건드리지 않는다
+    # — 여기서는 순수 en 곡이라 애초에 should_have_skipped_en_route 자체가 거짓이다.
+    seg = _seg("hi", "", words=False)
+    seg["pron"] = {"hangul": "hi"}  # "hi".split()으로도 "hi" — 우연히 같은 모양
+    attach_pron_variants(seg)
+    assert seg["pron"] == {"hangul": "hi"}
+
+
+# ---------------------------------------------------------------------------
+# hangul 세그 근사 폴백 — 모라 수 불일치를 통째 포기하지 않는다 (2026-08-03)
+# ---------------------------------------------------------------------------
+
+
+def _kana_segs(n: int, step: float = 0.5) -> list[dict]:
+    return [{"text": "カ", "start": i * step, "end": (i + 1) * step} for i in range(n)]
+
+
+def test_hangul_segs_exact_mora_match_stays_resolved():
+    from everyric2.server.worker import _ja_hangul_segments_from_kana
+
+    seg = {"pron": {"hangul": "카카카"}, "pron_segs": {"kana": _kana_segs(3)}}
+    out = _ja_hangul_segments_from_kana(seg)
+    assert out and len(out) == 3
+    assert all("resolved" not in s for s in out)  # 정합 경로는 기존 그대로(신뢰 표시)
+
+
+def test_hangul_segs_mismatch_falls_back_to_proportional_approximation():
+    # 실측 6_toWwEFXyA 세그 2·3: 모라 수 불일치(장음 축약·라틴 혼입)면 예전엔 None —
+    # 기본 표기만 카라오케 타이밍이 죽었다. 이제 kana 시간축을 비례 배분하되
+    # resolved: False로 근사임을 표시한다.
+    from everyric2.server.worker import _ja_hangul_segments_from_kana
+
+    seg = {"pron": {"hangul": "카카카카"}, "pron_segs": {"kana": _kana_segs(3)}}
+    out = _ja_hangul_segments_from_kana(seg)
+    assert out and len(out) == 4
+    assert all(s.get("resolved") is False for s in out)
+    # 시간축은 단조 — 비례 매핑(바닥 나눗셈)은 역행하지 않는다
+    starts = [s["start"] for s in out]
+    assert starts == sorted(starts)
+    assert out[-1]["end"] == _kana_segs(3)[-1]["end"]

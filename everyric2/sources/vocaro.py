@@ -62,9 +62,116 @@ def page_url(slug: str) -> str:
 _TABLE_RE = re.compile(r'<table class="wiki-content-table">([\s\S]*?)</table>')
 _ROW_RE = re.compile(r"<tr[^>]*>([\s\S]*?)</tr>")
 _TITLE_CELL_RE = re.compile(r'<th[^>]*class="[^"]*title-cell[^"]*"[^>]*>([\s\S]*?)</th>')
+_HEADING_RE = re.compile(r"<h([1-6])[^>]*>([\s\S]*?)</h\1>")
 
 
-def parse_song_page(page_html: str) -> tuple[str, list[SourceLine]] | None:
+def _normalize_variant(s: str) -> str:
+    """버전 헤딩/영상 제목 비교용 정규화 — 확장 normalizeTitle과 같은 정신(NFKC·casefold·문자숫자만)."""
+    import unicodedata
+
+    return "".join(ch for ch in unicodedata.normalize("NFKC", s).casefold() if ch.isalnum())
+
+
+#: 흔한 버전 표기의 언어 간 동의어 묶음 — 정규화 후 값(공백·괄호 제거)으로 적는다.
+#: 실측(2026-08-04, qXkkhP0d_iM «秋の未確認生物(long ver) / 音街ウナ» →
+#: /cryptid-of-autumn): 위키 헤딩은 한국어("긴 버전"/"짧은 버전")인데 유튜브 제목의
+#: 버전 표기는 영어("long ver")뿐이라 순수 부분열 포함(label in hint)이 절대 못
+#: 만난다 — 문자 자체가 다른 언어라 "포함"이라는 개념이 성립하지 않는다. 헤딩이
+#: 밴드명·리믹서명처럼 고유명사면(예: "Best Friend Remix") 원래 로직대로 원문
+#: 그대로 힌트에 실리므로 이 동의어 묶음은 흔한 버전 낱말에만 좁게 잡는다 — 넓게
+#: 잡으면(예: "long" 단독) 우연 포함(곡명에 "Longing" 등)의 오탐 위험이 커진다.
+_VARIANT_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"longver", "긴버전", "롱버전"}),
+    frozenset({"shortver", "짧은버전", "숏버전", "쇼트버전"}),
+    frozenset({"fullver", "풀버전"}),
+    frozenset({"tvsize", "tvver", "tv사이즈", "tv버전", "티비사이즈", "티비버전"}),
+    frozenset({"inst", "instrumental", "인스트", "반주"}),
+    frozenset({"originalver", "오리지널", "원곡", "본편"}),
+)
+
+
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _hint_tokens(variant_hint: str) -> frozenset[str]:
+    """힌트(영상 제목 원문)를 비영숫자 경계로 쪼갠 토큰 집합 — 개별 토큰 + 인접 토큰
+    연접(2개까지)을 후보로 낸다.
+
+    실측(2026-08-04 A4 감사): 힌트 전체를 부분열로 뭉쳐 검사하던 예전 방식은 "against"·
+    "instant"·"institute"(전부 "inst"를 부분열로 포함)가 "인스트" 그룹과, "Long Verse"
+    ("longver"를 부분열로 포함)가 "긴버전" 그룹과 우연히 충돌했다(실제 함수 호출로
+    재현). 토큰 경계로 쪼개 **정확 일치**만 인정하면 이 우연 포함이 사라진다 —
+    "against"는 통짜 토큰이라 "inst"와 절대 같아질 수 없다.
+
+    다만 실측 성공 사례(cryptid-of-autumn, 힌트 "(long ver)")는 "long"+"ver"가 공백으로
+    갈린 **두 토큰**이 합쳐 하나의 버전 표기를 이룬다 — 그래서 인접한 두 토큰의 연접도
+    후보에 넣는다(3단어 이상 연접은 조합 폭발 위험 대비 다루지 않는다 — 실측 사례가
+    2단어 연접뿐이다).
+    """
+    raw_tokens = _TOKEN_RE.findall(variant_hint)
+    norm_tokens = [_normalize_variant(t) for t in raw_tokens]
+    tokens = {t for t in norm_tokens if t}
+    for i in range(len(norm_tokens) - 1):
+        combo = norm_tokens[i] + norm_tokens[i + 1]
+        if combo:
+            tokens.add(combo)
+    return frozenset(tokens)
+
+
+def _synonym_hint_match(label: str, hint_tokens: frozenset[str]) -> bool:
+    """라벨이 흔한 버전 낱말이면, 힌트 쪽 토큰에 실린 다른 언어 동의어로도 대응을 확인한다.
+
+    label 자체가 어느 동의어 묶음의 원소일 때만 동작 — 밴드명 등 그 외 라벨은
+    기존 부분열 포함 검사만 탄다(이 함수는 항상 False). hint_tokens는 :func:`_hint_tokens`
+    가 낸 **토큰 집합**이라 부분열이 아니라 정확 일치로 대조한다.
+    """
+    for group in _VARIANT_SYNONYM_GROUPS:
+        if label in group:
+            return any(token != label and token in hint_tokens for token in group)
+    return False
+
+
+def _pick_table(page_html: str, variant_hint: str | None) -> str:
+    """가사 표가 여러 개인 페이지에서 힌트(영상 제목)에 맞는 버전의 표를 고른다.
+
+    한 페이지에 원곡과 리믹스 가사가 헤딩("오리지널"/"Best Friend Remix",
+    "긴 버전"/"짧은 버전" 등)으로 나뉘어 실리는 경우가 있다(실측: /monitoring,
+    /cryptid-of-autumn — 헤딩 레벨은 h1·h2 등 제각각이라 _HEADING_RE는 h1~h6을
+    다 본다). 예전 코드는 무조건 첫 표를 집어 롱버전 영상에 짧은 버전 가사를
+    붙였다. 각 표의 **직전 헤딩**을 정규화해 힌트에 통째로 포함되거나(고유명사
+    헤딩) 언어 간 버전 동의어가 대응되면(_synonym_hint_match — "긴 버전" ↔
+    "long ver") 고르고(여럿이면 가장 긴 헤딩), 없으면 첫 표 — 표가 하나인
+    대다수 페이지와 힌트 없는 구버전 호출은 동작이 그대로다.
+
+    호출 전제: page_html에 표가 최소 1개 있다 (parse_song_page가 먼저 검사).
+    """
+    tables = list(_TABLE_RE.finditer(page_html))
+    if len(tables) == 1 or not variant_hint:
+        return tables[0].group(1)
+    hint = _normalize_variant(variant_hint)
+    if not hint:
+        return tables[0].group(1)
+    hint_tokens = _hint_tokens(variant_hint)
+    best: tuple[int, str] | None = None
+    prev_end = 0
+    for m in tables:
+        headings = _HEADING_RE.findall(page_html[prev_end : m.start()])
+        prev_end = m.end()
+        if not headings:
+            continue  # 직전 표와 사이에 헤딩이 없으면 같은 버전의 연속 표 — 후보 아님
+        label = _normalize_variant(re.sub(r"<[^>]+>", "", headings[-1][1]))
+        # 2자 미만 라벨은 우연 포함이 너무 쉽다 (예: "2")
+        if len(label) < 2:
+            continue
+        matched = label in hint or _synonym_hint_match(label, hint_tokens)
+        if matched and (best is None or len(label) > best[0]):
+            best = (len(label), m.group(1))
+    return best[1] if best else tables[0].group(1)
+
+
+def parse_song_page(
+    page_html: str, variant_hint: str | None = None
+) -> tuple[str, list[SourceLine]] | None:
     """곡 페이지 HTML → (원제, 가사 줄 목록). 가사 표가 없으면 None.
 
     행 수로 세트 크기를 판별한다 — 3의 배수면 원문/발음/번역, 아니고 2의 배수면
@@ -72,12 +179,17 @@ def parse_song_page(page_html: str) -> tuple[str, list[SourceLine]] | None:
 
     6행처럼 3과 2의 배수를 겸하는 표는 3행 세트로 읽는다 — vocaro.ts와 같은 판정
     순서다. 발음 행을 번역으로 오인하는 쪽보다 발음이 있는데 못 읽는 쪽이 드물다.
+
+    ``variant_hint``(영상 제목)가 있으면 버전 헤딩이 힌트와 맞는 표를 고른다 —
+    :func:`_pick_table` 참고.
     """
-    table = _TABLE_RE.search(page_html)
-    if not table:
+    if not _TABLE_RE.search(page_html):
         return None
 
-    rows = [cell_text(m.group(1), drop_ruby=True) for m in _ROW_RE.finditer(table.group(1))]
+    rows = [
+        cell_text(m.group(1), drop_ruby=True)
+        for m in _ROW_RE.finditer(_pick_table(page_html, variant_hint))
+    ]
 
     lines: list[SourceLine]
     if rows and len(rows) % 3 == 0:
@@ -115,13 +227,18 @@ def _fetcher() -> WikiFetcher:
     return _default_fetcher
 
 
-def fetch_song(slug: str, fetcher: WikiFetcher | None = None) -> VocaroSong | None:
-    """슬러그로 곡 페이지를 받아 파싱. 요청 실패·가사 표 없음이면 None (요청 1회)."""
+def fetch_song(
+    slug: str, fetcher: WikiFetcher | None = None, variant_hint: str | None = None
+) -> VocaroSong | None:
+    """슬러그로 곡 페이지를 받아 파싱. 요청 실패·가사 표 없음이면 None (요청 1회).
+
+    ``variant_hint``(영상 제목)는 한 페이지에 여러 버전 가사가 실린 경우의 표 선택용.
+    """
     url = page_url(slug)
     page_html = (fetcher or _fetcher()).get_text(url)
     if not page_html:
         return None
-    parsed = parse_song_page(page_html)
+    parsed = parse_song_page(page_html, variant_hint)
     if parsed is None:
         return None
     title, lines = parsed
