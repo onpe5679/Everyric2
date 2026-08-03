@@ -177,6 +177,12 @@ try {
   // storage를 직접 쓰면 handleSettingsChange 경로(콜백)를 안 타서 반영이 안 된다
   // (content.ts는 storage.onChanged를 job 키만 듣는다 — 설정 변경은 UI 콜백 전용 경로).
   await page.locator('#everyric-root [title="설정"]').first().click();
+  // 8범주 접이식 — 접힌 범주 안 select는 hidden이라 먼저 전부 펼친다
+  await page.waitForTimeout(600);
+  await page.evaluate(() => {
+    const sr = document.getElementById('everyric-root').shadowRoot;
+    for (const d of sr.querySelectorAll('.ey-settings details')) d.open = true;
+  });
   const pronScriptSelect = page.locator('#everyric-root .ey-settings-row', { has: page.locator('label', { hasText: '발음 표기 방식' }) }).locator('select');
   await pronScriptSelect.waitFor({ state: 'visible', timeout: 5000 });
   const beforeValue = await pronScriptSelect.inputValue();
