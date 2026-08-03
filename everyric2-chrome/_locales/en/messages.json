@@ -1068,6 +1068,59 @@
   "overlay_mainLane_seekTitle": {
     "message": "Click to jump to that point (on a note, jumps to where the note starts)"
   },
+  "overlay_mainLane_resizeTitle": {
+    "message": "Drag to resize the lane column"
+  },
+  "overlay_quick_lane": {
+    "message": "Toggle karaoke lane"
+  },
+  "overlay_quick_lanePos": {
+    "message": "Change lane position"
+  },
+  "overlay_quick_lanePosToLeft": {
+    "message": "Move the lane to the left of the lyrics"
+  },
+  "overlay_quick_lanePosToBottom": {
+    "message": "Move the lane below the lyrics"
+  },
+  "overlay_quick_caption": {
+    "message": "Toggle video captions"
+  },
+  "overlay_quick_nextUp": {
+    "message": "Toggle next-video info"
+  },
+  "overlay_nextUp_label": {
+    "message": "Next ▸"
+  },
+  "overlay_depthLabel_fast": {
+    "message": "Fast"
+  },
+  "overlay_depthLabel_medium": {
+    "message": "Standard"
+  },
+  "overlay_laneNotice_text": {
+    "message": "If syllable timing looks off, try a deeper analysis (currently $P1$)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_laneNotice_close": {
+    "message": "Dismiss"
+  },
+  "overlay_laneNotice_never": {
+    "message": "Don't show again"
+  },
+  "overlay_laneNotice_neverTitle": {
+    "message": "Never show this notice again (you can restore it in settings)"
+  },
+  "overlay_settings_resetKaraokeNotice": {
+    "message": "Show karaoke timing notice again"
+  },
+  "overlay_settings_resetKaraokeNoticeTitle": {
+    "message": "Brings back the syllable timing notice you turned off with \"Don't show again\""
+  },
   "content_notice_extensionReloaded": {
     "message": "The extension was updated — refresh this page to keep using it in this tab"
   },
@@ -1790,5 +1843,293 @@
   },
   "content_genChip_depthUpgraded": {
     "message": "Switched to precise analysis"
-  }
-}
+  },
+  "panels_search_titleHint": {
+    "message": "Try just the song title (leave out the artist, 【】, MV, etc.)"
+  },
+  "panels_search_useRawTitle": {
+    "message": "Use full video title"
+  },
+  "panels_search_useRawTitleTitle": {
+    "message": "Fill in the raw video title: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_sheet_back": {
+    "message": "← Back"
+  },
+  "panels_depth_fast": {
+    "message": "Fast"
+  },
+  "panels_depth_medium": {
+    "message": "Standard"
+  },
+  "panels_depth_heavy": {
+    "message": "Precise"
+  },
+  "panels_date_today": {
+    "message": "Today"
+  },
+  "panels_date_yesterday": {
+    "message": "Yesterday"
+  },
+  "panels_date_daysAgo": {
+    "message": "$P1$ days ago",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_filterPlaceholder": {
+    "message": "Search settings (e.g. font, translation, server)"
+  },
+  "panels_settings_noMatch": {
+    "message": "No settings match '$P1$'",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_expandAll": {
+    "message": "Expand all"
+  },
+  "panels_settings_collapseAll": {
+    "message": "Collapse all"
+  },
+  "panels_settings_section_search": {
+    "message": "Finding lyrics"
+  },
+  "panels_settings_section_display": {
+    "message": "Display"
+  },
+  "panels_settings_section_lane": {
+    "message": "Karaoke lane"
+  },
+  "panels_settings_section_modules": {
+    "message": "Modules"
+  },
+  "panels_settings_section_pip": {
+    "message": "PIP"
+  },
+  "panels_settings_section_audio": {
+    "message": "Audio & mic"
+  },
+  "panels_settings_section_server": {
+    "message": "Server & advanced"
+  },
+  "panels_settings_section_reset": {
+    "message": "Reset"
+  },
+  "panels_settings_row_captionFontScale": {
+    "message": "Video caption text size"
+  },
+  "panels_settings_row_captionBgOpacity": {
+    "message": "Video caption background"
+  },
+  "panels_settings_row_mainLaneWidth": {
+    "message": "Lyrics panel lane width"
+  },
+  "panels_settings_row_mainLanePos": {
+    "message": "Lyrics panel lane position"
+  },
+  "panels_settings_mainLanePos_left": {
+    "message": "Left"
+  },
+  "panels_settings_mainLanePos_bottom": {
+    "message": "Bottom"
+  },
+  "panels_settings_row_pitchLaneHeight": {
+    "message": "Lane height"
+  },
+  "panels_settings_reset_karaokeNotice": {
+    "message": "Show the karaoke timing notice again"
+  },
+  "panels_settings_reset_karaokeNoticeTitle": {
+    "message": "Bring back the notice banner you dismissed"
+  },
+  "panels_settings_reset_done": {
+    "message": "Reset"
+  },
+  "panels_rating_title": {
+    "message": "How is this sync?"
+  },
+  "panels_rating_starTitle": {
+    "message": "$P1$ stars",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_rating_report": {
+    "message": "Report"
+  },
+  "panels_rating_reportTitle": {
+    "message": "Tell us about a lyrics, timing, or pronunciation problem"
+  },
+  "panels_rating_sending": {
+    "message": "Sending…"
+  },
+  "panels_rating_thanks": {
+    "message": "Thanks!"
+  },
+  "panels_rating_failed": {
+    "message": "Could not send"
+  },
+  "panels_report_title": {
+    "message": "What went wrong?"
+  },
+  "panels_report_commentPh": {
+    "message": "Describe what happened (optional)"
+  },
+  "panels_report_cancel": {
+    "message": "Cancel"
+  },
+  "panels_report_send": {
+    "message": "Report"
+  },
+  "panels_report_confirmTitle": {
+    "message": "Send this report?"
+  },
+  "panels_report_confirmBody": {
+    "message": "Reports are used only to improve quality. Cancel and nothing is sent."
+  },
+  "panels_report_confirmSend": {
+    "message": "Send report"
+  },
+  "panels_report_thanks": {
+    "message": "Report sent. Thanks!"
+  },
+  "panels_report_failed": {
+    "message": "Could not send. Please try again shortly"
+  },
+  "panels_report_depthHint": {
+    "message": "This result was made at '$P1$' depth. Raising the analysis depth may improve it.",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_report_depthUpgrade": {
+    "message": "Raise depth"
+  },
+  "panels_report_depthAnyway": {
+    "message": "Report anyway"
+  },
+  "panels_wrongLyrics_title": {
+    "message": "Wrong lyrics?"
+  },
+  "panels_wrongLyrics_matched": {
+    "message": "Matched: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_wrongLyrics_body": {
+    "message": "Reports the lyrics shown now and opens search."
+  },
+  "panels_wrongLyrics_cancel": {
+    "message": "Cancel"
+  },
+  "panels_wrongLyrics_confirm": {
+    "message": "Report"
+  },
+  "panels_notices_title": {
+    "message": "Notices"
+  },
+  "panels_notices_loading": {
+    "message": "Loading…"
+  },
+  "panels_notices_empty": {
+    "message": "No new notices"
+  },
+  "panels_notices_unavailable": {
+    "message": "Notices are not available right now"
+  },
+  "panels_notices_levelInfo": {
+    "message": "Info"
+  },
+  "panels_notices_levelWarning": {
+    "message": "Warning"
+  },
+  "panels_notices_levelCritical": {
+    "message": "Important"
+  },
+  "panels_contrib_title": {
+    "message": "My contributions"
+  },
+  "panels_contrib_loading": {
+    "message": "Loading…"
+  },
+  "panels_contrib_empty": {
+    "message": "You have not made any syncs yet"
+  },
+  "panels_contrib_headline": {
+    "message": "$P2$ people watched the $P1$ songs you made",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_headlineNoViews": {
+    "message": "$P1$ songs you made",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_rowViews": {
+    "message": "$P1$ views",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_openTitle": {
+    "message": "Open this video"
+  },
+  "panels_contrib_privacy": {
+    "message": "Your contribution history is stored only in this browser and the server cannot track it. Clearing browser data may erase it."
+  },
+  "panels_contrib_quotaTitle": {
+    "message": "Remaining today"
+  },
+  "panels_contrib_quotaGenerate": {
+    "message": "Sync creation"
+  },
+  "panels_contrib_quotaDestructive": {
+    "message": "Reset & unlink"
+  },
+  "panels_contrib_quotaValue": {
+    "message": "$P1$ / $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_quotaWindow": {
+    "message": "Per $P1$ hours",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  }}

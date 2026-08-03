@@ -88,6 +88,11 @@
 }
 
 .ey-panel.collapsed .ey-body,
+/* 가사·레인을 감싸는 컨테이너도 함께 접는다 — .ey-body만 숨기면 flex: 1인 빈 상자가
+   남아 접힌 패널이 그대로 길쭉하다 */
+.ey-panel.collapsed .ey-main-row,
+.ey-panel.collapsed .ey-lane-wrap,
+.ey-panel.collapsed .ey-quick-row,
 .ey-panel.collapsed .ey-banner,
 .ey-panel.collapsed .ey-server-bar-slot,
 .ey-panel.collapsed .ey-warn-bar,
@@ -841,12 +846,89 @@
   50% { box-shadow: 0 0 30px rgba(255, 176, 46, 0.22); }
 }
 
-/* 다음 영상 정보 모듈 (setNextUp) — 푸터 위 슬림 한 줄 */
+/* 다음 영상 정보 모듈 (setNextUp) — 푸터 위 카드.
+   예전엔 말줄임 한 줄이었는데, 잘린 제목만으론 "다음이 뭔지" 판단이 안 됐다(운영자
+   실보고). 썸네일 + 2줄 제목 + 채널로 한눈에 알아보게 한다. */
 .ey-nextup {
-  padding: 4px 12px;
+  padding: 6px 12px 8px;
   border-top: 1px solid var(--ey-border);
   color: var(--ey-text-dim);
   font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ey-nextup-label {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ey-text-faint);
+  margin-bottom: 4px;
+}
+
+.ey-nextup-card { display: flex; gap: 8px; align-items: flex-start; }
+
+.ey-nextup-thumb {
+  width: 72px;
+  height: 41px; /* 16:9 — 유튜브 mqdefault의 실제 비율과 같아 레터박스가 안 생긴다 */
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--ey-elev);
+  display: block;
+}
+
+.ey-nextup-meta { min-width: 0; flex: 1; }
+
+.ey-nextup-title {
+  color: var(--ey-text);
+  font-size: 12px;
+  line-height: 1.35;
+  /* 2줄 클램프 — 한 줄 말줄임은 긴 곡명(부제·아티스트 병기)에서 정보가 통째로 잘린다 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.ey-nextup-channel {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--ey-text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 이어질 재생목록 — 공급자가 없으면 렌더 자체가 생략된다(setPlaylist 계약).
+   길어질 수 있으므로 자체 스크롤로 가두어 가사 목록의 높이를 뺏지 않는다. */
+.ey-nextup-pl {
+  margin-top: 6px;
+  max-height: 96px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ey-text-faint) transparent;
+}
+.ey-nextup-pl::-webkit-scrollbar { width: 5px; }
+.ey-nextup-pl::-webkit-scrollbar-thumb { background: var(--ey-text-faint); border-radius: 3px; }
+.ey-nextup-pl::-webkit-scrollbar-track { background: transparent; }
+
+.ey-nextup-pl-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.ey-nextup-pl-index {
+  min-width: 14px;
+  text-align: right;
+  color: var(--ey-text-faint);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.ey-nextup-pl-title {
+  min-width: 0;
+  color: var(--ey-text-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ey-pip-nextup {
@@ -855,9 +937,12 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* [모듈] 가라오케 레인 (설정 modMainLane) — 메인 패널 푸터 위 고정 높이 캔버스.
-   PiP 레인(.ey-pip-pitch)과 같은 렌더러가 그리지만, 이쪽은 창을 채우는 flex 요소가
-   아니라 가사 목록(.ey-body)이 성장을 계속 가져가도록 고정 높이 + flex-shrink: 0이다. */
+/* [모듈] 가라오케 레인 (설정 modMainLane) — 배치 두 가지를 같은 캔버스로 그린다.
+   'bottom'(레거시): 푸터 위 고정 높이 가로 띠. 가사 목록(.ey-body)이 성장을 계속
+   가져가도록 고정 높이 + flex-shrink: 0.
+   'left': 가사 왼쪽 세로 열. 폭은 JS(mainLaneWidth)가 .ey-lane-wrap에 지정하고,
+   높이는 가사 목록과 같이 남는 공간을 채운다.
+   PiP 레인(.ey-pip-pitch)과 렌더러(ui/pitch-lane.ts)는 완전히 같다. */
 .ey-main-lane {
   width: 100%;
   height: 160px;
@@ -867,6 +952,91 @@
   box-sizing: border-box;
   cursor: pointer;
 }
+
+/* 레인 열 — 캔버스와 음절 타이밍 안내 배너를 함께 담는다(배치가 바뀌면 통째로 옮긴다) */
+.ey-lane-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* 가사 목록 + (좌측 배치의) 레인 열 컨테이너.
+   'bottom'에서는 세로 한 칸짜리 컨테이너라 예전 레이아웃과 결과가 같다. */
+.ey-main-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ey-main-row.lane-left { flex-direction: row; }
+
+/* flex 자동 최소 크기 해제 — 이게 없으면 가로 배치에서 긴 가사 한 줄이 본문의
+   최소 폭을 밀어올려 레인 열이 지정한 폭보다 좁아지고 패널이 가로로 넘친다 */
+.ey-main-row > .ey-body { min-width: 0; min-height: 0; }
+
+.ey-main-row.lane-left > .ey-lane-wrap {
+  border-right: 1px solid var(--ey-border);
+}
+
+/* 세로 열에서는 캔버스가 열 높이를 채운다 — 고정 160px과 위쪽 경계선은 가로 띠 전용 */
+.ey-main-row.lane-left .ey-main-lane {
+  width: 100%;
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  border-top: none;
+}
+
+/* 레인/가사 경계 드래그 손잡이 (좌측 배치 전용) — PiP 영상 비율 디바이더의 세로판 */
+.ey-lane-divider {
+  width: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ey-lane-divider-grip {
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  background: var(--ey-text-faint);
+  transition: background 0.15s;
+}
+
+.ey-lane-divider:hover .ey-lane-divider-grip { background: var(--ey-text-dim); }
+
+/* 음절 타이밍 안내 배너 — 레인 영역 안(캔버스 아래). 220px 열에서도 읽히도록
+   작은 글씨 + 줄바꿈 허용, 버튼은 아래 줄로 흐른다. */
+.ey-lane-notice {
+  padding: 5px 8px 6px;
+  border-top: 1px solid var(--ey-border);
+  background: var(--ey-accent-soft);
+  color: var(--ey-text-dim);
+  font-size: 10px;
+  line-height: 1.35;
+  flex-shrink: 0;
+}
+
+.ey-lane-notice-text { display: block; overflow-wrap: anywhere; }
+
+.ey-lane-notice-actions { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+
+.ey-lane-notice-btn {
+  padding: 2px 6px;
+  border: 1px solid var(--ey-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ey-text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ey-lane-notice-btn:hover { background: var(--ey-elev-hover); color: var(--ey-text); }
 
 /* 크로마키 스트리밍 모드 (pip.ts applyChroma) — PIP 문서 배경을 단색 키 컬러로 통일.
    글자·노트는 남기고 배경 계열만 키 컬러로 — OBS 크로마키 필터가 배경만 떼어낸다.
@@ -1358,7 +1528,11 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   transition: opacity 0.15s;
 }
 .ey-pip-corner:hover { opacity: 1; }
-.ey-pip-mini {
+/* 미니 토글 버튼 — PiP 좌상단 코너(.ey-pip-mini)와 메인 패널 퀵 토글 줄(.ey-mini)이
+   **같은 규칙 한 벌**을 공유한다. 두 곳에 같은 선언을 복사해 두면 한쪽만 고쳐져
+   버튼 모양이 창마다 달라진다(예전 레인 옵션이 그렇게 갈라졌다). */
+.ey-pip-mini,
+.ey-mini {
   width: 24px;
   height: 22px;
   padding: 0;
@@ -1371,8 +1545,25 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   align-items: center;
   justify-content: center;
 }
-.ey-pip-mini:hover { color: #fff; }
-.ey-pip-mini.on { color: #fff; background: rgba(88, 140, 255, 0.55); }
+.ey-pip-mini:hover,
+.ey-mini:hover { color: #fff; }
+.ey-pip-mini.on,
+.ey-mini.on { color: #fff; background: rgba(88, 140, 255, 0.55); }
+
+/* 라이트 테마에서는 검은 알약이 카드 위에 떠 보인다 — 배경만 패널 톤으로 바꾸고
+   켜짐 상태(파랑)는 그대로 둔다(상태 색은 테마와 무관하게 같은 뜻이어야 한다) */
+.ey-panel.ey-light .ey-mini { background: var(--ey-elev); color: var(--ey-text-dim); }
+.ey-panel.ey-light .ey-mini:hover { background: var(--ey-elev-hover); color: var(--ey-text); }
+.ey-panel.ey-light .ey-mini.on { color: #fff; background: rgba(62, 112, 224, 0.75); }
+
+/* 모듈 퀵 토글 줄 — 헤더 바로 아래(언어 칩 줄과 같은 계열의 얇은 띠).
+   헤더 .ey-actions는 이미 버튼 7개로 꽉 차 제목을 밀어내므로 별도 줄로 뺐다. */
+.ey-quick-row {
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px 0;
+  flex-shrink: 0;
+}
 
 /* 설정 시트의 볼륨 슬라이더 */
 .ey-settings-range {
@@ -1453,4 +1644,464 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   border: none; background: none; cursor: pointer;
   color: var(--ey-danger-text); font-size: 11px; padding: 0 2px;
   text-decoration: underline; text-underline-offset: 2px;
+}
+
+/* ==========================================================================
+   [2026-08 UI 개편 · panels.ts 전용 블록 — 아래로만 추가한다]
+
+   buildSettingsSheet / buildRatingPop / buildReportSheet /
+   buildWrongLyricsConfirm / buildNoticesSheet / buildContributionSheet 가
+   그리는 것들. 위쪽 레이아웃 규칙과 섞이지 않도록 파일 끝에 모아 둔다.
+   기존 골격(.ey-settings, .ey-feedback-pop, .ey-state)은 그대로 쓰고
+   그 **안쪽**만 새로 정의한다.
+   ========================================================================== */
+
+/* ── 설정 시트: 검색 도구줄 ─────────────────────────────────────── */
+
+/* .ey-settings가 스크롤 컨테이너다 — 음수 마진으로 그 padding 영역까지 덮어
+   스크롤해도 검색칸이 내용 위에 그대로 붙어 있게 한다(40줄을 훑는 화면에서
+   검색칸이 위로 사라지면 검색이 있다는 사실 자체를 잊는다). */
+.ey-settings-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -16px -16px 0;
+  padding: 12px 16px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--ey-bg-solid);
+  border-bottom: 1px solid var(--ey-border);
+}
+
+.ey-settings-filter { flex: 1; min-width: 0; }
+
+.ey-settings-expand-all {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--ey-text-dim);
+  font-size: 11px;
+  padding: 4px 2px;
+  white-space: nowrap;
+}
+
+.ey-settings-expand-all:hover { color: var(--ey-accent); }
+
+.ey-settings-empty {
+  font-size: 12px;
+  color: var(--ey-text-dim);
+  text-align: center;
+  padding: 12px 0;
+}
+
+/* ── 설정 시트: 접이식 범주 ─────────────────────────────────────── */
+
+.ey-settings-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ey-settings-section {
+  border: 1px solid var(--ey-border);
+  border-radius: 10px;
+  background: var(--ey-elev);
+  overflow: hidden;
+}
+
+.ey-settings-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ey-text);
+  list-style: none;
+  user-select: none;
+}
+
+/* 기본 삼각형을 지우고 직접 그린다 — 브라우저 기본 마커는 위치·색이 제각각이다 */
+.ey-settings-section-head::-webkit-details-marker { display: none; }
+.ey-settings-section-head::marker { content: ''; }
+
+.ey-settings-section-head::after {
+  content: '';
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--ey-text-faint);
+  border-bottom: 1.5px solid var(--ey-text-faint);
+  transform: rotate(45deg) translate(-2px, -2px);
+  transition: transform 0.15s;
+}
+
+.ey-settings-section[open] > .ey-settings-section-head::after {
+  transform: rotate(-135deg) translate(-2px, -2px);
+}
+
+.ey-settings-section-head:hover { background: var(--ey-elev-hover); }
+
+.ey-settings-section-icon { font-size: 13px; line-height: 1; flex-shrink: 0; }
+
+.ey-settings-section-title { min-width: 0; }
+
+/* 검색 중에만 채워지는 "이 범주에서 몇 개 걸렸나" */
+.ey-settings-section-count:not(:empty) {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--ey-accent);
+  background: var(--ey-accent-soft);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.ey-settings-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 12px 12px;
+}
+
+/* 라벨 없이 컨트롤만 있는 줄(권한 버튼·초기화 버튼) */
+.ey-settings-bare { justify-content: flex-start; }
+
+/* 값이 뜻을 갖는 슬라이더 옆 숫자 — 폭을 고정해 드래그 중 줄이 흔들리지 않게 */
+.ey-settings-range-val {
+  font-size: 11px;
+  color: var(--ey-text-dim);
+  min-width: 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 시트 맨 끝 '닫기'를 아래로 미는 `.ey-settings .ey-secondary-btn` 규칙이
+   범주 안의 동작 버튼까지 끌어내리지 않도록 되돌린다(perm-btn과 같은 사정).
+   같은 특이도이므로 반드시 그 규칙 **뒤에** 와야 한다 — 이 블록이 파일 끝인 이유. */
+.ey-settings .ey-settings-action { align-self: flex-start; margin-top: 0; }
+
+/* ── 별점 팝오버 ────────────────────────────────────────────────── */
+/* 바깥 껍데기(.ey-feedback-pop: 위치·배경·그림자)는 그대로 쓰고 안쪽만 정의한다 */
+
+.ey-rating-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 210px;
+}
+
+.ey-rating-title { font-size: 12px; color: var(--ey-text); }
+
+.ey-rating-stars { display: flex; align-items: center; gap: 2px; }
+
+.ey-rating-star {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--ey-text-faint);
+  font-size: 20px;
+  padding: 0 1px;
+  line-height: 1;
+  transition: color 0.1s;
+}
+
+.ey-rating-star.on { color: var(--ey-accent); }
+
+.ey-rating-actions { display: flex; align-items: center; gap: 6px; }
+
+/* 별점과 뚜렷이 다른 무게로 — 제보는 별점의 '더 자세히'가 아니라 다른 행동이다 */
+.ey-rating-report-btn {
+  border: 1px solid var(--ey-border);
+  background: none;
+  cursor: pointer;
+  color: var(--ey-danger-text);
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.ey-rating-report-btn:hover { background: var(--ey-elev-hover); }
+
+.ey-rating-status:not(:empty) { font-size: 11px; color: var(--ey-text-dim); }
+
+/* ── 제보 시트 + 확인 단계 ──────────────────────────────────────── */
+
+.ey-report-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 230px;
+}
+
+.ey-report-title { font-size: 12px; font-weight: 600; color: var(--ey-text); }
+
+.ey-report-row { display: flex; align-items: center; gap: 6px; }
+
+.ey-report-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+.ey-report-actions .ey-primary-btn,
+.ey-report-actions .ey-secondary-btn { font-size: 11px; padding: 5px 12px; }
+
+.ey-report-status:not(:empty) { font-size: 11px; color: var(--ey-text-dim); }
+
+/* 되돌릴 수 없는 동작은 색으로도 구분한다 — 확인 단계와 짝을 이루는 신호.
+   글자색을 고정 검정으로 두면 안 된다: --ey-danger-text가 다크에선 연분홍,
+   라이트에선 진한 빨강이라 한쪽에서 반드시 읽히지 않는다. 배경색 변수를 그대로
+   글자색으로 쓰면 두 테마 모두 대비가 뒤집힌 채 유지된다. */
+.ey-report-danger { background: var(--ey-danger-text); color: var(--ey-bg-solid); }
+
+.ey-report-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-left: 2px solid var(--ey-danger-text);
+  padding-left: 10px;
+}
+
+.ey-report-confirm-body { font-size: 11px; color: var(--ey-text-dim); line-height: 1.5; }
+
+/* 깊이 안내 — 제보 폼보다 먼저 뜨는 화면이라 눈에 띄어야 한다 */
+.ey-report-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-left: 2px solid var(--ey-accent);
+  padding-left: 10px;
+}
+
+.ey-report-hint-text { font-size: 12px; color: var(--ey-text); line-height: 1.5; }
+
+.ey-report-hint-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.ey-report-hint-actions .ey-primary-btn,
+.ey-report-hint-actions .ey-secondary-btn { font-size: 11px; padding: 5px 12px; }
+
+/* ── 확인 팝오버 (오매칭 제보) ──────────────────────────────────── */
+
+.ey-confirm-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+  max-width: 280px;
+}
+
+.ey-confirm-text { font-size: 12px; font-weight: 600; color: var(--ey-text); }
+
+.ey-confirm-target {
+  font-size: 11px;
+  color: var(--ey-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ey-confirm-body { font-size: 11px; color: var(--ey-text-faint); line-height: 1.5; }
+
+.ey-confirm-actions { display: flex; gap: 6px; justify-content: flex-end; }
+
+.ey-confirm-actions .ey-primary-btn,
+.ey-confirm-actions .ey-secondary-btn { font-size: 11px; padding: 5px 12px; }
+
+/* ── 시트 공통 머리 (공지 · 기여) ───────────────────────────────── */
+
+.ey-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.ey-sheet-title { font-size: 13px; font-weight: 600; color: var(--ey-text); }
+
+.ey-state .ey-sheet-back { font-size: 11px; padding: 4px 10px; }
+
+/* ── 공지 시트 ──────────────────────────────────────────────────── */
+
+/* .ey-state는 한두 줄짜리 안내를 가운데 세우는 골격이라 justify-content:center다 —
+   목록이 길어지면 위쪽이 잘려 첫 공지를 못 본다. 목록 시트는 위에서부터 쌓고 넘치면
+   스크롤한다. */
+.ey-notices { align-items: stretch; justify-content: flex-start; text-align: left; overflow-y: auto; }
+
+.ey-notices-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+/* 등급은 왼쪽 띠 색으로 — 목록을 훑을 때 제목을 읽기 전에 무게가 먼저 보인다 */
+.ey-notice-item {
+  border-left: 3px solid var(--ey-border);
+  background: var(--ey-elev);
+  border-radius: 0 8px 8px 0;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ey-notice-info { border-left-color: var(--ey-primary); }
+.ey-notice-warning { border-left-color: var(--ey-accent); }
+.ey-notice-critical { border-left-color: var(--ey-danger-text); }
+
+.ey-notice-head { display: flex; align-items: baseline; gap: 6px; }
+
+/* 색만으로 등급을 못 읽는 경우가 있어 낱말을 함께 둔다 */
+.ey-notice-level {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ey-elev-hover);
+  color: var(--ey-text-dim);
+}
+
+.ey-notice-info .ey-notice-level { color: var(--ey-primary); }
+.ey-notice-warning .ey-notice-level { color: var(--ey-accent); }
+.ey-notice-critical .ey-notice-level { color: var(--ey-danger-text); }
+
+.ey-notice-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ey-text);
+  min-width: 0;
+  word-break: break-word;
+}
+
+.ey-notice-date { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--ey-text-faint); }
+
+/* 서버가 넣은 개행이 곧 문단 구분이다 — 접어 버리면 공지가 한 덩어리로 뭉친다 */
+.ey-notice-body {
+  font-size: 11px;
+  color: var(--ey-text-dim);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 헤더 아이콘에 붙는 안 읽음 점 (probeNotices → 호스트가 붙인다) */
+.ey-unread-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ey-accent);
+  pointer-events: none;
+}
+
+/* ── 기여 · 쿼터 시트 ───────────────────────────────────────────── */
+
+/* 위 .ey-notices와 같은 사정 — 기여 목록은 수백 줄까지 늘어난다(CONTRIB_MAX=500) */
+.ey-contrib { align-items: stretch; justify-content: flex-start; text-align: left; overflow-y: auto; }
+
+.ey-contrib-quota {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--ey-border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.ey-contrib-quota-title { font-size: 11px; color: var(--ey-text-dim); }
+
+.ey-contrib-quota-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ey-text);
+}
+
+.ey-contrib-quota-val { font-variant-numeric: tabular-nums; color: var(--ey-text-dim); }
+
+/* 다 쓴 한도는 숫자를 읽기 전에 보여야 한다 — 여기서 막히는 사람이 실제로 있다 */
+.ey-contrib-quota-val.out { color: var(--ey-danger-text); font-weight: 600; }
+
+.ey-contrib-headline:not(:empty) {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ey-text);
+  line-height: 1.5;
+}
+
+.ey-contrib-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.ey-contrib-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: var(--ey-elev);
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  color: var(--ey-text);
+  font-family: inherit;
+}
+
+.ey-contrib-item:hover:not(:disabled) { background: var(--ey-elev-hover); }
+
+/* 이동할 방법이 없으면 눌리는 척하지 않는다 (onOpenVideo 미제공) */
+.ey-contrib-item:disabled { cursor: default; }
+
+.ey-contrib-item-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ey-contrib-item-meta { flex-shrink: 0; font-size: 10px; color: var(--ey-text-faint); }
+
+.ey-contrib-depth {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ey-elev-hover);
+  color: var(--ey-text-dim);
+}
+
+.ey-contrib-depth.heavy { color: var(--ey-accent); background: var(--ey-accent-soft); }
+
+/* 로컬 전용이라는 약속은 흐리게 두지 않는다 — 이 화면이 성립하는 근거 그 자체다 */
+.ey-contrib-privacy {
+  font-size: 10px;
+  color: var(--ey-text-faint);
+  line-height: 1.6;
+  border-top: 1px solid var(--ey-border);
+  padding-top: 8px;
+}
+
+/* ── 검색 폼 안내 + 원제목 되돌리기 ─────────────────────────────── */
+
+.ey-search-hint {
+  font-size: 11px;
+  color: var(--ey-text-faint);
+  line-height: 1.5;
+  text-align: left;
+}
+
+/* 입력칸 바로 아래 붙는 탈출구 — 폼 안의 다른 버튼(실행)과 무게를 달리한다 */
+.ey-search-raw-btn {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 4px 10px;
 }

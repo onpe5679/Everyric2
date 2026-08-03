@@ -1068,6 +1068,59 @@
   "overlay_mainLane_seekTitle": {
     "message": "클릭한 위치로 이동해요 (노트 위를 누르면 그 음 시작으로)"
   },
+  "overlay_mainLane_resizeTitle": {
+    "message": "드래그해서 레인 열 너비를 조절해요"
+  },
+  "overlay_quick_lane": {
+    "message": "가라오케 레인 켜기/끄기"
+  },
+  "overlay_quick_lanePos": {
+    "message": "레인 위치 바꾸기"
+  },
+  "overlay_quick_lanePosToLeft": {
+    "message": "레인을 가사 왼쪽 열로 옮기기"
+  },
+  "overlay_quick_lanePosToBottom": {
+    "message": "레인을 가사 아래 띠로 옮기기"
+  },
+  "overlay_quick_caption": {
+    "message": "영상 자막 켜기/끄기"
+  },
+  "overlay_quick_nextUp": {
+    "message": "다음 영상 표시 켜기/끄기"
+  },
+  "overlay_nextUp_label": {
+    "message": "다음 ▸"
+  },
+  "overlay_depthLabel_fast": {
+    "message": "빠름"
+  },
+  "overlay_depthLabel_medium": {
+    "message": "표준"
+  },
+  "overlay_laneNotice_text": {
+    "message": "음절 타이밍이 부정확하면 분석 깊이를 높여보세요 (현재 $P1$)",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_laneNotice_close": {
+    "message": "닫기"
+  },
+  "overlay_laneNotice_never": {
+    "message": "다시 보지 않기"
+  },
+  "overlay_laneNotice_neverTitle": {
+    "message": "이 안내를 다시 띄우지 않아요 (설정에서 되돌릴 수 있어요)"
+  },
+  "overlay_settings_resetKaraokeNotice": {
+    "message": "가라오케 타이밍 안내 다시 보기"
+  },
+  "overlay_settings_resetKaraokeNoticeTitle": {
+    "message": "‘다시 보지 않기’로 끈 음절 타이밍 안내를 되살려요"
+  },
   "content_notice_extensionReloaded": {
     "message": "확장 프로그램이 업데이트됐어요 — 이 탭에서 다시 쓰려면 페이지를 새로고침해 주세요"
   },
@@ -1790,5 +1843,293 @@
   },
   "content_genChip_depthUpgraded": {
     "message": "정밀 분석으로 전환됨"
-  }
-}
+  },
+  "panels_search_titleHint": {
+    "message": "순수 곡 제목만 입력해 보세요 (아티스트·【】·MV 등은 빼고)"
+  },
+  "panels_search_useRawTitle": {
+    "message": "영상 제목 그대로"
+  },
+  "panels_search_useRawTitleTitle": {
+    "message": "정리 전 영상 제목을 그대로 넣어요: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_sheet_back": {
+    "message": "← 돌아가기"
+  },
+  "panels_depth_fast": {
+    "message": "빠름"
+  },
+  "panels_depth_medium": {
+    "message": "보통"
+  },
+  "panels_depth_heavy": {
+    "message": "정밀"
+  },
+  "panels_date_today": {
+    "message": "오늘"
+  },
+  "panels_date_yesterday": {
+    "message": "어제"
+  },
+  "panels_date_daysAgo": {
+    "message": "$P1$일 전",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_filterPlaceholder": {
+    "message": "설정 검색 (예: 글꼴, 번역, 서버)"
+  },
+  "panels_settings_noMatch": {
+    "message": "'$P1$'에 해당하는 설정이 없어요",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_expandAll": {
+    "message": "모두 펼치기"
+  },
+  "panels_settings_collapseAll": {
+    "message": "모두 접기"
+  },
+  "panels_settings_section_search": {
+    "message": "가사 찾기"
+  },
+  "panels_settings_section_display": {
+    "message": "표시"
+  },
+  "panels_settings_section_lane": {
+    "message": "가라오케 레인"
+  },
+  "panels_settings_section_modules": {
+    "message": "모듈"
+  },
+  "panels_settings_section_pip": {
+    "message": "PIP"
+  },
+  "panels_settings_section_audio": {
+    "message": "오디오 · 마이크"
+  },
+  "panels_settings_section_server": {
+    "message": "서버 · 고급"
+  },
+  "panels_settings_section_reset": {
+    "message": "초기화"
+  },
+  "panels_settings_row_captionFontScale": {
+    "message": "영상 자막 글자 크기"
+  },
+  "panels_settings_row_captionBgOpacity": {
+    "message": "영상 자막 배경 진하기"
+  },
+  "panels_settings_row_mainLaneWidth": {
+    "message": "가사창 레인 너비"
+  },
+  "panels_settings_row_mainLanePos": {
+    "message": "가사창 레인 위치"
+  },
+  "panels_settings_mainLanePos_left": {
+    "message": "왼쪽"
+  },
+  "panels_settings_mainLanePos_bottom": {
+    "message": "아래"
+  },
+  "panels_settings_row_pitchLaneHeight": {
+    "message": "레인 높이"
+  },
+  "panels_settings_reset_karaokeNotice": {
+    "message": "가라오케 타이밍 안내 다시 보기"
+  },
+  "panels_settings_reset_karaokeNoticeTitle": {
+    "message": "한 번 닫은 안내 배너를 다음 곡부터 다시 보여줘요"
+  },
+  "panels_settings_reset_done": {
+    "message": "초기화했어요"
+  },
+  "panels_rating_title": {
+    "message": "이 싱크 어때요?"
+  },
+  "panels_rating_starTitle": {
+    "message": "$P1$점",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_rating_report": {
+    "message": "신고"
+  },
+  "panels_rating_reportTitle": {
+    "message": "가사·타이밍·발음 문제를 알려주세요"
+  },
+  "panels_rating_sending": {
+    "message": "보내는 중…"
+  },
+  "panels_rating_thanks": {
+    "message": "고마워요!"
+  },
+  "panels_rating_failed": {
+    "message": "전송에 실패했어요"
+  },
+  "panels_report_title": {
+    "message": "무엇이 잘못됐나요?"
+  },
+  "panels_report_commentPh": {
+    "message": "무슨 일이 있었는지 적어주세요 (선택)"
+  },
+  "panels_report_cancel": {
+    "message": "취소"
+  },
+  "panels_report_send": {
+    "message": "제보"
+  },
+  "panels_report_confirmTitle": {
+    "message": "제보하시겠어요?"
+  },
+  "panels_report_confirmBody": {
+    "message": "보낸 내용은 품질 개선에만 쓰여요. 취소하면 아무것도 보내지 않아요."
+  },
+  "panels_report_confirmSend": {
+    "message": "제보"
+  },
+  "panels_report_thanks": {
+    "message": "제보했어요. 고마워요!"
+  },
+  "panels_report_failed": {
+    "message": "전송에 실패했어요. 잠시 후 다시 시도해 주세요"
+  },
+  "panels_report_depthHint": {
+    "message": "이 결과는 '$P1$' 깊이로 만들어졌어요. 분석 깊이를 높이면 좋아질 수 있어요.",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_report_depthUpgrade": {
+    "message": "깊이 올리기"
+  },
+  "panels_report_depthAnyway": {
+    "message": "그래도 제보"
+  },
+  "panels_wrongLyrics_title": {
+    "message": "이 가사가 아닌가요?"
+  },
+  "panels_wrongLyrics_matched": {
+    "message": "현재 매칭: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_wrongLyrics_body": {
+    "message": "지금 표시된 가사를 제보하고 검색 창을 열어요."
+  },
+  "panels_wrongLyrics_cancel": {
+    "message": "취소"
+  },
+  "panels_wrongLyrics_confirm": {
+    "message": "제보"
+  },
+  "panels_notices_title": {
+    "message": "공지"
+  },
+  "panels_notices_loading": {
+    "message": "불러오는 중…"
+  },
+  "panels_notices_empty": {
+    "message": "새 공지가 없어요"
+  },
+  "panels_notices_unavailable": {
+    "message": "지금은 공지를 볼 수 없어요"
+  },
+  "panels_notices_levelInfo": {
+    "message": "안내"
+  },
+  "panels_notices_levelWarning": {
+    "message": "주의"
+  },
+  "panels_notices_levelCritical": {
+    "message": "중요"
+  },
+  "panels_contrib_title": {
+    "message": "내 기여"
+  },
+  "panels_contrib_loading": {
+    "message": "불러오는 중…"
+  },
+  "panels_contrib_empty": {
+    "message": "아직 만든 싱크가 없어요"
+  },
+  "panels_contrib_headline": {
+    "message": "내가 만든 $P1$곡을 $P2$명이 봤어요",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_headlineNoViews": {
+    "message": "내가 만든 $P1$곡",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_rowViews": {
+    "message": "조회 $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_openTitle": {
+    "message": "이 영상 열기"
+  },
+  "panels_contrib_privacy": {
+    "message": "기여 이력은 오직 이 브라우저에만 저장되며 서버는 추적할 수 없어요. 브라우저 데이터를 지우면 사라질 수 있어요."
+  },
+  "panels_contrib_quotaTitle": {
+    "message": "오늘 남은 횟수"
+  },
+  "panels_contrib_quotaGenerate": {
+    "message": "싱크 생성"
+  },
+  "panels_contrib_quotaDestructive": {
+    "message": "초기화 · 해제"
+  },
+  "panels_contrib_quotaValue": {
+    "message": "$P1$ / $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_quotaWindow": {
+    "message": "$P1$시간 기준",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  }}

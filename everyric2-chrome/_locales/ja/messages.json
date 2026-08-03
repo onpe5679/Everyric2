@@ -1068,6 +1068,59 @@
   "overlay_mainLane_seekTitle": {
     "message": "クリックした位置に移動します（ノートの上ならその音の開始位置へ）"
   },
+  "overlay_mainLane_resizeTitle": {
+    "message": "ドラッグでレーン列の幅を調整できます"
+  },
+  "overlay_quick_lane": {
+    "message": "カラオケレーンのオン/オフ"
+  },
+  "overlay_quick_lanePos": {
+    "message": "レーンの位置を変更"
+  },
+  "overlay_quick_lanePosToLeft": {
+    "message": "レーンを歌詞の左列に移動"
+  },
+  "overlay_quick_lanePosToBottom": {
+    "message": "レーンを歌詞の下に移動"
+  },
+  "overlay_quick_caption": {
+    "message": "動画字幕のオン/オフ"
+  },
+  "overlay_quick_nextUp": {
+    "message": "次の動画表示のオン/オフ"
+  },
+  "overlay_nextUp_label": {
+    "message": "次 ▸"
+  },
+  "overlay_depthLabel_fast": {
+    "message": "高速"
+  },
+  "overlay_depthLabel_medium": {
+    "message": "標準"
+  },
+  "overlay_laneNotice_text": {
+    "message": "音節のタイミングがずれる場合は解析の深さを上げてみてください（現在 $P1$）",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_laneNotice_close": {
+    "message": "閉じる"
+  },
+  "overlay_laneNotice_never": {
+    "message": "今後表示しない"
+  },
+  "overlay_laneNotice_neverTitle": {
+    "message": "この案内を今後表示しません（設定から戻せます）"
+  },
+  "overlay_settings_resetKaraokeNotice": {
+    "message": "カラオケタイミング案内を再表示"
+  },
+  "overlay_settings_resetKaraokeNoticeTitle": {
+    "message": "「今後表示しない」で消した音節タイミング案内を元に戻します"
+  },
   "content_notice_extensionReloaded": {
     "message": "拡張機能が更新されました — このタブで使い続けるにはページを再読み込みしてください"
   },
@@ -1790,5 +1843,293 @@
   },
   "content_genChip_depthUpgraded": {
     "message": "精密解析に切り替わりました"
-  }
-}
+  },
+  "panels_search_titleHint": {
+    "message": "曲名だけを入力してみてください（アーティスト・【】・MV などは除く）"
+  },
+  "panels_search_useRawTitle": {
+    "message": "動画タイトルそのまま"
+  },
+  "panels_search_useRawTitleTitle": {
+    "message": "整形前の動画タイトルをそのまま入れます: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_sheet_back": {
+    "message": "← 戻る"
+  },
+  "panels_depth_fast": {
+    "message": "高速"
+  },
+  "panels_depth_medium": {
+    "message": "標準"
+  },
+  "panels_depth_heavy": {
+    "message": "精密"
+  },
+  "panels_date_today": {
+    "message": "今日"
+  },
+  "panels_date_yesterday": {
+    "message": "昨日"
+  },
+  "panels_date_daysAgo": {
+    "message": "$P1$日前",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_filterPlaceholder": {
+    "message": "設定を検索（例: フォント、翻訳、サーバー）"
+  },
+  "panels_settings_noMatch": {
+    "message": "「$P1$」に一致する設定はありません",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_settings_expandAll": {
+    "message": "すべて展開"
+  },
+  "panels_settings_collapseAll": {
+    "message": "すべて折りたたむ"
+  },
+  "panels_settings_section_search": {
+    "message": "歌詞の検索"
+  },
+  "panels_settings_section_display": {
+    "message": "表示"
+  },
+  "panels_settings_section_lane": {
+    "message": "カラオケレーン"
+  },
+  "panels_settings_section_modules": {
+    "message": "モジュール"
+  },
+  "panels_settings_section_pip": {
+    "message": "PIP"
+  },
+  "panels_settings_section_audio": {
+    "message": "オーディオ・マイク"
+  },
+  "panels_settings_section_server": {
+    "message": "サーバー・詳細"
+  },
+  "panels_settings_section_reset": {
+    "message": "リセット"
+  },
+  "panels_settings_row_captionFontScale": {
+    "message": "動画字幕の文字サイズ"
+  },
+  "panels_settings_row_captionBgOpacity": {
+    "message": "動画字幕の背景の濃さ"
+  },
+  "panels_settings_row_mainLaneWidth": {
+    "message": "歌詞ウィンドウのレーン幅"
+  },
+  "panels_settings_row_mainLanePos": {
+    "message": "歌詞ウィンドウのレーン位置"
+  },
+  "panels_settings_mainLanePos_left": {
+    "message": "左"
+  },
+  "panels_settings_mainLanePos_bottom": {
+    "message": "下"
+  },
+  "panels_settings_row_pitchLaneHeight": {
+    "message": "レーンの高さ"
+  },
+  "panels_settings_reset_karaokeNotice": {
+    "message": "カラオケタイミングの案内を再表示"
+  },
+  "panels_settings_reset_karaokeNoticeTitle": {
+    "message": "一度閉じた案内バナーを次の曲から再表示します"
+  },
+  "panels_settings_reset_done": {
+    "message": "リセットしました"
+  },
+  "panels_rating_title": {
+    "message": "この同期はどうですか？"
+  },
+  "panels_rating_starTitle": {
+    "message": "$P1$点",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_rating_report": {
+    "message": "報告"
+  },
+  "panels_rating_reportTitle": {
+    "message": "歌詞・タイミング・発音の問題を知らせる"
+  },
+  "panels_rating_sending": {
+    "message": "送信中…"
+  },
+  "panels_rating_thanks": {
+    "message": "ありがとうございます！"
+  },
+  "panels_rating_failed": {
+    "message": "送信に失敗しました"
+  },
+  "panels_report_title": {
+    "message": "何が問題でしたか？"
+  },
+  "panels_report_commentPh": {
+    "message": "何が起きたか書いてください（任意）"
+  },
+  "panels_report_cancel": {
+    "message": "キャンセル"
+  },
+  "panels_report_send": {
+    "message": "報告"
+  },
+  "panels_report_confirmTitle": {
+    "message": "報告しますか？"
+  },
+  "panels_report_confirmBody": {
+    "message": "送信内容は品質改善のみに使われます。キャンセルすれば何も送信されません。"
+  },
+  "panels_report_confirmSend": {
+    "message": "報告する"
+  },
+  "panels_report_thanks": {
+    "message": "報告しました。ありがとうございます！"
+  },
+  "panels_report_failed": {
+    "message": "送信に失敗しました。しばらくしてからお試しください"
+  },
+  "panels_report_depthHint": {
+    "message": "この結果は「$P1$」の深さで作られました。解析の深さを上げると良くなる可能性があります。",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_report_depthUpgrade": {
+    "message": "深さを上げる"
+  },
+  "panels_report_depthAnyway": {
+    "message": "それでも報告"
+  },
+  "panels_wrongLyrics_title": {
+    "message": "この歌詞ではありませんか？"
+  },
+  "panels_wrongLyrics_matched": {
+    "message": "現在のマッチ: $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_wrongLyrics_body": {
+    "message": "表示中の歌詞を報告して検索を開きます。"
+  },
+  "panels_wrongLyrics_cancel": {
+    "message": "キャンセル"
+  },
+  "panels_wrongLyrics_confirm": {
+    "message": "報告"
+  },
+  "panels_notices_title": {
+    "message": "お知らせ"
+  },
+  "panels_notices_loading": {
+    "message": "読み込み中…"
+  },
+  "panels_notices_empty": {
+    "message": "新しいお知らせはありません"
+  },
+  "panels_notices_unavailable": {
+    "message": "現在お知らせを表示できません"
+  },
+  "panels_notices_levelInfo": {
+    "message": "お知らせ"
+  },
+  "panels_notices_levelWarning": {
+    "message": "注意"
+  },
+  "panels_notices_levelCritical": {
+    "message": "重要"
+  },
+  "panels_contrib_title": {
+    "message": "私の貢献"
+  },
+  "panels_contrib_loading": {
+    "message": "読み込み中…"
+  },
+  "panels_contrib_empty": {
+    "message": "まだ作成した同期はありません"
+  },
+  "panels_contrib_headline": {
+    "message": "あなたが作った$P1$曲を$P2$人が見ました",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_headlineNoViews": {
+    "message": "あなたが作った$P1$曲",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_rowViews": {
+    "message": "再生 $P1$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "panels_contrib_openTitle": {
+    "message": "この動画を開く"
+  },
+  "panels_contrib_privacy": {
+    "message": "貢献履歴はこのブラウザーにのみ保存され、サーバーは追跡できません。ブラウザーのデータを消すと失われることがあります。"
+  },
+  "panels_contrib_quotaTitle": {
+    "message": "本日の残り回数"
+  },
+  "panels_contrib_quotaGenerate": {
+    "message": "同期の作成"
+  },
+  "panels_contrib_quotaDestructive": {
+    "message": "リセット・解除"
+  },
+  "panels_contrib_quotaValue": {
+    "message": "$P1$ / $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_quotaWindow": {
+    "message": "$P1$時間あたり",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  }}

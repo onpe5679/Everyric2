@@ -177,7 +177,26 @@ export interface PitchLaneOptions {
   playbackRate: number;
   /** 마이크 음정 궤적 공급자 — null이면 궤적을 그리지 않는다(메인 패널 기본) */
   getMicSamples: (() => MicSample[]) | null;
+  /**
+   * 좁은 세로 열(메인 패널 좌측 레인)용 압축 모드 — 폭이 좁을 때 **찌그러뜨리는 대신**
+   * 담는 양을 줄인다: (1) 표시 마디 수를 절반씩 줄여 초당 픽셀을 확보하고,
+   * (2) 가사 글자 크기 상한을 캔버스 높이가 아니라 **폭**으로도 건다.
+   *
+   * 이 옵션 없이 220px 열에 기본 4마디(120BPM=8초)를 그리면 초당 23px, 한 음절이 3~5px가
+   * 되어 노트 라벨(w>=14 게이트)이 통째로 사라지고 가사 글자는 충돌 회피(placeRow)에
+   * 밀려 오른쪽으로 사슬처럼 쌓인다 — "작게 보이는" 게 아니라 못 읽는 상태가 된다.
+   *
+   * 기본 false이고 PiP는 이 값을 건드리지 않는다 — 즉 PiP 렌더 경로는 이 옵션이 도입되기
+   * 전과 **한 줄도 다르게 동작하지 않는다**(폭 기반 자동 판정이 아니라 명시적 옵트인인
+   * 이유가 이것이다: PiP 창을 좁게 줄인 사용자의 화면이 조용히 바뀌면 안 된다).
+   */
+  compact: boolean;
 }
+
+/** 압축 모드에서 확보할 최소 초당 픽셀 — 이보다 촘촘하면 음절이 뭉쳐 읽을 수 없다 */
+const COMPACT_MIN_PX_PER_SEC = 60;
+/** 압축 모드 마디 수 하한 — 이보다 더 줄이면 창에 노트가 한두 개만 남아 맥락이 사라진다 */
+const COMPACT_MIN_MEASURES = 0.25;
 
 const DEFAULT_OPTIONS: PitchLaneOptions = {
   enabled: true,
@@ -196,6 +215,7 @@ const DEFAULT_OPTIONS: PitchLaneOptions = {
   micOctave: 0,
   playbackRate: 1,
   getMicSamples: null,
+  compact: false,
 };
 
 export class PitchLaneRenderer {
@@ -351,25 +371,39 @@ export class PitchLaneRenderer {
       && pages.some(p => resolvedPronunciation(p.line, this.opts.pronScript));
     const hasTr = pages.some(p => p.line.translation);
     const fs = this.opts.fontScale;
+    // 좌측 음정 라벨 사이드바(멜로다인식) — 플롯은 그만큼 오른쪽에서 시작.
+    // 시간 스케일이 플롯 폭에 의존하므로(압축 모드) 폭 계산이 먼저다.
+    const sidebarW = Math.max(24, Math.round(27 * fs));
+    const plotX = sidebarW;
+    const plotW = Math.max(10, cw - sidebarW);
+    const compact = this.opts.compact;
+
     // 배율은 반드시 클램프 **이후에** 곱한다 — 예전엔 상한(34px 등) 안에서 곱해서,
-    // 레인이 조금만 커져도 상한에 걸려 배율이 계이름(무상한)에만 먹히는 것처럼 보였다
-    const lyricH = Math.round(Math.max(16, Math.min(34, ch * 0.15)) * fs);
+    // 레인이 조금만 커져도 상한에 걸려 배율이 계이름(무상한)에만 먹히는 것처럼 보였다.
+    // 압축 모드에서는 높이 말고 **폭**으로도 상한을 건다 — 좁고 긴 열은 ch가 커서
+    // 높이 기준만으로는 34px 상한에 걸린 글자가 열 폭에 7자밖에 못 들어간다.
+    const lyricCap = compact ? Math.min(34, cw * 0.1) : 34;
+    const lyricH = Math.round(Math.max(16, Math.min(lyricCap, ch * 0.15)) * fs);
     const lyricPx = Math.max(13, Math.round(lyricH * 0.72));
     const pronPx = Math.max(10, Math.round(lyricPx * 0.8));
     const pronRowH = hasPronRow ? pronPx + 6 : 0;
-    const trPx = Math.round(Math.max(12, Math.min(22, ch * 0.085)) * fs);
+    const trCap = compact ? Math.min(22, cw * 0.07) : 22;
+    const trPx = Math.round(Math.max(12, Math.min(trCap, ch * 0.085)) * fs);
     const trH = hasTr ? trPx + 7 : 0;
     const namePx = Math.max(10, Math.round(11 * fs));
     const padTop = 2;
     const staffH = Math.max(30, ch - padTop - lyricH - pronRowH - trH - 2);
 
-    // ── 고정 시간 스케일: 창 폭 = N마디(4/4 가정) — 템포 없으면 120BPM 가정 폴백
+    // ── 고정 시간 스케일: 창 폭 = N마디(4/4 가정) — 템포 없으면 120BPM 가정 폴백.
+    // 압축 모드는 초당 픽셀이 최소치에 닿을 때까지 마디 수를 절반씩 줄인다(설정값을
+    // 바꾸는 게 아니라 이 렌더에서만 좁힌다 — 사용자가 고른 마디 수는 넓은 창에서 그대로다)
     const secPerBeat = this.tempo ? 60 / this.tempo.bpm : 0.5;
-    const W = this.opts.windowMeasures * 4 * secPerBeat;
-    // 좌측 음정 라벨 사이드바(멜로다인식) — 플롯은 그만큼 오른쪽에서 시작
-    const sidebarW = Math.max(24, Math.round(27 * fs));
-    const plotX = sidebarW;
-    const plotW = Math.max(10, cw - sidebarW);
+    let measures = this.opts.windowMeasures;
+    if (compact) {
+      const maxSec = plotW / COMPACT_MIN_PX_PER_SEC;
+      while (measures > COMPACT_MIN_MEASURES && measures * 4 * secPerBeat > maxSec) measures /= 2;
+    }
+    const W = measures * 4 * secPerBeat;
     let t0: number;
     if (this.opts.scrollMode === 'page') {
       // 페이지 모드: 창은 고정한 채 플레이헤드가 이동하되, 페이지를 창 폭의 75%씩만

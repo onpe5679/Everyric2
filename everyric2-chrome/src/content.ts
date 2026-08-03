@@ -516,6 +516,11 @@ function beginFollowing(videoId: string): void {
   currentVideoId = videoId;
   followedPageTitle = document.title;
   deferredVideoId = null;
+  // 다음 영상 카드는 5초 스로틀을 타므로, 곡이 바뀐 순간 지워 주지 않으면 새 영상 위에
+  // **이전 곡의 "다음 ▸"**가 몇 초간 남는다(카드로 커지면서 눈에 띄게 됐다). PiP는
+  // 곡 전환에서 이미 setNextUp(null)을 하고 있었고 메인 패널만 빠져 있었다.
+  overlay?.setNextUp(null);
+  lastNextUpPush = 0; // 다음 틱이 스로틀에 막히지 않고 새 값을 즉시 채우게
 }
 
 function checkCurrentPage(): void {
@@ -2491,8 +2496,12 @@ function refreshNextUp(force = false): void {
   const now = Date.now();
   if (!force && now - lastNextUpPush < 5000) return;
   lastNextUpPush = now;
-  const title = document.querySelector('a.ytp-next-button')?.getAttribute('data-tooltip-text') ?? null;
-  overlay?.setNextUp(title);
+  const nextEl = document.querySelector('a.ytp-next-button');
+  const title = nextEl?.getAttribute('data-tooltip-text') ?? null;
+  // videoId가 있으면 카드가 썸네일까지 그린다(없으면 제목만 — 하위호환 문자열 API 유지).
+  // 유튜브가 next 버튼을 <a href>로 두지 않는 배치도 있어 못 뽑아도 정상 동작해야 한다.
+  const nextVideoId = nextEl?.getAttribute('href')?.match(/[?&]v=([\w-]{11})/)?.[1];
+  overlay?.setNextUp(title ? { title, videoId: nextVideoId } : null);
   if (pip.isOpen()) pip.setNextUp(title);
 }
 
