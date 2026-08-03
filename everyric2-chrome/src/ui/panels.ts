@@ -1294,6 +1294,35 @@ function noticeLevelLabel(level: ServerNotice['level']): string {
 }
 
 /**
+ * 지금 보여줄 공지 언어(ko·en·ja) — lib/i18n.ts의 t()가 내부에서 쓰는 것과 **같은 순서**로
+ * 직접 판정한다(사용자 명시 설정 → 브라우저 로케일 → 한국어). t()는 키 하나짜리 문자열
+ * 치환용이라 "이 통짜 객체를 어느 언어로 보여줄까" 같은 선택에는 못 쓰고, i18n.ts의
+ * 판정값(currentUiLanguage)도 모듈 비공개라 여기서 못 읽는다 — 그렇다고 이 판정 로직을
+ * i18n.ts에 옮기거나 overlay.ts(공지 시트 호출부)를 거쳐 넘겨받게 하면 이번 작업 허용
+ * 범위 밖 파일(overlay.ts는 다른 에이전트가 병행 작업 중)을 건드리게 된다 — 그래서
+ * chrome.storage.local을 이 함수 안에서 직접 한 번 읽는다(이 파일의 readContributions·
+ * readSeenNoticeId와 같은 패턴, storage 직접 조회는 이 파일에 이미 있는 관례다).
+ */
+async function resolveNoticeLang(): Promise<'ko' | 'en' | 'ja'> {
+  try {
+    const stored = await chrome.storage.local.get('settings');
+    const uiLanguage = (stored.settings as { uiLanguage?: string } | undefined)?.uiLanguage;
+    if (uiLanguage === 'ko' || uiLanguage === 'en' || uiLanguage === 'ja') return uiLanguage;
+  } catch { /* 저장소 조회 실패 — 아래 브라우저 로케일로 계속 */ }
+  try {
+    const browserLang = chrome.i18n.getUILanguage().split('-')[0];
+    if (browserLang === 'ko' || browserLang === 'en' || browserLang === 'ja') return browserLang;
+  } catch { /* chrome.i18n을 쓸 수 없는 컨텍스트 — 아래 최종 폴백으로 */ }
+  return 'ko'; // 최종 폴백 — 서버 title/body 자체가 한국어 기준이라 항상 안전하다
+}
+
+/** 이 공지를 지금 언어로 보여줄 제목·본문 — translations에 그 언어가 있으면 그것,
+ *  없으면(구버전 서버·부분 번역·ko 자체) title/body(기본 언어) 그대로. */
+function localizeNotice(notice: ServerNotice, lang: 'ko' | 'en' | 'ja'): { title: string; body: string } {
+  return notice.translations?.[lang] ?? { title: notice.title, body: notice.body };
+}
+
+/**
  * 서버 공지함 — 등급색 왼쪽 띠 + 제목 + 본문(줄바꿈 보존) + 상대 날짜.
  * 본문은 서버가 준 평문이라 textContent로만 넣는다(HTML을 심을 자리가 아니다).
  */
@@ -1305,7 +1334,10 @@ export function buildNoticesSheet(opts: NoticesSheetOpts = {}): { el: HTMLDivEle
     list,
   );
 
-  void sendPanelMessage<NoticesResponse>({ type: 'NOTICES_GET' }).then(res => {
+  void Promise.all([
+    sendPanelMessage<NoticesResponse>({ type: 'NOTICES_GET' }),
+    resolveNoticeLang(),
+  ]).then(([res, lang]) => {
     const notices = res.data?.notices;
     if (res.error || !Array.isArray(notices)) {
       // 여기까지 들어온 사용자에게는 말 없는 빈 화면이 더 나쁘다. 다만 서버 오류 문구를
@@ -1319,14 +1351,15 @@ export function buildNoticesSheet(opts: NoticesSheetOpts = {}): { el: HTMLDivEle
     }
     list.replaceChildren(...notices.map(notice => {
       const at = Date.parse(notice.created_at);
+      const localized = localizeNotice(notice, lang);
       return h('div', { className: `ey-notice-item ey-notice-${notice.level}` },
         h('div', { className: 'ey-notice-head' },
           h('span', { className: 'ey-notice-level', text: noticeLevelLabel(notice.level) }),
-          h('span', { className: 'ey-notice-title', text: notice.title }),
+          h('span', { className: 'ey-notice-title', text: localized.title }),
           Number.isFinite(at) ? h('span', { className: 'ey-notice-date', text: relativeDate(at) }) : null,
         ),
         // 줄바꿈은 CSS(white-space: pre-wrap)가 살린다 — 서버가 넣은 개행이 곧 문단 구분이다
-        h('div', { className: 'ey-notice-body', text: notice.body }),
+        h('div', { className: 'ey-notice-body', text: localized.body }),
       );
     }));
     void markNoticesSeen(notices).then(() => opts.onSeen?.());

@@ -467,6 +467,10 @@ export interface ServerNotice {
   created_at: string;
   /** 게시 종료 시각 — 지난 공지는 서버가 이미 걸러 보내지만 클라이언트도 확인할 수 있다 */
   ends_at?: string | null;
+  /** 다국어화(2026-08-04, additive) — 언어 코드(en·ja 등)를 키로 둔 번역. 위 title/body는
+   *  뜻이 안 바뀐다(여전히 기본/폴백 언어, 한국어). 이 필드가 없거나(구버전 서버) 사용자
+   *  UI 언어가 여기 없으면 title/body를 그대로 쓴다 — panels.ts buildNoticesSheet 참고. */
+  translations?: Record<string, { title: string; body: string }> | null;
 }
 
 export interface NoticesResponse {

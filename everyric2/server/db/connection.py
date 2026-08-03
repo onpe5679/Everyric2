@@ -106,6 +106,14 @@ async def init_db():
                 await conn.execute(
                     text("ALTER TABLE sync_feedback ADD COLUMN depth VARCHAR(16)")
                 )
+            # 공지 다국어화(2026-08-04) — {"en": {"title","body"}, ...} 모양의 단일 JSON
+            # 컬럼. 기존 행은 NULL로 남고(models.py Notice.translations 독스트링 참고)
+            # API가 그대로 title/body(한국어 기본)로 폴백한다.
+            notice_cols = {
+                row[1] for row in await conn.execute(text("PRAGMA table_info(notices)"))
+            }
+            if notice_cols and "translations" not in notice_cols:
+                await conn.execute(text("ALTER TABLE notices ADD COLUMN translations JSON"))
         # 서버가 죽으며 남긴 좀비 잡(pending/processing) 정리 — 방치하면 같은 영상의
         # 생성 요청이 죽은 잡에 합류해 영구 "전사 중"에 갇힌다
         from sqlalchemy import text as _text

@@ -57,17 +57,39 @@
 
 ---
 
-## 공지사항(인앱 알림) 게시용 초안 — 한국어만, 게시 여부는 별도 확인 필요
+## 공지사항(인앱 알림) 게시용 초안 — ko/en/ja 3언어, 게시 여부는 별도 확인 필요
 
 `notices` 테이블에 직접 넣지 않았다(실사용자에게 즉시 노출되는 게시 행위라 별도 승인
-필요 — 아래 형식만 준비).
+필요 — 아래 형식만 준비). 2026-08-04 다국어화(`Notice.translations` JSON 컬럼) 반영 —
+`title`/`body`(아래 ko)는 기본/폴백 언어, `en`·`ja`는 `POST /api/notices`의 `translations`
+필드에 그대로 실어 보내면 된다(`{"en": {"title", "body"}, "ja": {"title", "body"}}`).
+
+- **level**: `info`
+
+### ko (기본 — title/body)
 
 - **title**: `1.6.0 업데이트 — PIP 재작업 · 가라오케 레인 개선 · 쿼터 표시`
 - **body**: `메인 창과 PIP가 이제 같은 가사창을 씁니다 — PIP에서도 검색·설정·오프셋 조정이
   그대로 됩니다. 가라오케 레인(음절 표시·발음 타이밍), 재생목록, 번역 표시의 여러 결함을
   고쳤고, 기여 페이지에서 싱크 생성·초기화·커버 잇기·정렬 업그레이드의 남은 횟수를 각각
   확인할 수 있습니다.`
-- **level**: `info`
+
+### en (translations.en)
+
+- **title**: `1.6.0 update — PiP rework · karaoke lane improvements · quota display`
+- **body**: `The main window and PiP now share the same lyrics panel — search, settings, and
+  offset adjustment all work the same way in PiP. We fixed several bugs in the karaoke lane
+  (syllable display, pronunciation timing), playlist, and translation display, and the
+  Contributions page now shows your remaining quota separately for sync creation, reset,
+  cover-linking, and sort upgrades.`
+
+### ja (translations.ja)
+
+- **title**: `1.6.0アップデート — PIP刷新・カラオケレーン改善・クォータ表示`
+- **body**: `メインウィンドウとPIPが同じ歌詞パネルを共有するようになりました — PIPでも
+  検索・設定・オフセット調整がそのまま使えます。カラオケレーン(音節表示・発音タイミング)、
+  再生リスト、翻訳表示の複数の不具合を修正しました。貢献ページでは同期作成・リセット・
+  カバー連携・並べ替えアップグレードの残り回数をそれぞれ確認できるようになりました。`
 
 ---
 

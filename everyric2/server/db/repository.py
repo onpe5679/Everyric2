@@ -887,9 +887,16 @@ class NoticeRepository:
         return result.scalar_one_or_none()
 
     async def create(
-        self, title: str, body: str, level: str, ends_at: datetime | None = None
+        self,
+        title: str,
+        body: str,
+        level: str,
+        ends_at: datetime | None = None,
+        translations: dict[str, dict[str, str]] | None = None,
     ) -> Notice:
-        notice = Notice(title=title, body=body, level=level, ends_at=ends_at)
+        notice = Notice(
+            title=title, body=body, level=level, ends_at=ends_at, translations=translations
+        )
         self.session.add(notice)
         await self.session.flush()
         return notice
