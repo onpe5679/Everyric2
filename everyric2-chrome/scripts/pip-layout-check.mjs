@@ -15,15 +15,19 @@
 import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
-import { cpSync, mkdtempSync, readFileSync } from 'fs';
+import { cpSync, mkdirSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const liveDist = resolve(__dirname, '../dist');
-const distDir = mkdtempSync(join(tmpdir(), 'everyric-dist-snap-'));
-cpSync(liveDist, distDir, { recursive: true });
-JSON.parse(readFileSync(join(distDir, 'manifest.json'), 'utf8'));
+// 고정 dist 스냅샷 + 고정 프로필(병렬 검수 규약, a28540e): 무작위 경로는 언팩 확장 ID가
+// 매번 달라져 host permission이 안 남고, 그 버블을 지우려 taskkill //IM chrome.exe를 쓰면
+// 다른 에이전트의 브라우저까지 죽는다. 고정 경로에 매번 덮어써 최신 빌드는 그대로 반영한다.
+const distDir = process.env.EVERYRIC_E2E_DIST_DIR
+  ?? join(tmpdir(), 'everyric-e2e-profiles', 'pip-layout-dist');
+mkdirSync(distDir, { recursive: true });
+cpSync(resolve(__dirname, '../dist'), distDir, { recursive: true });
+JSON.parse(readFileSync(join(distDir, 'manifest.json'), 'utf8')); // 빌드 도중 깨진 스냅샷이면 즉사
 
 const videoId = process.argv[2];
 const LOCAL_SERVER_URL = 'http://127.0.0.1:8000';
@@ -69,10 +73,26 @@ const MEASURE = `(() => {
       footer: box(q('.ey-pip-footer')),
     },
     // 각 열이 실제로 내용을 갖고 있는가 — 빈 상자만 놓고 PASS 하지 않기 위해
-    laneCanvasW: Math.round(sr?.querySelector('.ey-main-lane')?.getBoundingClientRect().width ?? 0),
+    // 레인 캔버스도 filled에서는 Shadow DOM 밖(laneSlot)이다 — 한 곳만 보면 PiP에서 늘 0이 되어
+    // 「열은 있는데 캔버스가 없다」를 구분하지 못한다
+    laneCanvasW: Math.round((q('.ey-main-lane') ?? sr?.querySelector('.ey-main-lane'))
+      ?.getBoundingClientRect().width ?? 0),
     panelLines: sr?.querySelectorAll('.ey-line').length ?? 0,
     panelHasHeader: !!sr?.querySelector('.ey-header'),
-    playlistRows: sr?.querySelectorAll('.ey-pl-list *').length ?? 0,
+    // 재생목록은 **부착 패널 자체**를 봐야 한다. filled에서는 그 패널이 Shadow DOM 밖의
+    // 열(playlistSlot)로 나가므로 두 곳을 다 뒤지고, 표시 여부는 computed display로,
+    // 내용은 목록 행(또는 「다음 영상」 대체 카드) 수로 센다 — 아래 «표면 독립» 검사가
+    // 이 값을 쓴다(판정 기준을 상자에서 내용으로 옮긴 이유는 그쪽 주석 참조).
+    playlist: (() => {
+      const el = q('.ey-attach-playlist') ?? sr?.querySelector('.ey-attach-playlist');
+      if (!el) return { present: false, visible: false, rows: 0 };
+      const b = el.getBoundingClientRect();
+      return {
+        present: true,
+        visible: getComputedStyle(el).display !== 'none' && b.width > 0 && b.height > 0,
+        rows: el.querySelectorAll('.ey-pl-row-title, .ey-nextup-card').length,
+      };
+    })(),
     stageLine: q('.ey-pip-stage .ey-line') ? 1 : 0,
     stageUsesSharedLine: !!q('.ey-pip-stage .ey-pip-line.current .ey-line'),
     // 절대좌표 배치가 되살아났는지 감시 — 부착 패널에 left/top이 박히면 즉시 잡힌다
@@ -127,7 +147,9 @@ function verify(name, m) {
   return m;
 }
 
-const userDataDir = mkdtempSync(join(tmpdir(), 'everyric-pip-layout-'));
+const userDataDir = process.env.EVERYRIC_E2E_PROFILE_DIR
+  ?? join(tmpdir(), 'everyric-e2e-profiles', 'pip-layout-check');
+mkdirSync(userDataDir, { recursive: true });
 const ctx = await chromium.launchPersistentContext(userDataDir, {
   ignoreDefaultArgs: ['--disable-extensions'],
   headless: false,
@@ -283,43 +305,58 @@ try {
   await setSettings({ pipLaneSwapped: true });
   await page.waitForTimeout(1200);
   const swapped = await swapTarget.evaluate(MEASURE);
-  console.log('\n\u2500\u2500 \ub808\uc778\u00b7\uc911\uc559 \uc5f4 \uc2a4\uc651');
+  console.log('\n── 레인·중앙 열 스왑');
   const bothShown = normal.cols.lane && normal.cols.center && swapped.cols.lane && swapped.cols.center;
-  check(bothShown, '\uc2a4\uc651 \uac80\uc0ac \uc804\uc81c: \ub808\uc778\u00b7\uc911\uc559 \uc5f4\uc774 \ub458 \ub2e4 \ubcf4\uc784',
+  check(bothShown, '스왑 검사 전제: 레인·중앙 열이 둘 다 보임',
     { normal: !!normal.cols.lane, swapped: !!swapped.cols.lane });
   if (bothShown) {
-    check(normal.cols.lane.x < normal.cols.center.x, '\uae30\ubcf8 \ubc30\uce58: \ub808\uc778\uc774 \uc911\uc559 \uc5f4 \uc67c\ucabd',
+    check(normal.cols.lane.x < normal.cols.center.x, '기본 배치: 레인이 중앙 열 왼쪽',
       { lane: normal.cols.lane.x, center: normal.cols.center.x });
-    check(swapped.cols.lane.x > swapped.cols.center.x, '\uc2a4\uc651 \ud6c4: \ub808\uc778\uc774 \uc911\uc559 \uc5f4 \uc624\ub978\ucabd',
+    check(swapped.cols.lane.x > swapped.cols.center.x, '스왑 후: 레인이 중앙 열 오른쪽',
       { lane: swapped.cols.lane.x, center: swapped.cols.center.x });
     check(!!swapped.cols.panel && swapped.cols.lane.r <= swapped.cols.panel.x + 1,
-      '\uc2a4\uc651\ud574\ub3c4 \uac00\uc0ac\ucc3d\uc740 \uacc4\uc18d \ub9e8 \uc624\ub978\ucabd',
+      '스왑해도 가사창은 계속 맨 오른쪽',
       { laneRight: swapped.cols.lane.r, panelLeft: swapped.cols.panel?.x });
   }
   await page.evaluate(() => window.documentPictureInPicture?.window?.close());
   await page.waitForTimeout(1200);
-  await page.locator('#everyric-root [title="PiP \ucc3d\uc73c\ub85c \ubcf4\uae30"]').first().click();
+  await page.locator('#everyric-root [title="PiP 창으로 보기"]').first().click();
   await page.waitForTimeout(3500);
   const afterSwapWin = ctx.pages().find(p => p !== page);
   const afterSwap = afterSwapWin ? await afterSwapWin.evaluate(MEASURE) : null;
   check(afterSwap !== null && !!afterSwap.cols.lane && !!afterSwap.cols.center
     && afterSwap.cols.lane.x > afterSwap.cols.center.x,
-    '\uc2a4\uc651 \uc0c1\ud0dc\uac00 close \u2192 open \ub4a4\uc5d0\ub3c4 \uc720\uc9c0\ub428',
+    '스왑 상태가 close → open 뒤에도 유지됨',
     afterSwap ? { lane: afterSwap.cols.lane?.x, center: afterSwap.cols.center?.x } : 'no window');
   if (afterSwapWin) {
     await afterSwapWin.screenshot({ path: resolve(__dirname, '../pip-layout-swapped-check.png') });
     shots.push(resolve(__dirname, '../pip-layout-swapped-check.png'));
   }
 
-  // \uba54\uc778 \ud0a4\ub97c \uaebc\ub3c4 PiP \uc5f4\uc740 \uadf8\ub300\ub85c
-  await setSettings({ modPlaylist: false, modMainLane: false });
-  await page.waitForTimeout(1200);
+  // ── 표면 독립: 메인 키를 꺼도 PiP 쪽은 그대로 ─────────────────────
+  //
+  // **판정 기준을 «열 상자»에서 «열 안의 내용»으로 옮겼다(2026-08-04).** 실제로 난
+  // 결함(운영자 실제보 P1)의 모양이 바로 그 틈이었다: 열 상자(.ey-pip-playlist-col)는
+  // 그대로 남고 **그 안의 부착 패널만 display:none**이 되어, 상자 존재로 세는 이 검사가
+  // 거짓 통과했다. 원인은 overlay.ts의 updatePlaylistPlacement()/renderPlaylistPanel()이
+  // playlistVisible() 대신 settings.modPlaylist를 직접 읽어 filled 인스턴스가 메인 키를
+  // 따라간 것(방송된 settings는 두 인스턴스가 공유한다).
+  // 그래서 아래는 표시 여부와 **행 수**를 함께 본다 — 빈 상자는 PASS가 아니다.
+  // modNextUp도 함께 끈다 — 이래야 PiP 쪽에 남는 내용이 «PiP 표면 키로 조달된 것»임이
+  // 확실해진다(다음 영상 카드 모듈이 켜져 있으면 행 수가 그쪽 덕분일 수 있어 증거가 흐려진다)
+  await setSettings({ modPlaylist: false, modMainLane: false, modNextUp: false });
+  await page.waitForTimeout(1500);
   const surfIndep = afterSwapWin ? await afterSwapWin.evaluate(MEASURE) : null;
-  console.log('\n\u2500\u2500 \ud45c\uba74 \ub3c5\ub9bd');
-  check(surfIndep !== null && !!surfIndep.cols.lane,
-    '\uba54\uc778 \ub808\uc778\uc744 \uaebc\ub3c4 PiP \ub808\uc778 \uc5f4\uc740 \ub0a8\ub294\ub2e4', surfIndep ? !!surfIndep.cols.lane : 'no window');
-  check(surfIndep !== null && !!surfIndep.cols.playlist,
-    '\uba54\uc778 \uc7ac\uc0dd\ubaa9\ub85d\uc744 \uaebc\ub3c4 PiP \uc7ac\uc0dd\ubaa9\ub85d \uc5f4\uc740 \ub0a8\ub294\ub2e4', surfIndep ? !!surfIndep.cols.playlist : 'no window');
+  console.log('\n── 표면 독립');
+  check(surfIndep !== null && !!surfIndep.cols.lane && surfIndep.laneCanvasW > 0,
+    '메인 레인을 꺼도 PiP 레인 열은 남는다(캔버스까지)',
+    surfIndep ? { col: !!surfIndep.cols.lane, canvasW: surfIndep.laneCanvasW } : 'no window');
+  check(surfIndep !== null && !!surfIndep.cols.playlist && surfIndep.playlist.visible,
+    '메인 재생목록을 꺼도 PiP 재생목록 패널이 보인다',
+    surfIndep ? { col: !!surfIndep.cols.playlist, panel: surfIndep.playlist } : 'no window');
+  check(surfIndep !== null && surfIndep.playlist.rows > 0,
+    '그 패널이 **내용까지** 남아 있다(빈 상자 거짓 통과 방지)',
+    surfIndep ? surfIndep.playlist : 'no window');
 
   console.log('\nscreenshots:');
   for (const f of shots) console.log('  ' + f);
