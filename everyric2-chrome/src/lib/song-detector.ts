@@ -10,6 +10,7 @@ const TITLE_NOISE: RegExp[] = [
   /[([]\s*(?:4k|hd|hq)[^)\]]*[)\]]/gi,
   /[([]\s*(?:color coded|한글 자막|가사)[^)\]]*[)\]]/gi,
   /【[^】]*】/g,
+  /〔[^〕]*〕/g,
 ];
 
 export function getCurrentVideoId(): string | null {
@@ -63,8 +64,22 @@ export function cleanTitle(raw: string): string {
  * 있을 때만 발동한다(보수적 게이트) — 없으면 null을 돌려줘 호출부가 기존 규칙이나
  * meta.artist 폴백으로 넘어가게 한다.
  */
+// 분리 지점 슬래시 — 반각 "/"는 공백(반각·전각 공백 \s 포함)을 낀 꼴만 인정한다("AC/DC"처럼
+// 아티스트명 자체에 박힌 반각 슬래시와 구분이 안 되기 때문, 실측: A4 감사 오탐). 전각
+// "／"는 공백 없이도 인정 — 일본어 커버 제목 관례가 원래 단어 사이에 공백을 안 두고("Lemon
+// ／米津玄師"), 서양 밴드명에 전각 슬래시가 박히는 일은 실질적으로 없어 모호하지 않다.
+const _COVER_SLASH_RE = /\s+\/\s+|\s*／\s*/;
+
+// 커버 지시어 — 부분열이 아니라 **독립 토큰**으로만 인정한다(실측: A4 감사, "Discovery"·
+// "Uncover"·"Recovery"가 "cover"를 부분열로 포함해 오탐, "커버넌트"가 "커버"를 포함해
+// 오탐). 라틴 낱말은 \b 단어 경계(연속된 알파벳 안에서는 절대 안 걸린다 — "discovery"엔
+// \b가 "cover" 앞에 없다). 한글은 \b가 한글에 안 먹혀서(비-\w 문자라 양쪽 다 경계 무판정)
+// 앞뒤가 한글이 아닌지 직접 검사한다. 일본어 복합 표기(歌ってみた 등)는 충분히 길고
+// 특이적이라(A4 감사에서 우연 충돌 사례를 못 찾음) 그대로 둔다.
+const COVER_HINT = /\bcover\b|(?<![가-힣])커버(?![가-힣])|歌ってみた|弾いてみた|踊ってみた/i;
+
 function splitCoverTitle(title: string): { title: string; artist: string } | null {
-  const slash = title.match(/\s*[/／]\s*/);
+  const slash = title.match(_COVER_SLASH_RE);
   if (!slash || slash.index === undefined || slash.index <= 0) return null;
   const left = title.slice(0, slash.index).trim();
   let right = title.slice(slash.index + slash[0].length).trim();
@@ -73,9 +88,9 @@ function splitCoverTitle(title: string): { title: string; artist: string } | nul
   // 사고 제목은 "歌ってみた｜Kotoha"처럼 파이프 앞뒤에 공백이 없다)
   const pipe = right.match(/[｜|]/);
   if (pipe && pipe.index !== undefined) right = right.slice(0, pipe.index).trim();
-  const COVER_HINT = /歌ってみた|弾いてみた|踊ってみた|cover|커버/i;
   if (!COVER_HINT.test(right)) return null;
-  const artist = right.replace(COVER_HINT, '').trim();
+  // 도려낸 뒤 남는 이중 공백(예: "瑛人 -Cover-"의 "歌ってみた " 제거 잔재)을 정리한다
+  const artist = right.replace(COVER_HINT, '').replace(/\s{2,}/g, ' ').trim();
   return artist ? { title: left, artist } : null;
 }
 

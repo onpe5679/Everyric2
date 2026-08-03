@@ -190,6 +190,64 @@ def test_variant_synonym_does_not_false_positive_on_coincidental_substring():
     assert [ln.text for ln in lines] == ["みじかい"]  # 매칭 없음 → 첫 표 그대로
 
 
+# ── 동의어 매칭 오탐 방지 (A4 감사, 2026-08-04 — 부분열 → 토큰 정확 일치) ──────
+#
+# 예전 구현은 힌트 전체를 부분열로 뭉쳐 검사해 "against"·"instant"·"instinct"·
+# "institute"(전부 "inst"를 부분열로 포함)가 "인스트" 그룹과, "Long Verse"/"Short
+# Verse"("longver"/"shortver"를 부분열로 포함)가 "긴버전"/"짧은버전" 그룹과 우연히
+# 충돌했다 — 전부 실제 함수 호출로 재현(A4 검수 보고). 토큰 경계(_hint_tokens) 도입
+# 후에는 이 단어들이 통짜 토큰이라 그룹 낱말과 정확히 같아질 수 없다.
+
+_INST_ORIGINAL_HTML = (
+    "<h1>가사</h1>"
+    "<h2>오리지널</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>げんきょく</td></tr><tr><td>genkyoku</td></tr><tr><td>원곡</td></tr>"
+    "</tbody></table>"
+    "<h2>인스트</h2>"
+    '<table class="wiki-content-table"><tbody>'
+    "<tr><td>いんすと</td></tr><tr><td>insuto</td></tr><tr><td>반주판</td></tr>"
+    "</tbody></table>"
+)
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        "Song Title / Against the World",
+        "Song Title (Instant Cover ver.)",
+        "Wild Instinct - Cover",
+        "Berklee Institute Session",
+    ],
+)
+def test_inst_synonym_does_not_false_positive_on_coincidental_english_words(hint):
+    """against/instant/instinct/institute — "inst"를 부분열로 포함해도 "인스트" 표가 안 걸린다."""
+    _title, lines = vocaro.parse_song_page(_INST_ORIGINAL_HTML, hint)
+
+    assert [ln.text for ln in lines] == ["げんきょく"]  # 매칭 없음 → 첫 표(오리지널) 그대로
+
+
+def test_inst_synonym_still_matches_genuine_instrumental_mention():
+    """대조군: "Instrumental"이 독립 토큰으로 있으면 여전히 인스트 표를 고른다."""
+    _title, lines = vocaro.parse_song_page(_INST_ORIGINAL_HTML, "Song Title (Instrumental)")
+
+    assert [ln.text for ln in lines] == ["いんすと"]
+
+
+def test_long_verse_does_not_false_positive_as_long_version():
+    """작사 용어 "Long Verse" — "longver"와 정규화 후 부분열은 겹치지만 토큰은 다르다."""
+    _title, lines = vocaro.parse_song_page(_LONG_SHORT_VERSION_HTML, "My Long Verse (cover)")
+
+    assert [ln.text for ln in lines] == ["みじかい"]  # 매칭 없음 → 첫 표(짧은 버전) 그대로
+
+
+def test_short_verse_does_not_false_positive_as_short_version():
+    """대칭: "Short Verse"도 "shortver"와 안 걸린다."""
+    _title, lines = vocaro.parse_song_page(_LONG_SHORT_VERSION_HTML, "The Short Verse Session")
+
+    assert [ln.text for ln in lines] == ["みじかい"]
+
+
 def test_single_table_page_ignores_hint():
     _title, lines = vocaro.parse_song_page(_fixture("vocaro_song_3row.html"), "무슨 힌트든")
 

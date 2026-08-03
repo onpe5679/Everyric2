@@ -99,6 +99,82 @@ const cases = [
     expectArtist: null, // slash.index<=0 이라 splitCoverTitle 발동 안 함, 일반 규칙도 매치 없음
     expectTitle: '/ Artist 커버',
   },
+
+  // ── A4 감사(2026-08-04) 발견 — COVER_HINT 부분열 오탐으로 정상 제목이 파괴되던 케이스.
+  // "cover"/"커버"가 독립 토큰이 아니라 부분열로만 걸리면, 그 글자를 우연히 포함하는
+  // 실제 고유명사(Discovery·Uncover·Recovery·커버넌트)가 잘려나간다. 단어 경계 판정
+  // (라틴: \b, 한글: 앞뒤 비한글) 수리 후 회귀 확인.
+  {
+    label: 'A4: "Discovery"가 "cover" 부분열 포함 — 안 쪼개져야 함',
+    raw: 'Wonderland / The Great Discovery',
+    expectArtist: null,
+    expectTitle: 'Wonderland / The Great Discovery',
+  },
+  {
+    label: 'A4: "Uncover"가 "cover" 부분열 포함 — 안 쪼개져야 함',
+    raw: 'Secrets / Uncover Band',
+    expectArtist: null,
+    expectTitle: 'Secrets / Uncover Band',
+  },
+  {
+    label: 'A4: "Recovery"가 "cover" 부분열 포함 — 안 쪼개져야 함',
+    raw: 'Chapter One / Recovery Sessions',
+    expectArtist: null,
+    expectTitle: 'Chapter One / Recovery Sessions',
+  },
+  {
+    label: 'A4: "커버넌트"가 "커버" 부분열 포함(한글) — 안 쪼개져야 함',
+    raw: '언약 / 커버넌트',
+    expectArtist: null,
+    expectTitle: '언약 / 커버넌트',
+  },
+  {
+    label: 'A4: 슬래시 든 밴드명(AC/DC) + 뒤쪽 진짜 cover 공존 — 밴드명 안 잘려야 함',
+    raw: 'AC/DC - Thunderstruck (cover) | SomeChannel',
+    expectArtist: 'AC/DC',
+    // title에 파이프 뒤 채널명이 남는 것은 (일반 대시분리 경로라 파이프 스트립이 없음)
+    // 알려진 잔여 한계 — 핵심은 아티스트명(AC/DC)이 더는 안 잘린다는 것.
+  },
+
+  // ── A4 감사 — 진짜 협업 제목(슬래시 있지만 커버 아님) 오탐 금지 재확인 ──
+  {
+    label: 'A4: 밴드 협업(슬래시, cover 무관어) — 안 쪼개져야 함',
+    raw: 'damage / 이날치',
+    expectArtist: null,
+    expectTitle: 'damage / 이날치',
+  },
+  {
+    label: 'A4: Prod. 협업(슬래시) — 안 쪼개져야 함',
+    raw: 'Prod. Suede / Prod. Cha Cha Malone',
+    expectArtist: null,
+    expectTitle: 'Prod. Suede / Prod. Cha Cha Malone',
+  },
+  {
+    label: 'A4: 듀엣 곡(슬래시, 커버 아님) — 안 쪼개져야 함',
+    raw: 'Say So / Doja Cat & Nicki Minaj',
+    expectArtist: null,
+    expectTitle: 'Say So / Doja Cat & Nicki Minaj',
+  },
+
+  // ── A4 감사 — 정상 커버 케이스 회귀 없어야 함 ──
+  {
+    label: 'A4: 전각 슬래시(공백 없음) 커버 — 계속 분해돼야 함',
+    raw: 'Lemon／米津玄師 歌ってみた｜Singer',
+    expectTitle: 'Lemon',
+    expectArtist: '米津玄師',
+  },
+  {
+    label: 'A4: 도려낸 뒤 이중 공백 정리(-Cover- 잔재)',
+    raw: '香水 / 瑛人 歌ってみた -Cover-｜Someone',
+    expectTitle: '香水',
+    expectArtist: '瑛人 -Cover-', // 공백 1칸으로 정리(정리 전엔 2칸)
+  },
+  {
+    label: 'A4: 〔〕 낫표 괄호 잡음 제거(신규 노이즈 패턴)',
+    raw: '〔日本語ver〕좋은 날 / 아이유 cover',
+    expectTitle: '좋은 날',
+    expectArtist: '아이유',
+  },
 ];
 
 for (const c of cases) {

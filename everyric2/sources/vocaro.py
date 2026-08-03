@@ -90,15 +90,44 @@ _VARIANT_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
 )
 
 
-def _synonym_hint_match(label: str, hint: str) -> bool:
-    """라벨이 흔한 버전 낱말이면, 힌트 쪽에 실린 다른 언어 동의어로도 대응을 확인한다.
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _hint_tokens(variant_hint: str) -> frozenset[str]:
+    """힌트(영상 제목 원문)를 비영숫자 경계로 쪼갠 토큰 집합 — 개별 토큰 + 인접 토큰
+    연접(2개까지)을 후보로 낸다.
+
+    실측(2026-08-04 A4 감사): 힌트 전체를 부분열로 뭉쳐 검사하던 예전 방식은 "against"·
+    "instant"·"institute"(전부 "inst"를 부분열로 포함)가 "인스트" 그룹과, "Long Verse"
+    ("longver"를 부분열로 포함)가 "긴버전" 그룹과 우연히 충돌했다(실제 함수 호출로
+    재현). 토큰 경계로 쪼개 **정확 일치**만 인정하면 이 우연 포함이 사라진다 —
+    "against"는 통짜 토큰이라 "inst"와 절대 같아질 수 없다.
+
+    다만 실측 성공 사례(cryptid-of-autumn, 힌트 "(long ver)")는 "long"+"ver"가 공백으로
+    갈린 **두 토큰**이 합쳐 하나의 버전 표기를 이룬다 — 그래서 인접한 두 토큰의 연접도
+    후보에 넣는다(3단어 이상 연접은 조합 폭발 위험 대비 다루지 않는다 — 실측 사례가
+    2단어 연접뿐이다).
+    """
+    raw_tokens = _TOKEN_RE.findall(variant_hint)
+    norm_tokens = [_normalize_variant(t) for t in raw_tokens]
+    tokens = {t for t in norm_tokens if t}
+    for i in range(len(norm_tokens) - 1):
+        combo = norm_tokens[i] + norm_tokens[i + 1]
+        if combo:
+            tokens.add(combo)
+    return frozenset(tokens)
+
+
+def _synonym_hint_match(label: str, hint_tokens: frozenset[str]) -> bool:
+    """라벨이 흔한 버전 낱말이면, 힌트 쪽 토큰에 실린 다른 언어 동의어로도 대응을 확인한다.
 
     label 자체가 어느 동의어 묶음의 원소일 때만 동작 — 밴드명 등 그 외 라벨은
-    기존 부분열 포함 검사만 탄다(이 함수는 항상 False).
+    기존 부분열 포함 검사만 탄다(이 함수는 항상 False). hint_tokens는 :func:`_hint_tokens`
+    가 낸 **토큰 집합**이라 부분열이 아니라 정확 일치로 대조한다.
     """
     for group in _VARIANT_SYNONYM_GROUPS:
         if label in group:
-            return any(token != label and token in hint for token in group)
+            return any(token != label and token in hint_tokens for token in group)
     return False
 
 
@@ -122,6 +151,7 @@ def _pick_table(page_html: str, variant_hint: str | None) -> str:
     hint = _normalize_variant(variant_hint)
     if not hint:
         return tables[0].group(1)
+    hint_tokens = _hint_tokens(variant_hint)
     best: tuple[int, str] | None = None
     prev_end = 0
     for m in tables:
@@ -133,7 +163,7 @@ def _pick_table(page_html: str, variant_hint: str | None) -> str:
         # 2자 미만 라벨은 우연 포함이 너무 쉽다 (예: "2")
         if len(label) < 2:
             continue
-        matched = label in hint or _synonym_hint_match(label, hint)
+        matched = label in hint or _synonym_hint_match(label, hint_tokens)
         if matched and (best is None or len(label) > best[0]):
             best = (len(label), m.group(1))
     return best[1] if best else tables[0].group(1)
