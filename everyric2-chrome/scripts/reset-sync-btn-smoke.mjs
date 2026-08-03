@@ -3,9 +3,8 @@
 import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
-import { mkdtempSync, cpSync } from 'fs';
+import { mkdtempSync, mkdirSync, cpSync } from 'fs';
 import { tmpdir } from 'os';
-import { execFileSync } from 'child_process';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -21,11 +20,11 @@ function check(ok, label, detail) {
   if (!ok) failed = true;
 }
 
-try {
-  execFileSync('taskkill', ['/F', '/IM', 'chrome.exe', '/T'], { stdio: 'ignore' });
-} catch { /* 잔류 없음 — 정상 */ }
-
-const userDataDir = mkdtempSync(join(tmpdir(), 'ey-resetbtn-'));
+// taskkill 제거(팀리드 공지, 2026-08-04) — 병렬 검수 중인 다른 에이전트의 브라우저까지
+// 죽일 수 있어 금지됐다. 이 스크립트 전용 고정 user-data-dir로 대체 — 재실행 사이에도
+// 확장 id·권한이 유지돼 잔류 프로세스와 경합할 이유가 없다.
+const userDataDir = join(tmpdir(), 'ey-resetbtn-persist-exec-server-stages');
+mkdirSync(userDataDir, { recursive: true });
 const ctx = await chromium.launchPersistentContext(userDataDir, {
   ignoreDefaultArgs: ['--disable-extensions'],
   headless: false,

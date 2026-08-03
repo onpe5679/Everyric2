@@ -21,9 +21,8 @@
 import { chromium } from 'playwright';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
-import { mkdtempSync, cpSync } from 'fs';
+import { mkdtempSync, mkdirSync, cpSync } from 'fs';
 import { tmpdir } from 'os';
-import { execFileSync } from 'child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
 
@@ -78,18 +77,12 @@ info('R5용 실곡(ja)', songs.r5);
 const health = await (await fetch(`${SERVER}/health`, { signal: AbortSignal.timeout(3000) })).json().catch(() => null);
 if (!check(health?.status === 'healthy', 'real server /health', health)) process.exit(1);
 
-// ── 실행 전 정리 — 팀리드 지시(다른 세션 잔류 크롬이 프로필/포트를 물고 있는 사고 방지).
-//    이 스크립트는 매번 새 userDataDir(mkdtempSync)를 쓰므로 프로필 충돌은 원래 없지만,
-//    좀비 프로세스가 CPU/메모리를 눌러 타임아웃을 유발하는 사고를 막기 위해 best-effort로 정리한다.
-//    실패(권한 없음·프로세스 없음)는 무시 — 이 스크립트의 성패를 좌우할 이유가 없다. ──
-try {
-  execFileSync('taskkill', ['/F', '/IM', 'chrome.exe', '/T'], { stdio: 'ignore' });
-  info('사전 정리', 'chrome.exe 잔류 프로세스 종료(taskkill)');
-} catch {
-  info('사전 정리', '잔류 chrome.exe 없음(또는 종료 권한 없음) — 정상, 계속 진행');
-}
-
-const userDataDir = mkdtempSync(join(tmpdir(), 'ey-r3-'));
+// ── taskkill 제거(팀리드 공지, 2026-08-04) — 이미지명 기준 강제 종료는 병렬로 검수 중인
+//    다른 에이전트의 실브라우저까지 죽인다(실사고 발생). 대신 이 스크립트 전용 **고정**
+//    user-data-dir을 써서 확장 id·권한 부여가 재실행 사이에도 유지되게 한다 — 잔류
+//    프로세스와 경합할 필요 자체가 없어진다(권한 버블이 다시 안 뜬다). ──
+const userDataDir = join(tmpdir(), 'ey-r3-persist-exec-server-stages');
+mkdirSync(userDataDir, { recursive: true });
 const ctx = await chromium.launchPersistentContext(userDataDir, {
   ignoreDefaultArgs: ['--disable-extensions'],
   headless: false,
