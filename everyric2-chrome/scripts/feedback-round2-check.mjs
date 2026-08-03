@@ -5,7 +5,9 @@
 //       새로고침해도 안 읽음 점이 되살아나지 않는다 (int/string 불일치 회귀 방지)
 //   R3) 영상 자막 발음 줄 기본색이 청회색(#a9c4e6)이다 — 노랑×노랑 대비 사고 회귀 방지
 //   R4) 설정 시트에 mainFontScale 슬라이더·hidePronForEnglish 토글·전체 초기화 버튼이 있다
-//   R5) 헤더의 재생성 버튼이 '싱크 초기화' 의미로 바뀌었다
+//   R5) 초기화 버튼이 헤더가 아니라 풋터(별점 옆)에 '싱크 초기화' 의미로 있다
+//       (2026-08-04 #46 항목2 갱신 — 원래는 헤더에서 문구만 바뀐 걸 봤지만, 이후
+//       버튼 자체가 풋터로 옮겨갔다)
 //
 // 실행: node scripts/feedback-round2-check.mjs [videoId]
 // 사전 조건: 실서버 127.0.0.1:8000 (localhost는 IPv6 스톨), dist 최신 빌드.
@@ -175,13 +177,27 @@ check(settingsProbe.sheet === true && settingsProbe.hasPronEnRow === true
   && settingsProbe.fullResetBtn === true && settingsProbe.ranges >= 2,
   'R4 설정 시트: 영어 발음 끔·폰트 슬라이더·전체 초기화 존재', settingsProbe);
 
-// ── R5: 헤더 버튼이 싱크 초기화 의미 ─────────────────────────────
-const headerBtns = await page.evaluate(() => {
+// ── R5: 초기화 버튼 — 헤더가 아니라 풋터(별점 옆)로 이동, 문구는 초기화 의미 ────
+// (#46 항목2, 2026-08-04: regenBtn→resetSyncBtn 개명 + 헤더→풋터 이동. 헤더에는
+// 더 이상 이 버튼이 없는 게 정상 — reset-sync-btn-smoke.mjs R1/R2와 같은 전제를 공유한다.
+// "재생성"이라는 이름은 REGENERATE_SYNC 와이어 계약(깊이 올리기, onDepthUpgrade)에는
+// 그대로 남아 있으니 그 문구가 다른 버튼에 있는 건 정상 — 여기선 초기화 버튼 자체만 본다.)
+const resetBtnProbe = await page.evaluate(() => {
   const sr = document.getElementById('everyric-root').shadowRoot;
-  return [...sr.querySelectorAll('.ey-actions button')].map(b => b.title || '');
+  const headerHasReset = !!sr.querySelector('.ey-actions .ey-reset-sync-btn');
+  const footer = sr.querySelector('.ey-footer');
+  const footerBtn = footer?.querySelector('.ey-reset-sync-btn');
+  return {
+    headerHasReset,
+    footerBtnPresent: !!footerBtn,
+    footerBtnVisible: footerBtn ? footerBtn.getClientRects().length > 0 : false,
+    title: footerBtn?.title ?? '',
+  };
 });
-check(headerBtns.some(t => /초기화/.test(t)) && !headerBtns.some(t => /다시 생성|재생성/.test(t)),
-  'R5 헤더: 싱크 초기화 버튼 존재·재생성 문구 부재', headerBtns);
+check(resetBtnProbe.headerHasReset === false && resetBtnProbe.footerBtnPresent === true
+  && resetBtnProbe.footerBtnVisible === true && /초기화/.test(resetBtnProbe.title)
+  && !/다시 생성|재생성/.test(resetBtnProbe.title),
+  'R5 풋터: 싱크 초기화 버튼 존재(헤더엔 없음)·재생성 문구 부재', resetBtnProbe);
 
 // 설정 시트 닫기 (이후 체크가 시트에 가리지 않게)
 await page.evaluate(() => {
