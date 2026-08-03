@@ -14,6 +14,11 @@ connection.async_session을 몽키패치하고 라우트 코루틴을 직접 awa
      창을 벗어나야 worst-case used가 실제로 줄어들므로 더 늦은 쪽을 낸다 — 먼저 벗어나는
      쪽(MIN)을 냈다면 클라이언트가 "이 시각에 리셋"이라고 안내해도 실제로는 안 줄어드는
      거짓 안내가 된다.
+  ⑥ link(2026-08-04 보강) — action="link_candidates"를 generate/destructive와 완전히
+     독립적으로 집계한다(sync.py._dispatch_candidate_followup이 이미 그 이름으로 로그).
+  ⑦ upgrade(2026-08-04 보강) — 별도 액션이 없다. "정렬 업그레이드"(min_depth, force 없는
+     재생성)는 서버에서 그대로 action="generate"로 로그되므로, upgrade 필드는 generate와
+     **완전히 같은 값**이어야 한다 — 이 항등이 깨지면 limits.py가 값을 발명한 것이다.
 """
 
 import asyncio
@@ -25,6 +30,7 @@ from sqlalchemy.pool import StaticPool
 
 from everyric2.config.settings import get_settings
 from everyric2.server.api.limits import get_limits
+from everyric2.server.api.sync import DAILY_LINK_CANDIDATE_LIMIT
 from everyric2.server.db import connection as db_conn
 from everyric2.server.db.models import ActionLog, Base
 from everyric2.server.db.repository import ActionLogRepository
@@ -72,6 +78,11 @@ def test_unenforced_when_admin_key_unset():
             assert resp.destructive.used == 0
             assert resp.generate.remaining == resp.generate.limit
             assert resp.destructive.remaining == resp.destructive.limit
+            # link·upgrade도 같은 "무제한을 값으로" 계약을 따른다
+            assert resp.link.used == 0
+            assert resp.link.remaining == resp.link.limit == DAILY_LINK_CANDIDATE_LIMIT
+            assert resp.upgrade.used == 0
+            assert resp.upgrade == resp.generate
 
     asyncio.run(body())
 
@@ -97,6 +108,7 @@ def test_reflects_actual_action_log_usage():
                 await repo.log("generate", VIDEO)
                 await repo.log("generate", VIDEO)
                 await repo.log("reset", VIDEO)
+                await repo.log("link_candidates", VIDEO)
                 await s.commit()
 
             resp = await get_limits(VIDEO)
@@ -105,6 +117,75 @@ def test_reflects_actual_action_log_usage():
             assert resp.generate.remaining == resp.generate.limit - 3
             assert resp.destructive.used == 1  # reset 1건
             assert resp.destructive.remaining == 1  # limit(2) - 1
+            assert resp.link.used == 1
+            assert resp.link.remaining == resp.link.limit - 1
+            # upgrade는 별도 로그가 없어도 generate를 그대로 반영한다(같은 액션 재노출)
+            assert resp.upgrade == resp.generate
+
+    asyncio.run(body())
+
+
+# ── link·upgrade 버킷 (2026-08-04 보강) ──────────────────────────────────
+
+
+def test_link_bucket_is_independent_of_generate_and_destructive():
+    """link_candidates는 generate/destructive와 겹치지 않는 자기만의 카운터다."""
+
+    async def body():
+        async with _env(admin_api_key="secret"):
+            async with db_conn.async_session() as s:
+                repo = ActionLogRepository(s)
+                await repo.log("link_candidates", VIDEO)
+                await repo.log("link_candidates", VIDEO)
+                await s.commit()
+
+            resp = await get_limits(VIDEO)
+            assert resp.link.used == 2
+            assert resp.link.limit == DAILY_LINK_CANDIDATE_LIMIT
+            assert resp.link.remaining == DAILY_LINK_CANDIDATE_LIMIT - 2
+            # 다른 버킷은 전혀 영향받지 않는다
+            assert resp.generate.used == 0
+            assert resp.destructive.used == 0
+
+    asyncio.run(body())
+
+
+def test_link_bucket_next_reset_at_matches_oldest_log_plus_window():
+    async def body():
+        async with _env(admin_api_key="secret"):
+            oldest = _utc_naive(hours=-5)
+            async with db_conn.async_session() as s:
+                s.add(ActionLog(action="link_candidates", video_id=VIDEO, created_at=oldest))
+                await s.commit()
+
+            resp = await get_limits(VIDEO)
+            assert resp.link.used == 1
+            expected = oldest + timedelta(hours=resp.window_hours)
+            actual = datetime.fromisoformat(resp.link.next_reset_at)
+            assert abs((actual - expected).total_seconds()) < 1
+
+    asyncio.run(body())
+
+
+def test_upgrade_bucket_mirrors_generate_exactly():
+    """정렬 업그레이드(min_depth, force 없음)는 서버에서 action="generate"로 그대로
+    로그된다 — 별도 카운터가 없으므로 upgrade는 generate와 항등이어야 한다(limit·used·
+    remaining·next_reset_at 전부)."""
+
+    async def body():
+        async with _env(admin_api_key="secret"):
+            async with db_conn.async_session() as s:
+                repo = ActionLogRepository(s)
+                await repo.log("generate", VIDEO)
+                await repo.log("generate", VIDEO)
+                await s.commit()
+
+            resp = await get_limits(VIDEO)
+            assert resp.generate.used == 2
+            assert resp.upgrade.limit == resp.generate.limit
+            assert resp.upgrade.used == resp.generate.used
+            assert resp.upgrade.remaining == resp.generate.remaining
+            assert resp.upgrade.next_reset_at == resp.generate.next_reset_at
 
     asyncio.run(body())
 

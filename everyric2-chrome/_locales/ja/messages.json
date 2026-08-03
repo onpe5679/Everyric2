@@ -2284,6 +2284,15 @@
   "panels_contrib_quotaDestructive": {
     "message": "リセット・解除"
   },
+  "panels_contrib_quotaLink": {
+    "message": "同期リンク"
+  },
+  "panels_contrib_quotaUpgrade": {
+    "message": "深度アップグレード"
+  },
+  "panels_contrib_quotaUpgradeShared": {
+    "message": "同期作成の回数と共有されます(別集計はありません)"
+  },
   "panels_contrib_quotaValue": {
     "message": "$P1$ / $P2$",
     "placeholders": {

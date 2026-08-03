@@ -2284,6 +2284,15 @@
   "panels_contrib_quotaDestructive": {
     "message": "초기화 · 해제"
   },
+  "panels_contrib_quotaLink": {
+    "message": "커버 잇기"
+  },
+  "panels_contrib_quotaUpgrade": {
+    "message": "정렬 업그레이드"
+  },
+  "panels_contrib_quotaUpgradeShared": {
+    "message": "싱크 생성 횟수와 공유돼요 — 따로 세지 않아요"
+  },
   "panels_contrib_quotaValue": {
     "message": "$P1$ / $P2$",
     "placeholders": {
