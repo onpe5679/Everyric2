@@ -760,6 +760,9 @@ function ensureOverlay(): LyricsOverlay {
     onOpenPermissions: () => void openPermissionsPage(),
     loadServerLog: () => fetchServerLog(),
   }, initialGeometry);
+  // 마운트는 더 이상 생성자의 부수효과가 아니다 — 인스턴스가 둘(유튜브 페이지 + PiP 문서)이
+  // 되면서 "어느 문서에 붙는가"를 호출부가 정해야 한다(overlay.ts mountInto 주석)
+  overlay.mountInto(document);
   overlay.setServerStatus(serverStatus); // 이미 알고 있는 상태를 새 패널에 즉시 반영
   return overlay;
 }

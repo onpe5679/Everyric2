@@ -94,6 +94,17 @@ function thumbUrl(videoId: string): string {
   return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/mqdefault.jpg`;
 }
 
+/**
+ * 이 패널 인스턴스가 창을 쓰는 방식.
+ *
+ * floating = 유튜브 페이지 위에 떠 있는 기존 가사창(좌표·드래그·엣지 클램프·접기).
+ * filled   = PiP 창을 통째로 채우는 인스턴스. 창이 곧 패널이라 기하 층이 통째로 죽는다.
+ *
+ * PiP를 «반쪽 패널로 다시 구현»하는 대신 같은 클래스를 두 번 세우기 위한 유일한 분기다 —
+ * 화면 구현이 하나뿐이어야 두 창이 영원히 같은 모습을 유지한다.
+ */
+export type OverlayChrome = 'floating' | 'filled';
+
 export interface OverlayCallbacks {
   onSeek: (time: number) => void;
   /** attribution은 붙여넣기 경로에서 사용자가 적어 넣은 출처(선택) */
@@ -423,15 +434,59 @@ export class LyricsOverlay {
   private geometry: PanelGeometry;
   private applyingGeometry = false;
   private saveGeomTimer = 0;
-  private resizeObserver: ResizeObserver;
+  /** mountInto에서 «대상 문서의 창»으로 만든다 — unbindWindow가 끊으면 null */
+  private resizeObserver: ResizeObserver | null = null;
+  /**
+   * 이 패널이 창을 쓰는 방식. floating은 유튜브 페이지 위에 떠 있어 기하·드래그·엣지
+   * 클램프가 살아 있고, filled는 PiP 창을 통째로 채운다 — 창이 곧 패널이므로 기하 층
+   * 전체가 의미를 잃는다(이식할 게 아니라 죽여야 하는 층이다).
+   */
+  private readonly chrome: OverlayChrome;
+  /**
+   * 마운트된 문서와 그 창 — mountInto 전에는 null이다. 전역 document/window를 그대로
+   * 쓰면 PiP 인스턴스가 «유튜브 탭의» 창에 리스너·옵저버를 걸어 버리고, 그 탭이 숨겨져
+   * 스로틀되는 순간 PiP 쪽 콜백이 멎는다(pitch-lane.ts의 setupResizeObserver가 같은
+   * 이유로 canvas.ownerDocument.defaultView를 쓴다 — 그 규약을 패널에도 맞춘다).
+   */
+  private doc: Document | null = null;
+  private win: Window | null = null;
+  /**
+   * 곡명을 뽑아 오는 «유튜브 페이지» 문서. 인스턴스가 둘이 되면 this.doc은 PiP 문서일
+   * 수 있는데, PiP 문서의 title은 pip.ts가 t('pip.docTitle')로 덮어쓴 전혀 다른 값이라
+   * 거기서 제목을 읽으면 조용히 엉뚱한 곡명이 나온다. 생성 시점의 것을 붙들어 둔다.
+   */
+  private readonly pageDoc = document;
+  /** 2단계 확인 버튼의 되돌리기 타이머 — 예전엔 지역 클로저 변수라 destroy()가 원리적으로
+   *  건드릴 수 없었다(누수 실측에서 코드상 지적으로 남긴 항목) */
+  private confirmTimer = 0;
+  /** applyGeometry가 거는 «다음 프레임에 플래그 되돌리기» 핸들. 콜백이 자기 필드만
+   *  만져서 실해는 없지만, teardown 잔재가 0이어야 다음 회귀를 하네스가 잡아낸다 */
+  private geomRaf = 0;
+  /** 두 번 눌러 확인이 «무장»된 버튼과 원래 툴팁 (confirmTwice) */
+  private armedBtn: HTMLElement | null = null;
+  private armedTitle = '';
 
-  constructor(cssText: string, settings: Settings, callbacks: OverlayCallbacks, geometry: PanelGeometry | null) {
+  constructor(
+    cssText: string,
+    settings: Settings,
+    callbacks: OverlayCallbacks,
+    geometry: PanelGeometry | null,
+    opts: { chrome?: OverlayChrome } = {},
+  ) {
+    this.chrome = opts.chrome ?? 'floating';
     this.settings = settings;
     this.callbacks = callbacks;
     this.offsetSec = settings.offsetSec;
 
     this.host = h('div', { attrs: { id: 'everyric-root' } });
-    this.host.style.cssText = 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;';
+    // floating은 «좌표를 가진 패널»을 띄우는 0크기 앵커고, filled는 창 전체가 패널이라
+    // 호스트부터 창을 덮는다 — 이 한 줄이 기하 층의 존재 여부를 가른다
+    this.host.style.cssText = this.chrome === 'filled'
+      // PiP 창 안에서는 영상 미러와 플레이어 컨트롤 사이의 «흐름 요소»로 산다 —
+      // fixed로 창을 덮으면 그 둘을 가려 버린다. 남는 세로를 전부 가져가되(flex:1),
+      // min-height:0이어야 내부 스크롤이 부모를 밀어내지 않는다.
+      ? 'all:initial;position:relative;display:block;flex:1 1 auto;min-height:0;'
+      : 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;';
     const shadow = this.host.attachShadow({ mode: 'open' });
 
     const style = document.createElement('style');
@@ -447,7 +502,7 @@ export class LyricsOverlay {
     // 서버 저장을 지우고 처음부터 다시 만드는 onResetSync를 부른다(깊이 올리기는 별개
     // 경로 — depthBtn/updateDepthButton이 여전히 onDepthUpgrade로 재생성 API를 쓴다).
     this.regenBtn = this.headerButton(ICONS.refresh, t('overlay.header.regen'), () => {
-      if (window.confirm(t('overlay.header.regenConfirm'))) {
+      if (this.confirmTwice(this.regenBtn, t('overlay.header.regenConfirm'))) {
         this.callbacks.onResetSync();
       }
     });
@@ -702,7 +757,8 @@ export class LyricsOverlay {
       this.warnBar, this.translationPendingBar, this.mainRow, this.resumeChip, this.laneWrap,
       this.footer, this.debugStrip, this.debugPanelEl,
     );
-    this.lane.attach(this.laneCanvas, this.panel);
+    // 레인 attach는 mountInto로 옮겼다 — 캔버스가 «어느 문서에 붙었는지»가 정해진 뒤에
+    // 해야 ResizeObserver·dpr·CSS 변수가 그 창 것으로 잡힌다
     // 패널 안 타이핑(검색창·가사 붙여넣기)이 유튜브 전역 단축키(스페이스=재생/정지,
     // 방향키=시킹 등)로 새지 않도록 키 이벤트를 패널에서 끊는다
     for (const type of ['keydown', 'keyup', 'keypress'] as const) {
@@ -716,27 +772,115 @@ export class LyricsOverlay {
     shadow.append(this.attachPlaylistPanel);
 
     this.geometry = geometry ?? this.defaultGeometry();
-    this.applyGeometry();
     this.applySettings(settings);
     this.updateOffsetLabel();
-
-    this.setupDrag();
+    // 드래그는 좌표가 있는 패널에만 의미가 있다 — filled는 창이 곧 패널이라 옮길 곳이 없다
+    if (this.chrome === 'floating') this.setupDrag();
     void this.refreshNoticesButton();
-    this.resizeObserver = new ResizeObserver(() => this.handlePanelResize());
-    this.resizeObserver.observe(this.panel);
-    window.addEventListener('resize', this.handleWindowResize);
-    document.addEventListener('fullscreenchange', this.handleFullscreenChange);
-
-    document.documentElement.append(this.host);
   }
 
-  /** 현재 오버레이는 페이지 수명 싱글턴이라 호출처가 없다 — 향후 하드 teardown 경로용 */
+  /**
+   * 이 패널을 문서에 붙이고 «그 문서의 창»에 결합한다.
+   *
+   * 생성자에서 떼어낸 이유는 인스턴스가 둘이기 때문이다 — 메인 문서에 하나, PiP 문서에
+   * 하나. 옵저버·리스너를 대상 문서의 창에서 만들지 않으면 PiP 인스턴스가 유튜브 탭의
+   * window에 매달려, 그 탭이 숨겨져 스로틀되는 순간 조용히 멎는다.
+   *
+   * 레인 캔버스도 여기서 다시 attach한다: PitchLaneRenderer는 attach 시점의
+   * canvas.ownerDocument로 ResizeObserver·devicePixelRatio·CSS 변수를 잡는데,
+   * h()가 만든 캔버스는 문서에 붙기 전까지 «메인 문서» 소속이기 때문이다.
+   */
+  mountInto(doc: Document, container?: Element): void {
+    if (this.doc === doc) return;
+    if (this.doc) this.unbindWindow();
+    this.doc = doc;
+    this.win = doc.defaultView;
+    // 유튜브 페이지에서는 documentElement 직속(페이지 레이아웃에 끼어들지 않는 0크기 앵커),
+    // PiP에서는 영상 미러와 플레이어 컨트롤 «사이»에 흐름 요소로 들어간다
+    (container ?? doc.documentElement).append(this.host);
+    this.lane.attach(this.laneCanvas, this.panel);
+    this.applyGeometry();
+    const RO = (this.win as unknown as { ResizeObserver?: typeof ResizeObserver })?.ResizeObserver
+      ?? ResizeObserver;
+    this.resizeObserver = new RO(() => this.handlePanelResize());
+    this.resizeObserver.observe(this.panel);
+    // 창 크기 추종과 전체화면 회피는 유튜브 페이지 위에 떠 있는 패널만의 문제다.
+    // PiP 창에는 전체화면 개념이 없고, 크기 변화는 ResizeObserver가 이미 잡는다.
+    if (this.chrome === 'floating') {
+      this.win?.addEventListener('resize', this.handleWindowResize);
+      doc.addEventListener('fullscreenchange', this.handleFullscreenChange);
+    }
+  }
+
+  /**
+   * «같은 버튼을 두 번 눌러 확인» — window.confirm을 대신한다.
+   *
+   * window.confirm은 그것을 부른 창이 아니라 최상위 탭에 모달을 띄운다. 인스턴스가 둘이
+   * 되면서(유튜브 페이지 + PiP 문서) PiP에서 부르면 사용자가 보고 있는 창에는 아무 일도
+   * 일어나지 않고 유튜브 탭이 응답을 기다려, 화면이 멈춘 것처럼 보인다. 설정 시트의
+   * 전체 초기화가 이미 쓰던 방식을 공용으로 올려 되돌릴 수 없는 동작 전부에 적용한다.
+   *
+   * 무장은 4초 뒤 스스로 풀린다 — 남아 있는 무장이 다음 클릭을 삼키면 사용자는 "한 번
+   * 눌렀는데 실행됐다"고 느낀다. 다른 버튼을 무장하면 이전 무장은 즉시 풀린다.
+   *
+   * @returns 이번 클릭이 «확정»이면 true — 호출부는 이때만 실제 동작을 실행한다
+   */
+  private confirmTwice(btn: HTMLElement, prompt: string): boolean {
+    if (this.armedBtn === btn) {
+      this.disarmConfirm();
+      return true;
+    }
+    this.disarmConfirm();
+    this.armedBtn = btn;
+    this.armedTitle = btn.title;
+    btn.title = prompt;
+    btn.classList.add('ey-confirm-armed');
+    this.confirmTimer = window.setTimeout(() => this.disarmConfirm(), 4000);
+    return false;
+  }
+
+  private disarmConfirm(): void {
+    clearTimeout(this.confirmTimer);
+    const b = this.armedBtn;
+    if (!b) return;
+    b.classList.remove('ey-confirm-armed');
+    b.title = this.armedTitle;
+    this.armedBtn = null;
+  }
+
+  /** 창에 건 것만 끊는다 — DOM·상태는 그대로 두므로 다른 문서로 다시 mountInto할 수 있다 */
+  private unbindWindow(): void {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    (this.win ?? window).cancelAnimationFrame(this.geomRaf);
+    this.geomRaf = 0;
+    // 등록과 «같은 조건»으로만 해제한다 — filled는 애초에 걸지 않았다. removeEventListener
+    // 자체는 무해하지만, 조건이 어긋나 있으면 읽는 사람이 "filled에도 리스너가 있나?"로
+    // 오해하고, 등록/해제 대칭을 보는 누수 계측도 음수로 어긋난다(반복 측정에서 실제로 발생).
+    if (this.chrome === 'floating') {
+      this.win?.removeEventListener('resize', this.handleWindowResize);
+      this.doc?.removeEventListener('fullscreenchange', this.handleFullscreenChange);
+    }
+    // 레인은 자기 ResizeObserver를 따로 들고 있다 — 이걸 빼먹은 것이 실측에서 잡힌
+    // 유일한 «치명» 누수였다(PiP를 여닫을 때마다 옵저버와 캔버스가 통째로 남았다)
+    this.lane.detach();
+  }
+
+  /**
+   * 창 결합을 전부 끊고 DOM에서 뗀다.
+   *
+   * 예전엔 호출처가 없는 «한 번도 실행된 적 없는» 코드였는데, PiP 인스턴스가 닫힐 때마다
+   * 도는 임계 경로가 되면서 실검증했다. 그때 드러난 누수 3종을 여기서 막는다:
+   * 레인 ResizeObserver(lane.detach 누락), 알림 칩 타이머, 2단계 확인 타이머.
+   */
   destroy(): void {
-    this.resizeObserver.disconnect();
-    window.removeEventListener('resize', this.handleWindowResize);
-    document.removeEventListener('fullscreenchange', this.handleFullscreenChange);
+    this.unbindWindow();
     clearTimeout(this.saveGeomTimer);
+    clearTimeout(this.noticeTimer);
+    clearTimeout(this.confirmTimer);
     this.host.remove();
+    this.doc = null;
+    this.win = null;
   }
 
   // ── 상태 렌더링 ────────────────────────────────────────────────
@@ -885,8 +1029,9 @@ export class LyricsOverlay {
             text: t('overlay.search.resetSync'),
             attrs: { title: t('overlay.search.resetSyncTitle') },
             on: {
-              click: () => {
-                if (window.confirm(t('overlay.search.resetSyncConfirm'))) {
+              click: (e: MouseEvent) => {
+                const btn = e.currentTarget as HTMLElement;
+                if (this.confirmTwice(btn, t('overlay.search.resetSyncConfirm'))) {
                   this.callbacks.onResetSync();
                 }
               },
@@ -911,7 +1056,9 @@ export class LyricsOverlay {
    * 근사가 빗나가도 화면에 남는 피해는 없다.
    */
   private rawVideoTitle(): string | undefined {
-    const raw = document.title.replace(/ - YouTube$/, '').trim();
+    // 반드시 «유튜브 페이지» 문서에서 읽는다 — PiP 문서의 title은 pip.ts가 덮어쓴 값이라
+    // filled 인스턴스가 전역 document를 보면 곡명 대신 PiP 창 제목이 잡힌다
+    const raw = this.pageDoc.title.replace(/ - YouTube$/, '').trim();
     return raw && raw !== 'YouTube' ? raw : undefined;
   }
 
@@ -1883,7 +2030,10 @@ export class LyricsOverlay {
         on: {
           click: (e) => {
             e.stopPropagation(); // 칩의 대기열 목록 토글로 새지 않게
-            if (window.confirm(t('overlay.genChip.cancelConfirm'))) this.callbacks.onCancelGenerate();
+            const btn = e.currentTarget as HTMLElement;
+            if (this.confirmTwice(btn, t('overlay.genChip.cancelConfirm'))) {
+              this.callbacks.onCancelGenerate();
+            }
           },
         },
       }));
@@ -2283,7 +2433,9 @@ export class LyricsOverlay {
       this.depthBtn.title = t('overlay.depth.upgradeTitle');
       this.depthBtn.disabled = false;
       this.depthAction = () => {
-        if (window.confirm(t('overlay.depth.upgradeConfirm'))) this.callbacks.onDepthUpgrade();
+        if (this.confirmTwice(this.depthBtn, t('overlay.depth.upgradeConfirm'))) {
+          this.callbacks.onDepthUpgrade();
+        }
       };
       this.depthBtn.style.display = '';
       this.regenBtn.style.display = 'none'; // 업그레이드 버튼이 재생성 버튼을 대신한다
@@ -2311,7 +2463,9 @@ export class LyricsOverlay {
       this.depthBtn.disabled = false;
       const next = depth === 1 ? ('medium' as const) : ('heavy' as const);
       this.depthAction = () => {
-        if (window.confirm(t('overlay.depth.confirm'))) this.callbacks.onDepthUpgrade(next);
+        if (this.confirmTwice(this.depthBtn, t('overlay.depth.confirm'))) {
+          this.callbacks.onDepthUpgrade(next);
+        }
       };
     }
     this.depthBtn.style.display = '';
@@ -3027,25 +3181,26 @@ export class LyricsOverlay {
         // 남겨둔 무장 상태가 다음 클릭을 삼키지 않는다). 시트를 열 때마다 이 행이 새로
         // 만들어지므로(settingsSections는 openSettings마다 새로 호출된다) armed 상태를
         // 인스턴스 필드가 아니라 클로저 지역변수로 둬도 다음에 여는 시트엔 영향이 없다.
+        // 단 «타이머»만은 인스턴스 필드(confirmTimer)에 둔다 — 지역변수로 두면 destroy()가
+        // 원리적으로 걷을 수 없어서, 창을 닫아도 4초짜리 타이머가 죽은 버튼을 만진다.
         kind: 'button', key: 'fullReset',
         label: t('panels.settings.reset.fullReset'),
         title: t('panels.settings.reset.fullResetTitle'),
         keywords: '전체 초기화 리셋 기여 이력 설정 reset all',
         onClick: (() => {
           let armed = false;
-          let timer = 0;
           return (btn: HTMLButtonElement) => {
             if (!armed) {
               armed = true;
               btn.textContent = t('panels.settings.reset.fullResetConfirm');
-              window.clearTimeout(timer);
-              timer = window.setTimeout(() => {
+              window.clearTimeout(this.confirmTimer);
+              this.confirmTimer = window.setTimeout(() => {
                 armed = false;
                 btn.textContent = t('panels.settings.reset.fullReset');
               }, 4000);
               return;
             }
-            window.clearTimeout(timer);
+            window.clearTimeout(this.confirmTimer);
             armed = false;
             btn.textContent = t('panels.settings.reset.done'); // 카라오케 안내 되살리기 버튼과 같은 완료 문구 재사용
             this.callbacks.onFullReset();
@@ -3089,6 +3244,8 @@ export class LyricsOverlay {
   // ── 위치/크기 ─────────────────────────────────────────────────
 
   private defaultGeometry(): PanelGeometry {
+    // 생성 시점엔 아직 마운트 전이라 창을 모른다 — 유튜브 페이지 창을 기준으로 잡고,
+    // filled면 어차피 applyGeometry가 이 값을 쓰지 않는다
     return {
       x: Math.max(EDGE_MARGIN, window.innerWidth - DEFAULT_WIDTH - 24),
       y: 72,
@@ -3099,6 +3256,17 @@ export class LyricsOverlay {
   }
 
   private applyGeometry(): void {
+    // filled: 창이 곧 패널이다. 좌표·크기·접기를 창에서 빼앗아 오는 대신 창을 그대로
+    // 채운다 — 이 인스턴스에는 "화면 밖으로 나가는" 상태가 존재할 수 없다.
+    if (this.chrome === 'filled') {
+      this.panel.classList.add('ey-panel-filled');
+      this.panel.classList.remove('collapsed');
+      this.panel.style.left = '';
+      this.panel.style.top = '';
+      this.panel.style.width = '';
+      this.panel.style.height = '';
+      return;
+    }
     this.applyingGeometry = true;
     const g = this.geometry;
     this.panel.style.left = `${g.x}px`;
@@ -3110,7 +3278,9 @@ export class LyricsOverlay {
     this.collapseBtn.title = g.collapsed ? t('overlay.header.expand') : t('overlay.header.collapse');
     this.updateAttachPlacement(); // 부착 모드면 패널 좌표·접힘 상태가 바뀔 때마다 따라간다
     this.updatePlaylistPlacement();
-    requestAnimationFrame(() => {
+    const w = this.win ?? window;
+    w.cancelAnimationFrame(this.geomRaf);
+    this.geomRaf = w.requestAnimationFrame(() => {
       this.applyingGeometry = false;
     });
   }
@@ -3191,7 +3361,7 @@ export class LyricsOverlay {
 
   private handleFullscreenChange = (): void => {
     const wasHidden = this.fullscreenHidden;
-    this.fullscreenHidden = document.fullscreenElement !== null;
+    this.fullscreenHidden = (this.doc ?? document).fullscreenElement !== null;
     this.updateHostVisibility();
     // 전체화면 동안 도착해 못 본 알림을 해제 직후 다시 띄운다 — 타이머도 여기서 처음부터.
     // 칩은 이미 DOM에 그려져 있으므로 문구가 바뀌지 않고 표시 시간만 새로 주어진다.
@@ -3201,12 +3371,16 @@ export class LyricsOverlay {
     }
   };
 
+  // 클램프는 «패널이 창보다 작다»는 전제에서만 뜻이 있다 — 마운트된 창을 기준으로 재고,
+  // filled면 애초에 호출되지 않는다(applyGeometry·handleWindowResize·드래그가 전부 죽는다).
   private clampX(x: number): number {
-    return Math.min(Math.max(x, EDGE_MARGIN), Math.max(EDGE_MARGIN, window.innerWidth - this.geometry.width - EDGE_MARGIN));
+    const w = this.win?.innerWidth ?? window.innerWidth;
+    return Math.min(Math.max(x, EDGE_MARGIN), Math.max(EDGE_MARGIN, w - this.geometry.width - EDGE_MARGIN));
   }
 
   private clampY(y: number): number {
-    return Math.min(Math.max(y, EDGE_MARGIN), Math.max(EDGE_MARGIN, window.innerHeight - 48));
+    const h = this.win?.innerHeight ?? window.innerHeight;
+    return Math.min(Math.max(y, EDGE_MARGIN), Math.max(EDGE_MARGIN, h - 48));
   }
 
   private updateHostVisibility(): void {
@@ -3214,6 +3388,9 @@ export class LyricsOverlay {
   }
 
   private scheduleGeometrySave(): void {
+    // filled 인스턴스의 "기하"는 창이 정하는 것이라 저장할 값이 없다 — 저장하면 PiP 창
+    // 크기가 유튜브 페이지 패널의 저장된 좌표를 덮어쓴다
+    if (this.chrome === 'filled') return;
     clearTimeout(this.saveGeomTimer);
     this.saveGeomTimer = window.setTimeout(() => {
       this.callbacks.onGeometryChange({ ...this.geometry });

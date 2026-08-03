@@ -53,6 +53,42 @@
   box-sizing: border-box;
 }
 
+/* 두 번 눌러 확인 — 무장된 버튼.
+   window.confirm을 대신하는 표시다(창이 둘이면 모달이 사용자가 보는 창이 아니라 유튜브
+   탭에 떠서 "멈춘 것처럼" 보인다). 모달만큼 강하게 눈에 띄어야 사용자가 "지금 한 번 더
+   누르면 실행된다"를 놓치지 않는다 — 4초 뒤 자동으로 풀린다. */
+.ey-confirm-armed {
+  outline: 2px solid var(--ey-accent);
+  outline-offset: 1px;
+  animation: ey-confirm-pulse 1s ease-in-out infinite;
+}
+
+@keyframes ey-confirm-pulse {
+  50% { opacity: 0.5; }
+}
+
+/* PiP 창을 통째로 채우는 인스턴스(OverlayChrome='filled').
+   같은 .ey-panel이 «떠 있는 창»과 «창 자체»라는 두 역할을 겸하게 하는 유일한 규칙이다 —
+   PiP를 반쪽으로 다시 구현하지 않고 같은 클래스를 두 번 세우기 위한 값이므로,
+   여기서 하는 일은 기하(좌표·최대폭·리사이즈 손잡이·그림자·모서리)를 걷어내는 것뿐이고
+   내용 레이아웃은 한 줄도 갈라지지 않는다. */
+.ey-panel.ey-panel-filled {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  /* 폭 상한은 «남의 화면 위에 얹힌 패널»이라서 있던 제약이다. 창이 곧 패널이면
+     상한이 있을 이유가 없다(운영자 지적: "이런 건 왜 제한이 있는지 모르겠어"). */
+  max-width: none;
+  max-height: none;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  resize: none;
+}
+
 /* 라이트 테마 변수 — 오버레이 패널과 PiP **문서 루트**가 같은 값을 공유한다.
    PiP는 :root에 걸어야 한다: 레인 캔버스가 getComputedStyle(documentElement)로 색을
    읽으므로(readPitchColors), body에만 걸면 UI만 밝아지고 캔버스는 다크로 남는다.
