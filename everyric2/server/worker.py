@@ -1104,7 +1104,8 @@ def compute_audio_hash(file_path: Path) -> str:
     """확보한 오디오 파일의 md5 — 캐시 키(SyncResult.audio_hash, String(32))다.
 
     **파일 바이트 해시라 확보 경로에 의존한다** — 같은 영상이라도 미디어 캐시 경로(m4a
-    스트림카피)와 yt-dlp 경로(wav 트랜스코드)는 다른 해시가 된다. 아래 `_acquire_audio`에
+    스트림카피)와 yt-dlp 경로(opus 우선 스트림카피, 소스에 따라 m4a/webm)는 다른 해시가
+    된다. 아래 `_acquire_audio`에
     이 비대칭을 왜 그냥 두는지(내용 기반 해시로 못 고치는 이유) 실측과 함께 적어 뒀다.
     """
     md5 = hashlib.md5()
@@ -1755,7 +1756,8 @@ def _acquire_audio(job: "JobInput") -> dict:
 
     **audio_hash는 확보 경로에 의존한다** — 예전 독스트링은 "같은 원본이면 해시도 같다"고
     단언했지만 성립하지 않는다. 미디어 캐시 경로는 ``-acodec copy``로 m4a를 만들고
-    (media_cache._run_ffmpeg) yt-dlp 경로는 wav로 트랜스코드하므로, 같은 영상도 바이트가
+    (media_cache._run_ffmpeg) yt-dlp 경로는 opus 우선 스트림카피(소스 코덱에 따라
+    m4a/webm으로도 갈린다)를 쓰므로, 같은 영상도 바이트가
     달라 다른 해시가 된다. 그래서 같은 영상을 두 경로로 처리하면 캐시가 미스해 GPU 정렬을
     다시 돌린다(교차 영상 재사용도 경로가 갈리면 못 잡는다).
 

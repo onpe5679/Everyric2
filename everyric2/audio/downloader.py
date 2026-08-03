@@ -3,6 +3,7 @@
 import logging
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,12 @@ from typing import Any
 from everyric2.config.settings import AudioSettings, get_settings
 
 logger = logging.getLogger(__name__)
+
+# 다운로드 산출물로 인정하는 확장자. postprocessor를 "best"(스트림카피)로 돌리면 소스 코덱에
+# 따라 결과가 opus/m4a/webm 등으로 갈린다 — wav 하나만 찾던 예전 글롭은 이제 못 찾는다.
+# 순서가 판정이다: opus를 가장 먼저 봐 스트림카피 산출물을 우선 채택하고, wav는 로컬 트랜스코드
+# 구제 경로(_ensure_decodable)의 산출물이라 맨 뒤에 둔다.
+_DOWNLOAD_EXTS: tuple[str, ...] = (".opus", ".m4a", ".webm", ".ogg", ".mp3", ".wav")
 
 
 class DownloadError(Exception):
@@ -367,6 +374,30 @@ def egress_retryable(error: BaseException) -> bool:
     return getattr(error, "code", "unknown") in _EGRESS_RETRYABLE_CODES
 
 
+def _probe_decodable(path: Path) -> bool:
+    """이 파일을 디코더가 열 수 있는가 — soundfile 먼저, 실패하면 librosa(ffmpeg 경유) 폴백.
+
+    ``loader.AudioLoader.load``가 실제로 쓰는 두 경로와 순서까지 같다(soundfile은 m4a를
+    못 읽는다는 게 loader.py의 실측이라 opus/m4a는 librosa 폴백이 정상 경로다 — 거기서
+    실패가 아니다). 그래서 둘 다 실패해야 진짜로 못 읽는 파일이고, import 자체가 없는
+    환경도 조용히 "못 읽음"으로 처리한다.
+    """
+    try:
+        import soundfile as sf
+
+        sf.info(str(path))
+        return True
+    except Exception:
+        pass
+    try:
+        import librosa
+
+        librosa.get_duration(path=str(path))
+        return True
+    except Exception:
+        return False
+
+
 @dataclass
 class VideoInfo:
     """YouTube video information."""
@@ -651,7 +682,14 @@ class YouTubeDownloader:
         filename: str | None,
         egress: str | None,
     ) -> DownloadResult:
-        """다운로드 1회 시도 (출구 1개) — 실패는 분류된 예외로 올린다."""
+        """다운로드 1회 시도 (출구 1개) — 실패는 분류된 예외로 올린다.
+
+        코덱은 opus 우선 + 스트림카피다(전곡 재인코딩 아님) — 예전엔 전곡을 wav로
+        트랜스코드해 곡당 수십 MB가 캐시에 쌓였다(운영자 요청: 전곡 wav 보존 용량 과다).
+        "opus 소스는 .opus, aac 소스는 .m4a"로 원본 컨테이너를 그대로 살리고, 디코드
+        가능성만 값싸게 확인해 극소수의 안 풀리는 파일만 로컬 트랜스코드로 구제한다
+        (_ensure_decodable) — 유튜브를 다시 접촉하지 않는다.
+        """
         try:
             import yt_dlp
 
@@ -662,12 +700,18 @@ class YouTubeDownloader:
                 outtmpl = str(output_dir / "%(title)s.%(ext)s")
 
             ydl_opts: dict[str, Any] = {
-                "format": "bestaudio/best",
+                # opus 오디오 트랙이 있으면 그것부터 받는다 — 유튜브 업로드 대부분이
+                # opus-in-webm이라 재인코딩 없이 그대로 받을 수 있다. 없으면 최선의
+                # 오디오로 폴백.
+                "format": "bestaudio[acodec=opus]/bestaudio/best",
                 "postprocessors": [
                     {
                         "key": "FFmpegExtractAudio",
-                        "preferredcodec": "wav",
-                        "preferredquality": "192",
+                        # "best" = 스트림카피 우선(재인코딩 안 함) — 컨테이너만 오디오
+                        # 전용으로 바꾼다(yt-dlp FFmpegExtractAudioPP 실측: 이미 공용
+                        # 오디오 컨테이너면 후처리 자체를 건너뛴다). preferredquality는
+                        # 재인코딩 비트레이트 옵션이라 스트림카피엔 의미가 없어 뺐다.
+                        "preferredcodec": "best",
                     }
                 ],
                 "outtmpl": outtmpl,
@@ -688,22 +732,9 @@ class YouTubeDownloader:
                 title = info.get("title", "Unknown")
                 duration = float(info.get("duration", 0))
 
-                # Find the downloaded file
-                if filename:
-                    audio_path = output_dir / f"{filename}.wav"
-                else:
-                    # Sanitize title for filename
-                    safe_title = yt_dlp.utils.sanitize_filename(title)
-                    audio_path = output_dir / f"{safe_title}.wav"
-
-                if not audio_path.exists():
-                    # Try to find the produced wav; with an explicit filename, never grab
-                    # another concurrent job's file
-                    wav_files = list(output_dir.glob(f"{filename}*.wav" if filename else "*.wav"))
-                    if wav_files:
-                        audio_path = wav_files[0]
-                    else:
-                        raise DownloadError(f"Downloaded file not found: {audio_path}")
+                audio_path = self._locate_downloaded_file(info, output_dir, filename, title)
+                audio_path = self._ensure_decodable(audio_path)
+                logger.info("오디오 확보 형식 유지: %s (url=%s)", audio_path.suffix, url)
 
                 return DownloadResult(
                     audio_path=audio_path,
@@ -716,6 +747,90 @@ class YouTubeDownloader:
             raise _classified_error(e, url, "Download failed") from e
         except Exception as e:
             raise _classified_error(e, url, "Download failed") from e
+
+    def _locate_downloaded_file(
+        self,
+        info: dict[str, Any],
+        output_dir: Path,
+        filename: str | None,
+        title: str,
+    ) -> Path:
+        """postprocessor가 실제로 만든 파일을 찾는다.
+
+        최우선은 ``requested_downloads[0]["filepath"]`` — 최신 yt-dlp는 다운로드용으로
+        복사한 info dict를 postprocessor가 그대로 물고 있다가 완료 후 ``filepath``/``ext``를
+        갱신하고(FFmpegExtractAudioPP.run), 그 dict가 참조로 ``requested_downloads``에
+        실려 있어(YoutubeDL.process_video_result) 여기서 최종 경로가 그대로 보인다. 이
+        필드가 없거나 가리키는 파일이 없으면(구버전 yt-dlp) 예상 경로 → 확장자 제한 글롭
+        순으로 내려간다. 명시적 filename이 있으면 글롭도 그 접두사로 좁혀 동시 잡의 파일을
+        가로채지 않는다(기존 불변식 유지).
+        """
+        requested = info.get("requested_downloads") or []
+        if requested:
+            filepath = requested[0].get("filepath")
+            if filepath:
+                p = Path(filepath)
+                if p.exists():
+                    return p
+
+        import yt_dlp
+
+        expected_stem = filename or yt_dlp.utils.sanitize_filename(title)
+
+        for ext in _DOWNLOAD_EXTS:
+            candidate = output_dir / f"{expected_stem}{ext}"
+            if candidate.exists():
+                return candidate
+
+        # 예상 경로에 없다 — 확장자별로 글롭한다. filename이 있으면 그 접두사로 좁혀
+        # 동시에 도는 다른 잡의 파일을 절대 집지 않는다(기존 불변식).
+        glob_prefix = f"{filename}*" if filename else "*"
+        for ext in _DOWNLOAD_EXTS:
+            matches = list(output_dir.glob(f"{glob_prefix}{ext}"))
+            if matches:
+                return matches[0]
+
+        raise DownloadError(f"Downloaded file not found: {output_dir / expected_stem}")
+
+    def _ensure_decodable(self, path: Path) -> Path:
+        """받은 파일이 디코드되는지 값싸게 확인하고, 안 되면 로컬 트랜스코드로 구제한다.
+
+        스트림카피는 컨테이너만 바꾸므로 아주 드물게 손상된 헤더 등으로 디코더가 못 여는
+        조합이 나올 수 있다. ``_probe_decodable``이 쓰는 두 경로(soundfile → librosa)는
+        loader.AudioLoader.load가 실제로 쓰는 경로와 같다 — 여기서 통과하면 정렬 단계에서도
+        통과한다는 뜻이다. 둘 다 실패하면 **유튜브를 다시 접촉하지 않고** 로컬 ffmpeg로 wav
+        트랜스코드한다. 원본은 지운다 — 디코드 안 되는 사본을 캐시에 남기면 다음 캐시
+        히트도 똑같이 깨진다.
+        """
+        if _probe_decodable(path):
+            return path
+
+        logger.warning("다운로드 파일이 디코드되지 않아 로컬 wav로 트랜스코드해요: %s", path)
+        wav_path = path.with_suffix(".wav")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", str(path),
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "44100",
+                    str(wav_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            raise DownloadError(
+                f"Downloaded file is not decodable and local transcode failed: {exc}"
+            ) from exc
+        finally:
+            # 트랜스코드 성패와 무관하게 원본은 지운다 — 실패해도 디코드 안 되는 원본을
+            # 캐시/작업 디렉터리에 남겨 둘 이유가 없다.
+            path.unlink(missing_ok=True)
+
+        if not wav_path.exists() or wav_path.stat().st_size == 0:
+            raise DownloadError(f"Local transcode produced no output: {wav_path}")
+
+        logger.info("로컬 트랜스코드로 구제했어요: %s -> %s", path.name, wav_path.name)
+        return wav_path
 
     def cleanup(self, result: DownloadResult) -> None:
         """Clean up downloaded file.

@@ -20,6 +20,7 @@ import contextlib
 import logging
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -790,6 +791,173 @@ class TestEgressRotation:
         monkeypatch.setattr(dl, "_extract_info_once", fake_once)
         assert dl.get_video_info("https://www.youtube.com/watch?v=aaaaaaaaaaa").title == "t"
         assert tried == ["10.0.0.1", "10.0.0.2"]
+
+
+# ── opus 우선 다운로드: 산출물 발견 + 디코드 구제 ──────────────────────
+#
+# 전곡을 wav로 트랜스코드해 곡당 수십 MB가 캐시에 쌓이던 것을 opus 우선 스트림카피로
+# 바꿨다(운영자 요청: 전곡 wav 보존 용량 과다). 소스 코덱에 따라 산출물 확장자가
+# opus/m4a/webm으로 갈리므로 wav 하나만 찾던 예전 글롭은 못 찾는다 — 이 자리를
+# _locate_downloaded_file(requested_downloads 우선 → 예상 경로 → 확장자 글롭)과
+# _ensure_decodable(디코드 프로브 실패 시에만 로컬 wav 구제)로 대체했다.
+
+
+def _fake_yt_dlp_module(monkeypatch, info: dict):
+    """`import yt_dlp`가 이 가짜 모듈을 받도록 sys.modules에 심는다.
+
+    _download_once는 함수 안에서 지역 import를 쓰므로(``import yt_dlp``), 실제 네트워크
+    없이 그 경로를 통째로 돌리려면 모듈 자체를 바꿔치기해야 한다.
+    """
+    import sys
+    import types
+
+    fake = types.ModuleType("yt_dlp")
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            return info
+
+    fake.YoutubeDL = _FakeYDL
+    utils_ns = types.SimpleNamespace()
+    utils_ns.DownloadError = type("FakeYtDlpDownloadError", (Exception,), {})
+    utils_ns.sanitize_filename = lambda s: s
+    fake.utils = utils_ns
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake)
+    return fake
+
+
+class TestDownloadedFileDiscovery:
+    def test_requested_downloads_filepath_is_used_when_present(self, monkeypatch, tmp_path):
+        """최신 yt-dlp가 후처리 후 최종 경로를 실어 주면 그 값을 그대로 믿는다."""
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        produced = tmp_path / "제목과-다른-실제파일.opus"
+        produced.write_bytes(b"opus-bytes")
+        _fake_yt_dlp_module(
+            monkeypatch,
+            {
+                "title": "My Song",
+                "duration": 12.0,
+                "requested_downloads": [{"filepath": str(produced)}],
+            },
+        )
+
+        result = dl._download_once(
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa", tmp_path, None, None
+        )
+        assert result.audio_path == produced
+        assert result.title == "My Song"
+
+    def test_glob_discovery_finds_opus_when_no_requested_downloads(self, monkeypatch, tmp_path):
+        """구버전 yt-dlp(또는 필드 누락)는 확장자 제한 글롭으로 내려간다 — wav 전용이 아니다."""
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        # 예상 경로("My Song.opus")는 없고, 제목 접두사로 시작하는 실제 산출물만 있다 —
+        # 글롭이 찾아야 한다.
+        actual = tmp_path / "My Song [id123].opus"
+        actual.write_bytes(b"opus-bytes")
+        _fake_yt_dlp_module(monkeypatch, {"title": "My Song", "duration": 5.0})
+
+        result = dl._download_once(
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa", tmp_path, None, None
+        )
+        assert result.audio_path == actual
+
+    def test_explicit_filename_glob_never_grabs_another_jobs_file(self, monkeypatch, tmp_path):
+        """기존 불변식: filename이 있으면 글롭도 그 접두사로 좁힌다."""
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        mine = tmp_path / "job-abc [x].m4a"
+        mine.write_bytes(b"m4a-bytes")
+        other = tmp_path / "job-xyz [y].m4a"
+        other.write_bytes(b"m4a-bytes-other")
+        _fake_yt_dlp_module(monkeypatch, {"title": "irrelevant", "duration": 3.0})
+
+        result = dl._download_once(
+            "https://www.youtube.com/watch?v=aaaaaaaaaaa", tmp_path, "job-abc", None
+        )
+        assert result.audio_path == mine
+
+
+class TestDecodabilityFallback:
+    """스트림카피 산출물이 아주 드물게 안 열리는 경우를 로컬 트랜스코드로만 구제한다
+    (유튜브 재접촉 없음)."""
+
+    def test_decodable_file_is_kept_as_is(self, monkeypatch, tmp_path):
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: True)
+
+        src = tmp_path / "a.opus"
+        src.write_bytes(b"opus-bytes")
+        assert dl._ensure_decodable(src) == src
+        assert src.exists()  # 손대지 않는다
+
+    def test_probe_failure_transcodes_locally_and_removes_original(self, monkeypatch, tmp_path):
+        from everyric2.audio import downloader as dl_mod
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: False)
+
+        src = tmp_path / "broken.opus"
+        src.write_bytes(b"not-really-opus")
+
+        calls = []
+
+        def fake_run(cmd, check, capture_output):
+            calls.append(cmd)
+            # 실제 ffmpeg 대신 wav 출력만 흉내낸다
+            out_path = Path(cmd[-1])
+            out_path.write_bytes(b"RIFF....WAVEfmt ")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(dl_mod.subprocess, "run", fake_run)
+
+        result = dl._ensure_decodable(src)
+        assert result == src.with_suffix(".wav")
+        assert result.exists()
+        assert not src.exists()  # 디코드 안 되는 원본은 지운다
+        assert calls and calls[0][0] == "ffmpeg"
+        assert "-i" in calls[0] and str(src) in calls[0]
+        # 유튜브를 다시 접촉하지 않는다 — yt_dlp를 아예 안 불렀다는 것이 이 테스트의 전제
+
+    def test_transcode_failure_still_cleans_up_original_and_raises(self, monkeypatch, tmp_path):
+        from everyric2.audio import downloader as dl_mod
+        from everyric2.audio.downloader import DownloadError
+
+        dl = _downloader(monkeypatch, tmp_path)
+        monkeypatch.setattr(dl_mod, "_probe_decodable", lambda p: False)
+
+        src = tmp_path / "broken.opus"
+        src.write_bytes(b"not-really-opus")
+
+        def fake_run(cmd, check, capture_output):
+            raise subprocess.CalledProcessError(1, cmd)
+
+        monkeypatch.setattr(dl_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(DownloadError):
+            dl._ensure_decodable(src)
+        assert not src.exists()  # 실패해도 디코드 안 되는 원본을 남기지 않는다
 
 
 # ── ④ audio_hash 계약 고정 ──────────────────────────────────────────

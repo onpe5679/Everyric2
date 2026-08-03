@@ -6,8 +6,9 @@
 다운로드 275회, 같은 곡을 재처리하면 또 275회다.
 
 부수 효과가 하나 더 있는데 이쪽이 실은 더 중요하다. ``audio_hash``는 파일 바이트 해시라서
-**확보 경로에 의존한다**(미디어 캐시는 m4a 스트림카피, yt-dlp는 wav 트랜스코드 —
-``worker.compute_audio_hash`` 참조). 같은 영상이 경로에 따라 다른 해시를 내면 해시 캐시가
+**확보 경로에 의존한다**(미디어 캐시는 m4a 스트림카피, yt-dlp는 opus 우선 스트림카피 —
+소스 코덱에 따라 opus/m4a/webm으로 갈리고, 디코드 안 되는 극소수만 wav로 트랜스코드
+구제한다. ``worker.compute_audio_hash`` 참조). 같은 영상이 경로에 따라 다른 해시를 내면 해시 캐시가
 미스해서 GPU 정렬을 다시 돈다. 이 캐시가 앞에 서면 같은 영상은 항상 같은 파일을 내므로
 해시가 안정되고, 그래야 해시 캐시가 제 일을 한다.
 
@@ -44,7 +45,8 @@ logger = logging.getLogger(__name__)
 # ``..``이 절대 통과하지 못하게 하는 것이 요점이다.
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-# 확장자도 파일명이 되므로 허용 목록으로 둔다. yt-dlp 경로는 wav, 미디어 캐시 경로는 m4a다.
+# 확장자도 파일명이 되므로 허용 목록으로 둔다. yt-dlp 경로는 opus 우선(소스에 따라
+# m4a/webm으로도 갈리고, 디코드 실패 구제 시에만 wav), 미디어 캐시 경로는 m4a다.
 _ALLOWED_EXT = frozenset({".wav", ".m4a", ".mp3", ".opus", ".ogg", ".flac", ".webm", ".aac"})
 
 _LOCKS: dict[str, threading.Lock] = {}
