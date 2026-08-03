@@ -1241,7 +1241,12 @@ async function readSeenNoticeId(): Promise<string> {
   try {
     const stored = await chrome.storage.local.get(NOTICES_SEEN_KEY);
     const value = stored[NOTICES_SEEN_KEY] as unknown;
-    return typeof value === 'string' ? value : '';
+    // 서버 id는 정수다 — 숫자도 받아 문자열로 정규화한다. 예전 코드는 string만 인정해
+    // 저장된 숫자를 영영 못 읽었고, 읽음 표시가 새로고침마다 초기화됐다(실사용 재현).
+    // 숫자 허용은 그 시절 저장분(숫자)을 든 사용자 구제이기도 하다.
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number') return String(value);
+    return '';
   } catch {
     return '';
   }
@@ -1250,7 +1255,7 @@ async function readSeenNoticeId(): Promise<string> {
 async function markNoticesSeen(notices: ServerNotice[]): Promise<void> {
   if (notices.length === 0) return;
   try {
-    await chrome.storage.local.set({ [NOTICES_SEEN_KEY]: notices[0].id });
+    await chrome.storage.local.set({ [NOTICES_SEEN_KEY]: String(notices[0].id) });
   } catch { /* 표시용 상태다 — 못 적으면 점이 한 번 더 뜰 뿐이다 */ }
 }
 
@@ -1272,7 +1277,7 @@ export async function probeNotices(): Promise<NoticesProbe> {
   if (res.error || !Array.isArray(notices)) return { available: false, unread: false, count: 0 };
   if (notices.length === 0) return { available: true, unread: false, count: 0 };
   const seen = await readSeenNoticeId();
-  return { available: true, unread: notices[0].id !== seen, count: notices.length };
+  return { available: true, unread: String(notices[0].id) !== seen, count: notices.length };
 }
 
 export interface NoticesSheetOpts {

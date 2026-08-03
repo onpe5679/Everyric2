@@ -1,11 +1,11 @@
 import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, ServerLogEntry, ServerStatus, Settings, SongInfo, SongKey, SongTempo, SourceAttribution, SyncDebugMeta, SyncListItem, SyncPreviousVersion } from '../types';
-import { resolveScript, resolvedPronSegments, resolvedPronunciation, type PronScript } from '../lib/lang';
+import { resolveScript } from '../lib/lang';
 import { t } from '../lib/i18n';
 import { needsHostPermission, serverUsable, statusLine, unknownStatus } from '../lib/server-status';
 import { resolveTheme } from '../lib/theme';
 import { buildDebugPanel } from './debug-panel';
 import { h, icon, ICONS } from './dom';
-import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
+import { buildLineEl, buildPronEl, collectFillTargets, setElFilled, updateFillTargets, type FillTarget } from './line-render';
 import { PitchLaneRenderer } from './pitch-lane';
 import {
   applyServerGate,
@@ -46,9 +46,16 @@ function depthArrowIcon(count: number): string {
 const MINI_LANE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M3 5h18v2H3zm0 4h12v2H3zm0 4h18v2H3zm0 4h9v2H3z"/></svg>';
 const MINI_CAPTION_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="2"/><line x1="6" y1="14" x2="11" y2="14" stroke-linecap="round"/><line x1="13" y1="14" x2="18" y2="14" stroke-linecap="round"/></svg>';
 const MINI_NEXT_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M5 5l9 7-9 7V5zm11 0h3v14h-3V5z"/></svg>';
+/** 재생목록 패널 토글 — 목록 줄 세 개 + 재생 삼각형(대기열을 표시하는 관용 도안) */
+const MINI_PLAYLIST_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h12"/><path d="M3 12h12"/><path d="M3 18h8"/><path d="M17 14.5v5l4.5-2.5z" fill="currentColor" stroke="none"/></svg>';
+/** 재생목록 패널 헤더의 이전/다음 버튼 — PiP 재생 컨트롤과 같은 삼각형 도안 계열 */
+const PL_PREV_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M19 5l-9 7 9 7V5zm-11 0h-3v14h3V5z"/></svg>';
+const PL_NEXT_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 5l9 7-9 7V5zm11 0h3v14h-3V5z"/></svg>';
 /** 레인 배치 토글 — 왼쪽 열(좁은 세로 막대 + 본문) / 아래 띠(본문 + 가로 막대) */
 const MINI_POS_LEFT_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="4" width="6" height="16" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
 const MINI_POS_BOTTOM_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="14" width="18" height="6" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
+/** 레인 배치 토글 — 부착(패널 밖 왼쪽에 따로 붙는 작은 상자 + 간격 + 본문 상자) */
+const MINI_POS_ATTACHED_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="1.5" y="5" width="5" height="14" rx="1" fill="currentColor" stroke="none" opacity="0.75"/><rect x="9" y="4" width="13.5" height="16" rx="2"/></svg>';
 /**
  * 헤더 공지·기여 버튼 도안 — ICONS(dom.ts)에 넣지 않은 이유는 그 집합이 패널·PiP가
  * 함께 쓰는 최소 공용 아이콘이기 때문이다. 이 둘은 메인 패널 헤더에만 있다.
@@ -69,13 +76,18 @@ export interface NextUpInfo {
   channel?: string;
 }
 
-/** 이어질 재생목록 한 줄 — 아직 공급자가 없어도 API는 열어 둔다(빈 배열이면 안 그린다) */
+/** 이어질 재생목록 한 줄 — content가 lib/yt-player.ts로 스크랩해 채운다 */
 export interface PlaylistItem {
   title: string;
   videoId?: string;
   channel?: string;
-  /** 재생목록 안 번호(1-base) — 없으면 렌더 순서로 매긴다 */
+  /** 재생목록 안 번호(0-base) — playPlaylistItem에 그대로 넘기는 인덱스라 렌더 순서와
+   *  달라질 수 없다(항상 채워져 온다, content가 yt-player.PlaylistEntry.index를 그대로 싣는다) */
   index?: number;
+  /** 지금 재생 중인 항목 (유튜브가 selected로 표시) */
+  current?: boolean;
+  /** 서버 싱크(링크 포함) 존재 여부 — undefined면 아직 모름(조회 전/실패), 배지를 안 그린다 */
+  syncExists?: boolean;
 }
 
 /** 유튜브 썸네일 URL — mqdefault(320×180)는 카드 크기에 비해 넉넉하고 항상 존재한다 */
@@ -117,6 +129,16 @@ export interface OverlayCallbacks {
   onSubmitFeedback: (rating: number, category?: string, comment?: string) => Promise<boolean>;
   /** 매칭 표시줄의 "이 가사가 아니에요" — 오매칭 제보 후 검색 시트를 연다 */
   onWrongLyrics: () => void;
+  /** 재생목록 패널 — 이전/다음 곡 이동 (lib/yt-player.ts DOM 조작을 content가 대신한다) */
+  onPlaylistPrev: () => void;
+  onPlaylistNext: () => void;
+  /** 재생목록 항목 클릭 — index는 content가 스크랩한 순서(yt-player.playPlaylistItem과
+   *  같은 인덱스 체계)를 그대로 되돌려준다 */
+  onPlaylistSelect: (index: number) => void;
+  /** 저신뢰 경고 바의 "이 곡에서 다시 보지 않기" — 이 영상에서는 영구히 억제한다 */
+  onWarnDismissSong: () => void;
+  /** 설정 시트 ♻️ 범주 — 곡별로 끈 저신뢰 경고 억제를 전부 되살린다 */
+  onResetWarnDismiss: () => void;
   /** 이 영상의 서버 싱크 전부 삭제(초기화) — 잘못 붙여넣은 가사에서 새로 시작 */
   onResetSync: () => void;
   /** 검색 시트에서 원래 보던 가사 화면으로 복귀 (실수로 검색을 연 경우 탈출구) */
@@ -127,6 +149,8 @@ export interface OverlayCallbacks {
   onOpenPermissions: () => void;
   /** 최근 서버 요청 로그 — 접이식 섹션을 펼칠 때만 호출된다 */
   loadServerLog: () => Promise<ServerLogEntry[]>;
+  /** 확장 전체 초기화 — 설정 시트 ♻️ 범주의 2단계 확인(같은 버튼 재클릭) 뒤에만 불린다 */
+  onFullReset: () => void;
 }
 
 /** 'sheet' = 공지·기여처럼 본문 자리를 통째로 빌린 화면 — 가사가 없으므로 하이라이트·
@@ -171,6 +195,19 @@ const LANE_DIVIDER_W = 8;
  * 읽히는 1단이 낫고, 패널을 넓히면 즉시 2단으로 복귀한다(handlePanelResize).
  */
 const LANE_TWO_COL_MIN = LANE_WIDTH_MIN + LANE_BODY_MIN + LANE_DIVIDER_W;
+/** 부착(attached) 레인 패널의 폭 하한/상한 — 패널 폭에서 깎이는 내부 열이 아니라 화면에
+ *  독립적으로 뜨므로 LANE_WIDTH_MAX(480)보다 넓게 허용한다 */
+const ATTACH_WIDTH_MIN = 140;
+const ATTACH_WIDTH_MAX = 560;
+/** 부착 패널과 메인 패널 사이 간격(px) */
+const ATTACH_GAP = 8;
+/** 재생목록 부착 패널의 고정 폭(px) — 레인 부착 패널과 달리 사용자 조절 손잡이를 두지
+ *  않는다(운영자 요청 범위 밖 — 목록 폭은 제목 말줄임이 감당하므로 굳이 필요하지 않다) */
+const PLAYLIST_PANEL_WIDTH = 260;
+/** 퀵 토글 레인 배치 버튼의 순환 순서 — left → bottom → attached → left */
+const LANE_POS_CYCLE: Record<Settings['mainLanePos'], Settings['mainLanePos']> = {
+  left: 'bottom', bottom: 'attached', attached: 'left',
+};
 
 export class LyricsOverlay {
   private host: HTMLDivElement;
@@ -201,6 +238,10 @@ export class LyricsOverlay {
   private noticeChip: HTMLDivElement;
   private noticeTimer = 0;
   private warnBar: HTMLDivElement;
+  /** 경고 바가 지금 그리는 점수 — renderWarnBar가 접힘 토글마다 다시 읽는다(null=숨김) */
+  private warnScore: number | null = null;
+  /** "자세히" 펼침 상태 — 곡이 바뀌면 setQualityWarning이 접힘으로 되돌린다 */
+  private warnExpanded = false;
   /** 미보유 언어 칩을 눌러 번역을 기다리는 동안의 표시(U3-b) — 칩 펄스만으론 눈에 잘
    *  안 띈다는 실보고로 추가. 라인 목록 바로 위(.ey-warn-bar와 같은 자리 규칙)에 둬서
    *  "빈 번역 줄"이 아니라 "준비 중"임을 알린다. .ey-tr-status 클래스를 재사용한다
@@ -255,6 +296,26 @@ export class LyricsOverlay {
   private laneWrap: HTMLDivElement;
   /** 레인/가사 경계 드래그 손잡이 — 'left' 배치에서만 DOM에 붙는다 */
   private laneDivider: HTMLDivElement;
+  /**
+   * 부착(attached) 레인 패널 — mainLanePos==='attached'일 때 laneWrap이 여기로 옮겨
+   * 온다. `this.panel`의 **형제**로 Shadow DOM에 직접 붙는다(패널 내부 분할이 아니라
+   * 패널 밖에 독립적으로 뜨는 패널 — 운영자 요청 2026-08-03, "메인 가사창 왼쪽에
+   * 따로 붙는 뷰"). position:fixed라 패널과 같은 좌표계를 쓴다.
+   */
+  private attachPanel: HTMLDivElement;
+  /** 부착 패널 자체의 폭 조절 손잡이(왼쪽 모서리) — 내부 분할용 laneDivider와는 별개다 */
+  private attachDivider: HTMLDivElement;
+  /**
+   * 재생목록 부착 패널 — 설정 modPlaylist가 켜지면 뜬다. attachPanel(레인)과 형제로
+   * Shadow DOM에 직접 붙는 독립 패널이지만 **반대쪽**을 기본으로 삼는다: 레인이 왼쪽
+   * 우선(폴백 오른쪽)인 것과 대칭으로, 이쪽은 오른쪽 우선(폴백 왼쪽) — updatePlaylistPlacement.
+   */
+  private attachPlaylistPanel: HTMLDivElement;
+  private playlistHeaderEl: HTMLDivElement;
+  private playlistStatusEl: HTMLSpanElement;
+  private playlistPrevBtn: HTMLButtonElement;
+  private playlistNextBtn: HTMLButtonElement;
+  private playlistListEl: HTMLDivElement;
   /** 가사 목록 + (좌측 배치의) 레인 열을 담는 가로/세로 전환 컨테이너 */
   private mainRow: HTMLDivElement;
   /** 음절 타이밍 안내 배너 (fast/medium 깊이에서만) — 레인 영역 안에 산다 */
@@ -267,6 +328,7 @@ export class LyricsOverlay {
   private quickLanePosBtn: HTMLButtonElement;
   private quickCaptionBtn: HTMLButtonElement;
   private quickNextUpBtn: HTMLButtonElement;
+  private quickPlaylistBtn: HTMLButtonElement;
   private collapseBtn: HTMLButtonElement;
   private settingsSheet: HTMLDivElement | null = null;
   private settingsDot: HTMLSpanElement | null = null;
@@ -284,7 +346,7 @@ export class LyricsOverlay {
   private lines: LyricLine[] = [];
   private lineEls: HTMLElement[] = [];
   private trStatusEl: HTMLSpanElement;
-  private activeWordEls: { start: number; el: HTMLElement }[] = [];
+  private activeWordEls: FillTarget[] = [];
   private currentIndex = -1;
   /** 앞선 이 개수만큼의 줄이 '전부 채워진' 상태다 — fillUpTo가 유지하는 경계 */
   private filledUpTo = 0;
@@ -375,9 +437,12 @@ export class LyricsOverlay {
 
     this.pipBtn = this.headerButton(ICONS.pip, t('overlay.header.pip'), () => this.callbacks.onPipToggle());
     this.pipBtn.style.display = 'none';
+    // 운영자 결정: 가사 오입력 상황을 감안해 '재생성' 개념을 '싱크 초기화'로 통일한다.
+    // 서버 저장을 지우고 처음부터 다시 만드는 onResetSync를 부른다(깊이 올리기는 별개
+    // 경로 — depthBtn/updateDepthButton이 여전히 onDepthUpgrade로 재생성 API를 쓴다).
     this.regenBtn = this.headerButton(ICONS.refresh, t('overlay.header.regen'), () => {
       if (window.confirm(t('overlay.header.regenConfirm'))) {
-        this.callbacks.onRegenerate();
+        this.callbacks.onResetSync();
       }
     });
     this.regenBtn.style.display = 'none';
@@ -580,6 +645,29 @@ export class LyricsOverlay {
     this.laneWrap = h('div', { className: 'ey-lane-wrap' }, this.laneCanvas, this.laneNotice);
     this.laneWrap.style.display = 'none';
     this.laneDivider = this.buildLaneDivider();
+    this.attachDivider = this.buildAttachDivider();
+    // 부착 패널 — 시작할 때는 attachDivider만 자식으로 둔다. laneWrap은 applyLanePlacement가
+    // mainLanePos==='attached'일 때만 reparent해 넣는다(항상 만들어 두되 필요할 때만 채운다).
+    this.attachPanel = h('div', { className: 'ey-attach-lane' }, this.attachDivider);
+    this.attachPanel.style.display = 'none';
+
+    // 재생목록 부착 패널 (설정 modPlaylist) — 헤더(이전/다음 + 상태 문구) + 스크롤 목록.
+    // 레인 부착 패널과 마찬가지로 처음부터 만들어 두고 표시만 토글한다(캔버스는 없으므로
+    // 재생성 비용 문제는 없지만, 같은 구조를 유지해 두 부착 패널의 코드 계열을 맞춘다).
+    this.playlistPrevBtn = h('button', {
+      className: 'ey-pl-nav-btn', title: t('overlay.playlist.prev'), attrs: { type: 'button' },
+      on: { click: () => this.callbacks.onPlaylistPrev() },
+    }, icon(PL_PREV_SVG));
+    this.playlistNextBtn = h('button', {
+      className: 'ey-pl-nav-btn', title: t('overlay.playlist.next'), attrs: { type: 'button' },
+      on: { click: () => this.callbacks.onPlaylistNext() },
+    }, icon(PL_NEXT_SVG));
+    this.playlistStatusEl = h('span', { className: 'ey-pl-status' });
+    this.playlistHeaderEl = h('div', { className: 'ey-pl-header' },
+      this.playlistPrevBtn, this.playlistStatusEl, this.playlistNextBtn);
+    this.playlistListEl = h('div', { className: 'ey-pl-list' });
+    this.attachPlaylistPanel = h('div', { className: 'ey-attach-playlist' }, this.playlistHeaderEl, this.playlistListEl);
+    this.attachPlaylistPanel.style.display = 'none';
 
     // 가사 목록 컨테이너 — 'left' 배치에서 레인 열과 가로로 나란히 서는 자리다.
     // 'bottom'이면 세로 컨테이너 하나에 body만 들어 있어 예전 레이아웃과 같다.
@@ -590,20 +678,29 @@ export class LyricsOverlay {
     // 제목 바로 아래 언어 칩 줄과 같은 계열의 얇은 줄을 따로 둔다.
     this.quickLaneBtn = this.miniButton(MINI_LANE_SVG, t('overlay.quick.lane'),
       () => this.callbacks.onSettingsChange({ modMainLane: !this.settings.modMainLane }));
-    // 배치 토글은 레인이 켜져 있을 때만 의미가 있다 — syncQuickRow가 표시를 정한다
+    // 배치 토글은 레인이 켜져 있을 때만 의미가 있다 — syncQuickRow가 표시를 정한다.
+    // 3단 순환: left → bottom → attached → left (LANE_POS_CYCLE 참고)
     this.quickLanePosBtn = this.miniButton(MINI_POS_LEFT_SVG, t('overlay.quick.lanePos'),
       () => this.callbacks.onSettingsChange({
-        mainLanePos: this.settings.mainLanePos === 'left' ? 'bottom' : 'left',
+        mainLanePos: LANE_POS_CYCLE[this.settings.mainLanePos],
       }));
     this.quickCaptionBtn = this.miniButton(MINI_CAPTION_SVG, t('overlay.quick.caption'),
       () => this.callbacks.onSettingsChange({ videoCaptions: !this.settings.videoCaptions }));
     this.quickNextUpBtn = this.miniButton(MINI_NEXT_SVG, t('overlay.quick.nextUp'),
       () => this.callbacks.onSettingsChange({ modNextUp: !this.settings.modNextUp }));
+    // 재생목록 패널 — modNextUp(하단 카드)과는 별개 설정이다. 켜지면 하단 카드는
+    // 중복 정보라 숨는다(renderNextUp의 modPlaylist 가드).
+    this.quickPlaylistBtn = this.miniButton(MINI_PLAYLIST_SVG, t('overlay.quick.playlist'),
+      () => this.callbacks.onSettingsChange({ modPlaylist: !this.settings.modPlaylist }));
+    // 번역 언어 칩을 같은 줄 오른쪽 끝에 함께 싣는다 — 별도 줄로 두면 얇은 줄이 두 개
+    // 쌓여 세로 공간만 먹는다(실사용 제보). 칩 줄 표시/숨김(renderLangChips)은 그대로
+    // 자기 display로 하고, 접힘 상태는 퀵 줄과 함께 사라진다.
     this.quickRow = h('div', { className: 'ey-quick-row' },
-      this.quickLaneBtn, this.quickLanePosBtn, this.quickCaptionBtn, this.quickNextUpBtn);
+      this.quickLaneBtn, this.quickLanePosBtn, this.quickCaptionBtn, this.quickNextUpBtn,
+      this.quickPlaylistBtn, this.langChipsRow);
 
     this.panel = h('div', { className: 'ey-panel' },
-      this.header, this.quickRow, this.matchedBar, this.wrongLyricsPop, this.langChipsRow, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
+      this.header, this.quickRow, this.matchedBar, this.wrongLyricsPop, this.serverBar, this.banner, this.genChip, this.genList, this.noticeChip,
       this.warnBar, this.translationPendingBar, this.mainRow, this.resumeChip, this.nextUpEl, this.laneWrap,
       this.footer, this.debugStrip, this.debugPanelEl,
     );
@@ -614,6 +711,11 @@ export class LyricsOverlay {
       this.panel.addEventListener(type, e => e.stopPropagation());
     }
     shadow.append(this.panel);
+    // 부착 레인 패널 — this.panel의 형제. 패널 뒤에 붙여서 우연히 겹치는 경우(폴백)
+    // 스택 순서상 패널 위에 그려지게 한다.
+    shadow.append(this.attachPanel);
+    // 재생목록 부착 패널도 같은 규약(this.panel의 형제, 겹침 폴백 시 패널 위)
+    shadow.append(this.attachPlaylistPanel);
 
     this.geometry = geometry ?? this.defaultGeometry();
     this.applyGeometry();
@@ -701,35 +803,15 @@ export class LyricsOverlay {
     const pronScript = resolveScript(this.settings);
     const list = h('div', { className: 'ey-lines' });
     lines.forEach((line, index) => {
-      const el = h('div', {
-        className: 'ey-line',
-        title: t('overlay.line.seekTitle'),
-        // dir=auto — RTL(아랍어·히브리어) 가사가 문장 방향대로 정렬되게
-        attrs: { dir: 'auto' },
-        on: {
-          click: () => {
-            // 줄 시작 시각으로 정확히 시크하면 브라우저가 그 지점 **이하**의 디코딩
-            // 가능한 위치로 스냅해서, 곡 시간이 줄 시작보다 살짝 앞에 떨어진다.
-            // 그러면 활성 줄 판정이 한 줄 위로 가서 "누른 줄의 윗칸이 눌린" 것처럼
-            // 보인다. 줄 안쪽으로 아주 조금 밀어 넣어 의도한 줄에서 시작하게 한다.
-            if (line.time !== null) this.callbacks.onSeek(line.time + SEEK_INTO_LINE_SEC);
-          },
-        },
+      const { el } = buildLineEl(line, pronScript, this.settings);
+      el.title = t('overlay.line.seekTitle');
+      el.addEventListener('click', () => {
+        // 줄 시작 시각으로 정확히 시크하면 브라우저가 그 지점 **이하**의 디코딩
+        // 가능한 위치로 스냅해서, 곡 시간이 줄 시작보다 살짝 앞에 떨어진다.
+        // 그러면 활성 줄 판정이 한 줄 위로 가서 "누른 줄의 윗칸이 눌린" 것처럼
+        // 보인다. 줄 안쪽으로 아주 조금 밀어 넣어 의도한 줄에서 시작하게 한다.
+        if (line.time !== null) this.callbacks.onSeek(line.time + SEEK_INTO_LINE_SEC);
       });
-      // words가 없어도 호출 — appendKaraokeSpans가 음절 타이밍/라인 구간 비례
-      // 배분으로 폴백해, 라인이 한 번에 통째로 켜지는 표시를 피한다
-      appendKaraokeSpans(el, line, word => {
-        // 신뢰도 등급 클래스 — .ey-show-conf(디버그 모드)에서만 색이 입혀진다.
-        // 값은 CTC 프레임 로그확률의 기하평균(0~1) — 절대값이 작아 로그 스케일로 버킷:
-        // <1e-4(로그 -9 이하)=낮음, <2e-2(로그 -4 이하)=중간
-        const conf = word.confidence;
-        // 버킷 색은 레인(pip.ts confBucketColor)과 동일: 빨강<1e-4, 노랑<2e-2, 초록=양호
-        const confClass = conf == null ? '' : conf < 1e-4 ? ' ey-conf-low' : conf < 2e-2 ? ' ey-conf-mid' : ' ey-conf-ok';
-        return h('span', { className: `ey-word${confClass}`, text: word.word, attrs: { 'data-start': String(word.start) } });
-      });
-      const pronEl = this.buildPronEl(line, pronScript);
-      if (pronEl) el.append(pronEl);
-      if (line.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation, attrs: { dir: 'auto' } }));
       el.dataset.index = String(index);
       this.lineEls.push(el);
       list.append(el);
@@ -1173,9 +1255,7 @@ export class LyricsOverlay {
     const active = index >= 0 ? this.lineEls[index] : undefined;
     if (active) {
       // 발음 음절(.ey-pron-syl)도 단어와 같은 sung 토글 메커니즘에 합류
-      for (const wordEl of active.querySelectorAll<HTMLElement>('.ey-word, .ey-pron-syl')) {
-        this.activeWordEls.push({ start: Number(wordEl.dataset.start), el: wordEl });
-      }
+      this.activeWordEls = collectFillTargets(active);
       if (Date.now() >= this.userScrollUntil) {
         this.scrollToCurrent();
       } else {
@@ -1185,9 +1265,7 @@ export class LyricsOverlay {
   }
 
   updateTime(time: number, paused = false): void {
-    for (const { start, el } of this.activeWordEls) {
-      el.classList.toggle('sung', start <= time);
-    }
+    updateFillTargets(this.activeWordEls, time);
     this.updateVocalGlow(time);
     this.lastTime = time;
     this.lanePaused = paused;
@@ -1235,30 +1313,40 @@ export class LyricsOverlay {
 
   /**
    * 레인 배치 적용 — 'left'면 가사 왼쪽 세로 열(폭 조절 가능), 'bottom'이면 가사 아래
-   * 가로 띠(1.5.5까지의 배치, 무회귀 경로).
+   * 가로 띠(1.5.5까지의 배치, 무회귀 경로), 'attached'면 패널 **밖** 왼쪽에 독립적으로
+   * 뜨는 부착 패널(attachPanel — this.panel의 형제, 내부 분할이 아니다).
    *
    * 엘리먼트를 옮기기만 하고 새로 만들지 않는다 — 캔버스가 바뀌면 렌더러 attach와
    * 백버퍼가 함께 날아가므로, 배치 전환마다 한 프레임이 빈 칸으로 깜빡였을 것이다.
    */
   private applyLanePlacement(): void {
     const panelW = this.panel.clientWidth || this.geometry.width;
-    // 패널이 2단을 못 담을 만큼 좁으면 설정과 무관하게 가로 띠로 — LANE_TWO_COL_MIN 주석 참고
-    const left = this.settings.mainLanePos === 'left' && panelW >= LANE_TWO_COL_MIN;
+    const attached = this.settings.mainLanePos === 'attached';
+    // 패널이 2단을 못 담을 만큼 좁으면 설정과 무관하게 가로 띠로 — LANE_TWO_COL_MIN 주석 참고.
+    // attached는 패널 폭과 무관(부착 패널은 화면에 독립적으로 뜬다)하므로 이 좁음 폴백과 무관하다.
+    const left = !attached && this.settings.mainLanePos === 'left' && panelW >= LANE_TWO_COL_MIN;
     this.mainRow.classList.toggle('lane-left', left);
-    if (left) {
+    if (attached) {
+      if (this.laneWrap.parentElement !== this.attachPanel) this.attachPanel.append(this.laneWrap);
+      this.laneDivider.remove(); // 내부 분할 손잡이는 부착 모드에서 쓰지 않는다 — attachDivider가 대신한다
+      this.laneWrap.style.width = ''; // 부착 패널 자신이 폭을 정한다(CSS flex:1)
+      this.updateAttachPlacement();
+    } else if (left) {
       if (this.laneWrap.parentElement !== this.mainRow || this.laneDivider.parentElement !== this.mainRow) {
         this.mainRow.prepend(this.laneWrap, this.laneDivider);
       }
       this.laneWrap.style.width = `${this.clampLaneWidth(this.settings.mainLaneWidth)}px`;
       this.laneDivider.style.display = this.laneShown ? '' : 'none';
+      this.attachPanel.style.display = 'none';
     } else {
       if (this.laneWrap.parentElement !== this.panel) this.panel.insertBefore(this.laneWrap, this.footer);
       this.laneDivider.remove();
       this.laneWrap.style.width = '';
+      this.attachPanel.style.display = 'none';
     }
-    // 좁은 세로 열에서만 압축 렌더(표시 마디 수 축소 + 글자 폭 상한) — 가로 띠는
-    // 폭이 넉넉하므로 예전과 완전히 같은 그림을 그린다
-    this.lane.setOptions({ compact: left });
+    // 좁은 세로 열(left)이거나 부착 패널(attached, 폭이 140~560px로 역시 좁은 세로 열)일
+    // 때만 압축 렌더 — 가로 띠(bottom)는 폭이 넉넉하므로 예전과 완전히 같은 그림을 그린다
+    this.lane.setOptions({ compact: left || attached });
   }
 
   /**
@@ -1269,6 +1357,83 @@ export class LyricsOverlay {
     const panelW = this.panel.clientWidth || this.geometry.width;
     const roomCap = Math.max(LANE_WIDTH_MIN, panelW - LANE_BODY_MIN);
     return Math.round(Math.min(Math.max(px, LANE_WIDTH_MIN), Math.min(LANE_WIDTH_MAX, roomCap)));
+  }
+
+  /** 부착 패널 폭 클램프 — 패널 폭과 무관한 고정 범위(140~560px)만 본다. 패널에서
+   *  깎이는 내부 열이 아니라는 것이 애초에 부착 모드를 만든 이유이므로 clampLaneWidth의
+   *  panelW 상한(roomCap)은 여기 적용하지 않는다. */
+  private clampAttachedWidth(px: number): number {
+    return Math.round(Math.min(ATTACH_WIDTH_MAX, Math.max(ATTACH_WIDTH_MIN, px)));
+  }
+
+  /**
+   * 부착 패널의 위치·크기를 지금의 geometry(메인 패널 좌표)에 맞춰 다시 계산한다.
+   * mainLanePos !== 'attached'거나 레인이 안 보이거나 패널이 접혀 있으면 숨긴다
+   * (visible/fullscreenHidden은 별도로 보지 않는다 — attachPanel은 this.host 안 this.panel의
+   * 형제라 host 자체가 숨으면 함께 숨는다, updateHostVisibility 참고).
+   *
+   * 왼쪽에 놓을 공간이 없으면(화면 밖으로 나감) 패널 **오른쪽**으로 폴백한다. 그마저도
+   * 공간이 없으면(창이 아주 좁음) 화면 왼쪽 끝에 맞춰 살짝 겹치더라도 보이게 둔다 —
+   * 완전히 숨기면 "레인이 꺼졌다"로 오인하기 쉽고, 겹침은 사용자가 패널을 옮기면 바로
+   * 풀리는 반면 숨김은 부착 모드를 껐다 켜기 전까지 원인을 알 수 없다(판단 근거).
+   */
+  private updateAttachPlacement(): void {
+    const show = this.settings.mainLanePos === 'attached' && this.laneShown && !this.geometry.collapsed;
+    if (!show) {
+      this.attachPanel.style.display = 'none';
+      return;
+    }
+    const width = this.clampAttachedWidth(this.settings.attachedLaneWidth);
+    let left = this.geometry.x - width - ATTACH_GAP;
+    let onRight = false;
+    if (left < EDGE_MARGIN) {
+      const rightLeft = this.geometry.x + this.geometry.width + ATTACH_GAP;
+      if (rightLeft + width + EDGE_MARGIN <= window.innerWidth) {
+        left = rightLeft;
+        onRight = true;
+      } else {
+        left = Math.max(EDGE_MARGIN, Math.min(left, window.innerWidth - width - EDGE_MARGIN));
+      }
+    }
+    this.attachPanel.classList.toggle('ey-attach-right', onRight);
+    this.attachPanel.style.display = '';
+    this.attachPanel.style.width = `${width}px`;
+    this.attachPanel.style.height = `${this.geometry.height}px`;
+    this.attachPanel.style.left = `${left}px`;
+    this.attachPanel.style.top = `${this.geometry.y}px`;
+  }
+
+  /**
+   * 재생목록 부착 패널의 위치·크기 — updateAttachPlacement와 **대칭** 규약이지만
+   * 우선순위가 반대다: 레인은 왼쪽 우선(폴백 오른쪽)인데, 이쪽은 패널 **오른쪽**을
+   * 우선하고 공간이 없으면 왼쪽으로 폴백한다(운영자 요청 2026-08-03 — 레인·재생목록을
+   * 동시에 켜도 서로 반대편에 서게 해 겹칠 확률을 줄인다). 그마저 안 되면 화면 오른쪽
+   * 끝에 맞춰 클램프한다(레인 쪽과 같은 판단 근거 — 완전히 숨기는 것보다 겹침이 낫다).
+   */
+  private updatePlaylistPlacement(): void {
+    const show = this.settings.modPlaylist && !this.geometry.collapsed;
+    if (!show) {
+      this.attachPlaylistPanel.style.display = 'none';
+      return;
+    }
+    const width = PLAYLIST_PANEL_WIDTH;
+    let left = this.geometry.x + this.geometry.width + ATTACH_GAP;
+    let onLeft = false;
+    if (left + width + EDGE_MARGIN > window.innerWidth) {
+      const leftLeft = this.geometry.x - width - ATTACH_GAP;
+      if (leftLeft >= EDGE_MARGIN) {
+        left = leftLeft;
+        onLeft = true;
+      } else {
+        left = Math.max(EDGE_MARGIN, Math.min(left, window.innerWidth - width - EDGE_MARGIN));
+      }
+    }
+    this.attachPlaylistPanel.classList.toggle('ey-attach-left', onLeft);
+    this.attachPlaylistPanel.style.display = '';
+    this.attachPlaylistPanel.style.width = `${width}px`;
+    this.attachPlaylistPanel.style.height = `${this.geometry.height}px`;
+    this.attachPlaylistPanel.style.left = `${left}px`;
+    this.attachPlaylistPanel.style.top = `${this.geometry.y}px`;
   }
 
   /**
@@ -1305,6 +1470,47 @@ export class LyricsOverlay {
     return divider;
   }
 
+  /**
+   * 부착 패널 자신의 폭 조절 손잡이 — **왼쪽** 모서리에 붙는다(오른쪽 모서리는 메인
+   * 패널과의 간격에 고정돼 있어야 하므로, 왼쪽으로 끌수록 넓어진다). buildLaneDivider와
+   * 같은 규약: 드래그 중엔 화면만, 떼는 순간에만 저장.
+   */
+  private buildAttachDivider(): HTMLDivElement {
+    const divider = h('div', {
+      className: 'ey-attach-divider',
+      title: t('overlay.mainLane.resizeTitle'),
+    }, h('div', { className: 'ey-lane-divider-grip' }));
+    let dragging = false;
+    let startX = 0;
+    let startWidth = 0;
+    divider.addEventListener('pointerdown', (e: PointerEvent) => {
+      dragging = true;
+      startX = e.clientX;
+      startWidth = this.clampAttachedWidth(this.settings.attachedLaneWidth);
+      divider.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    divider.addEventListener('pointermove', (e: PointerEvent) => {
+      if (!dragging) return;
+      const width = this.clampAttachedWidth(startWidth + (startX - e.clientX));
+      this.attachPanel.style.width = `${width}px`;
+      // 오른쪽 모서리가 메인 패널에 계속 붙어 있으려면 폭이 바뀔 때마다 left도 다시 계산해야 한다
+      const onRight = this.attachPanel.classList.contains('ey-attach-right');
+      this.attachPanel.style.left = onRight
+        ? `${this.geometry.x + this.geometry.width + ATTACH_GAP}px`
+        : `${Math.max(EDGE_MARGIN, this.geometry.x - width - ATTACH_GAP)}px`;
+      this.renderLane();
+    });
+    divider.addEventListener('pointerup', (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      divider.releasePointerCapture(e.pointerId);
+      const width = parseInt(this.attachPanel.style.width, 10);
+      if (Number.isFinite(width)) this.callbacks.onSettingsChange({ attachedLaneWidth: width });
+    });
+    return divider;
+  }
+
   private miniButton(svg: string, title: string, onClick: () => void): HTMLButtonElement {
     return h('button', {
       className: 'ey-mini', title, attrs: { type: 'button' }, on: { click: onClick },
@@ -1319,11 +1525,21 @@ export class LyricsOverlay {
     this.quickCaptionBtn.title = t('overlay.quick.caption');
     this.quickNextUpBtn.classList.toggle('on', this.settings.modNextUp);
     this.quickNextUpBtn.title = t('overlay.quick.nextUp');
+    this.quickPlaylistBtn.classList.toggle('on', this.settings.modPlaylist);
+    this.quickPlaylistBtn.title = t('overlay.quick.playlist');
     // 배치 버튼은 "지금 어디에 있는가"가 아니라 "누르면 어디로 가는가"를 말한다 —
     // 아이콘은 현재 배치를 그리고 툴팁이 목적지를 밝힌다
-    const left = this.settings.mainLanePos === 'left';
-    this.quickLanePosBtn.replaceChildren(icon(left ? MINI_POS_LEFT_SVG : MINI_POS_BOTTOM_SVG));
-    this.quickLanePosBtn.title = left ? t('overlay.quick.lanePosToBottom') : t('overlay.quick.lanePosToLeft');
+    const pos = this.settings.mainLanePos;
+    const POS_ICON: Record<Settings['mainLanePos'], string> = {
+      left: MINI_POS_LEFT_SVG, bottom: MINI_POS_BOTTOM_SVG, attached: MINI_POS_ATTACHED_SVG,
+    };
+    const POS_NEXT_TITLE: Record<Settings['mainLanePos'], string> = {
+      left: t('overlay.quick.lanePosToBottom'),
+      bottom: t('overlay.quick.lanePosToAttached'),
+      attached: t('overlay.quick.lanePosToLeft'),
+    };
+    this.quickLanePosBtn.replaceChildren(icon(POS_ICON[pos]));
+    this.quickLanePosBtn.title = POS_NEXT_TITLE[pos];
     this.quickLanePosBtn.style.display = this.settings.modMainLane ? '' : 'none';
   }
 
@@ -1340,15 +1556,23 @@ export class LyricsOverlay {
     const label = route === 'fast' ? t('overlay.depthLabel.fast')
       : route === 'medium' ? t('overlay.depthLabel.medium')
       : null;
-    const show = this.laneShown && label !== null
+    // 구싱크(라우팅 메타 없음)는 route가 undefined라 label도 null이 된다 — 예전엔 그 경우
+    // 배너가 아예 안 떴다(fast/medium 곡의 실사용 미표시 원인 후보). heavy는 계속 억제하되,
+    // "깊이를 모른다"와 "heavy라 올릴 곳이 없다"는 구분해야 한다 — meta 자체가 없거나
+    // route가 fast/medium/heavy 어디에도 속하지 않을 때만 깊이 표기 없는 문구로 띄운다.
+    const knownNonUpgradable = route === 'heavy';
+    const show = this.laneShown && !knownNonUpgradable
       && !this.settings.karaokeTimingNoticeDismissed && !this.timingNoticeHidden;
     if (!show) {
       this.laneNotice.style.display = 'none';
       this.laneNotice.replaceChildren();
       return;
     }
+    const text = label !== null
+      ? t('overlay.laneNotice.text', [label])
+      : t('overlay.laneNotice.textNoDepth');
     this.laneNotice.replaceChildren(
-      h('span', { className: 'ey-lane-notice-text', text: t('overlay.laneNotice.text', [label]) }),
+      h('span', { className: 'ey-lane-notice-text', text }),
       h('div', { className: 'ey-lane-notice-actions' },
         h('button', {
           className: 'ey-lane-notice-btn',
@@ -1399,9 +1623,7 @@ export class LyricsOverlay {
   private setLineFilled(i: number, filled: boolean): void {
     const el = this.lineEls[i];
     if (!el) return;
-    for (const w of el.querySelectorAll<HTMLElement>('.ey-word, .ey-pron-syl')) {
-      w.classList.toggle('sung', filled);
-    }
+    setElFilled(el, filled);
   }
 
   /**
@@ -1515,30 +1737,6 @@ export class LyricsOverlay {
   }
 
   /**
-   * 라인 하나의 발음 표기 엘리먼트를 만든다 — showSyncedLyrics(최초 렌더)와
-   * refreshTranslations(재렌더: 번역 API가 늦게 채워줄 때·발음 표기 전환 시) 둘 다
-   * 이걸 거친다. 음절 타이밍(pronSegments)이 있으면 단어처럼 부른 만큼 색이 차오르게
-   * 스팬으로(사이 텍스트는 appendTimedSpans가 인접 span에 끼워 넣어 흰 글자 없이
-   * 칠해진다), 없으면 통짜 텍스트로. 발음이 없으면 null(둘 다 append를 생략하게).
-   */
-  private buildPronEl(line: LyricLine, pronScript: PronScript): HTMLDivElement | null {
-    const pron = resolvedPronunciation(line, pronScript);
-    if (!pron) return null;
-    const segs = resolvedPronSegments(line, pronScript);
-    const pronEl = h('div', { className: 'ey-line-pron', attrs: { dir: 'auto' } });
-    const mapped = segs && segs.length > 0
-      ? appendTimedSpans(pronEl, pron, segs, s => s.text, seg =>
-          h('span', {
-            className: 'ey-pron-syl',
-            text: seg.text,
-            attrs: { 'data-start': String(seg.start) },
-          }))
-      : 0;
-    if (mapped === 0) pronEl.replaceChildren(pron);
-    return pronEl;
-  }
-
-  /**
    * lines[].translation을 다시 읽어 각 라인 아래 번역을 갱신/제거하고, 발음 표기도
    * 항상 새로 그린다(무조건 지우고 buildPronEl로 재구성) — 번역 API가 발음을 늦게
    * 채워주는 경우뿐 아니라, 발음 표기 방식(pronunciationScript/translationLanguage)이
@@ -1554,7 +1752,7 @@ export class LyricsOverlay {
       el.querySelector('.ey-line-pron')?.remove();
       const line = this.lines[i];
       if (line) {
-        const pronEl = this.buildPronEl(line, pronScript);
+        const pronEl = buildPronEl(line, pronScript, this.settings);
         if (pronEl) el.append(pronEl);
       }
       if (line?.translation) el.append(h('div', { className: 'ey-line-tr', text: line.translation, attrs: { dir: 'auto' } }));
@@ -1572,23 +1770,61 @@ export class LyricsOverlay {
 
   /** 낮은 정렬 신뢰도 경고 바 — score가 null이면 숨김. X로 닫을 수 있다. */
   setQualityWarning(score: number | null): void {
+    this.warnScore = score;
+    this.warnExpanded = false; // 곡이 바뀌면 접힘 상태로 되돌린다
+    this.renderWarnBar();
+  }
+
+  /**
+   * 경고 바 — 짧은 줄(항상 보임) + "자세히"로 펼치는 안내문. 예전엔 안내(가사 원문 확인·
+   * 분석 깊이 올리기 제안)가 툴팁에만 있어 실제로 읽히지 않았다(운영자 지시 2026-08-03:
+   * 본문 노출로 승격). ×는 이번 세션만 닫고, "이 곡에서 다시 보지 않기"는 영상별로
+   * 영구히 억제한다(content가 chrome.storage에 적는다) — 둘의 되돌릴 수 있는 정도가
+   * 달라 같은 버튼으로 합치지 않는다.
+   */
+  private renderWarnBar(): void {
+    const score = this.warnScore;
     if (score === null) {
       this.warnBar.style.display = 'none';
+      this.warnBar.replaceChildren();
       return;
     }
-    this.warnBar.replaceChildren(
-      h('span', {
-        className: 'ey-warn-text',
-        text: `⚠️ ${t('overlay.warn.text', [fmtConf(score)])}`,
-        attrs: { title: t('overlay.warn.title') },
+    const head = h('div', { className: 'ey-warn-head' },
+      h('span', { className: 'ey-warn-text', text: `⚠️ ${t('overlay.warn.text', [fmtConf(score)])}` }),
+      h('button', {
+        className: 'ey-warn-expand',
+        text: this.warnExpanded ? t('overlay.warn.collapse') : t('overlay.warn.expand'),
+        title: t('overlay.warn.title'),
+        attrs: { type: 'button' },
+        on: { click: () => { this.warnExpanded = !this.warnExpanded; this.renderWarnBar(); } },
       }),
       h('button', {
         className: 'ey-warn-close',
         text: '×',
         title: t('overlay.warn.close'),
+        attrs: { type: 'button' },
         on: { click: () => { this.warnBar.style.display = 'none'; } },
       }),
     );
+    const children: HTMLElement[] = [head];
+    if (this.warnExpanded) {
+      children.push(h('div', { className: 'ey-warn-detail' },
+        h('span', { className: 'ey-warn-detail-text', text: t('overlay.warn.detail') }),
+        h('button', {
+          className: 'ey-warn-dismiss-song',
+          text: t('overlay.warn.dismissSong'),
+          title: t('overlay.warn.dismissSongTitle'),
+          attrs: { type: 'button' },
+          on: {
+            click: () => {
+              this.warnBar.style.display = 'none';
+              this.callbacks.onWarnDismissSong();
+            },
+          },
+        }),
+      ));
+    }
+    this.warnBar.replaceChildren(...children);
     this.warnBar.style.display = '';
   }
 
@@ -1736,57 +1972,102 @@ export class LyricsOverlay {
   setNextUp(info: string | NextUpInfo | null): void {
     this.nextUpInfo = typeof info === 'string' ? { title: info } : info;
     this.renderNextUp();
+    // 재생목록이 없는 페이지(단일 영상)에서는 부착 패널도 이 값을 재사용해 보여준다
+    this.renderPlaylistPanel();
   }
 
-  /**
-   * 이어질 재생목록 — 아직 공급자가 없어도 계약을 먼저 연다(빈 배열/null이면 목록을
-   * 아예 그리지 않으므로, content가 나중에 채워도 다른 화면은 영향을 받지 않는다).
-   */
-  setPlaylist(items: PlaylistItem[] | null): void {
-    this.playlistItems = items ?? [];
-    this.renderNextUp();
-  }
-
-  /** 다음 영상 카드 + 이어질 목록 — 둘 다 비면 슬롯 자체를 접는다 */
+  /** 하단 다음 영상 카드 — modPlaylist가 켜지면 부착 패널이 같은 정보를 대신 보여주므로
+   *  중복을 피해 숨긴다(설정 항목의 관계 정리, overlay.ts 담당자 메모 2026-08-03). */
   private renderNextUp(): void {
     const info = this.nextUpInfo;
-    const list = this.playlistItems;
-    if (!info && list.length === 0) {
+    if (!info || this.settings.modPlaylist) {
       this.nextUpEl.style.display = 'none';
       this.nextUpEl.replaceChildren();
       return;
     }
-    const parts: HTMLElement[] = [];
-    if (info) {
-      const meta = h('div', { className: 'ey-nextup-meta' },
-        h('div', { className: 'ey-nextup-title', text: info.title, title: info.title }),
-      );
-      if (info.channel) meta.append(h('div', { className: 'ey-nextup-channel', text: info.channel }));
-      const card = h('div', { className: 'ey-nextup-card' });
-      const thumb = info.thumbnail ?? (info.videoId ? thumbUrl(info.videoId) : null);
-      if (thumb) {
-        // 썸네일은 있으면 좋은 장식이다 — 404·CSP·오프라인 어느 이유로 실패하든 깨진
-        // 이미지 아이콘을 남기지 말고 조용히 자리를 접는다(제목·채널은 그대로 읽힌다)
-        const img = h('img', {
-          className: 'ey-nextup-thumb',
-          attrs: { src: thumb, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' },
-        });
-        img.addEventListener('error', () => img.remove());
-        card.append(img);
-      }
-      card.append(meta);
-      parts.push(h('div', { className: 'ey-nextup-label', text: t('overlay.nextUp.label') }), card);
-    }
-    if (list.length > 0) {
-      parts.push(h('div', { className: 'ey-nextup-pl' },
-        ...list.map((it, i) => h('div', { className: 'ey-nextup-pl-row' },
-          h('span', { className: 'ey-nextup-pl-index', text: String(it.index ?? i + 1) }),
-          h('span', { className: 'ey-nextup-pl-title', text: it.title, title: it.title }),
-        )),
-      ));
-    }
-    this.nextUpEl.replaceChildren(...parts);
+    this.nextUpEl.replaceChildren(
+      h('div', { className: 'ey-nextup-label', text: t('overlay.nextUp.label') }),
+      this.buildNextUpCard(info),
+    );
     this.nextUpEl.style.display = '';
+  }
+
+  /** 다음 영상 카드 본체(썸네일 + 제목 + 채널) — 하단 카드·재생목록 부착 패널(목록이
+   *  없는 단일 영상 페이지)이 함께 쓴다. */
+  private buildNextUpCard(info: NextUpInfo): HTMLDivElement {
+    const meta = h('div', { className: 'ey-nextup-meta' },
+      h('div', { className: 'ey-nextup-title', text: info.title, title: info.title }),
+    );
+    if (info.channel) meta.append(h('div', { className: 'ey-nextup-channel', text: info.channel }));
+    const card = h('div', { className: 'ey-nextup-card' });
+    const thumb = info.thumbnail ?? (info.videoId ? thumbUrl(info.videoId) : null);
+    if (thumb) {
+      // 썸네일은 있으면 좋은 장식이다 — 404·CSP·오프라인 어느 이유로 실패하든 깨진
+      // 이미지 아이콘을 남기지 말고 조용히 자리를 접는다(제목·채널은 그대로 읽힌다)
+      const img = h('img', {
+        className: 'ey-nextup-thumb',
+        attrs: { src: thumb, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' },
+      });
+      img.addEventListener('error', () => img.remove());
+      card.append(img);
+    }
+    card.append(meta);
+    return card;
+  }
+
+  /**
+   * 이어질 재생목록 — content가 lib/yt-player.ts로 스크랩한 항목을 그대로 밀어넣는다.
+   * null/빈 배열이면 "재생목록에 속하지 않은 영상"으로 보고 다음 영상 카드로 대체한다
+   * (renderPlaylistPanel). 표시 자체는 modPlaylist 설정을 따른다.
+   */
+  setPlaylist(items: PlaylistItem[] | null): void {
+    this.playlistItems = items ?? [];
+    this.renderPlaylistPanel();
+  }
+
+  /** 재생목록 부착 패널 — 목록이 있으면 스크롤 리스트, 없으면 다음 영상 카드 하나만 */
+  private renderPlaylistPanel(): void {
+    if (!this.settings.modPlaylist || this.geometry.collapsed) {
+      this.attachPlaylistPanel.style.display = 'none';
+      return;
+    }
+    const list = this.playlistItems;
+    if (list.length > 0) {
+      this.playlistStatusEl.textContent = t('overlay.playlist.status', [String(list.length)]);
+      this.playlistStatusEl.title = '';
+      this.playlistListEl.replaceChildren(...list.map((it, i) => this.buildPlaylistRow(it, i)));
+    } else if (this.nextUpInfo) {
+      this.playlistStatusEl.textContent = t('overlay.playlist.noPlaylist');
+      this.playlistStatusEl.title = t('overlay.playlist.noPlaylistTitle');
+      this.playlistListEl.replaceChildren(
+        h('div', { className: 'ey-pl-nextup-wrap' },
+          h('div', { className: 'ey-nextup-label', text: t('overlay.nextUp.label') }),
+          this.buildNextUpCard(this.nextUpInfo),
+        ),
+      );
+    } else {
+      this.playlistStatusEl.textContent = t('overlay.playlist.empty');
+      this.playlistStatusEl.title = '';
+      this.playlistListEl.replaceChildren();
+    }
+    this.attachPlaylistPanel.style.display = '';
+    this.updatePlaylistPlacement();
+  }
+
+  /** 재생목록 항목 한 줄 — 클릭하면 그 영상으로 이동. 서버 싱크가 있으면 작은 점 배지 */
+  private buildPlaylistRow(it: PlaylistItem, i: number): HTMLDivElement {
+    const row = h('div', {
+      className: `ey-pl-row${it.current ? ' current' : ''}`,
+      attrs: { title: it.title },
+      on: { click: () => this.callbacks.onPlaylistSelect(it.index ?? i) },
+    },
+      h('span', { className: 'ey-pl-row-index', text: String((it.index ?? i) + 1) }),
+      h('span', { className: 'ey-pl-row-title', text: it.title }),
+    );
+    if (it.syncExists) {
+      row.append(h('span', { className: 'ey-pl-row-dot', title: t('overlay.playlist.existsTitle') }));
+    }
+    return row;
   }
 
   setDebugMeta(meta: SyncDebugMeta | null): void {
@@ -1842,8 +2123,16 @@ export class LyricsOverlay {
     this.renderLangChips();
     this.panel.classList.remove('ey-fs-small', 'ey-fs-medium', 'ey-fs-large');
     this.panel.classList.add(`ey-fs-${settings.fontSize}`);
-    // 테마 판정은 lib/theme.ts 한 곳에서만 — PiP도 content가 같은 값을 받아 칠한다
-    this.panel.classList.toggle('ey-light', resolveTheme(settings) === 'light');
+    // 3단 프리셋 위에 얹는 미세 배율 — Shadow DOM 안이라 document.body가 아니라 패널
+    // 엘리먼트 자신에 심어야 overlay.css의 --ey-line-size calc()가 이 값을 본다
+    this.panel.style.setProperty('--ey-main-fs', String(settings.mainFontScale));
+    // 테마 판정은 lib/theme.ts 한 곳에서만 — PiP도 content가 같은 값을 받아 칠한다.
+    // attachPanel은 this.panel의 형제라 CSS 변수를 :host에서 상속받지만, 라이트 테마
+    // 오버라이드(.ey-panel.ey-light)는 클래스 스코프라 자신도 같은 클래스를 받아야 한다.
+    const isLight = resolveTheme(settings) === 'light';
+    this.panel.classList.toggle('ey-light', isLight);
+    this.attachPanel.classList.toggle('ey-light', isLight);
+    this.attachPlaylistPanel.classList.toggle('ey-light', isLight);
     // 오프셋은 영상별 상태(setOffsetValue로 주입) — 전역 설정으로 되돌리지 않는다
     this.debugStrip.style.display = settings.debugInfo ? '' : 'none';
     if (!settings.debugInfo) this.closeDebugPanel(); // 버튼이 숨는데 패널만 열려 남으면 안 된다
@@ -1871,6 +2160,9 @@ export class LyricsOverlay {
     });
     this.lane.refreshColors(); // 테마가 바뀌었을 수 있다 — CSS 변수를 다시 읽게 한다
     this.applyLaneVisibility();
+    // modPlaylist 토글은 하단 카드↔부착 패널의 표시를 즉시 맞바꿔야 한다
+    this.renderNextUp();
+    this.renderPlaylistPanel();
   }
 
   // ── 내부 헬퍼 ─────────────────────────────────────────────────
@@ -2013,6 +2305,10 @@ export class LyricsOverlay {
 
   private resetBody(): void {
     this.body.replaceChildren();
+    // 화면 전환마다 도는 지점이라 분리된(더 이상 DOM에 없는) 생성 버튼 참조를 여기서도
+    // 걸러낸다 — 그 버튼들이 들고 있던 가사 전문 클로저가 다음 setServerStatus까지
+    // 기다리지 않고 곧바로 해제된다(5fps 감사 #3, 메모리 누적 방지).
+    this.generateButtons = this.generateButtons.filter(btn => btn.isConnected);
     this.banner.style.display = 'none';
     this.footer.style.display = 'none';
     this.resumeChip.style.display = 'none';
@@ -2312,6 +2608,15 @@ export class LyricsOverlay {
         onChange: v => set({ fontSize: v as Settings['fontSize'] }),
       },
       {
+        // fontSize(3단 프리셋) 위에 얹는 미세 배율 — 기존 select는 그대로 두고 바로
+        // 아래에 슬라이더를 추가한다(선례: laneRows의 pitchFontScale 행)
+        kind: 'range', key: 'mainFontScale', label: t('overlay.settings.row.mainFontScale'),
+        keywords: '가사창 폰트 글씨 크기 배율',
+        value: this.settings.mainFontScale, min: 0.7, max: 1.6, step: 0.05,
+        format: v => `${v.toFixed(2)}×`,
+        onChange: v => set({ mainFontScale: v }),
+      },
+      {
         kind: 'select', key: 'theme', label: t('overlay.settings.row.theme'),
         keywords: '다크 라이트 dark light',
         value: this.settings.theme,
@@ -2357,6 +2662,13 @@ export class LyricsOverlay {
       {
         kind: 'checkbox', key: 'showPronunciation', label: t('overlay.settings.row.showPronunciation'),
         value: this.settings.showPronunciation, onChange: v => set({ showPronunciation: v }),
+      },
+      {
+        // showPronunciation이 꺼져 있으면 이 설정은 어차피 소음이므로 켜져 있을 때만 의미가
+        // 있다 — 그래도 항상 노출해 둔다(비어 있는 조건부 표시는 "설정이 사라졌다"로 읽힌다)
+        kind: 'checkbox', key: 'hidePronForEnglish', label: t('overlay.settings.row.hidePronForEnglish'),
+        title: t('overlay.settings.row.hidePronForEnglishTitle'),
+        value: this.settings.hidePronForEnglish, onChange: v => set({ hidePronForEnglish: v }),
       },
       {
         kind: 'checkbox', key: 'vocalGlow', label: t('overlay.settings.row.vocalGlow'),
@@ -2450,9 +2762,11 @@ export class LyricsOverlay {
         title: t('overlay.settings.row.pronPositionTitle'),
         value: this.settings.pitchPronPosition,
         options: [
+          ['off', t('overlay.settings.pronPosition.off')],
           ['note', t('overlay.settings.pronPosition.note')],
           ['bottom', t('overlay.settings.pronPosition.bottom')],
           ['both', t('overlay.settings.pronPosition.both')],
+          ['center', t('overlay.settings.pronPosition.center')],
         ],
         onChange: v => set({ pitchPronPosition: v as Settings['pitchPronPosition'] }),
       },
@@ -2467,13 +2781,22 @@ export class LyricsOverlay {
       },
       {
         kind: 'select', key: 'mainLanePos', label: t('panels.settings.row.mainLanePos'),
-        keywords: '가사창 레인 위치 왼쪽 아래',
+        keywords: '가사창 레인 위치 왼쪽 아래 부착',
         value: this.settings.mainLanePos,
         options: [
           ['left', t('panels.settings.mainLanePos.left')],
           ['bottom', t('panels.settings.mainLanePos.bottom')],
+          ['attached', t('panels.settings.mainLanePos.attached')],
         ],
         onChange: v => set({ mainLanePos: v as Settings['mainLanePos'] }),
+      },
+      {
+        // mainLaneWidth와 별개 값 — 부착 패널은 패널 폭에서 깎이지 않으므로 상한이 더 넓다
+        kind: 'range', key: 'attachedLaneWidth', label: t('panels.settings.row.attachedLaneWidth'),
+        keywords: '가사창 레인 부착 너비 width attached',
+        value: this.settings.attachedLaneWidth,
+        min: ATTACH_WIDTH_MIN, max: ATTACH_WIDTH_MAX, step: 10, format: px,
+        onChange: v => set({ attachedLaneWidth: Math.round(v) }),
       },
     ];
 
@@ -2502,6 +2825,11 @@ export class LyricsOverlay {
         onChange: v => set({ modNextUp: v }),
       },
       {
+        kind: 'checkbox', key: 'modPlaylist', label: t('overlay.settings.row.modPlaylist'),
+        title: t('overlay.settings.row.modPlaylistTitle'), value: this.settings.modPlaylist,
+        onChange: v => set({ modPlaylist: v }),
+      },
+      {
         kind: 'checkbox', key: 'modMainLane', label: t('overlay.settings.row.modMainLane'),
         title: t('overlay.settings.row.modMainLaneTitle'), value: this.settings.modMainLane,
         onChange: v => set({ modMainLane: v }),
@@ -2516,6 +2844,11 @@ export class LyricsOverlay {
       {
         kind: 'checkbox', key: 'pipShowVideo', label: t('overlay.settings.row.pipShowVideo'),
         value: this.settings.pipShowVideo, onChange: v => set({ pipShowVideo: v }),
+      },
+      {
+        kind: 'checkbox', key: 'pipLyricsList', label: t('overlay.settings.row.pipLyricsList'),
+        title: t('overlay.settings.row.pipLyricsListTitle'),
+        value: this.settings.pipLyricsList, onChange: v => set({ pipLyricsList: v }),
       },
       {
         kind: 'select', key: 'pipChromaKey', label: t('overlay.settings.row.pipChromaKey'),
@@ -2647,6 +2980,49 @@ export class LyricsOverlay {
           btn.textContent = t('panels.settings.reset.done');
         },
       },
+      {
+        // 곡별로 끈 저신뢰 경고를 전부 되살리는 유일한 경로 — 카라오케 안내 되살리기
+        // 버튼과 같은 자리 규칙(비어 있어도 숨기지 않는다, 눌러도 무해).
+        kind: 'button', key: 'warnDismissReset',
+        label: t('panels.settings.reset.warnDismiss'),
+        title: t('panels.settings.reset.warnDismissTitle'),
+        keywords: '저신뢰 경고 신뢰도 낮음 정렬 다시 보기 warning confidence',
+        onClick: btn => {
+          this.callbacks.onResetWarnDismiss();
+          btn.textContent = t('panels.settings.reset.done');
+        },
+      },
+      {
+        // 2단계 확인 — 같은 버튼을 두 번 눌러야 실행된다(window.confirm 대신 이 방식을
+        // 쓰는 이유: 되돌릴 수 없는 동작이고, 4초 뒤 자동으로 원래 라벨로 돌아가 실수로
+        // 남겨둔 무장 상태가 다음 클릭을 삼키지 않는다). 시트를 열 때마다 이 행이 새로
+        // 만들어지므로(settingsSections는 openSettings마다 새로 호출된다) armed 상태를
+        // 인스턴스 필드가 아니라 클로저 지역변수로 둬도 다음에 여는 시트엔 영향이 없다.
+        kind: 'button', key: 'fullReset',
+        label: t('panels.settings.reset.fullReset'),
+        title: t('panels.settings.reset.fullResetTitle'),
+        keywords: '전체 초기화 리셋 기여 이력 설정 reset all',
+        onClick: (() => {
+          let armed = false;
+          let timer = 0;
+          return (btn: HTMLButtonElement) => {
+            if (!armed) {
+              armed = true;
+              btn.textContent = t('panels.settings.reset.fullResetConfirm');
+              window.clearTimeout(timer);
+              timer = window.setTimeout(() => {
+                armed = false;
+                btn.textContent = t('panels.settings.reset.fullReset');
+              }, 4000);
+              return;
+            }
+            window.clearTimeout(timer);
+            armed = false;
+            btn.textContent = t('panels.settings.reset.done'); // 카라오케 안내 되살리기 버튼과 같은 완료 문구 재사용
+            this.callbacks.onFullReset();
+          };
+        })(),
+      },
     ];
 
     return [
@@ -2703,6 +3079,8 @@ export class LyricsOverlay {
     this.panel.style.height = g.collapsed ? 'auto' : `${g.height}px`;
     this.collapseBtn.replaceChildren(icon(g.collapsed ? ICONS.expand : ICONS.collapse));
     this.collapseBtn.title = g.collapsed ? t('overlay.header.expand') : t('overlay.header.collapse');
+    this.updateAttachPlacement(); // 부착 모드면 패널 좌표·접힘 상태가 바뀔 때마다 따라간다
+    this.updatePlaylistPlacement();
     requestAnimationFrame(() => {
       this.applyingGeometry = false;
     });
@@ -2736,6 +3114,8 @@ export class LyricsOverlay {
       this.geometry.y = this.clampY(origY + e.clientY - startY);
       this.panel.style.left = `${this.geometry.x}px`;
       this.panel.style.top = `${this.geometry.y}px`;
+      this.updateAttachPlacement();
+      this.updatePlaylistPlacement();
     });
     this.header.addEventListener('pointerup', (e: PointerEvent) => {
       if (!dragging) return;
@@ -2750,16 +3130,25 @@ export class LyricsOverlay {
     // 레인 열 폭은 패널 폭에 대해 상대적으로 클램프되고, 패널이 아주 좁아지면 2단 자체가
     // 가로 띠로 접힌다 — 그 판정을 모두 쥔 applyLanePlacement를 그대로 다시 태운다.
     // 저장값(mainLaneWidth)은 건드리지 않으므로 패널을 도로 넓히면 원래 폭으로 돌아온다.
+    // attached도 함께 본다 — 부착 패널의 높이·폴백 판정이 패널 크기(geometry.width/height)에
+    // 종속되므로, 아래에서 geometry를 갱신한 **뒤에** 다시 그려야 한 프레임 지연 없이 맞는다.
     if (this.laneShown && this.settings.mainLanePos === 'left') {
       this.applyLanePlacement();
       this.renderLane();
     }
-    if (this.applyingGeometry || this.geometry.collapsed) return;
+    if (this.applyingGeometry || this.geometry.collapsed) {
+      this.updateAttachPlacement();
+      this.updatePlaylistPlacement();
+      return;
+    }
     const { offsetWidth, offsetHeight } = this.panel;
-    if (offsetWidth === this.geometry.width && offsetHeight === this.geometry.height) return;
-    this.geometry.width = offsetWidth;
-    this.geometry.height = offsetHeight;
-    this.scheduleGeometrySave();
+    if (offsetWidth !== this.geometry.width || offsetHeight !== this.geometry.height) {
+      this.geometry.width = offsetWidth;
+      this.geometry.height = offsetHeight;
+      this.scheduleGeometrySave();
+    }
+    this.updateAttachPlacement();
+    this.updatePlaylistPlacement();
   }
 
   private handleWindowResize = (): void => {
@@ -2767,6 +3156,8 @@ export class LyricsOverlay {
     this.geometry.y = this.clampY(this.geometry.y);
     this.panel.style.left = `${this.geometry.x}px`;
     this.panel.style.top = `${this.geometry.y}px`;
+    this.updateAttachPlacement();
+    this.updatePlaylistPlacement();
   };
 
   private handleFullscreenChange = (): void => {

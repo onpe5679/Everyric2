@@ -1,5 +1,5 @@
 import type { LyricLine } from '../types';
-import { resolvedPronunciation, resolvedPronSegments, type PronScript } from '../lib/lang';
+import { resolvedPronunciation, resolvedPronSegments, shouldShowPron, type PronScript } from '../lib/lang';
 import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
 
 // 스케일 배율의 기준값(기존 하드코딩 값과 동일 — fontScale 1일 때 지금과 완전히 같다)
@@ -39,11 +39,16 @@ export class VideoCaption {
   private enabled = false;
   private pronScript: PronScript = 'hangul';
   private showPron = true;
+  private hidePronForEnglish = false;
   private showTr = true;
   private fontScale = 1;
   private bgOpacity = 0.75;
   private lastTime = 0;
   private activeWordEls: { start: number; el: HTMLElement }[] = [];
+  /** 마지막 mount() 재시도 시각 — updateTime은 최대 60Hz로 도는데 호스트가 안 붙어
+   *  있으면 매 tick 재시도해 DOM 삽입 시도가 프레임마다 반복됐다(5fps 감사 #4).
+   *  500ms 미만이면 건너뛴다. */
+  private lastMountAttempt = 0;
 
   setEnabled(on: boolean): void {
     this.enabled = on;
@@ -64,9 +69,10 @@ export class VideoCaption {
     this.syncYtSuppression();
   }
 
-  applyDisplay(pronScript: PronScript, showPron: boolean, showTr: boolean): void {
+  applyDisplay(pronScript: PronScript, showPron: boolean, showTr: boolean, hidePronForEnglish: boolean): void {
     this.pronScript = pronScript;
     this.showPron = showPron;
+    this.hidePronForEnglish = hidePronForEnglish;
     this.showTr = showTr;
     // 표시 방식이 바뀌면 현재 줄을 다시 그린다 (다음 tick을 기다리지 않는다)
     const index = this.currentIndex;
@@ -85,8 +91,16 @@ export class VideoCaption {
 
   updateTime(time: number): void {
     if (!this.enabled || this.lines.length === 0) return;
-    // 유튜브가 SPA 이동으로 플레이어 DOM을 재구성하면 호스트가 조용히 떨어져 나간다
-    if (!this.host?.isConnected) this.mount();
+    // 유튜브가 SPA 이동으로 플레이어 DOM을 재구성하면 호스트가 조용히 떨어져 나간다.
+    // updateTime은 최대 60Hz(rAF)로 도는데, 재시도할 곳(#movie_player)이 계속 없으면
+    // 매 tick DOM 삽입을 시도해 프레임을 깎는다 — 500ms 백오프로 재시도 빈도를 낮춘다.
+    if (!this.host?.isConnected) {
+      const now = performance.now();
+      if (now - this.lastMountAttempt >= 500) {
+        this.lastMountAttempt = now;
+        this.mount();
+      }
+    }
     this.lastTime = time;
     let index = -1;
     for (let i = 0; i < this.lines.length; i++) {
@@ -116,6 +130,17 @@ export class VideoCaption {
   private mount(): void {
     const player = document.querySelector<HTMLElement>('#movie_player');
     if (!player) return; // 플레이어가 아직 없다 — 다음 updateTime에서 재시도된다
+    // 이전 시도의 잔재(끊어진 호스트/스타일)를 먼저 정리한다 — 그대로 둔 채 새로 만들면
+    // 참조 없는 detached 엘리먼트가 재삽입 시도마다 쌓인다(5fps 감사 #4).
+    if (this.host && !this.host.isConnected) {
+      this.host.remove();
+      this.host = null;
+      this.lineEl = this.pronEl = this.trEl = null;
+    }
+    if (this.styleEl && !this.styleEl.isConnected) {
+      this.styleEl.remove();
+      this.styleEl = null;
+    }
     if (!this.styleEl || !this.styleEl.isConnected) {
       // 유일한 페이지 주입 스타일 — 유튜브 자막 숨김 + 카라오케 sung 강조색 두 규칙뿐
       this.styleEl = document.createElement('style');
@@ -132,10 +157,13 @@ export class VideoCaption {
     // 유튜브 DOM 안에서 «이름 없는 div»라 디버깅으로도 E2E 선택자로도 못 짚는다(실측:
     // 자막 검사가 요소를 못 찾아 검증 자체가 건너뛰어졌다).
     this.host.className = 'ey-video-caption';
-    // 자막 관례 위치: 하단 중앙, 조작을 막지 않게 pointer-events 없음
+    // 자막 관례 위치: 하단 중앙, 조작을 막지 않게 pointer-events 없음.
+    // z-index는 유튜브가 일시정지 때 띄우는 "More videos" 오버레이(.ytp-pause-overlay)보다
+    // 높아야 한다 — 안 그러면 그 오버레이가 자막 호스트를 덮어 일시정지 중 자막이 사라진
+    // 것처럼 보인다(실사용 제보). 유튜브 자체 오버레이 스택보다 확실히 위로.
     this.host.style.cssText = [
       'position:absolute', 'left:50%', 'bottom:8%', 'transform:translateX(-50%)',
-      'max-width:86%', 'z-index:60', 'pointer-events:none', 'text-align:center',
+      'max-width:86%', 'z-index:2000000', 'pointer-events:none', 'text-align:center',
       "font-family:'YouTube Sans',Roboto,'Noto Sans KR',sans-serif",
     ].join(';');
     // font-size·background는 applyStyleToEls가 fontScale·bgOpacity에 맞춰 별도로 채운다
@@ -145,8 +173,10 @@ export class VideoCaption {
     this.lineEl = document.createElement('div');
     this.lineEl.style.cssText = `${shared};color:#fff;font-weight:600;line-height:1.4`;
     this.pronEl = document.createElement('div');
-    // 발음 줄은 패널과 같은 앰버 계열로 원문과 구분한다
-    this.pronEl.style.cssText = `${shared};color:#ffd98e;opacity:0.92;margin-top:2px`;
+    // 발음 줄 기본색은 차분한 청회색 — 예전 앰버(#ffd98e)는 sung 강조색(#ffb02e)과
+    // 동계열이라 카라오케 진행이 안 보였다(실사용 제보 "노란 자막에 노란 하이라이트").
+    // 원문(흰색)과도, 진행(노랑)과도 갈리는 제3색이어야 한다.
+    this.pronEl.style.cssText = `${shared};color:#a9c4e6;opacity:0.95;margin-top:2px`;
     this.trEl = document.createElement('div');
     this.trEl.style.cssText = `${shared};color:#fff;opacity:0.95;margin-top:2px`;
     for (const el of [this.lineEl, this.pronEl, this.trEl]) {
@@ -211,7 +241,10 @@ export class VideoCaption {
 
     // 발음 줄 — 음절 세그(script별)가 있으면 카라오케 span, 없으면 통짜 텍스트로 폴백
     this.pronEl.replaceChildren();
-    const pronText = this.showPron && line ? resolvedPronunciation(line, this.pronScript) : undefined;
+    const pronVisible = line
+      ? shouldShowPron(line.text, { showPronunciation: this.showPron, hidePronForEnglish: this.hidePronForEnglish })
+      : false;
+    const pronText = pronVisible && line ? resolvedPronunciation(line, this.pronScript) : undefined;
     if (pronText) {
       this.pronEl.style.display = 'inline-block';
       const segs = line ? resolvedPronSegments(line, this.pronScript) : undefined;

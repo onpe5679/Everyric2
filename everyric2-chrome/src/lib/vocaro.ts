@@ -55,15 +55,19 @@ interface IndexEntry {
   slug: string;
 }
 
-/** 제목으로 곡 페이지를 찾아 가사(원문+발음+번역)를 반환. 못 찾으면 null */
-export async function vocaroLookup(server: ServerConfig, title: string): Promise<VocaroResult | null> {
+/** 제목으로 곡 페이지를 찾아 가사(원문+발음+번역)를 반환. 못 찾으면 null.
+ *  hint(정리 전 영상 제목)는 다중 버전 페이지의 표 선택용 — 없으면 title로 대신한다. */
+export async function vocaroLookup(
+  server: ServerConfig, title: string, hint?: string,
+): Promise<VocaroResult | null> {
   const trimmed = title.trim();
   if (!trimmed) return null;
+  const variantHint = hint ?? trimmed;
 
   // 1) ASCII 위주 제목이면 슬러그를 직접 추측 — 요청 1회로 끝나는 경우가 많다
   const guessed = guessSlug(trimmed);
   if (guessed) {
-    const page = await fetchSongPage(server, guessed);
+    const page = await fetchSongPage(server, guessed, variantHint);
     if (page) return page;
   }
 
@@ -75,7 +79,7 @@ export async function vocaroLookup(server: ServerConfig, title: string): Promise
   const entries = await getIndexEntries(server, indexPage);
   const match = entries ? findMatch(entries, trimmed) : null;
   if (match && match.slug !== guessed) {
-    return fetchSongPage(server, match.slug);
+    return fetchSongPage(server, match.slug, variantHint);
   }
   return null;
 }
@@ -174,8 +178,10 @@ function findMatch(entries: IndexEntry[], title: string): IndexEntry | null {
 
 // ── 곡 페이지 조회 ─────────────────────────────────────────────
 
-export async function fetchSongPage(server: ServerConfig, slug: string): Promise<VocaroResult | null> {
-  const res = await vocaroPage(server, slug);
+export async function fetchSongPage(
+  server: ServerConfig, slug: string, hint?: string,
+): Promise<VocaroResult | null> {
+  const res = await vocaroPage(server, slug, hint);
   if (!res?.found || !res.slug || !res.lines || res.lines.length === 0) return null;
   return {
     pageUrl: res.page_url ?? `http://vocaro.wikidot.com/${res.slug}`,

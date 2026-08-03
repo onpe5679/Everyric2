@@ -488,6 +488,25 @@ export function listSyncs(
   return request<SyncListItem[]>(server, `/api/sync/list?limit=${limit}`, undefined, 4000, sink);
 }
 
+/** 배치 조회 상한 — 서버 계약과 같다(재생목록 패널의 존재 배지용) */
+const SYNC_EXISTS_MAX = 100;
+
+/**
+ * 여러 영상의 서버 싱크(링크로 빌려온 것 포함) 존재 여부를 한 번에 — 재생목록 패널의
+ * 항목별 "서버 싱크 있음" 점 배지가 쓴다. 빈 배열을 보내면 요청 자체를 생략한다(서버가
+ * 빈 목록도 200으로 받아주지만 왕복이 무의미하다).
+ */
+export function syncExists(
+  server: ServerConfig, videoIds: string[], sink?: FailureSink,
+): Promise<Record<string, boolean> | null> {
+  if (videoIds.length === 0) return Promise.resolve({});
+  return request<{ exists: Record<string, boolean> }>(server, '/api/sync/exists', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_ids: videoIds.slice(0, SYNC_EXISTS_MAX) }),
+  }, 5000, sink).then(res => res?.exists ?? null);
+}
+
 /**
  * 서버를 쓸 수 있는지 + 못 쓴다면 왜인지.
  *
@@ -628,12 +647,15 @@ export interface VocaroMatchResponse {
   ja?: string | null;
 }
 
-/** 일본어 원제 등 클라이언트 독음 인덱스로 못 찾는 제목을 서버 원제 인덱스에 묻는다 */
+/** 일본어 원제 등 클라이언트 독음 인덱스로 못 찾는 제목을 서버 원제 인덱스에 묻는다.
+ *  타임아웃 6s — 예전 2.5s는 서버가 생성·정렬로 순간 눌린 사이 쉽게 초과했고, 그 한 번의
+ *  미스로 곡이 자막 폴백으로 생성되면 vocaroRef가 영영 비어 위키 발음·번역을 잃었다
+ *  (실측: 踊っチャイナ). 매칭은 곡 로드당 1회라 넉넉해도 비용이 없다. */
 export function vocaroMatch(
   server: ServerConfig, title: string, sink?: FailureSink,
 ): Promise<VocaroMatchResponse | null> {
   return request<VocaroMatchResponse>(
-    server, `/api/vocaro/match?title=${encodeURIComponent(title)}`, undefined, 2500, sink,
+    server, `/api/vocaro/match?title=${encodeURIComponent(title)}`, undefined, 6000, sink,
   );
 }
 
@@ -668,10 +690,13 @@ export interface VocaroIndexResponse {
  * 타임아웃은 서버의 위키 조회(예의 간격+백오프)까지 감싼 값이다.
  */
 export function vocaroPage(
-  server: ServerConfig, slug: string, sink?: FailureSink,
+  server: ServerConfig, slug: string, hint?: string, sink?: FailureSink,
 ): Promise<VocaroPageResponse | null> {
+  // hint(영상 제목)는 한 페이지에 여러 버전 가사(원곡/리믹스)가 실린 경우의 표 선택용.
+  // 파라미터를 모르는 구서버는 무시한다 — additive.
+  const q = hint ? `&hint=${encodeURIComponent(hint.slice(0, 300))}` : '';
   return request<VocaroPageResponse>(
-    server, `/api/vocaro/page?slug=${encodeURIComponent(slug)}`, undefined, 10000, sink,
+    server, `/api/vocaro/page?slug=${encodeURIComponent(slug)}${q}`, undefined, 10000, sink,
   );
 }
 

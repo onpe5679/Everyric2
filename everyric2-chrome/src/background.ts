@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchLimits, fetchNotices, fetchPreviousSync, fetchSyncVersion, fetchSyncVersions, fetchViewStats, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, submitFeedback, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
+import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchLimits, fetchNotices, fetchPreviousSync, fetchSyncVersion, fetchSyncVersions, fetchViewStats, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, submitFeedback, syncExists, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { mirahezeLookup } from './lib/miraheze';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
@@ -65,11 +65,23 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   const isEveryric = origin === 'https://everyric.com' || origin.endsWith('.everyric.com');
   const videoId = (message?.payload as { videoId?: unknown } | undefined)?.videoId;
   if (isEveryric && message?.type === 'SYNC_COMPLETE' && typeof videoId === 'string') {
+    // 방금 생겼으니 존재 캐시가 있다면 낡았다 — 지워서 다음 조회가 서버에 다시 묻게 한다
+    existsCache.delete(videoId);
     void broadcastToYouTubeTabs({ type: 'SYNC_GENERATED', payload: { videoId } });
     sendResponse({ success: true });
   }
   return true;
 });
+
+/**
+ * 재생목록 패널의 존재 배지 캐시 — 있음은 30분, 없음은 2분만 믿는다(방금 생성된 싱크를
+ * "없음"으로 오래 오해하지 않으려는 비대칭 TTL). 서비스워커가 잠들면 사라지는 휘발성
+ * 캐시로 충분하다(다음 조회가 다시 채운다). SYNC_GENERATED 발신 지점에서 해당 videoId를
+ * 무효화한다(위 onMessageExternal).
+ */
+const EXISTS_TTL_HIT_MS = 30 * 60 * 1000;
+const EXISTS_TTL_MISS_MS = 2 * 60 * 1000;
+const existsCache = new Map<string, { exists: boolean; expiresAt: number }>();
 
 // 툴바 아이콘 클릭 → 해당 탭의 오버레이 토글
 chrome.action.onClicked.addListener(tab => {
@@ -265,14 +277,16 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
      */
     case 'VOCARO_LOOKUP': {
       const server = await getServerConfig();
+      // hint = 정리 전 영상 제목 — 다중 버전 페이지(원곡/리믹스)에서 맞는 표를 고른다
+      const hint = message.payload.hint ?? message.payload.title;
       const matched = await vocaroMatch(server, message.payload.title);
       if (matched?.found && matched.slug) {
-        const page = await fetchSongPage(server, matched.slug);
+        const page = await fetchSongPage(server, matched.slug, hint);
         if (page) return { data: page };
       }
       // 서버가 미발견이거나 페이지를 못 읽은 경우에만 클라 경로 — 초성 인덱스가 답할 수
       // 있는 제목(한글·라틴·숫자 시작)에서만 결과가 나온다
-      return { data: await vocaroLookup(server, message.payload.title) };
+      return { data: await vocaroLookup(server, message.payload.title, hint) };
     }
 
     // 가사 본문 없이 원제 매칭만 — 제목 확인·후보 표시 경로가 페이지 조회 없이 쓴다
@@ -377,6 +391,33 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
         fetchViewStats(server, message.payload.videoIds, sink));
     }
 
+    // 재생목록 패널 존재 배지 — 캐시로 먼저 채우고, 남는 것만 서버에 묻는다.
+    // 서버 조회가 실패해도 캐시로 채운 분은 그대로 돌려준다(부분 성공을 error로 뭉개지 않는다).
+    case 'SYNC_EXISTS': {
+      const ids = [...new Set(message.payload.videoIds)].slice(0, 100);
+      const now = Date.now();
+      const result: Record<string, boolean> = {};
+      const need: string[] = [];
+      for (const id of ids) {
+        const cached = existsCache.get(id);
+        if (cached && cached.expiresAt > now) result[id] = cached.exists;
+        else need.push(id);
+      }
+      if (need.length > 0) {
+        const fetched = await syncExists(await getServerConfig(), need);
+        if (fetched) {
+          for (const id of need) {
+            const exists = fetched[id] ?? false;
+            existsCache.set(id, { exists, expiresAt: now + (exists ? EXISTS_TTL_HIT_MS : EXISTS_TTL_MISS_MS) });
+            result[id] = exists;
+          }
+        }
+        // 조회 실패(구버전 서버·오프라인)는 조용히 넘어간다 — 그 항목만 배지가 안 뜰 뿐,
+        // 목록 자체는 계속 동작해야 한다(다른 additive 엔드포인트와 같은 규칙)
+      }
+      return { data: result };
+    }
+
     case 'SYNC_LIST': {
       // 검색 필터가 생겨 후보를 넉넉히 받는다 — 서버 목록은 최신순.
       // 빈 배열([])과 "서버가 못 줬다"를 화면이 구분할 수 있게 실패 사유를 함께 보낸다
@@ -386,7 +427,11 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     }
 
     case 'VOCARO_PAGE':
-      return { data: await fetchSongPage(await getServerConfig(), message.payload.slug) };
+      return {
+        data: await fetchSongPage(
+          await getServerConfig(), message.payload.slug, message.payload.hint,
+        ),
+      };
 
     // 자막 **본문**은 서버(yt-dlp) 경유 — 워치 페이지에서 긁은 timedtext URL은
     // POT(proof-of-origin) 강제로 브라우저 플레이어 밖에선 빈 응답이 온다 (실측).

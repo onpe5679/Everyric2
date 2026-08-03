@@ -1,11 +1,12 @@
 import type { LyricLine, SearchCandidate, ServerLogEntry, ServerStatus, SongInfo, SongKey, SongTempo, SyncDebugMeta } from '../types';
 import type { MicSample } from '../lib/mic-pitch';
-import { resolvedPronSegments, resolvedPronunciation, type PronScript } from '../lib/lang';
+import { resolvedPronSegments, resolvedPronunciation, shouldShowPron, type PronScript } from '../lib/lang';
 import { t } from '../lib/i18n';
 import { unknownStatus } from '../lib/server-status';
 import type { ThemeName } from '../lib/theme';
 import { h, icon } from './dom';
 import { appendKaraokeSpans, appendTimedSpans } from './karaoke';
+import { buildLineEl, collectFillTargets, setElFilled, updateFillTargets, type FillTarget } from './line-render';
 import { PitchLaneRenderer } from './pitch-lane';
 import {
   applyServerGate,
@@ -39,6 +40,8 @@ export interface PipOptions {
   initialVideoRatio: number;
   /** 현재 라인 밑에 한국어 발음 표기 표시 여부 */
   showPronunciation: boolean;
+  /** 라틴 문자 우세 줄(영어 곡)에서는 발음 줄을 감춘다 */
+  hidePronForEnglish: boolean;
   /** 발음 표기 방식(자동 해석 완료 — hangul/romaji/kana). 호출부(content.ts)가
    *  lib/lang.ts의 resolveScript(settings)로 미리 해석해 넘긴다 */
   pronScript: PronScript;
@@ -64,8 +67,9 @@ export interface PipOptions {
   pipChromaKey: 'off' | 'green' | 'blue' | 'magenta';
   /** 디버그: 글자별 CTC 신뢰도를 색으로 표시 */
   showConfidence: boolean;
-  /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
-  pitchPronPosition: 'note' | 'bottom' | 'both';
+  /** 발음 표기 위치: off = 표시 안 함, note = 노트마다 위에 부착, bottom = 화면 하단 중앙
+   *  (진행률 그라데이션), both = 노트 부착 + 하단 동시, center = 레인 중앙 반투명 오버레이 */
+  pitchPronPosition: 'off' | 'note' | 'bottom' | 'both' | 'center';
   /** 레인 높이 드래그 조절 완료 시 */
   onPitchHeightChange: (px: number) => void;
   /** 가사 라인 클릭 — 가사 타임라인(초) 기준 */
@@ -108,6 +112,13 @@ export interface PipOptions {
   onKaraokeToggle: (on: boolean) => void;
   /** 좌상단 미니 버튼 — PiP 영상 표시 토글 (설정 pipShowVideo) */
   onVideoToggle: (on: boolean) => void;
+  /** PiP 창 오른쪽에 스크롤 가사 목록 컬럼 표시 여부(대칭 UI, 설정 pipLyricsList) */
+  pipLyricsList: boolean;
+  /** 좌상단 미니 버튼 — 가사 목록 컬럼 토글 */
+  onLyricsListToggle: (on: boolean) => void;
+  /** 좌상단 미니 버튼 — 레인 발음 줄 위치 순환(off/bottom/center). pitchPronPosition
+   *  설정 자체를 바꾼다(메인 패널 설정 시트의 select와 같은 설정을 공유). */
+  onPronPositionChange: (position: 'off' | 'note' | 'bottom' | 'both' | 'center') => void;
   /** 가사 패널(가사 없음·검색·붙여넣기·싱크 생성) 콜백 — 메인 창과 같은 핸들러로 배선한다 */
   panel: PanelCallbacks;
   /** 열 때의 테마 — content가 lib/theme.resolveTheme로 판정한 값. 이후 갱신은 setTheme */
@@ -133,6 +144,14 @@ const PREV_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentC
 const NEXT_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 6H18v12h-2.5zM6 18l9-6-9-6z"/></svg>';
 const LIST_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 6h11v2H3zm0 5h11v2H3zm0 5h8v2H3zm16-11v8.1a2.8 2.8 0 1 0 2 2.7V7h2V5h-4z"/></svg>';
 const FIND_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>';
+/** 코너 미니 버튼 — 오른쪽 가사 목록 컬럼 토글(대칭 UI). overlay.ts MINI_POS_LEFT_SVG와
+ *  같은 "상자 + 강조 구역" 도안 계열이되, 강조가 오른쪽에 있어 컬럼이 오른쪽에 붙음을 암시한다 */
+const SIDEBAR_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="15" y="4" width="6" height="16" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
+/** 코너 미니 버튼 — 레인 발음 줄 위치 순환(off/bottom/center). 3개 아이콘이 하나의
+ *  "상자 + 강조 띠" 언어를 공유한다: off=대각선(꺼짐), bottom=하단 띠, center=중앙 띠 */
+const PRON_OFF_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="4.5" y1="19.5" x2="19.5" y2="4.5"/></svg>';
+const PRON_BOTTOM_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="15" width="18" height="5" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
+const PRON_CENTER_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="10.5" width="18" height="5" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
 
 const MIN_VIDEO_RATIO = 0.15;
 const MAX_VIDEO_RATIO = 0.75;
@@ -187,11 +206,15 @@ const IDLE_REDRAW_MS = 100;
 // PiP 창 크기 기억 — 비정상적으로 작거나 큰 값이 저장/전달돼 창이 못 쓰게 되지 않도록 클램프
 const MIN_PIP_WIDTH = 280;
 const MAX_PIP_WIDTH = 960;
+/** 가사 목록 컬럼(pipLyricsList)이 켜져 있으면 그만큼 더 넓게 허용한다 — 안 그러면
+ *  컬럼을 켠 채 저장한 폭이 다음에 열 때 960으로 깎여 컬럼이 본문을 짓누른다 */
+const MAX_PIP_WIDTH_WITH_LIST = 1280;
 const MIN_PIP_HEIGHT = 200;
 const MAX_PIP_HEIGHT = 1000;
-function clampPipSize(width: number, height: number): { width: number; height: number } {
+function clampPipSize(width: number, height: number, listOn = false): { width: number; height: number } {
+  const maxW = listOn ? MAX_PIP_WIDTH_WITH_LIST : MAX_PIP_WIDTH;
   return {
-    width: Math.round(Math.min(MAX_PIP_WIDTH, Math.max(MIN_PIP_WIDTH, width))),
+    width: Math.round(Math.min(maxW, Math.max(MIN_PIP_WIDTH, width))),
     height: Math.round(Math.min(MAX_PIP_HEIGHT, Math.max(MIN_PIP_HEIGHT, height))),
   };
 }
@@ -285,6 +308,10 @@ export class PipController {
   private chromaKey: 'off' | 'green' | 'blue' | 'magenta' = 'off';
   /** 발음 표기 방식 — 스테이지 발음 줄(renderLines)이 쓴다. 레인 쪽 반영은 lane이 맡는다 */
   private pronScript: PronScript = 'hangul';
+  /** 스테이지 발음 줄 표시 여부 — 전체 끔은 body.ey-hide-pron 클래스와 함께 이 필드도
+   *  본다(영어만 끔과 결합 판정하려면 클래스 하나로는 부족하다, lib/lang.ts shouldShowPron) */
+  private showPronunciation = true;
+  private hidePronForEnglish = false;
   private metronomeRate = 1;
   private metronomeBeat = 0;
   private metroRateBtn: HTMLButtonElement | null = null;
@@ -303,8 +330,23 @@ export class PipController {
   private cornerKaraokeBtn: HTMLButtonElement | null = null;
   private cornerVideoBtn: HTMLButtonElement | null = null;
   private cornerPanelBtn: HTMLButtonElement | null = null;
+  /** 코너 미니 버튼 — 레인 발음 줄 위치 순환(off→bottom→center) */
+  private cornerPronBtn: HTMLButtonElement | null = null;
+  /** 코너 미니 버튼 — 오른쪽 가사 목록 컬럼 토글(대칭 UI) */
+  private cornerLyricsBtn: HTMLButtonElement | null = null;
   /** PiP 영상 표시 '설정' 상태 — 미러 성공 여부(DRM 실패 등)와 무관한 사용자 의도 */
   private videoOn = false;
+  /** 현재 레인 발음 표기 위치 — setPitchPronPosition이 갱신, 코너 버튼 순환·아이콘 판정에 쓴다 */
+  private pronPosition: PipOptions['pitchPronPosition'] = 'note';
+  /** 오른쪽 가사 목록 컬럼 — 대칭 UI(설정 pipLyricsList). 켜지면 clampPipSize 상한도 넓어진다 */
+  private lyricsColEl: HTMLDivElement | null = null;
+  private lyricsListOn = false;
+  private lyricsRowEls: HTMLDivElement[] = [];
+  /** 목록 컬럼의 현재 활성 줄 — 원문 단어/발음 음절 스팬(카라오케 채움 대상). 매 tick
+   *  renderFrame이 이것만 갱신한다(목록 전체 재구성 없이 활성 줄만, 메인 activeWordEls와 같은 규약) */
+  private lyricsColFillTargets: FillTarget[] = [];
+  /** 앞선 이 개수만큼의 목록 줄이 '전부 채워진' 상태다 — 메인 overlay.ts filledUpTo와 같은 경계 추적 */
+  private lyricsColFilledUpTo = 0;
 
   // ── 가사 패널 모드 (가사가 없어도 창이 살아남게) ─────────────────
   /** 패널 조각(panels.ts)이 그려지는 컨테이너 */
@@ -363,7 +405,7 @@ export class PipController {
         .documentPictureInPicture;
       if (!api) return false;
 
-      const { width, height } = clampPipSize(opts.width, opts.height);
+      const { width, height } = clampPipSize(opts.width, opts.height, opts.pipLyricsList);
       let win: Window;
       try {
         win = await api.requestWindow({ width, height });
@@ -400,8 +442,12 @@ export class PipController {
     this.onPitchWindowChange = opts.onPitchWindowChange;
     this.chromaKey = opts.pipChromaKey;
     this.pronScript = opts.pronScript;
+    this.showPronunciation = opts.showPronunciation;
+    this.hidePronForEnglish = opts.hidePronForEnglish;
     this.metronomeRate = opts.metronomeRate;
     this.metronomeBeat = opts.metronomeBeat;
+    this.pronPosition = opts.pitchPronPosition;
+    this.lyricsListOn = opts.pipLyricsList;
     // 레인 표시 취향은 렌더러가 들고 있다 — 창을 열 때 한 번에 밀어넣고, 이후에는
     // 개별 setter가 같은 경로(lane.setOptions)로 갱신한다
     this.lane.setOptions({
@@ -620,6 +666,24 @@ export class PipController {
       title: t('pip.controls.panelToggle'),
       on: { click: () => this.togglePanel() },
     }, icon(FIND_SVG));
+    // 레인 발음 줄 위치 순환 — off → bottom → center. 설정 시트에서 'note'·'both'를
+    // 직접 고른 상태라면(메인 패널 전용 값) 이 버튼은 'off'로 되돌린 뒤부터 순환한다
+    // (코너 버튼은 3상태만 다루는 축약 컨트롤이라는 것을 명확히 하기 위한 선택).
+    this.cornerPronBtn = h('button', {
+      className: 'ey-pip-mini',
+      title: t('pip.controls.pronPositionToggle'),
+      on: {
+        click: () => {
+          const next = this.pronPosition === 'off' ? 'bottom' : this.pronPosition === 'bottom' ? 'center' : 'off';
+          opts.onPronPositionChange(next);
+        },
+      },
+    });
+    this.cornerLyricsBtn = h('button', {
+      className: 'ey-pip-mini',
+      title: t('pip.controls.lyricsListToggle'),
+      on: { click: () => opts.onLyricsListToggle(!this.lyricsListOn) },
+    }, icon(SIDEBAR_SVG));
     this.syncCornerButtons();
 
     // 가사 패널 컨테이너 — 내용이 채워지기 전까지 숨김
@@ -651,20 +715,29 @@ export class PipController {
         this.windowMinusBtn, this.windowLabelBtn, this.windowPlusBtn, this.modeBtn,
         this.volumeSlider, progressWrap, this.timeEl),
     );
+    // 오른쪽 가사 목록 컬럼(대칭 UI) — 기존(2026-08 이전) 세로 스택 전체는 .ey-pip-main으로
+    // 감싼다. body가 가로(row)로 바뀌어도 .ey-pip-main 안은 예전과 완전히 같은 세로 흐름이라
+    // 컬럼이 꺼져 있으면(기본값) 화면이 예전과 한 픽셀도 다르지 않다.
+    this.lyricsColEl = h('div', { className: 'ey-pip-lyricscol' });
     doc.body.append(
-      this.videoWrapEl,
-      this.dividerEl,
-      h('div', { className: 'ey-pip-stage' }, this.prevEl, this.currentEl, this.pronEl, this.trEl, this.nextEl),
-      this.panelEl,
-      this.pitchDividerEl,
-      this.pitchCanvas,
-      this.serverBarEl,
-      this.chipEl,
-      this.noticeEl,
-      this.playlistEl,
-      this.footerEl,
-      h('div', { className: 'ey-pip-corner' }, this.cornerKaraokeBtn, this.cornerVideoBtn, this.cornerPanelBtn),
+      h('div', { className: 'ey-pip-main' },
+        this.videoWrapEl,
+        this.dividerEl,
+        h('div', { className: 'ey-pip-stage' }, this.prevEl, this.currentEl, this.pronEl, this.trEl, this.nextEl),
+        this.panelEl,
+        this.pitchDividerEl,
+        this.pitchCanvas,
+        this.serverBarEl,
+        this.chipEl,
+        this.noticeEl,
+        this.playlistEl,
+        this.footerEl,
+      ),
+      this.lyricsColEl,
+      h('div', { className: 'ey-pip-corner' },
+        this.cornerKaraokeBtn, this.cornerVideoBtn, this.cornerPanelBtn, this.cornerPronBtn, this.cornerLyricsBtn),
     );
+    this.applyLyricsListVisibility();
     this.refreshPlayerControls();
     this.renderServerBar(); // 서버가 이미 죽어 있는 채로 열렸다면 열자마자 사유를 보여 준다
 
@@ -707,13 +780,21 @@ export class PipController {
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault();
         opts.onSeek(Math.max(0, this.lastTime - 5));
+      } else if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+        // 볼륨 ±0.05 — preventDefault로 페이지 스크롤(이 창엔 스크롤할 것도 없지만)을 막는다.
+        // onVolumeChange가 볼륨>0일 때 mute도 함께 풀어 준다(content.ts 콜백, 슬라이더와 동일 경로)
+        e.preventDefault();
+        const cur = Number(this.volumeSlider?.value ?? 100) / 100;
+        const next = Math.min(1, Math.max(0, cur + (e.code === 'ArrowUp' ? 0.05 : -0.05)));
+        if (this.volumeSlider) this.volumeSlider.value = String(Math.round(next * 100));
+        opts.onVolumeChange(next);
       }
     });
 
     win.addEventListener('pagehide', () => {
       // 닫히기 직전 창 크기를 기억해 두었다가 다음에 열 때 복원 (위치는 브라우저가 자체 재사용)
       if (win.innerWidth > 0 && win.innerHeight > 0) {
-        const size = clampPipSize(win.innerWidth, win.innerHeight);
+        const size = clampPipSize(win.innerWidth, win.innerHeight, this.lyricsListOn);
         opts.onSizeChange(size.width, size.height);
       }
       // 프레임 루프를 먼저 끊는다 — 닫힌 창의 rAF가 남으면 누수이고, 아래에서 null로
@@ -748,6 +829,13 @@ export class PipController {
       this.cornerKaraokeBtn = null;
       this.cornerVideoBtn = null;
       this.cornerPanelBtn = null;
+      this.cornerPronBtn = null;
+      this.cornerLyricsBtn = null;
+      this.lyricsColEl = null;
+      this.lyricsRowEls = [];
+      this.lyricsColFillTargets = [];
+      this.lyricsColFilledUpTo = 0;
+      this.lyricsListOn = false;
       this.videoOn = false;
       this.laneShown = false;
       this.panelEl = null;
@@ -792,10 +880,20 @@ export class PipController {
   attachVideo(source: HTMLVideoElement): void {
     if (!this.win || !this.videoWrapEl) return;
     this.stopMirror();
+    // 미디어가 아직 없으면(SPA 이동 직후 readyState 0) 캡처를 시도하지 않는다 —
+    // bindMirrorRefresh의 loadeddata가 다시 부른다. 여기서 만들어지는 0트랙 스트림도
+    // 살아 있는 캡처 sink라, 버리기만 하면 원본 video에 매달린 채 프레임 복사를 계속해
+    // 페이지 전체가 계단식으로 느려진다(고아 PIP 미러 5fps와 같은 기전).
+    if (source.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      this.hideVideoArea();
+      return;
+    }
     try {
       const capturable = source as HTMLVideoElement & { captureStream?: () => MediaStream };
       const stream = capturable.captureStream?.();
       if (!stream || stream.getVideoTracks().length === 0) {
+        // 참조만 버려선 안 된다 — sink를 명시적으로 끊는다 (위 주석과 같은 이유)
+        stream?.getTracks().forEach(t => t.stop());
         this.hideVideoArea();
         return;
       }
@@ -853,6 +951,75 @@ export class PipController {
     this.applyPitchVisibility();
     this.syncCornerButtons(); // 가사 유무가 바뀌면 패널 토글 버튼 노출 조건도 바뀐다
     this.renderLines();
+    this.renderLyricsCol();
+  }
+
+  /** 오른쪽 가사 목록 컬럼 토글(대칭 UI 코너 버튼) — 즉시 반영 */
+  setLyricsListOn(on: boolean): void {
+    this.lyricsListOn = on;
+    this.applyLyricsListVisibility();
+    this.syncCornerButtons();
+  }
+
+  private applyLyricsListVisibility(): void {
+    // 'flex' 명시 — CSS 기본이 display:none이라 ''(인라인 제거)로는 켜지지 않는다
+    // (실브라우저 검증 R7에서 적발: 항목 134개가 그려진 채 통째로 숨어 있었다)
+    if (this.lyricsColEl) this.lyricsColEl.style.display = this.lyricsListOn ? 'flex' : 'none';
+    if (this.lyricsListOn) this.syncLyricsColActive();
+  }
+
+  /**
+   * 가사 목록 컬럼 내용을 통째로 다시 그린다 — 곡이 바뀌거나(setLines) 컬럼을 처음
+   * 켤 때, 발음 표기 설정이 바뀔 때만 부른다(활성 줄 강조·채움은 syncLyricsColActive/
+   * renderFrame이 훨씬 싸게 갱신한다).
+   *
+   * 줄 하나의 DOM(.ey-line 구조)은 line-render.ts의 공용 렌더러로 만든다 — 메인 가사창의
+   * `.ey-line`과 완전히 같은 클래스 구조라, 같은 overlay.css를 받는 PIP 문서에서도 같은
+   * 모양이 난다(대칭 UI 요구사항: "PIP·메인 가사창이 같은 기능·모양이어야 한다").
+   */
+  private renderLyricsCol(): void {
+    if (!this.lyricsColEl) return;
+    const settings = { showPronunciation: this.showPronunciation, hidePronForEnglish: this.hidePronForEnglish };
+    this.lyricsRowEls = this.lines.map(line => {
+      const { el } = buildLineEl(line, this.pronScript, settings);
+      el.addEventListener('click', () => {
+        if (line.time !== null) this.onSeek(line.time);
+      });
+      return el;
+    });
+    this.lyricsColFilledUpTo = 0;
+    this.lyricsColFillTargets = [];
+    this.lyricsColEl.replaceChildren(...this.lyricsRowEls);
+    this.syncLyricsColActive();
+  }
+
+  /**
+   * 활성 줄 강조 + 채움 경계 갱신 + 자동 스크롤 — update(index)마다 부르므로 컬럼이 꺼져
+   * 있으면 즉시 반환한다(scrollIntoView는 강제 레이아웃을 유발해 컬럼이 안 보일 때는 낭비다).
+   *
+   * 지나온 줄은 메인(overlay.ts fillUpTo)과 같은 규칙으로 통째로 채우고(현재 위치의
+   * 함수 — 재생으로 지나왔는지 클릭으로 건너뛰었는지 무관하게 같은 화면), 활성 줄의
+   * 원문/발음 스팬만 lyricsColFillTargets로 모아 둔다 — 그 배열의 매 tick 갱신(sung
+   * 토글)은 renderFrame이 담당해 목록 전체를 다시 만들지 않는다.
+   */
+  private syncLyricsColActive(): void {
+    if (!this.lyricsListOn) return;
+    const target = Math.max(0, this.index);
+    while (this.lyricsColFilledUpTo < target) {
+      setElFilled(this.lyricsRowEls[this.lyricsColFilledUpTo], true);
+      this.lyricsColFilledUpTo++;
+    }
+    while (this.lyricsColFilledUpTo > target) {
+      this.lyricsColFilledUpTo--;
+      setElFilled(this.lyricsRowEls[this.lyricsColFilledUpTo], false);
+    }
+    this.lyricsRowEls.forEach((row, i) => {
+      row.classList.toggle('active', i === this.index);
+      row.classList.toggle('past', this.index >= 0 && i < this.index);
+    });
+    const active = this.index >= 0 ? this.lyricsRowEls[this.index] : undefined;
+    this.lyricsColFillTargets = active ? collectFillTargets(active) : [];
+    active?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 
   /** 레인 표시 구간(마디 수) 설정 즉시 반영 — 0.5마디까지 허용 */
@@ -970,9 +1137,11 @@ export class PipController {
     this.lane.setOptions({ countdown: enabled });
   }
 
-  /** 발음 표기 위치(노트 위/화면 하단) 즉시 반영 — 다음 레인 렌더에서 바로 적용됨 */
-  setPitchPronPosition(position: 'note' | 'bottom' | 'both'): void {
+  /** 발음 표기 위치(꺼짐/노트 위/화면 하단/중앙 오버레이) 즉시 반영 — 다음 레인 렌더에서 바로 적용됨 */
+  setPitchPronPosition(position: 'off' | 'note' | 'bottom' | 'both' | 'center'): void {
+    this.pronPosition = position;
     this.lane.setOptions({ pronPosition: position });
+    this.syncCornerButtons();
   }
 
   /** 발음 표기 방식 변경 즉시 반영 — 음정 노트에 부착된 발음(collectPitchData)도 다시 계산한다
@@ -982,6 +1151,7 @@ export class PipController {
     this.pronScript = script;
     this.lane.setOptions({ pronScript: script });
     this.renderLines();
+    this.renderLyricsCol();
   }
 
   /** 현재 라인 인덱스 변경 시 호출 */
@@ -990,6 +1160,7 @@ export class PipController {
     this.index = index;
     this.lane.setIndex(index);
     this.renderLines();
+    this.syncLyricsColActive();
   }
 
   /** 번역 등 라인 데이터가 바뀐 뒤 강제 재렌더 */
@@ -1038,7 +1209,23 @@ export class PipController {
 
   /** 발음 표기 설정 토글 즉시 반영 */
   setShowPronunciation(visible: boolean): void {
+    this.showPronunciation = visible;
     this.win?.document.body.classList.toggle('ey-hide-pron', !visible);
+    if (this.win) {
+      this.renderLines();
+      this.renderLyricsCol();
+    }
+  }
+
+  /** 영어 발음 표기 끔 설정 즉시 반영 — 전체 끔(showPronunciation)과 달리 CSS 클래스
+   *  하나로는 "영어 줄만" 못 가려서 렌더 시점에 shouldShowPron으로 직접 판정한다 */
+  setHidePronForEnglish(v: boolean): void {
+    if (this.hidePronForEnglish === v) return;
+    this.hidePronForEnglish = v;
+    if (this.win) {
+      this.renderLines();
+      this.renderLyricsCol();
+    }
   }
 
   /** 가라오케 음정 바 설정 토글 즉시 반영 */
@@ -1058,6 +1245,22 @@ export class PipController {
       const toggleable = this.panelAvailable && this.lines.length > 0;
       this.cornerPanelBtn.style.display = toggleable ? '' : 'none';
       this.cornerPanelBtn.classList.toggle('on', this.panelActive);
+    }
+    if (this.cornerPronBtn) {
+      const icons = { off: PRON_OFF_SVG, bottom: PRON_BOTTOM_SVG, center: PRON_CENTER_SVG } as const;
+      // 코너 버튼은 off/bottom/center 3상태만 다룬다 — 설정 시트에서 'note'·'both'를
+      // 직접 고른 상태는 이 버튼이 알 수 없는 4번째 값이라 off 아이콘으로 대표해 둔다
+      // (다음 클릭이 정확히 off→bottom 규약을 따르므로 사용자가 헷갈릴 일은 없다)
+      const key = this.pronPosition === 'bottom' || this.pronPosition === 'center' ? this.pronPosition : 'off';
+      this.cornerPronBtn.replaceChildren(icon(icons[key]));
+      this.cornerPronBtn.classList.toggle('on', this.pronPosition !== 'off');
+      // 노트 데이터(레인)가 있는 곡에서만 의미가 있다 — 가라오케 코너 버튼과 노출 조건을 맞춘다
+      this.cornerPronBtn.style.display = this.lane.hasNotes() ? '' : 'none';
+    }
+    if (this.cornerLyricsBtn) {
+      this.cornerLyricsBtn.classList.toggle('on', this.lyricsListOn);
+      // 되돌아갈 가사가 있을 때만 의미가 있다 — cornerPanelBtn과 같은 조건
+      this.cornerLyricsBtn.style.display = this.lines.length > 0 ? '' : 'none';
     }
   }
 
@@ -1621,6 +1824,8 @@ export class PipController {
     for (const { start, el } of this.wordEls) {
       el.classList.toggle('sung', start <= time);
     }
+    // 목록 컬럼은 활성 줄만 갱신한다 — 목록 전체를 매 프레임 재구성하지 않는다
+    if (this.lyricsListOn) updateFillTargets(this.lyricsColFillTargets, time);
     if (this.progressEl && duration > 0) {
       this.progressEl.style.width = `${Math.min(100, (time / duration) * 100)}%`;
     }
@@ -1711,8 +1916,11 @@ export class PipController {
     // 음절 span을 wordEls에 합류시켜 프레임 렌더(renderFrame)의 sung 토글을 그대로 태운다
     if (this.pronEl) {
       this.pronEl.replaceChildren();
-      const pron = (current && resolvedPronunciation(current, this.pronScript)) ?? '';
-      const segs = current ? resolvedPronSegments(current, this.pronScript) : undefined;
+      const pronOk = current
+        ? shouldShowPron(current.text, { showPronunciation: this.showPronunciation, hidePronForEnglish: this.hidePronForEnglish })
+        : false;
+      const pron = (pronOk && current && resolvedPronunciation(current, this.pronScript)) || '';
+      const segs = pronOk && current ? resolvedPronSegments(current, this.pronScript) : undefined;
       const mapped = current && pron && segs && segs.length > 0
         ? appendTimedSpans(this.pronEl, pron, segs, s => s.text, seg => {
             const el = h('span', { className: 'ey-pron-syl', text: seg.text });

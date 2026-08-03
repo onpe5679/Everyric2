@@ -1,10 +1,11 @@
 import { detectSong, getCurrentVideoId, getVideoElement } from './lib/song-detector';
+import { getPlaylist, playNext, playPlaylistItem, playPrevious } from './lib/yt-player';
 import { SyncEngine, type SyncHandlers } from './lib/sync-engine';
 import { KaraokeAudio, collectMelodyNotes } from './lib/karaoke-audio';
 import { parseTriLineLyrics } from './lib/tri-line';
 import { describeRemoved, stripPartMarkers } from './lib/lyrics-clean';
 import { MicPitch } from './lib/mic-pitch';
-import { getGeometry, getSettings, saveGeometry, saveSettings } from './lib/settings';
+import { DEFAULT_SETTINGS, getGeometry, getSettings, saveGeometry, saveSettings } from './lib/settings';
 import { matchWikiLinesToSegments, resolveScript, resolvedPronunciation } from './lib/lang';
 import { setUiLanguage, t } from './lib/i18n';
 import { LyricsOverlay } from './ui/overlay';
@@ -84,8 +85,12 @@ interface TrackedJob {
   depth?: 'fast' | 'medium' | 'heavy';
   /** 남은 예상 시간(초) / 큐 대기 예상(초) — 없으면 화면은 퍼센트로 폴백한다 */
   etaSec?: number;
+  /** etaSec을 마지막으로 서버와 동기화한 시각(Date.now) — 폴링 사이 1초 카운트다운의 기준 */
+  etaSyncedAt?: number;
   queueEtaSec?: number;
   queuePosition?: number;
+  /** 경과가 서버 추정 중앙값을 초과 — ETA 문구 대신 단계·퍼센트로 갈아탄다 */
+  etaOverrun?: boolean;
   /** heavy 승격을 이미 알렸는가 — 폴링마다 같은 칩이 다시 뜨지 않게 하는 일회성 표식 */
   heavyNoticed?: boolean;
   /**
@@ -147,11 +152,14 @@ const pendingTranslate = new Map<string, Promise<TranslatedLine[] | undefined>>(
 async function init(): Promise<void> {
   settings = await getSettings();
   setUiLanguage(settings.uiLanguage); // 이 콘텐츠 스크립트가 실제로 t()를 쓰는 유일한 곳 — 세션 시작 시 한 번 맞춘다
-  videoCaption.applyDisplay(resolveScript(settings), settings.showPronunciation, settings.showTranslation);
+  videoCaption.applyDisplay(
+    resolveScript(settings), settings.showPronunciation, settings.showTranslation, settings.hidePronForEnglish,
+  );
   videoCaption.applyStyle({ fontScale: settings.captionFontScale, bgOpacity: settings.captionBgOpacity });
   videoCaption.setEnabled(settings.videoCaptions);
   [cssText, initialGeometry] = await Promise.all([loadCss(), getGeometry()]);
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+  await loadWarnDismissed(); // 저신뢰 경고를 처음 그리기 전에 곡별 억제 목록이 준비돼 있어야 한다
   await restoreActiveJobs();
   watchJobsFromOtherTabs();
   watchSettingsFromOtherTabs();
@@ -350,6 +358,11 @@ function observeNavigation(): void {
   document.addEventListener('yt-navigate-finish', () => window.setTimeout(checkCurrentPage, 300));
   window.setInterval(checkCurrentPage, 1500);
   window.setInterval(watchVideoBinding, 3000);
+  // 다음 영상 카드·재생목록 패널 결함 수리(2026-08-03): 예전엔 엔진 tick에만 의존해서
+  // 싱크 없는 영상(엔진이 아예 안 돈다 — startEngine 참고)에서는 영원히 안 갱신됐다.
+  // 엔진과 무관한 자체 타이머로 갈아탄다 — 각 함수 안의 스로틀이 중복 호출을 거른다.
+  window.setInterval(() => refreshNextUp(), 5000);
+  window.setInterval(() => refreshPlaylist(), PLAYLIST_REFRESH_MS);
   // 유튜브 다크모드 토글(html[dark])을 실시간 반영 — theme=auto일 때 패널·PiP·레인 색 갱신.
   // PiP는 유튜브 페이지 컨텍스트가 없어 스스로 판정할 수 없으므로 여기서 판정해 밀어넣는다.
   new MutationObserver(() => {
@@ -521,6 +534,11 @@ function beginFollowing(videoId: string): void {
   // 곡 전환에서 이미 setNextUp(null)을 하고 있었고 메인 패널만 빠져 있었다.
   overlay?.setNextUp(null);
   lastNextUpPush = 0; // 다음 틱이 스로틀에 막히지 않고 새 값을 즉시 채우게
+  // 전환 지점에서 즉시 한 번 — 이후는 observeNavigation의 자체 타이머가 이어받는다.
+  // (SPA 이동 직후라 DOM이 아직 이전 영상 것일 수 있다는 점은 checkCurrentPage의
+  // stale 판정과 같은 한계다 — 다음 tick/interval에서 스스로 바로잡는다)
+  refreshNextUp(true);
+  refreshPlaylist(true);
 }
 
 function checkCurrentPage(): void {
@@ -625,6 +643,10 @@ function cleanupForPage(): void {
   karaokeAudio.setTempo(null);
   videoCaption.setLines([]); // 이전 곡 자막이 새 영상 위에 남으면 안 된다
   overlay?.setVisible(false);
+  // 재생목록 패널도 영상 없는 페이지(홈·검색)에서는 비운다 — 남으면 이전 페이지의
+  // 목록이 새 무영상 페이지 위에 떠 있는 것처럼 보인다
+  overlay?.setPlaylist(null);
+  lastPlaylistItems = [];
 }
 
 async function toggleOverlay(): Promise<void> {
@@ -691,6 +713,17 @@ function ensureOverlay(): LyricsOverlay {
       showNotice(t('content.wrongLyrics.thanks'), 6000);
       overlay?.openSearch();
     },
+    // 재생목록 패널 — DOM 조작은 lib/yt-player.ts, 실패하면(셀렉터 불일치·항목 사라짐)
+    // 목록을 강제로 다시 스크랩해 화면을 실제 상태와 맞춘다(PiP의 refreshPlayerControls
+    // 재판정과 같은 복구 규칙).
+    onPlaylistPrev: () => { if (!playPrevious()) refreshPlaylist(true); },
+    onPlaylistNext: () => { if (!playNext()) refreshPlaylist(true); },
+    onPlaylistSelect: index => { if (!playPlaylistItem(index)) refreshPlaylist(true); },
+    onWarnDismissSong: () => {
+      const videoId = currentVideoId;
+      if (videoId) void dismissWarnForVideo(videoId);
+    },
+    onResetWarnDismiss: () => void resetAllWarnDismissed(),
     onPipToggle: () => void handlePipToggle(),
     onGeometryChange: geometry => void saveGeometry(geometry),
     onCandidateSearch: query => void handleCandidateSearch(query),
@@ -707,6 +740,7 @@ function ensureOverlay(): LyricsOverlay {
       return res.data ?? null;
     },
     onResetSync: () => void handleResetSync(),
+    onFullReset: () => void handleFullReset(),
     onRecheckServer: () => void refreshServerStatus(),
     onOpenPermissions: () => void openPermissionsPage(),
     loadServerLog: () => fetchServerLog(),
@@ -1052,6 +1086,13 @@ function applySettingsPatch(patch: Partial<Settings>): void {
     pip.setShowPronunciation(patch.showPronunciation);
   }
 
+  // 영어 발음 끔 — CSS 클래스 하나로는 "영어 줄만" 못 가려서 PiP·메인 패널 모두
+  // 렌더 시점 판정(shouldShowPron)을 다시 태워야 한다
+  if (patch.hidePronForEnglish !== undefined) {
+    pip.setHidePronForEnglish(settings.hidePronForEnglish);
+    overlay?.refreshTranslations();
+  }
+
   // 발음 표기 방식(hangul/romaji/kana) 즉시 반영 — pronunciationScript 자체를 바꿨을 때는
   // 물론, 'auto'일 때는 translationLanguage가 바뀌어도 해석 결과가 달라지므로 함께 본다.
   // 메인 패널도 refreshTranslations로 함께 재렌더한다 — 감사 #8: 서버가 표기별 발음
@@ -1076,12 +1117,22 @@ function applySettingsPatch(patch: Partial<Settings>): void {
   if (patch.modNextUp !== undefined) {
     refreshNextUp(true);
   }
+  // 재생목록 패널 — 토글 즉시 반영. 하단 카드와의 표시 전환(showNextUp)은
+  // overlay.applySettings(위에서 이미 호출됨)가 렌더 시점에 처리한다.
+  if (patch.modPlaylist !== undefined) {
+    refreshPlaylist(true);
+    // 재생목록이 없는 페이지의 대체 카드(다음 영상)도 즉시 채운다 — modNextUp이
+    // 꺼져 있으면 refreshNextUp이 지금까지 한 번도 안 돌았을 수 있다
+    refreshNextUp(true);
+  }
   if (
     patch.pronunciationScript !== undefined || patch.translationLanguage !== undefined
     || patch.showPronunciation !== undefined || patch.showTranslation !== undefined
+    || patch.hidePronForEnglish !== undefined
   ) {
     videoCaption.applyDisplay(
       resolveScript(settings), settings.showPronunciation, settings.showTranslation,
+      settings.hidePronForEnglish,
     );
   }
 
@@ -1105,6 +1156,10 @@ function applySettingsPatch(patch: Partial<Settings>): void {
   }
   if (patch.pitchPronPosition !== undefined) {
     pip.setPitchPronPosition(patch.pitchPronPosition);
+  }
+  // 가사 목록 컬럼(대칭 UI) 토글 즉시 반영
+  if (patch.pipLyricsList !== undefined) {
+    pip.setLyricsListOn(patch.pipLyricsList);
   }
   // K2: 계이름 표기, K3: 음정선 밝기 — 즉시 반영
   if (patch.solfegeNotation !== undefined) {
@@ -1277,6 +1332,9 @@ function lineConfSummary(): {
  * 서버 싱크(everyric) 라인에 보카로 위키의 발음/사람 번역을 텍스트 매칭으로 입힌다.
  * 싱크가 위키 가사로 생성됐다면 라인 텍스트가 그대로 보존되므로 대부분 1:1로 매칭된다.
  */
+/** 늦은 재매칭을 이미 시도한 영상 — 세션당 한 번만 (미스가 확정인 곡에 매 로드 요청 방지) */
+const vocaroRematchTried = new Set<string>();
+
 async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void> {
   let lines: VocaroLine[] | null = lastVocaro?.videoId === videoId ? lastVocaro.lines : null;
   if (!lines) {
@@ -1287,8 +1345,30 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<void
       const raw = stored[`vocaroRef:${videoId}`] as string | { slug?: string } | undefined;
       slug = typeof raw === 'string' ? raw : raw?.slug ?? null;
     } catch { /* storage 실패 → 병합 생략 */ }
+    if (!slug && currentSong && videoId === currentVideoId && !vocaroRematchTried.has(videoId)) {
+      // 원 조회가 무산된 채 생성된 싱크(예: 서버 순간 부하로 매칭 타임아웃 → 자막 폴백)는
+      // vocaroRef가 영영 비어 위키 발음·번역 병합이 시작조차 안 됐다(실측: 踊っチャイナ —
+      // 위키에 발음·번역이 다 있는데 자막 가사로 생성됨). 서버 원제 인덱스에 늦은
+      // 재매칭을 한 번 시도해 스스로 치유한다.
+      vocaroRematchTried.add(videoId);
+      const m = await sendToBackground<{ found: boolean; slug?: string | null } | null>({
+        type: 'VOCARO_MATCH', payload: { title: currentSong.title },
+      });
+      if (videoId !== currentVideoId) return;
+      if (m.data?.found && m.data.slug) {
+        slug = m.data.slug;
+        try {
+          await chrome.storage.local.set({ [`vocaroRef:${videoId}`]: { slug, t: Date.now() } });
+        } catch { /* 저장 실패해도 이번 병합은 진행 */ }
+      }
+    }
     if (!slug) return;
-    const res = await sendToBackground<VocaroResult | null>({ type: 'VOCARO_PAGE', payload: { slug } });
+    // hint는 이 videoId가 아직 현재 영상일 때만 — SPA 이동 뒤 늦게 도는 병합에 다른
+    // 영상의 제목을 힌트로 주면 버전 선택이 엉뚱한 표로 튈 수 있다
+    const hint = videoId === currentVideoId ? currentSong?.rawTitle : undefined;
+    const res = await sendToBackground<VocaroResult | null>({
+      type: 'VOCARO_PAGE', payload: { slug, hint },
+    });
     lines = res.data?.lines ?? null;
     if (lines) lastVocaro = { videoId, lines };
   }
@@ -1459,7 +1539,8 @@ async function fetchWikiMatch(
     if (res.data) wikiAttribution = attributionFromSource(res.data);
   } else {
     const res = await sendToBackground<VocaroResult | null>({
-      type: 'VOCARO_LOOKUP', payload: { title: currentSong.title },
+      type: 'VOCARO_LOOKUP',
+      payload: { title: currentSong.title, hint: currentSong.rawTitle },
     });
     if (videoId !== currentVideoId) return null;
     wikiLines = res.data?.lines ?? null;
@@ -2351,7 +2432,9 @@ async function lookupWikiSources(
     if (src === 'vocaro') {
       const vocaro = await sendToBackground<VocaroResult | null>({
         type: 'VOCARO_LOOKUP',
-        payload: { title },
+        // hint: 검색어가 아니라 영상의 정리 전 제목 — 다중 버전 페이지의 표 선택은
+        // "이 영상이 어느 버전인가"의 문제라 사용자가 좁힌 검색어와 무관하다
+        payload: { title, hint: currentSong?.rawTitle },
       });
       if (seq !== searchSeq || videoId !== currentVideoId) return { stale: true };
       if (vocaro.data && vocaro.data.lines.length > 0) {
@@ -2387,6 +2470,71 @@ async function pruneVocaroRefs(): Promise<void> {
     refs.sort((a, b) => a.t - b.t);
     await chrome.storage.local.remove(refs.slice(0, refs.length - VOCARO_REF_MAX).map(r => r.key));
   } catch { /* 정리 실패는 무시 */ }
+}
+
+// ── 곡별 저신뢰 경고 억제 (#36) ─────────────────────────────────────
+// "이 곡에서 다시 보지 않기"로 끈 영상은 storage에 `warnDismiss:<videoId>`로 남는다.
+// 매 곡마다 storage를 왕복하면 applyLyricsData(동기 함수, 여러 곳에서 호출됨)가 async가
+// 돼야 해 파급이 크므로, 세션 시작 시 한 번 통째로 읽어 메모리 Set에 캐시한다(다른 탭에서의
+// 변경은 이 탭이 새로고침되기 전까지 반영되지 않는다 — activeJobs 같은 실시간 동기화가
+// 필요할 만큼 자주 바뀌는 상태가 아니라 감내할 수 있는 트레이드오프다).
+const WARN_DISMISS_PREFIX = 'warnDismiss:';
+const WARN_DISMISS_MAX = 200;
+const warnDismissedVideos = new Set<string>();
+
+async function loadWarnDismissed(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    for (const k of Object.keys(all)) {
+      if (k.startsWith(WARN_DISMISS_PREFIX)) warnDismissedVideos.add(k.slice(WARN_DISMISS_PREFIX.length));
+    }
+  } catch { /* 조회 실패 — 이번 세션은 억제 없이 진행(경고가 다시 뜨는 것뿐, 안전한 방향) */ }
+}
+
+/** vocaroRef와 같은 LRU 정리 패턴 — 시청 이력만큼 무한히 쌓이지 않게 오래된 것부터 정리 */
+async function pruneWarnDismissed(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const refs = Object.entries(all)
+      .filter(([k]) => k.startsWith(WARN_DISMISS_PREFIX))
+      .map(([k, v]) => ({
+        key: k,
+        t: typeof v === 'object' && v !== null ? ((v as { t?: number }).t ?? 0) : 0,
+      }));
+    if (refs.length <= WARN_DISMISS_MAX) return;
+    refs.sort((a, b) => a.t - b.t);
+    const doomed = refs.slice(0, refs.length - WARN_DISMISS_MAX);
+    await chrome.storage.local.remove(doomed.map(r => r.key));
+    for (const r of doomed) warnDismissedVideos.delete(r.key.slice(WARN_DISMISS_PREFIX.length));
+  } catch { /* 정리 실패는 무시 */ }
+}
+
+/** 경고 바의 "이 곡에서 다시 보지 않기" — 메모리에 즉시 반영 후 저장(먼저 반영해야
+ *  저장이 늦거나 실패해도 이번 세션 안에서는 확실히 억제된다) */
+async function dismissWarnForVideo(videoId: string): Promise<void> {
+  warnDismissedVideos.add(videoId);
+  overlay?.setQualityWarning(null);
+  try {
+    await chrome.storage.local.set({ [`${WARN_DISMISS_PREFIX}${videoId}`]: { t: Date.now() } });
+    void pruneWarnDismissed();
+  } catch { /* 저장 실패 — 메모리 억제는 이미 반영됐으니 이번 세션은 정상 동작한다 */ }
+}
+
+/** 설정 시트 ♻️ 범주 — 곡별로 끈 억제를 전부 되살린다 */
+async function resetAllWarnDismissed(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const keys = Object.keys(all).filter(k => k.startsWith(WARN_DISMISS_PREFIX));
+    if (keys.length > 0) await chrome.storage.local.remove(keys);
+  } catch { /* 삭제 실패는 무시 — 메모리는 아래에서 어차피 비운다 */ }
+  warnDismissedVideos.clear();
+  // 지금 보던 곡이 억제 대상이었다면 즉시 되살린다
+  if (
+    settings.lowConfWarning && currentData?.synced && currentData.source === 'everyric'
+    && currentData.qualityScore != null && currentData.qualityScore < 0.001
+  ) {
+    overlay?.setQualityWarning(currentData.qualityScore);
+  }
 }
 
 /**
@@ -2456,7 +2604,7 @@ async function handlePickCandidate(candidate: SearchCandidate): Promise<void> {
   if (candidate.source === 'vocaro') {
     const page = await sendToBackground<VocaroResult | null>({
       type: 'VOCARO_PAGE',
-      payload: { slug: candidate.slug },
+      payload: { slug: candidate.slug, hint: currentSong?.rawTitle },
     });
     if (seq !== searchSeq || videoId !== currentVideoId) return;
     if (page.data && page.data.lines.length > 0) data = adoptVocaroResult(videoId, page.data);
@@ -2512,7 +2660,10 @@ function prefillTranslationCacheFromServer(data: LyricsData): void {
  *  DOM 조회는 5초 스로틀 — onTick마다 querySelector를 돌릴 만큼 자주 바뀌는 값이 아니다. */
 let lastNextUpPush = 0;
 function refreshNextUp(force = false): void {
-  if (!settings.modNextUp) {
+  // modPlaylist도 이 데이터를 쓴다 — 재생목록이 없는 단일 영상 페이지에서 부착 패널이
+  // "다음 영상" 카드로 대체 표시한다(overlay.renderPlaylistPanel). modNextUp이 꺼져
+  // 있어도 modPlaylist만으로 스크랩은 계속 돌아야 그 대체 카드가 채워진다.
+  if (!settings.modNextUp && !settings.modPlaylist) {
     if (force) {
       overlay?.setNextUp(null);
       pip.setNextUp(null);
@@ -2528,7 +2679,64 @@ function refreshNextUp(force = false): void {
   // 유튜브가 next 버튼을 <a href>로 두지 않는 배치도 있어 못 뽑아도 정상 동작해야 한다.
   const nextVideoId = nextEl?.getAttribute('href')?.match(/[?&]v=([\w-]{11})/)?.[1];
   overlay?.setNextUp(title ? { title, videoId: nextVideoId } : null);
-  if (pip.isOpen()) pip.setNextUp(title);
+  // PiP 알림은 modNextUp 전용으로 남긴다 — modPlaylist는 메인 패널 부착 패널만의
+  // 기능이라(운영자 지시 범위) PiP에 새 표시를 추가하지 않는다.
+  if (settings.modNextUp && pip.isOpen()) pip.setNextUp(title);
+}
+
+/**
+ * 재생목록 부착 패널 모듈(설정 modPlaylist) — 유튜브 재생목록 패널 DOM(lib/yt-player.ts)에서
+ * 항목을 읽어 채운다. 60초 간격이면 충분하다(운영자 지시 — 5fps 감사 규약처럼 고빈도
+ * 타이머를 새로 만들지 않는다) + 영상 전환 지점(beginFollowing)에서 1회.
+ *
+ * exists 배지는 여기서 바로 채우지 않는다 — 서버 왕복이 있어 목록을 우선 그린 뒤
+ * refreshPlaylistExists가 뒤늦게 배지만 병합해 다시 밀어넣는다(체감상 목록이 먼저
+ * 뜨고 점이 뒤따라 켜지는 편이, 배지를 기다리느라 목록 자체가 늦게 뜨는 것보다 낫다).
+ */
+let lastPlaylistPush = 0;
+const PLAYLIST_REFRESH_MS = 60000;
+/** 마지막으로 스크랩한 재생목록 — exists 병합이 DOM을 다시 읽지 않고 이 사본 위에 적용한다
+ *  (재조회 사이 목록이 바뀌면 병합 대상이 어긋날 수 있어, 응답이 낡았으면 seq로 버린다) */
+let lastPlaylistItems: { title: string; channel?: string; videoId?: string; index: number; current: boolean; syncExists?: boolean }[] = [];
+let playlistExistsSeq = 0;
+
+function refreshPlaylist(force = false): void {
+  if (!settings.modPlaylist) {
+    if (force && lastPlaylistItems.length > 0) {
+      overlay?.setPlaylist(null);
+      lastPlaylistItems = [];
+    }
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - lastPlaylistPush < PLAYLIST_REFRESH_MS) return;
+  lastPlaylistPush = now;
+  const entries = getPlaylist();
+  lastPlaylistItems = entries.map(e => ({
+    title: e.title,
+    channel: e.byline || undefined,
+    videoId: e.videoId ?? undefined,
+    index: e.index,
+    current: e.selected,
+  }));
+  overlay?.setPlaylist(lastPlaylistItems);
+  const ids = [...new Set(lastPlaylistItems.map(it => it.videoId).filter((v): v is string => Boolean(v)))];
+  if (ids.length > 0) void refreshPlaylistExists(ids);
+}
+
+/** 재생목록 항목들의 서버 싱크 존재 여부를 배치로 물어 배지만 병합한다 */
+async function refreshPlaylistExists(videoIds: string[]): Promise<void> {
+  const seq = ++playlistExistsSeq;
+  const res = await sendToBackground<Record<string, boolean>>({
+    type: 'SYNC_EXISTS', payload: { videoIds },
+  });
+  // 그 사이 목록이 다시 스크랩됐거나(seq 낡음) 모듈이 꺼졌으면 조용히 버린다
+  if (seq !== playlistExistsSeq || !res.data || !settings.modPlaylist) return;
+  const exists = res.data;
+  lastPlaylistItems = lastPlaylistItems.map(it => ({
+    ...it, syncExists: it.videoId ? exists[it.videoId] : undefined,
+  }));
+  overlay?.setPlaylist(lastPlaylistItems);
 }
 
 function applyLyricsData(data: LyricsData | null): void {
@@ -2557,10 +2765,11 @@ function applyLyricsData(data: LyricsData | null): void {
   // 지점이 여기 하나이므로 여기서 한 번에 맞춘다 (타이밍이 없는 가사는 노트도 없다).
   karaokeAudio.setNotes(data?.synced ? collectMelodyNotes(data.lines) : []);
   karaokeAudio.setTempo(data?.synced ? data.tempo ?? null : null);
-  // 곡 전체 정렬 신뢰도가 매우 낮으면 경고 바 (설정으로 끌 수 있음)
+  // 곡 전체 정렬 신뢰도가 매우 낮으면 경고 바 (설정으로 끌 수 있음, 곡별 억제는 warnDismissedVideos)
   panel.setQualityWarning(
     settings.lowConfWarning && data?.synced && data.source === 'everyric'
       && data.qualityScore != null && data.qualityScore < 0.001
+      && !(currentVideoId && warnDismissedVideos.has(currentVideoId))
       ? data.qualityScore
       : null,
   );
@@ -3042,7 +3251,8 @@ async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
         lineMetaLang = wiki.data?.translationLang ?? 'en';
       } else {
         const wiki = await sendToBackground<VocaroResult | null>({
-          type: 'VOCARO_LOOKUP', payload: { title: currentSong.title },
+          type: 'VOCARO_LOOKUP',
+          payload: { title: currentSong.title, hint: currentSong.rawTitle },
         });
         lineMeta = (wiki.data?.lines ?? [])
           .filter(l => l.pronunciation || l.translation)
@@ -3122,6 +3332,35 @@ async function handleResetSync(): Promise<void> {
   removeJob(videoId);
   updateGenChip();
   void searchLyrics();
+}
+
+/**
+ * 확장 전체 초기화 — 설정 시트 ♻️ 범주의 2단계 확인(같은 버튼 재클릭) 뒤에만 불린다.
+ *
+ * `settings`는 remove가 아니라 **기본값으로 덮어쓴다**(saveSettings에 DEFAULT_SETTINGS
+ * 전체를 patch로 넘기면 병합 결과가 곧 기본값이다) — watchSettingsFromOtherTabs가
+ * `chrome.storage.onChanged`에서 `newValue`가 없으면(remove) 아예 무시하므로
+ * (`if (!next) return`, 위 watchSettingsFromOtherTabs 주석), remove로는 이 탭 말고
+ * 다른 열린 유튜브 탭에 초기화가 전파되지 않는다.
+ *
+ * 나머지는 remove한다: geometry: 접두(창 위치)·vocaroRef: 접두·vocaroIdx: 접두(곡별 캐시)는
+ * 영상마다 쌓이는 부가 상태라 기본값이랄 게 없고, ey_notices_seen·ey_contrib·
+ * activeJobs는 세션 이력이라 남기면 "초기화했는데 기여 이력이 그대로"가 된다.
+ */
+async function handleFullReset(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const removeKeys = Object.keys(all).filter(k =>
+      k.startsWith('geometry:') || k.startsWith('vocaroRef:') || k.startsWith('vocaroIdx:')
+      || k.startsWith(WARN_DISMISS_PREFIX)
+      || k === 'ey_notices_seen' || k === CONTRIB_STORAGE_KEY || k === JOBS_STORAGE_KEY,
+    );
+    if (removeKeys.length > 0) await chrome.storage.local.remove(removeKeys);
+  } catch { /* 스캔·삭제 실패는 무시 — 설정 초기화는 계속 진행한다 */ }
+  warnDismissedVideos.clear();
+  settings = await saveSettings(DEFAULT_SETTINGS);
+  applySettingsPatch(settings);
+  showNotice(t('content.fullReset.done'), 6000);
 }
 
 /** 타임싱크를 벗긴 사본 — 초기화 뒤에 남기는 가사는 타이밍이 없는 가사여야 한다.
@@ -3266,7 +3505,19 @@ async function pollJobs(): Promise<void> {
       job.progress = status.progress ?? job.progress;
       job.stage = status.stage ?? undefined;
       job.stageProgress = status.stage_progress ?? undefined;
-      job.etaSec = status.eta_sec ?? undefined;
+      // ETA는 표시값을 단조 감소로 눌러 둔다 — 서버 추정이 폴마다 흔들리면(24→28→22)
+      // 숫자가 오르내려 표시를 못 믿게 된다. 30초 넘게 뛰는 증가만 진짜 재추정(heavy
+      // 전환 등)으로 받아들이고, 소폭 증가는 로컬 카운트다운(effectiveEtaSec)을 유지한다.
+      const nextEta = status.eta_sec ?? undefined;
+      if (nextEta == null) {
+        job.etaSec = undefined;
+        job.etaSyncedAt = undefined;
+      } else {
+        const eff = effectiveEtaSec(job);
+        job.etaSec = eff != null && nextEta > eff && nextEta - eff <= 30 ? eff : nextEta;
+        job.etaSyncedAt = Date.now();
+      }
+      job.etaOverrun = status.eta_overrun ?? false;
       job.queueEtaSec = status.queue_eta_sec ?? undefined;
       job.queuePosition = status.queue_position ?? undefined;
       // 깊이가 도중에 heavy로 바뀌는 것은 **서버가 판단을 바꿨다**는 사건이다(라우팅이
@@ -3383,15 +3634,29 @@ const DEPTH_LABEL_KEYS: Record<string, string> = {
 };
 
 /**
- * 남은 시간 문구 — 1분 미만은 초를 세지 않는다.
+ * 남은 시간 문구 — **초 단위 카운트다운**이 기본이다.
  *
- * 초 단위로 카운트다운하면 서버 추정이 흔들릴 때마다 숫자가 튀어(90→40→70) 표시 자체를
- * 못 믿게 된다. 분 단위는 그 흔들림을 흡수하고, 1분 안쪽은 어차피 곧이므로 "곧 완료"로
- * 뭉갠다. 0 이하(추정 초과)도 같은 문구다 — 음수를 보여줄 수는 없다.
+ * 대부분의 잡이 1분 안에 끝나므로(운영자 실측) 분 뭉갬이나 "곧 완료" 뭉갬은 표시의
+ * 존재 이유(몇 초 남았는지)를 없앤다. 예전 60초 미만 일괄 "곧 완료"가 정확히 그
+ * 사고였다(실사용 제보 "곧 완료에서 10초 이상"). 숫자 튐(90→40→70)은 폴 수신부의
+ * 증가 클램프 + effectiveEtaSec의 로컬 감쇠가 흡수하므로 초를 그대로 보여도 안전하다.
+ * 숫자는 1초까지 그대로 보여준다(운영자 지시) — "곧 완료"는 카운트다운이 0에 닿은
+ * 순간(서버 바닥값 5초를 로컬 감쇠가 다 소진한 뒤)에만 남는다.
+ * 추정 초과(overrun)는 jobStateText가 이 함수에 오기 전에 갈라 처리한다.
  */
 function etaText(sec: number): string {
-  if (sec < 60) return t('content.genChip.etaSoon');
+  if (sec <= 0) return t('content.genChip.etaSoon');
+  if (sec < 60) return t('content.genChip.etaSeconds', [String(sec)]);
   return t('content.genChip.etaMinutes', [String(Math.round(sec / 60))]);
+}
+
+/** 표시용 잔여 초 — 마지막 서버 동기값에서 흐른 시간을 빼 폴링(2초) 사이에도 1초씩 준다 */
+function effectiveEtaSec(job: TrackedJob): number | null {
+  if (job.etaSec == null) return null;
+  const decayed = job.etaSyncedAt != null
+    ? job.etaSec - (Date.now() - job.etaSyncedAt) / 1000
+    : job.etaSec;
+  return Math.max(0, Math.round(decayed));
 }
 
 /** 진행 칩의 상태 조각 — 대기열 → ETA → 단계·퍼센트 순으로 아는 것 중 가장 구체적인 것 */
@@ -3406,12 +3671,21 @@ function jobStateText(job: TrackedJob): string {
     }
     return job.queueLabel;
   }
+  // 추정 초과: eta_sec은 바닥값에 눌려 있어 거짓 "곧 완료"가 된다 — 시간 약속 대신
+  // 지금 어느 단계인지(단계·퍼센트)에 초과 사실을 붙여 정직하게 말한다
+  if (job.etaOverrun) {
+    const base = job.stage
+      ? t('content.genChip.stageProgress', [stageLabel(job.stage), String(job.stageProgress ?? 0), String(job.progress)])
+      : t('content.genChip.percentOnly', [String(job.progress)]);
+    return `${base} · ${t('content.genChip.etaOverrun')}`;
+  }
   // 진행 중: 서버가 남은 시간을 알려주면 퍼센트보다 그것이 사용자에게 쓸모 있다.
   // 퍼센트는 폴백으로 남긴다 — 구버전 서버는 eta_sec 자체가 없다.
-  if (job.etaSec != null) {
+  const eta = effectiveEtaSec(job);
+  if (eta != null) {
     return job.stage
-      ? t('content.genChip.stageEta', [stageLabel(job.stage), etaText(job.etaSec)])
-      : etaText(job.etaSec);
+      ? t('content.genChip.stageEta', [stageLabel(job.stage), etaText(eta)])
+      : etaText(eta);
   }
   return job.stage
     ? t('content.genChip.stageProgress', [stageLabel(job.stage), String(job.stageProgress ?? 0), String(job.progress)])
@@ -3449,20 +3723,37 @@ function updateGenChip(): void {
   // 칩 클릭 시 펼칠 내 대기열 목록 — 곡명+상태. activeJobs에 이 브라우저가 시킨
   // 잡만 저장되므로 다른 사용자의 큐는 구조적으로 노출되지 않는다.
   const items = [...generatingJobs.entries()]
-    .map(([v, j]) => ({
-      title: j.title ?? v,
-      state: j.queueLabel
-        ?? (j.etaSec != null
-          ? etaText(j.etaSec)
-          : j.stage ? t('content.genChip.stageOnly', [stageLabel(j.stage), String(j.stageProgress ?? 0)]) : t('content.genChip.percentOnly', [String(j.progress)])),
-      isCurrent: v === currentVideoId,
-    }))
+    .map(([v, j]) => {
+      const eta = effectiveEtaSec(j);
+      return {
+        title: j.title ?? v,
+        state: j.queueLabel
+          ?? (eta != null && !j.etaOverrun
+            ? etaText(eta)
+            : j.stage ? t('content.genChip.stageOnly', [stageLabel(j.stage), String(j.stageProgress ?? 0)]) : t('content.genChip.percentOnly', [String(j.progress)])),
+        isCurrent: v === currentVideoId,
+      };
+    })
     .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
   overlay?.setGenerationList(items);
   // 잡이 등록된 뒤에만 취소 가능 (준비 단계는 잡 id가 아직 없다)
   overlay?.setGenerationChip(text, Boolean(cur));
   // PiP에는 대기열 목록·취소 UI가 없다 — 같은 진행 문구만 창 안 칩으로 보여 준다
   pip.setGenerationChip(text);
+  syncEtaTicker();
+}
+
+/** ETA 1초 카운트다운 티커 — 폴링(2초) 사이에도 초가 줄어 보이게 칩만 다시 그린다.
+ *  ETA를 아는 잡이 있을 때만 돌고 스스로 꺼진다(유휴 시 타이머 0개 — 5fps 감사 규약). */
+let etaTicker: number | undefined;
+function syncEtaTicker(): void {
+  const needed = [...generatingJobs.values()].some(j => j.etaSec != null && !j.queueLabel && !j.etaOverrun);
+  if (needed && etaTicker === undefined) {
+    etaTicker = window.setInterval(() => updateGenChip(), 1000);
+  } else if (!needed && etaTicker !== undefined) {
+    clearInterval(etaTicker);
+    etaTicker = undefined;
+  }
 }
 
 const POLL_MS_NORMAL = 2000;
@@ -3560,6 +3851,7 @@ async function handlePipToggle(): Promise<void> {
     },
     initialVideoRatio: settings.pipVideoRatio,
     showPronunciation: settings.showPronunciation,
+    hidePronForEnglish: settings.hidePronForEnglish,
     pronScript: resolveScript(settings),
     pitchEnabled: settings.pitchGuide,
     pitchLaneHeight: settings.pitchLaneHeight,
@@ -3572,6 +3864,7 @@ async function handlePipToggle(): Promise<void> {
     pitchF0Opacity: settings.pitchF0Opacity,
     pipChromaKey: settings.pipChromaKey,
     pitchPronPosition: settings.pitchPronPosition,
+    pipLyricsList: settings.pipLyricsList,
     showConfidence: settings.debugInfo,
     onPitchHeightChange: px => {
       settings = { ...settings, pitchLaneHeight: px };
@@ -3626,6 +3919,8 @@ async function handlePipToggle(): Promise<void> {
     onPitchScrollModeChange: mode => void handleSettingsChange({ pitchScrollMode: mode }),
     onKaraokeToggle: on => void handleSettingsChange({ pitchGuide: on }),
     onVideoToggle: on => void handleSettingsChange({ pipShowVideo: on }),
+    onLyricsListToggle: on => void handleSettingsChange({ pipLyricsList: on }),
+    onPronPositionChange: position => void handleSettingsChange({ pitchPronPosition: position }),
     getMicSamples: () => micPitch.samples(),
     onClosed: () => {
       karaokeAudio.setActive(false);

@@ -1,6 +1,6 @@
-import type { LyricLine, SongKey, SongTempo, SyncDebugMeta } from '../types';
+import type { LyricLine, PronSegment, SongKey, SongTempo, SyncDebugMeta } from '../types';
 import type { MicSample } from '../lib/mic-pitch';
-import { resolvedPronSegments, resolvedPronunciation, type PronScript } from '../lib/lang';
+import { isLatinDominant, resolvedPronSegments, resolvedPronunciation, type PronScript } from '../lib/lang';
 import { t } from '../lib/i18n';
 
 /**
@@ -93,6 +93,9 @@ export interface PitchNote {
   end: number;
   /** 이 노트(음절)에 대응하는 발음 표기 — 계이름처럼 노트에 직접 붙여 그린다 */
   pron?: string;
+  /** 렌더 전용 표시 끝(코덱스 감사 b2NTglk9tvI: 인접 라인 노트 겹침 28건) — 다음 노트가
+   *  시작되는 시각으로 그리기용 막대만 잘라낸다. end(실제 데이터)는 손대지 않는다. */
+  dispEnd?: number;
 }
 
 interface PitchWord {
@@ -159,8 +162,10 @@ export interface PitchLaneOptions {
   lineOpacity: number;
   /** f0 곡선(음정 보는 선) 밝기 배율 0.2~1.5 — 노트 바와 별개 페이더 */
   f0Opacity: number;
-  /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙, both = 동시 */
-  pronPosition: 'note' | 'bottom' | 'both';
+  /** 발음 표기 위치: off = 표시 안 함, note = 노트마다 위에 부착, bottom = 화면 하단 중앙,
+   *  both = 노트 부착 + 하단 동시, center = 레인 중앙에 반투명 오버레이(운영자 요청
+   *  2026-08-03: "노트에 붙는 발음만으로는 타이밍이 튀어 따라 부르기 어렵다") */
+  pronPosition: 'off' | 'note' | 'bottom' | 'both' | 'center';
   /** 발음 표기 방식(hangul/romaji/kana/…) — 호출부가 lib/lang.resolveScript로 해석해 넘긴다 */
   pronScript: PronScript;
   /** RAW f0 곡선 상시 표시 (설정 pitchF0Curve) — 디버그 언더레이와 독립 */
@@ -237,6 +242,14 @@ export class PitchLaneRenderer {
   /** 일시정지 중 수동 스크롤 창 시작 시각 — 재생 재개 시 호출부가 해제한다 */
   private manualT0: number | null = null;
   private paused = false;
+  /** clientWidth/clientHeight·getBoundingClientRect() 캐시 — render()는 매 프레임(최대
+   *  60Hz) 도는데 이 값들은 강제 레이아웃(forced reflow)을 유발한다. ResizeObserver로
+   *  실제 크기가 바뀔 때만 갱신하고, 렌더 루프는 캐시만 읽는다(코덱스 감사 5fps #1). */
+  private cachedSize: { cw: number; ch: number } | null = null;
+  /** 좌상단 키·BPM 라벨이 미니 버튼과 겹치지 않게 밀 위치인가 — getBoundingClientRect().top
+   *  기준 판정을 같은 캐시 갱신 시점에 함께 계산해 둔다 */
+  private cachedLabelNearTop = false;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(opts: Partial<PitchLaneOptions> = {}) {
     this.opts = { ...DEFAULT_OPTIONS, ...opts };
@@ -247,6 +260,7 @@ export class PitchLaneRenderer {
     this.canvas = canvas;
     this.colorSource = colorSource;
     this.colors = null;
+    this.setupResizeObserver(canvas);
   }
 
   /** 캔버스가 사라졌을 때(창 닫힘) — 곡 데이터는 남기고 그리기 대상만 끊는다 */
@@ -255,6 +269,27 @@ export class PitchLaneRenderer {
     this.colorSource = null;
     this.colors = null;
     this.view = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.cachedSize = null;
+  }
+
+  /** 크기 캐시 갱신 — attach 시 1회 + 이후 실제 리사이즈가 있을 때만 ResizeObserver가 부른다 */
+  private setupResizeObserver(canvas: HTMLCanvasElement): void {
+    this.resizeObserver?.disconnect();
+    this.updateCachedGeometry(canvas);
+    const win = canvas.ownerDocument.defaultView;
+    if (!win?.ResizeObserver) {
+      this.resizeObserver = null;
+      return;
+    }
+    this.resizeObserver = new win.ResizeObserver(() => this.updateCachedGeometry(canvas));
+    this.resizeObserver.observe(canvas);
+  }
+
+  private updateCachedGeometry(canvas: HTMLCanvasElement): void {
+    this.cachedSize = { cw: canvas.clientWidth, ch: canvas.clientHeight };
+    this.cachedLabelNearTop = canvas.getBoundingClientRect().top < 34;
   }
 
   setOptions(patch: Partial<PitchLaneOptions>): void {
@@ -343,8 +378,11 @@ export class PitchLaneRenderer {
     if (!canvas || !win || !this.opts.enabled || this.data.notes.length === 0) return;
 
     const dpr = win.devicePixelRatio || 1;
-    const cw = canvas.clientWidth;
-    const ch = canvas.clientHeight;
+    // 강제 레이아웃을 유발하는 clientWidth/clientHeight 대신 ResizeObserver 캐시를 읽는다
+    // (attach에서 즉시 1회 계산해 두므로 캐시가 비어 있는 경우는 사실상 없다).
+    const size = this.cachedSize ?? { cw: canvas.clientWidth, ch: canvas.clientHeight };
+    const cw = size.cw;
+    const ch = size.ch;
     if (cw === 0 || ch === 0) return;
     const bw = Math.round(cw * dpr);
     const bh = Math.round(ch * dpr);
@@ -361,13 +399,18 @@ export class PitchLaneRenderer {
     const { pages, notes, words, lo, hi } = this.data;
 
     // ── 세로 레이아웃: 오선 영역 + 가사 줄 + (발음 폴백 줄) + 번역 줄
-    // pronPosition: 'note'=노트 부착(음절 타이밍이 없을 때만 하단 폴백),
+    // pronPosition: 'off'=표시 안 함, 'note'=노트 부착(음절 타이밍이 없을 때만 하단 폴백),
     // 'bottom'=항상 하단 줄(진행률 그라데이션), 'both'=노트 부착 + 하단 줄 동시
-    // (운영자 요청 2026-08-03: "노트 말고도 밑에도").
-    const noteAttach = this.opts.pronPosition !== 'bottom';
+    // (운영자 요청 2026-08-03: "노트 말고도 밑에도"), 'center'=레인 위 반투명 중앙
+    // 오버레이(운영자 요청 2026-08-03: "노트에 붙는 발음만으로는 타이밍이 튀어
+    // 따라 부르기 어렵다" — 세로 공간을 새로 차지하지 않고 레인 위에 겹쳐 그린다).
+    const pronPos = this.opts.pronPosition;
+    const noteAttach = pronPos === 'note' || pronPos === 'both';
     const hasSegs = noteAttach
       && pages.some(p => (resolvedPronSegments(p.line, this.opts.pronScript)?.length ?? 0) > 0);
-    const hasPronRow = (this.opts.pronPosition !== 'note' || !hasSegs)
+    const hasPronRow = (pronPos === 'bottom' || pronPos === 'both' || (pronPos === 'note' && !hasSegs))
+      && pages.some(p => resolvedPronunciation(p.line, this.opts.pronScript));
+    const hasPronCenter = pronPos === 'center'
       && pages.some(p => resolvedPronunciation(p.line, this.opts.pronScript));
     const hasTr = pages.some(p => p.line.translation);
     const fs = this.opts.fontScale;
@@ -502,7 +545,7 @@ export class PitchLaneRenderer {
     ctx.textBaseline = 'middle';
     for (const n of vis) {
       const x1 = x(n.start);
-      const x2 = x(n.end);
+      const x2 = x(n.dispEnd ?? n.end);
       const w = Math.max(3, x2 - x1 - 1);
       const top = y(n.midi) - noteH / 2;
       const isCurrent = n.start <= now && now < n.end;
@@ -646,6 +689,15 @@ export class PitchLaneRenderer {
       ty += pronRowH;
     }
 
+    // ── 중앙 오버레이 발음(pronPosition==='center'): 세로 공간을 새로 차지하지 않고
+    // 레인 위에 반투명하게 겹쳐 그린다 — staffH 계산에는 관여하지 않는다.
+    if (hasPronCenter && page && resolvedPronunciation(page.line, this.opts.pronScript)) {
+      ctx.save();
+      ctx.globalAlpha = 0.62;
+      this.renderPronFallback(ctx, page, now, cw, padTop + staffH * 0.55, colors, Math.round(lyricPx * 1.05));
+      ctx.restore();
+    }
+
     // ── 번역: 현재 라인 번역을 하단 중앙에 — 길면 가로 압축(찌그러짐) 대신 폰트 축소
     if (hasTr && page?.line.translation) {
       const tr = page.line.translation;
@@ -669,8 +721,8 @@ export class PitchLaneRenderer {
       ctx.fillStyle = colors.dim;
       ctx.globalAlpha = 0.85;
       // 레인이 창 상단에 붙어 있으면(영상·스테이지 없음) 좌상단 미니 버튼과 겹치지
-      // 않게 라벨을 오른쪽으로 민다
-      const labelX = canvas.getBoundingClientRect().top < 34 ? 62 : 4;
+      // 않게 라벨을 오른쪽으로 민다 (강제 레이아웃 방지를 위해 캐시된 판정을 쓴다)
+      const labelX = this.cachedLabelNearTop ? 62 : 4;
       ctx.fillText(parts.join(' · '), labelX, padTop + 7);
       ctx.globalAlpha = 1;
       ctx.textAlign = 'center';
@@ -1028,6 +1080,71 @@ export class PitchLaneRenderer {
   }
 }
 
+/** 발음 세그의 최소 표시 폭(초) — 이보다 짧으면 노트 겹침 판정(overlap>0)을 통과하지
+ *  못해 음절이 통째로 안 그려진다(코덱스 감사 b2NTglk9tvI: 1119개 중 132개가 길이 0). */
+const MIN_SEG_WIDTH = 0.06;
+
+/**
+ * 길이 0(또는 극단적으로 짧은) 발음 세그에 최소 표시 폭을 부여한다. 같은 시각에 여럿이
+ * 몰려 있으면(실측 최대 6개) 앞뒤 이웃 세그를 침범하지 않는 선에서 균등 배분하고,
+ * 배분할 공간조차 없으면 최소폭은 지키되 살짝 어긋나게 겹친다(이웃 폴백보다 침묵이 낫다).
+ * 원본 배열은 바꾸지 않고 복제본을 반환한다 — 디버그 타이밍 레인(renderTimingLanes)은
+ * 이 함수를 거치지 않은 원본 세그를 그대로 써서 실제 정렬 결함이 계속 보이게 둔다.
+ */
+function widenZeroLengthSegs(segs: PronSegment[]): PronSegment[] {
+  if (segs.length === 0) return segs;
+  const out = segs.map(s => ({ ...s }));
+  let i = 0;
+  while (i < out.length) {
+    if (out[i].end - out[i].start >= MIN_SEG_WIDTH) { i++; continue; }
+    // 뒤이어 같은 시각(1ms 오차)에 몰린 짧은 세그들을 한 무리로 묶는다
+    let j = i;
+    while (j + 1 < out.length
+      && out[j + 1].end - out[j + 1].start < MIN_SEG_WIDTH
+      && Math.abs(out[j + 1].start - out[i].start) < 1e-3) j++;
+    const n = j - i + 1;
+    const point = out[i].start;
+    const prevBound = i > 0 ? out[i - 1].end : point - MIN_SEG_WIDTH * n;
+    const nextBound = j + 1 < out.length ? out[j + 1].start : point + MIN_SEG_WIDTH * n;
+    const wanted = MIN_SEG_WIDTH * n;
+    const avail = Math.max(0, nextBound - prevBound);
+    if (avail >= wanted) {
+      // 이웃을 침범하지 않는 균등 배분 — 무리를 [prevBound, nextBound] 구간 중앙에 맞춘다
+      const slotStart = prevBound + (avail - wanted) / 2;
+      for (let k = 0; k < n; k++) {
+        out[i + k].start = slotStart + MIN_SEG_WIDTH * k;
+        out[i + k].end = slotStart + MIN_SEG_WIDTH * (k + 1);
+      }
+    } else {
+      // 공간이 없다 — 최소폭은 지키되 겹치도록 촘촘히 어긋나게 편다(이웃을 살짝 침범 허용)
+      const step = n > 1 ? avail / n : 0;
+      const start0 = point - wanted / 2;
+      for (let k = 0; k < n; k++) {
+        out[i + k].start = start0 + step * k;
+        out[i + k].end = out[i + k].start + MIN_SEG_WIDTH;
+      }
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+/** 인접 라인 노트가 겹칠 때 표시(dispEnd)만 클립하는 상한 — 이보다 큰 겹침은 진짜
+ *  하모니/듀엣일 수 있어 손대지 않는다(실측: 문제 사례는 0.06~0.27초). */
+const MAX_CLIP_OVERLAP = 0.5;
+
+/** notes.sort() 직후 1회 호출 — 시간순으로 인접한 두 노트가 짧게 겹치면 앞 노트의
+ *  dispEnd를 뒤 노트 시작점으로 클립한다. start/end(실제 데이터)는 건드리지 않는다. */
+function clipAdjacentNoteOverlaps(notes: PitchNote[]): void {
+  for (let i = 0; i < notes.length - 1; i++) {
+    const cur = notes[i];
+    const next = notes[i + 1];
+    if (next.start <= cur.start) continue; // 동시 시작(화음 가능성)은 클립 대상이 아니다
+    const overlap = cur.end - next.start;
+    if (overlap > 0 && overlap < MAX_CLIP_OVERLAP) cur.dispEnd = next.start;
+  }
+}
+
 /**
  * 라인 배열에서 레인 데이터를 평탄화한다.
  * - pages: 라인 인덱스와 1:1 (카운트다운·현재 라인 번역/발음 폴백용)
@@ -1056,8 +1173,15 @@ function collectPitchData(lines: LyricLine[], script: PronScript): PitchData {
     }
     lineNotes.sort((a, b) => a.start - b.start);
 
-    // 발음 음절을 최대 겹침 노트에 부착 — 계이름처럼 노트에 직접 그린다
-    const pronSegs = resolvedPronSegments(line, script);
+    // 발음 음절을 최대 겹침 노트에 부착 — 계이름처럼 노트에 직접 그린다.
+    // 라틴 우세 줄(영어 곡)은 표기 설정과 무관하게 'en'(원문 철자) 세그를 쓴다 — 노트에
+    // za/we/zaa 같은 오염된 로마자 대신 That/mor/ning처럼 원문 음절이 붙어야 한다(운영자
+    // 요구사항). 발음 **줄** 표시는 이 판정과 별개로 기존 script(표기 설정)를 그대로 쓴다.
+    const noteSegs = isLatinDominant(line.text) ? line.pronSegsByScript?.['en'] : undefined;
+    const rawPronSegs = noteSegs ?? resolvedPronSegments(line, script);
+    // 길이 0 세그는 overlap 판정을 절대 통과하지 못해(ov는 항상 0, bestOv 초기값도 0이라
+    // `>` 비교가 갱신되지 않는다) 노트 부착 전에 최소폭을 부여해 둔다.
+    const pronSegs = rawPronSegs ? widenZeroLengthSegs(rawPronSegs) : undefined;
     if (pronSegs) {
       for (const seg of pronSegs) {
         let best: PitchNote | null = null;
@@ -1086,6 +1210,7 @@ function collectPitchData(lines: LyricLine[], script: PronScript): PitchData {
   });
 
   notes.sort((a, b) => a.start - b.start);
+  clipAdjacentNoteOverlaps(notes);
   words.sort((a, b) => a.start - b.start);
   if (!Number.isFinite(lo)) {
     lo = 57;

@@ -19,6 +19,16 @@ export function resolveScript(
 }
 
 /**
+ * 라틴 문자 우세 판정 — 영어 곡 구제(오염된 구세대 romaji 표기 교체)와 가라오케 노트
+ * 원문 부착에 쓴다. 라틴 문자 수가 가나+한자+한글 합보다 많으면 참.
+ */
+export function isLatinDominant(text: string): boolean {
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const cjk = (text.match(/[぀-ヿ㐀-鿿가-힣]/g) ?? []).length;
+  return latin > cjk;
+}
+
+/**
  * 표시용 발음 문자열 — line.pron[script]가 있으면 그 값, 없으면 레거시 pronunciation(한글)
  * 으로 폴백한다. 표시 지점은 항상 이 함수를 거쳐야 한다(직접 line.pronunciation을 읽지
  * 않는다) — 서버가 아직 pron dict를 안 주는 동안에도 이 폴백 덕분에 오늘과 동일하게 동작한다.
@@ -27,14 +37,38 @@ export function resolveScript(
  * romaji·kana를 보는 사용자(en·ja 유저)에게 그대로 돌려주면 자기 표기가 아닌 한글 독음이
  * 뜬다(ja 유저 감사에서 실측 — pron dict에 kana 키가 없는 곡마다 한글이 새어나왔다).
  * hangul 외 표기에서 dict에 값이 없으면 undefined를 그대로 돌려줘 발음 줄 자체를 생략한다.
+ *
+ * **영어 곡 구제**: script가 'romaji'이고 원문이 라틴 우세인 줄은 romaji 대신 line.pron['en']을
+ * 쓴다 — 구세대 서버가 영어 가사를 "영어→가타카나→로마자"로 오염시켜 저장한 곡들이
+ * 이미 많이 쌓여 있다("za wezaa..."류). 서버는 이제 새로 만드는 곡에 romaji=en(원문
+ * 철자)을 넣지만, 이미 저장된 곡은 클라이언트가 이렇게 구제한다.
  */
 export function resolvedPronunciation(line: LyricLine, script: PronScript): string | undefined {
+  if (script === 'romaji' && line.pron?.['en'] && isLatinDominant(line.text)) return line.pron['en'];
   return line.pron?.[script] ?? (script === 'hangul' ? line.pronunciation : undefined);
 }
 
-/** 표시용 발음 음절 타이밍 — 규칙은 resolvedPronunciation과 동일(표기별 값 → hangul만 레거시 폴백) */
+/** 표시용 발음 음절 타이밍 — 규칙은 resolvedPronunciation과 동일(표기별 값 → hangul만 레거시
+ *  폴백, 라틴 우세 romaji 줄은 'en' 세그로 구제). */
 export function resolvedPronSegments(line: LyricLine, script: PronScript): PronSegment[] | undefined {
+  if (script === 'romaji' && line.pronSegsByScript?.['en'] && isLatinDominant(line.text)) {
+    return line.pronSegsByScript['en'];
+  }
   return line.pronSegsByScript?.[script] ?? (script === 'hangul' ? line.pronSegments : undefined);
+}
+
+/**
+ * 발음 줄을 이 줄에서 보여줄지 — 전체 끔(showPronunciation)과 영어만 끔
+ * (hidePronForEnglish)을 한 판정으로 합친다. 레인(pitch-lane.ts)의 노트 부착 발음은
+ * 이 함수를 거치지 않는다 — PIP·레인 노트의 발음 표시는 운영자 제약으로 항상 유지된다.
+ */
+export function shouldShowPron(
+  lineText: string,
+  settings: Pick<Settings, 'showPronunciation' | 'hidePronForEnglish'>,
+): boolean {
+  if (!settings.showPronunciation) return false;
+  if (settings.hidePronForEnglish && isLatinDominant(lineText)) return false;
+  return true;
 }
 
 export interface WikiMatchLine {

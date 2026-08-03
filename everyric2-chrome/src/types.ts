@@ -3,6 +3,8 @@ export interface SongInfo {
   artist: string | null;
   videoId: string;
   duration: number;
+  /** 정리 전 영상 제목 — 버전 판별(리믹스 등)·검색 시트의 "원본으로" 복귀에 쓴다 */
+  rawTitle?: string;
 }
 
 /** 가라오케 음정 바용 노트 — 서버(FCPE)가 음절 구간을 반음 양자화한 결과 */
@@ -430,6 +432,8 @@ export interface JobStatusResponse {
   eta_sec?: number | null;
   /** 큐에서 자기 차례가 오기까지의 예상 대기(초) — queued 상태에서만 의미가 있다 */
   queue_eta_sec?: number | null;
+  /** 경과가 추정 중앙값을 넘었다 — eta_sec은 바닥값에 눌려 있으니 ETA 대신 단계·퍼센트로 */
+  eta_overrun?: boolean;
   /** 서버가 404를 반환 — 잡 기록이 사라짐(서버 재시작 등). 폴링은 실패로 마감한다 */
   gone?: boolean;
 }
@@ -439,7 +443,8 @@ export interface JobStatusResponse {
 
 /** GET /api/notices 항목 — 확장 안 공지함에 그대로 표시된다 */
 export interface ServerNotice {
-  id: string;
+  /** 서버는 정수 autoincrement를 준다 — 저장·비교는 String()으로 정규화해서 한다 */
+  id: number;
   title: string;
   body: string;
   /** 표시 강도 — critical은 닫아도 다시 뜨는 등급으로 쓸 수 있다(표시 정책은 UI가 정한다) */
@@ -565,6 +570,9 @@ export interface Settings {
   /** 쇼츠(/shorts/)에서도 가사창 자동 열기 허용 — 기본 꺼짐 */
   autoSearchShorts: boolean;
   fontSize: 'small' | 'medium' | 'large';
+  /** 메인 가사창 글자 크기 배율 — fontSize(3단 프리셋)에 곱해진다. 0.7~1.6, 기본 1(무회귀).
+   *  Shadow DOM 패널 엘리먼트에 --ey-main-fs로 실린다(overlay.css). */
+  mainFontScale: number;
   theme: 'auto' | 'dark' | 'light';
   serverUrl: string;
   offsetSec: number;
@@ -572,10 +580,16 @@ export interface Settings {
   translationLanguage: string;
   /** 원문 밑에 한국어 발음 표기(있을 때만) 표시 — 패널·PiP 공통 */
   showPronunciation: boolean;
+  /** 라틴 문자 우세 줄(영어 곡 등)에서는 발음 줄을 감춘다 — showPronunciation이 켜져
+   *  있어도 이 설정이 켜지면 영어 줄만 선택적으로 숨긴다(lib/lang.ts shouldShowPron) */
+  hidePronForEnglish: boolean;
   /** 서버 싱크가 없을 때 어느 가사 소스를 먼저 찾을지 — 보카로 위키는 발음·사람 번역 제공 */
   lyricsSourcePriority: 'vocaro' | 'lrclib';
   pipKeepPanel: boolean;
   pipShowVideo: boolean;
+  /** PiP 창 오른쪽에 스크롤 가사 목록 컬럼을 함께 표시(대칭 UI) — 기본 꺼짐(창이 넓어져야
+   *  하므로 옵트인). 켜지면 clampPipSize 상한도 넓어진다(pip.ts MAX_PIP_WIDTH_WITH_LIST) */
+  pipLyricsList: boolean;
   /** 빈 문자열이면 헤더 생략 */
   apiKey: string;
   /** PiP에서 영상 영역이 차지하는 세로 비율 (0 = 자동 16:9) */
@@ -616,11 +630,18 @@ export interface Settings {
   captionBgOpacity: number;
   /** [모듈] 다음 영상 정보 — 메인 패널·PIP에 다음 재생 영상 제목 표시 */
   modNextUp: boolean;
+  /** [모듈] 재생목록 패널 — 가사창 오른쪽(공간 부족 시 왼쪽)에 부착되는 전체 재생목록.
+   *  이전/다음 이동·항목 클릭 이동·영상별 서버 싱크 존재 배지를 담는다. 켜지면 하단
+   *  다음 영상 카드(modNextUp)는 같은 정보의 중복이라 숨긴다(overlay.renderNextUp). */
+  modPlaylist: boolean;
   /** [모듈] 가라오케 레인 — PIP 전용이던 음정 레인(피아노롤)을 메인 가사창 아래에도 표시.
    *  그리는 코드는 PIP와 완전히 같고(ui/pitch-lane.ts), 표시 취향도 같은 설정을 따른다 */
   modMainLane: boolean;
-  /** 발음 표기 위치: note = 노트마다 위에 부착, bottom = 화면 하단 중앙(진행률 그라데이션) */
-  pitchPronPosition: 'note' | 'bottom' | 'both';
+  /** 발음 표기 위치: off = 표시 안 함, note = 노트마다 위에 부착, bottom = 화면 하단 중앙
+   *  (진행률 그라데이션), both = 노트 부착 + 하단 동시, center = 레인 중앙에 반투명 오버레이.
+   *  hidePronForEnglish·showPronunciation과 무관하게 이 값 하나로만 켜고 끈다(노트·레인
+   *  발음은 스테이지 발음 줄과 별개 계약 — lib/lang.ts 게이트를 타지 않는다). */
+  pitchPronPosition: 'off' | 'note' | 'bottom' | 'both' | 'center';
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */
   pitchGuide: boolean;
   /** 가라오케 창에서 노트를 신디사이즈로 재생 */
@@ -656,9 +677,13 @@ export interface Settings {
   /** 메인 가사창 가라오케 레인이 왼쪽 열일 때의 열 너비(px) — 레인/가사 경계 드래그로 조절.
    *  mainLanePos가 'bottom'이면 무시된다(그때는 pitchLaneHeight가 크기를 정한다). */
   mainLaneWidth: number;
-  /** 메인 가사창 레인 배치: 'left' = 가사 왼쪽 세로 열, 'bottom' = 가사 아래 가로 띠(레거시).
+  /** 메인 가사창 레인 배치: 'left' = 가사 왼쪽 세로 열(패널 안), 'bottom' = 가사 아래 가로
+   *  띠(레거시), 'attached' = 가사창 **밖** 왼쪽에 따로 붙는 패널(운영자 요청 2026-08-03).
    *  modMainLane이 켜져 있을 때만 의미가 있다. */
-  mainLanePos: 'left' | 'bottom';
+  mainLanePos: 'left' | 'bottom' | 'attached';
+  /** 'attached' 배치일 때 부착 패널의 폭(px) — mainLaneWidth와 별개 값(부착 패널은
+   *  패널 폭에서 깎이는 게 아니라 화면에 독립적으로 떠 있어 더 넓은 범위를 허용한다) */
+  attachedLaneWidth: number;
   /** 가라오케 음절 타이밍 안내 배너(깊이 업그레이드 유도)를 사용자가 닫았는가 —
    *  한 번 닫으면 다시 띄우지 않는다(곡마다 다시 뜨면 그 자체가 소음이다). */
   karaokeTimingNoticeDismissed: boolean;
@@ -772,6 +797,10 @@ export type BgRequest =
   | { type: 'SYNC_RESET'; payload: { videoId: string } }
   | { type: 'SYNC_OFFSET'; payload: { videoId: string; offsetSec: number } }
   | { type: 'SYNC_LIST' }
+  /** 재생목록 패널의 존재 배지 — 여러 videoId(≤100)의 서버 싱크 존재 여부를 한 번에.
+   *  응답은 요청한 videoId 중 조회 성공분만 채워질 수 있다(부분 실패는 배지 생략으로
+   *  조용히 흡수 — background.ts의 캐시가 실패한 나머지를 다음 조회에서 다시 시도한다) */
+  | { type: 'SYNC_EXISTS'; payload: { videoIds: string[] } }
   /** 이 영상 싱크의 직전 세대 조회 — 디버그 패널의 A/B 고스트 비교용 */
   | { type: 'SYNC_PREVIOUS'; payload: { videoId: string } }
   /** 이 영상 싱크의 저장된 버전 목록(최신순 ≤10) — 디버그 패널의 깊이·버전 비교용 */
@@ -793,11 +822,11 @@ export type BgRequest =
    *  있는 **확장 페이지**에서만 되므로 content script는 여기까지만 할 수 있다.
    *  (service worker에서 request()를 부르면 제스처 컨텍스트가 없어 실패한다.) */
   | { type: 'OPEN_OPTIONS' }
-  | { type: 'VOCARO_LOOKUP'; payload: { title: string } }
+  | { type: 'VOCARO_LOOKUP'; payload: { title: string; hint?: string } }
   /** 서버 원제 인덱스에 제목 하나를 묻는다(가사 본문 없이 slug/표기만) — 일본어 원제처럼
    *  클라이언트 초성 인덱스가 구조적으로 못 찾는 제목의 유일한 경로다. */
   | { type: 'VOCARO_MATCH'; payload: { title: string } }
-  | { type: 'VOCARO_PAGE'; payload: { slug: string } }
+  | { type: 'VOCARO_PAGE'; payload: { slug: string; hint?: string } }
   /** 서버 공지 목록 — 없는 서버(404)면 조용히 기능만 꺼진다 */
   | { type: 'NOTICES_GET' }
   /** 이 영상 기준 남은 한도 — 생성 버튼 옆 잔여 표시용 */

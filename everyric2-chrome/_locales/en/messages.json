@@ -352,7 +352,7 @@
     "message": "Server unavailable"
   },
   "panels_serverDown_note": {
-    "message": "Lyrics search still works without the server, but this song wasn't found on external sources either. Generating, regenerating, and translating sync requires the server."
+    "message": "Lyrics search still works without the server, but this song wasn't found on external sources either. Generating, resetting, and translating sync requires the server."
   },
   "panels_serverDown_retry": {
     "message": "Search lyrics again"
@@ -424,10 +424,10 @@
     "message": "View in Picture-in-Picture"
   },
   "overlay_header_regen": {
-    "message": "Regenerate sync (ignore server cache)"
+    "message": "Reset sync — deletes the server save and starts over from scratch"
   },
   "overlay_header_regenConfirm": {
-    "message": "Regenerate the server sync?\nThis takes about a minute; the current lyrics stay visible until it's done."
+    "message": "Delete the server sync and start over from scratch?\nAutomatic search runs again right after. Use this if the lyrics were pasted wrong to begin with."
   },
   "overlay_header_search": {
     "message": "Search lyrics again (pick another result)"
@@ -588,6 +588,9 @@
   "content_wrongLyrics_thanks": {
     "message": "Thanks for the report! Pick the right lyrics in search"
   },
+  "content_fullReset_done": {
+    "message": "Extension reset — settings are back to defaults"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "Run AI transcription"
   },
@@ -746,10 +749,25 @@
     }
   },
   "overlay_warn_title": {
-    "message": "The average alignment confidence for transcription/pronunciation is low. Check that the original lyrics are correct, or try regenerating."
+    "message": "The average alignment confidence for transcription/pronunciation is low. Check that the original lyrics are correct, or try resetting the sync."
   },
   "overlay_warn_close": {
     "message": "Dismiss this warning (you can also turn it off in settings)"
+  },
+  "overlay_warn_expand": {
+    "message": "Details"
+  },
+  "overlay_warn_collapse": {
+    "message": "Collapse"
+  },
+  "overlay_warn_detail": {
+    "message": "Check whether the original lyrics are accurate, or try increasing the analysis depth."
+  },
+  "overlay_warn_dismissSong": {
+    "message": "Don't show for this song"
+  },
+  "overlay_warn_dismissSongTitle": {
+    "message": "This warning won't show again for this video (you can undo it in Settings ♻️)"
   },
   "overlay_genList_currentVideo": {
     "message": "$P1$ (current video)",
@@ -891,6 +909,9 @@
   "overlay_settings_row_fontSize": {
     "message": "Font size"
   },
+  "overlay_settings_row_mainFontScale": {
+    "message": "Fine-tune font size"
+  },
   "overlay_settings_row_theme": {
     "message": "Theme"
   },
@@ -908,6 +929,12 @@
   },
   "overlay_settings_row_showPronunciation": {
     "message": "Show pronunciation (when available)"
+  },
+  "overlay_settings_row_hidePronForEnglish": {
+    "message": "Hide pronunciation for English lyrics"
+  },
+  "overlay_settings_row_hidePronForEnglishTitle": {
+    "message": "Only hides the pronunciation line for lines where Latin letters dominate (e.g. English songs) — other languages are unaffected"
   },
   "overlay_settings_row_sourcePriority": {
     "message": "Lyrics source priority"
@@ -943,7 +970,7 @@
     "message": "Pronunciation position"
   },
   "overlay_settings_row_pronPositionTitle": {
-    "message": "Where to show pronunciation for songs with syllable timing. Above notes = attached right below each note; bottom = centered at the bottom with a progress gradient."
+    "message": "Where to show pronunciation for songs with syllable timing. Off = no pronunciation on the lane; above notes = attached right below each note; bottom = centered at the bottom with a progress gradient; center overlay = translucent, layered on top of the staff."
   },
   "overlay_settings_row_melodyPlayback": {
     "message": "Play melody (karaoke window)"
@@ -1059,6 +1086,12 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "Shows the upcoming video's title in the panel and PiP (playlist and autoplay)"
   },
+  "overlay_settings_row_modPlaylist": {
+    "message": "[Module] Playlist panel"
+  },
+  "overlay_settings_row_modPlaylistTitle": {
+    "message": "Attaches the full YouTube playlist next to the lyrics panel — previous/next navigation, click to jump, and a server-sync badge per item. Turning this on hides the next-video card below"
+  },
   "overlay_settings_row_modMainLane": {
     "message": "[Module] Karaoke lane"
   },
@@ -1089,6 +1122,9 @@
   "overlay_quick_nextUp": {
     "message": "Toggle next-video info"
   },
+  "overlay_quick_playlist": {
+    "message": "Toggle playlist panel"
+  },
   "overlay_nextUp_label": {
     "message": "Next ▸"
   },
@@ -1096,7 +1132,7 @@
     "message": "Fast"
   },
   "overlay_depthLabel_medium": {
-    "message": "Standard"
+    "message": "Medium"
   },
   "overlay_laneNotice_text": {
     "message": "If syllable timing looks off, try a deeper analysis (currently $P1$)",
@@ -1105,6 +1141,9 @@
         "content": "$1"
       }
     }
+  },
+  "overlay_laneNotice_textNoDepth": {
+    "message": "If syllable timing looks off, try a deeper analysis"
   },
   "overlay_laneNotice_close": {
     "message": "Dismiss"
@@ -1131,6 +1170,32 @@
         "content": "$1"
       }
     }
+  },
+  "overlay_playlist_prev": {
+    "message": "Previous video"
+  },
+  "overlay_playlist_next": {
+    "message": "Next video"
+  },
+  "overlay_playlist_status": {
+    "message": "Playlist · $P1$ tracks",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_playlist_noPlaylist": {
+    "message": "Not part of a playlist"
+  },
+  "overlay_playlist_noPlaylistTitle": {
+    "message": "This video isn't part of a playlist — showing the next video instead"
+  },
+  "overlay_playlist_empty": {
+    "message": "Nothing to show yet"
+  },
+  "overlay_playlist_existsTitle": {
+    "message": "Server sync available"
   },
   "pip_nextUp": {
     "message": "Next ▸ $P1$",
@@ -1594,7 +1659,7 @@
     }
   },
   "content_completion_partialReadyWarning": {
-    "message": "Only $P1$ was added to some lines — try regenerating",
+    "message": "Only $P1$ was added to some lines — try resetting the sync to retry",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -1616,7 +1681,7 @@
     }
   },
   "content_completion_missingWarning": {
-    "message": "Sync was made, but $P1$ wasn't added$P2$ — try regenerating",
+    "message": "Sync was made, but $P1$ wasn't added$P2$ — try resetting the sync to retry",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -1784,10 +1849,10 @@
     "message": "Fast"
   },
   "content_genChip_depthMedium": {
-    "message": "Standard"
+    "message": "Medium"
   },
   "content_genChip_depthHeavy": {
-    "message": "Precise"
+    "message": "Heavy"
   },
   "content_genChip_depthState": {
     "message": "$P1$ · $P2$",
@@ -1810,6 +1875,17 @@
   },
   "content_genChip_etaSoon": {
     "message": "almost done"
+  },
+  "content_genChip_etaSeconds": {
+    "message": "$P1$s left",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_genChip_etaOverrun": {
+    "message": "taking longer than expected"
   },
   "content_genChip_stageEta": {
     "message": "$P1$ · $P2$",
@@ -1842,7 +1918,7 @@
     }
   },
   "content_genChip_depthUpgraded": {
-    "message": "Switched to precise analysis"
+    "message": "Switched to Heavy analysis"
   },
   "panels_search_titleHint": {
     "message": "Try just the song title (leave out the artist, 【】, MV, etc.)"
@@ -1865,10 +1941,10 @@
     "message": "Fast"
   },
   "panels_depth_medium": {
-    "message": "Standard"
+    "message": "Medium"
   },
   "panels_depth_heavy": {
-    "message": "Precise"
+    "message": "Heavy"
   },
   "panels_date_today": {
     "message": "Today"
@@ -1949,8 +2025,23 @@
   "panels_settings_reset_karaokeNotice": {
     "message": "Show the karaoke timing notice again"
   },
+  "panels_settings_reset_fullReset": {
+    "message": "Reset the entire extension"
+  },
+  "panels_settings_reset_fullResetTitle": {
+    "message": "Restores every setting to default and clears window positions, per-video references, notice read state, and contribution history"
+  },
+  "panels_settings_reset_fullResetConfirm": {
+    "message": "Really reset everything? — your contribution history goes too (click again within 4s to confirm)"
+  },
   "panels_settings_reset_karaokeNoticeTitle": {
     "message": "Bring back the notice banner you dismissed"
+  },
+  "panels_settings_reset_warnDismiss": {
+    "message": "Restore all low-confidence warnings"
+  },
+  "panels_settings_reset_warnDismissTitle": {
+    "message": "Brings back every low-confidence warning you dismissed per song"
   },
   "panels_settings_reset_done": {
     "message": "Reset"
@@ -1967,10 +2058,10 @@
     }
   },
   "panels_rating_report": {
-    "message": "Report"
+    "message": "Report alignment quality"
   },
   "panels_rating_reportTitle": {
-    "message": "Tell us about a lyrics, timing, or pronunciation problem"
+    "message": "Report an alignment quality problem (lyrics, timing, pronunciation)"
   },
   "panels_rating_sending": {
     "message": "Sending…"
@@ -1982,7 +2073,7 @@
     "message": "Could not send"
   },
   "panels_report_title": {
-    "message": "What went wrong?"
+    "message": "Report alignment quality — what went wrong?"
   },
   "panels_report_commentPh": {
     "message": "Describe what happened (optional)"
@@ -2073,7 +2164,7 @@
     "message": "You have not made any syncs yet"
   },
   "panels_contrib_headline": {
-    "message": "$P2$ people watched the $P1$ songs you made",
+    "message": "Your $P1$ songs were viewed $P2$ times",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -2146,5 +2237,32 @@
   },
   "overlay_header_contrib": {
     "message": "My contributions & remaining quota"
+  },
+  "overlay_settings_pronPosition_off": {
+    "message": "Off"
+  },
+  "overlay_settings_pronPosition_center": {
+    "message": "Center overlay on lane"
+  },
+  "panels_settings_mainLanePos_attached": {
+    "message": "Attached (outside panel)"
+  },
+  "overlay_quick_lanePosToAttached": {
+    "message": "Attach the lane outside the panel, to the left"
+  },
+  "panels_settings_row_attachedLaneWidth": {
+    "message": "Attached lane width"
+  },
+  "overlay_settings_row_pipLyricsList": {
+    "message": "PiP lyrics list column"
+  },
+  "overlay_settings_row_pipLyricsListTitle": {
+    "message": "Show a scrollable lyrics list next to the PiP window. Turning it on widens the window's max width."
+  },
+  "pip_controls_lyricsListToggle": {
+    "message": "Toggle lyrics list column"
+  },
+  "pip_controls_pronPositionToggle": {
+    "message": "Cycle lane pronunciation position (off/bottom/center)"
   }
 }

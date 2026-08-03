@@ -58,6 +58,7 @@
    읽으므로(readPitchColors), body에만 걸면 UI만 밝아지고 캔버스는 다크로 남는다.
    테마 판정 자체는 src/lib/theme.ts 한 곳에서만 하고 여기선 칠하기만 한다. */
 .ey-panel.ey-light,
+.ey-attach-lane.ey-light,
 :root.ey-light {
   color-scheme: light;
   --ey-bg: rgba(255, 255, 255, 0.94);
@@ -107,12 +108,12 @@
   display: none !important;
 }
 
-/* 낮은 정렬 신뢰도 경고 바 — 헤더/진행 칩 아래, X로 닫기 */
+/* 낮은 정렬 신뢰도 경고 바 — 헤더/진행 칩 아래. 짧은 줄(head) + "자세히"로 펼치는
+   안내(detail, 곡별 "다시 보지 않기" 포함)의 2단 구성 — renderWarnBar 참고. */
 .ey-warn-bar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 4px;
   margin: 0 10px 6px;
   padding: 5px 10px;
   border-radius: 8px;
@@ -122,7 +123,25 @@
   color: var(--ey-text);
   flex-shrink: 0;
 }
-.ey-warn-text { min-width: 0; }
+.ey-warn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ey-warn-text { min-width: 0; flex: 1; }
+.ey-warn-expand {
+  border: none;
+  background: transparent;
+  color: var(--ey-text-dim);
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ey-warn-expand:hover { color: var(--ey-text); }
 .ey-warn-close {
   border: none;
   background: transparent;
@@ -134,6 +153,30 @@
   flex-shrink: 0;
 }
 .ey-warn-close:hover { color: var(--ey-text); }
+.ey-warn-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 3px;
+  border-top: 1px dashed rgba(255, 176, 46, 0.35);
+  color: var(--ey-text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.ey-warn-detail-text { min-width: 0; flex: 1; }
+.ey-warn-dismiss-song {
+  border: 1px solid rgba(255, 176, 46, 0.4);
+  background: transparent;
+  color: var(--ey-text-dim);
+  font-size: 10.5px;
+  border-radius: 5px;
+  padding: 2px 7px;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ey-warn-dismiss-song:hover { color: var(--ey-text); border-color: rgba(255, 176, 46, 0.7); }
 
 /* ── 서버 오류 배너 ───────────────────────────────────────────────
    메인 패널(헤더 아래 고정 슬롯)과 PiP(창 하단 슬롯), 그리고 본문 상태 화면이
@@ -223,9 +266,12 @@
 /* 검색 시트 복귀 버튼 — 시트 최상단에서 눈에 띄게 */
 .ey-search-back { align-self: center; }
 
-.ey-panel.ey-fs-small { --ey-line-size: 13px; }
-.ey-panel.ey-fs-medium { --ey-line-size: 15px; }
-.ey-panel.ey-fs-large { --ey-line-size: 18px; }
+/* 3단 프리셋에 --ey-main-fs(설정 슬라이더, 기본 1) 배율을 곱한다 — 기존 small/medium/large
+   선택은 그대로 보존되고, 슬라이더는 그 위에 얹히는 미세 조정이다(overlay.ts applySettings가
+   .ey-panel에 --ey-main-fs를 심는다). 변수 자체가 없으면(패널 부착 전) 1로 폴백해 무회귀. */
+.ey-panel.ey-fs-small { --ey-line-size: calc(13px * var(--ey-main-fs, 1)); }
+.ey-panel.ey-fs-medium { --ey-line-size: calc(15px * var(--ey-main-fs, 1)); }
+.ey-panel.ey-fs-large { --ey-line-size: calc(18px * var(--ey-main-fs, 1)); }
 
 /* 리사이즈 그립 표시 */
 .ey-panel::after {
@@ -260,10 +306,11 @@
 
 /* 제목바 언어 칩 — 곡이 지원하는 번역 언어를 한눈에 보여주고 클릭으로 바로 전환한다.
    상태 4종: 현재 선택(accent, "노란색") / 보유(밝은 회색) / 미보유(어두운 회색) / 로딩(펄스) */
+/* 퀵 토글 줄(.ey-quick-row) 오른쪽 끝에 얹혀 산다 — 별도 줄이 아니다 */
 .ey-lang-chips {
   display: flex;
   gap: 6px;
-  padding: 0 10px 8px 14px;
+  margin-left: auto;
   flex-shrink: 0;
 }
 
@@ -838,12 +885,24 @@
 .ey-feedback-status { color: var(--ey-text-dim); font-size: 11px; }
 
 /* 보컬 발성 구간 글로우 (overlay.ts updateVocalGlow) — 은은한 소프트 펄스.
-   box-shadow 전용이라 레이아웃 리플로 없음. 끄면(설정) 클래스 자체가 안 붙는다. */
-.ey-panel { transition: box-shadow 0.6s ease; }
-.ey-panel.ey-vocal-glow { animation: ey-glow-pulse 2.4s ease-in-out infinite; }
+   box-shadow를 매 프레임 애니메이션하면 backdrop-filter가 있는 패널에서 프레임마다
+   전체 리페인트가 든다(5fps 감사 #2) — 고정 box-shadow는 그대로 두고, 펄스는 ::after
+   의사요소의 opacity만 오간다(합성 전용 — 컴포지터가 처리해 리페인트가 없다).
+   .ey-panel은 이미 position: fixed(위 30행)라 별도 relative 없이도 이 절대 위치
+   의사요소의 컨테이닝 블록이 된다. */
+.ey-panel.ey-vocal-glow::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 30px rgba(255, 176, 46, 0.22);
+  opacity: 0;
+  animation: ey-glow-pulse 2.4s ease-in-out infinite;
+}
 @keyframes ey-glow-pulse {
-  0%, 100% { box-shadow: 0 0 16px rgba(255, 176, 46, 0.10); }
-  50% { box-shadow: 0 0 30px rgba(255, 176, 46, 0.22); }
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
 }
 
 /* 다음 영상 정보 모듈 (setNextUp) — 푸터 위 카드.
@@ -897,40 +956,9 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* 이어질 재생목록 — 공급자가 없으면 렌더 자체가 생략된다(setPlaylist 계약).
-   길어질 수 있으므로 자체 스크롤로 가두어 가사 목록의 높이를 뺏지 않는다. */
-.ey-nextup-pl {
-  margin-top: 6px;
-  max-height: 96px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--ey-text-faint) transparent;
-}
-.ey-nextup-pl::-webkit-scrollbar { width: 5px; }
-.ey-nextup-pl::-webkit-scrollbar-thumb { background: var(--ey-text-faint); border-radius: 3px; }
-.ey-nextup-pl::-webkit-scrollbar-track { background: transparent; }
-
-.ey-nextup-pl-row {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  padding: 2px 0;
-  font-size: 11px;
-}
-
-.ey-nextup-pl-index {
-  min-width: 14px;
-  text-align: right;
-  color: var(--ey-text-faint);
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-
-.ey-nextup-pl-title {
-  min-width: 0;
-  color: var(--ey-text-dim);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
+/* 이어질 재생목록의 인라인 임베드 목록(.ey-nextup-pl*)은 2026-08-03 재작업으로
+   전용 부착 패널(.ey-attach-playlist, .ey-pl-*)로 대체됐다 — 하단 카드는 다음
+   영상 정보만 남는다(renderNextUp). */
 .ey-pip-nextup {
   color: var(--ey-text-dim);
   font-size: calc(10px * var(--ey-pip-fs, 1));
@@ -1009,6 +1037,166 @@
 }
 
 .ey-lane-divider:hover .ey-lane-divider-grip { background: var(--ey-text-dim); }
+
+/* 부착(attached) 레인 패널 — .ey-panel의 형제로 Shadow DOM에 직접 붙는 독립 패널
+   (내부 분할이 아니라 패널 밖 왼쪽에 따로 뜨는 뷰, 운영자 요청 2026-08-03). 좌표·크기는
+   overlay.ts의 updateAttachPlacement가 인라인 스타일로 매긴다 — 여기선 겉모양만. */
+.ey-attach-lane {
+  position: fixed;
+  display: flex;
+  flex-direction: row;
+  background: var(--ey-bg);
+  color: var(--ey-text);
+  font-family: var(--ey-font);
+  border: 1px solid var(--ey-border);
+  border-radius: var(--ey-radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.ey-attach-lane.ey-light { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18); }
+
+/* 부착 패널 안의 레인 열 — 내부 분할(.ey-main-row.lane-left)과 달리 폭은 부착 패널
+   자신(JS가 매긴다)이 정하므로 laneWrap은 남는 공간을 그냥 채운다 */
+.ey-attach-lane > .ey-lane-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ey-attach-lane .ey-main-lane {
+  width: 100%;
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  border-top: none;
+  cursor: pointer;
+}
+
+/* 부착 패널 자신의 폭 조절 손잡이 — 왼쪽 모서리(오른쪽은 메인 패널과의 간격에 고정) */
+.ey-attach-divider {
+  width: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+/* 재생목록 부착 패널 — .ey-panel의 형제로 Shadow DOM에 직접 붙는 독립 패널. 레인 부착
+   패널(.ey-attach-lane)과 겉모양 계열은 같지만 세로(헤더 + 스크롤 목록) 구성이라
+   flex-direction이 column이다. 좌표·크기는 overlay.ts의 updatePlaylistPlacement가
+   인라인 스타일로 매긴다 — 여기선 겉모양만. */
+.ey-attach-playlist {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  background: var(--ey-bg);
+  color: var(--ey-text);
+  font-family: var(--ey-font);
+  border: 1px solid var(--ey-border);
+  border-radius: var(--ey-radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.ey-attach-playlist.ey-light { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18); }
+
+.ey-pl-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ey-border);
+  flex-shrink: 0;
+}
+
+.ey-pl-nav-btn {
+  border: 1px solid var(--ey-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ey-text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.ey-pl-nav-btn:hover { color: var(--ey-text); border-color: var(--ey-text-dim); }
+
+.ey-pl-status {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ey-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ey-pl-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ey-text-faint) transparent;
+}
+.ey-pl-list::-webkit-scrollbar { width: 5px; }
+.ey-pl-list::-webkit-scrollbar-thumb { background: var(--ey-text-faint); border-radius: 3px; }
+.ey-pl-list::-webkit-scrollbar-track { background: transparent; }
+
+.ey-pl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--ey-border);
+}
+.ey-pl-row:last-child { border-bottom: none; }
+.ey-pl-row:hover { background: var(--ey-elev); }
+.ey-pl-row.current { background: var(--ey-accent-soft); }
+
+.ey-pl-row-index {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: right;
+  font-size: 10px;
+  color: var(--ey-text-faint);
+}
+
+.ey-pl-row-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ey-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ey-pl-row.current .ey-pl-row-title { font-weight: 600; }
+
+/* 서버 싱크 존재 배지 — 작은 점 하나로 충분하다(목록이 길면 아이콘·글자는 소음) */
+.ey-pl-row-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ey-accent);
+}
+
+/* 재생목록이 없는 단일 영상 페이지 — 다음 영상 카드를 그대로 재사용해 보여준다 */
+.ey-pl-nextup-wrap { padding: 10px; }
 
 /* 음절 타이밍 안내 배너 — 레인 영역 안(캔버스 아래). 220px 열에서도 읽히도록
    작은 글씨 + 줄바꿈 허용, 버튼은 아래 줄로 흐른다. */
@@ -1261,10 +1449,13 @@
    PiP 창
    ========================================================================== */
 
+/* body는 가로(row)로 나뉜다: [.ey-pip-main(예전 세로 스택 전체)] [.ey-pip-lyricscol(대칭
+   UI, 기본 꺼짐)]. 컬럼이 꺼져 있으면 .ey-pip-main이 flex:1로 폭 전체를 그대로 먹어
+   2026-08 이전과 픽셀 단위로 동일하다 — 아래 .ey-pip-corner는 position:fixed라 무관하다. */
 body.ey-pip {
   margin: 0;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: 100vh;
   background: var(--ey-bg-solid);
   color: var(--ey-text);
@@ -1276,6 +1467,39 @@ body.ey-pip {
      스테이지 가사/발음/번역까지 함께 커지도록 폰트 계산에 곱해 쓴다 */
   --ey-pip-fs: 1;
 }
+
+.ey-pip-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 오른쪽 가사 목록 컬럼 — 대칭 UI(설정 pipLyricsList, 기본 꺼짐). 표시/숨김은
+   JS(applyLyricsListVisibility)가 style.display로 정한다.
+   줄 하나의 DOM은 메인 가사창과 완전히 같은 .ey-line 구조(line-render.ts 공용 렌더러)라
+   위쪽 .ey-line/.ey-word/.ey-line-pron/.ey-line-tr 규칙이 그대로 적용된다 — 운영자 불만
+   ("PIP·메인 가사창 모양이 다르다") 해소: 여기서는 폭이 좁은 컨텍스트에 필요한
+   글자 크기·좌우 여백만 최소로 오버라이드한다. */
+.ey-pip-lyricscol {
+  display: none;
+  flex-direction: column;
+  flex: 0 0 260px;
+  width: 260px;
+  min-width: 200px;
+  max-width: 40%;
+  border-left: 1px solid var(--ey-border);
+  overflow-y: auto;
+  padding: 6px 4px;
+  box-sizing: border-box;
+  /* 메인 기본(15px)의 0.9배 — 260px 고정 폭에 맞춘 축소. .ey-line.active의 1.13배
+     확대도 이 값 기준으로 다시 계산되어 함께 줄어든다 */
+  --ey-line-size: 13.5px;
+}
+
+.ey-pip-lyricscol .ey-line { padding: 6px 8px; }
 
 /* 영상 미러 (captureStream) — 창이 가로로 넓어져 16:9 높이가 커져도
    가사 스테이지의 min-height를 지키도록 shrink를 허용한다 */
@@ -1338,7 +1562,9 @@ body.ey-pip {
 }
 
 .ey-pip-line.prev, .ey-pip-line.next {
-  font-size: calc(clamp(10px, min(3.6vw, 11cqh), 16px) * var(--ey-pip-fs, 1));
+  /* vw가 아니라 cqw — 가사 목록 컬럼(.ey-pip-lyricscol)이 열려 스테이지 폭이 줄어들면
+     글자도 그 폭을 따라 줄어야 넘치지 않는다(container-type: size가 .ey-pip-stage에 있다) */
+  font-size: calc(clamp(10px, min(3.6cqw, 11cqh), 16px) * var(--ey-pip-fs, 1));
   color: var(--ey-text-faint);
   cursor: pointer;
   display: -webkit-box;
@@ -1350,7 +1576,7 @@ body.ey-pip {
 .ey-pip-line.prev:hover, .ey-pip-line.next:hover { color: var(--ey-text-dim); }
 
 .ey-pip-line.current {
-  font-size: calc(clamp(15px, min(6.5vw, 24cqh), 34px) * var(--ey-pip-fs, 1));
+  font-size: calc(clamp(15px, min(6.5cqw, 24cqh), 34px) * var(--ey-pip-fs, 1));
   font-weight: 700;
   line-height: 1.35;
   color: var(--ey-text);
@@ -1383,7 +1609,7 @@ body.ey-pip {
 .ey-pip-line.current .ey-word.sung { color: var(--ey-accent); }
 
 .ey-pip-tr {
-  font-size: calc(clamp(11px, min(4vw, 14cqh), 18px) * var(--ey-pip-fs, 1));
+  font-size: calc(clamp(11px, min(4cqw, 14cqh), 18px) * var(--ey-pip-fs, 1));
   color: var(--ey-text-dim);
   max-width: 100%;
   word-break: keep-all;
@@ -1400,7 +1626,7 @@ body.ey-pip {
 
 /* 현재 라인의 발음 표기 (원문과 번역 사이) */
 .ey-pip-pron {
-  font-size: calc(clamp(11px, min(3.8vw, 12cqh), 17px) * var(--ey-pip-fs, 1));
+  font-size: calc(clamp(11px, min(3.8cqw, 12cqh), 17px) * var(--ey-pip-fs, 1));
   color: var(--ey-text-dim);
   max-width: 100%;
   word-break: keep-all;
@@ -1431,6 +1657,67 @@ body.ey-hide-pron .ey-pip-pron { display: none; }
    스테이지가 빠지면 flex 성장 요소가 없어지므로 영상이 남는 공간을 흡수한다 */
 body.ey-lane-active .ey-pip-stage { display: none; }
 body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
+
+/* 이전/다음 영상 재생목록(footer 목록 버튼) — 가사 목록 컬럼(.ey-pip-lyricscol)과는
+   다른 목록이다(이건 유튜브 재생목록, 그건 이 곡의 가사 줄). 여태 골격만 있고 스타일이
+   비어 있어 버튼 더미가 맨몸으로 렌더됐다(코덱스 감사). */
+.ey-pip-playlist {
+  flex: 0 1 auto;
+  max-height: 40%;
+  overflow-y: auto;
+  border-top: 1px solid var(--ey-border);
+  padding: 4px 0;
+}
+
+.ey-pip-playlist-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  color: var(--ey-text-dim);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--ey-font);
+}
+
+.ey-pip-playlist-item:hover { background: var(--ey-elev-hover); color: var(--ey-text); }
+.ey-pip-playlist-item.current { color: var(--ey-accent); }
+
+.ey-pip-playlist-title {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ey-pip-playlist-by {
+  font-size: 10px;
+  color: var(--ey-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ey-pip-playlist-item.current .ey-pip-playlist-by { color: inherit; opacity: 0.8; }
+
+/* 가사 패널(검색·붙여넣기·싱크 생성 — 메인 패널과 같은 panels.ts 조각을 담는 컨테이너).
+   .ey-pip-main 안에서 flex:1로 남는 세로 공간을 채우고 내용이 넘치면 스스로 스크롤한다. */
+.ey-pip-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px;
+  box-sizing: border-box;
+}
+
+.ey-pip-panel-plain {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 
 /* PiP 진행/알림 칩 — 푸터 위 얇은 줄. 메인 패널의 .ey-gen-chip / .ey-notice-chip과
    같은 정보를 같은 색 규약(진행=강조 노랑 계열, 알림=초록 계열)으로 창 안에 띄운다.
@@ -1560,6 +1847,7 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
    헤더 .ey-actions는 이미 버튼 7개로 꽉 차 제목을 밀어내므로 별도 줄로 뺐다. */
 .ey-quick-row {
   display: flex;
+  align-items: center;
   gap: 4px;
   padding: 6px 12px 0;
   flex-shrink: 0;

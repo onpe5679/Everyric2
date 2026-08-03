@@ -76,6 +76,7 @@ export function detectSong(): SongInfo | null {
       artist: meta.artist || null,
       videoId,
       duration,
+      rawTitle: meta.title,
     };
   }
 
@@ -84,7 +85,7 @@ export function detectSong(): SongInfo | null {
     if (title) {
       const byline = textOf('ytmusic-player-bar .byline');
       const artist = byline.split('•')[0]?.trim() || null;
-      return { title: cleanTitle(title), artist, videoId, duration };
+      return { title: cleanTitle(title), artist, videoId, duration, rawTitle: title };
     }
   }
 
@@ -100,5 +101,6 @@ export function detectSong(): SongInfo | null {
     artist: split.artist ?? channel,
     videoId,
     duration,
+    rawTitle,
   };
 }

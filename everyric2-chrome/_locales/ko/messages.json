@@ -352,7 +352,7 @@
     "message": "서버를 쓸 수 없어요"
   },
   "panels_serverDown_note": {
-    "message": "가사 검색은 서버 없이도 되지만 이 곡은 외부 소스에서도 찾지 못했어요. 싱크 생성·재생성·번역은 서버가 있어야 해요."
+    "message": "가사 검색은 서버 없이도 되지만 이 곡은 외부 소스에서도 찾지 못했어요. 싱크 생성·초기화·번역은 서버가 있어야 해요."
   },
   "panels_serverDown_retry": {
     "message": "가사 다시 검색"
@@ -424,10 +424,10 @@
     "message": "PiP 창으로 보기"
   },
   "overlay_header_regen": {
-    "message": "싱크 다시 생성 (서버 캐시 무시)"
+    "message": "싱크 초기화 — 서버 저장을 지우고 처음부터 다시 만들어요"
   },
   "overlay_header_regenConfirm": {
-    "message": "서버 싱크를 다시 생성할까요?\n1분 정도 걸리고, 완료될 때까지 기존 가사는 계속 표시됩니다."
+    "message": "서버에 저장된 싱크를 지우고 처음부터 다시 만들까요?\n삭제 후 자동으로 다시 검색해요. 가사를 잘못 입력했을 때 여기서 새로 시작할 수 있어요."
   },
   "overlay_header_search": {
     "message": "가사 다시 검색 (다른 결과 선택)"
@@ -588,6 +588,9 @@
   "content_wrongLyrics_thanks": {
     "message": "제보 고마워요! 검색에서 올바른 가사를 골라 주세요"
   },
+  "content_fullReset_done": {
+    "message": "확장을 초기화했어요 — 설정이 기본값으로 돌아갔어요"
+  },
   "overlay_banner_aiTranscribe": {
     "message": "AI 전사 생성"
   },
@@ -746,10 +749,25 @@
     }
   },
   "overlay_warn_title": {
-    "message": "전사·발음 정렬의 평균 신뢰도가 낮아요. 가사 원문이 정확한지 확인하거나 재생성을 시도해 보세요."
+    "message": "전사·발음 정렬의 평균 신뢰도가 낮아요. 가사 원문이 정확한지 확인하거나 싱크 초기화를 시도해 보세요."
   },
   "overlay_warn_close": {
     "message": "이 경고 닫기 (설정에서 끌 수도 있어요)"
+  },
+  "overlay_warn_expand": {
+    "message": "자세히"
+  },
+  "overlay_warn_collapse": {
+    "message": "접기"
+  },
+  "overlay_warn_detail": {
+    "message": "가사 원문이 정확한지 확인하거나 분석 깊이를 높여보세요."
+  },
+  "overlay_warn_dismissSong": {
+    "message": "이 곡에서 다시 보지 않기"
+  },
+  "overlay_warn_dismissSongTitle": {
+    "message": "이 영상에서는 이 경고를 다시 보여주지 않아요 (설정 ♻️ 범주에서 되돌릴 수 있어요)"
   },
   "overlay_genList_currentVideo": {
     "message": "$P1$ (현재 영상)",
@@ -891,6 +909,9 @@
   "overlay_settings_row_fontSize": {
     "message": "폰트 크기"
   },
+  "overlay_settings_row_mainFontScale": {
+    "message": "폰트 크기 세부 조절"
+  },
   "overlay_settings_row_theme": {
     "message": "테마"
   },
@@ -908,6 +929,12 @@
   },
   "overlay_settings_row_showPronunciation": {
     "message": "발음 표기 표시 (있을 때)"
+  },
+  "overlay_settings_row_hidePronForEnglish": {
+    "message": "영어 가사는 발음 표기 끄기"
+  },
+  "overlay_settings_row_hidePronForEnglishTitle": {
+    "message": "라틴 문자가 우세한 줄(영어 곡 등)만 발음 줄을 감춰요 — 다른 언어 줄은 그대로 나와요"
   },
   "overlay_settings_row_sourcePriority": {
     "message": "가사 소스 우선순위"
@@ -943,7 +970,7 @@
     "message": "발음 표기 위치"
   },
   "overlay_settings_row_pronPositionTitle": {
-    "message": "음절 타이밍이 있는 곡에서 발음 표기를 어디에 표시할지 고릅니다. 노트 위 = 각 노트 바로 아래 부착, 화면 하단 = 진행률 그라데이션으로 하단 중앙 표시."
+    "message": "음절 타이밍이 있는 곡에서 발음 표기를 어디에 표시할지 고릅니다. 표시 안 함 = 레인에 발음 없음, 노트 위 = 각 노트 바로 아래 부착, 화면 하단 = 진행률 그라데이션으로 하단 중앙 표시, 레인 중앙 오버레이 = 오선 위에 반투명하게 겹쳐 표시."
   },
   "overlay_settings_row_melodyPlayback": {
     "message": "멜로디 재생 (가라오케 창)"
@@ -1059,6 +1086,12 @@
   "overlay_settings_row_modNextUpTitle": {
     "message": "가사창·PIP에 다음 재생될 영상 제목을 표시해요 (재생목록·자동재생 공통)"
   },
+  "overlay_settings_row_modPlaylist": {
+    "message": "[모듈] 재생목록 패널"
+  },
+  "overlay_settings_row_modPlaylistTitle": {
+    "message": "가사창 옆에 유튜브 재생목록 전체를 붙여 보여줘요 — 이전/다음 이동, 항목 클릭 이동, 서버 싱크 존재 배지 포함. 켜지면 아래 다음 영상 카드는 숨겨져요"
+  },
   "overlay_settings_row_modMainLane": {
     "message": "[모듈] 가라오케 레인"
   },
@@ -1089,14 +1122,17 @@
   "overlay_quick_nextUp": {
     "message": "다음 영상 표시 켜기/끄기"
   },
+  "overlay_quick_playlist": {
+    "message": "재생목록 패널 켜기/끄기"
+  },
   "overlay_nextUp_label": {
     "message": "다음 ▸"
   },
   "overlay_depthLabel_fast": {
-    "message": "빠름"
+    "message": "Fast"
   },
   "overlay_depthLabel_medium": {
-    "message": "표준"
+    "message": "Medium"
   },
   "overlay_laneNotice_text": {
     "message": "음절 타이밍이 부정확하면 분석 깊이를 높여보세요 (현재 $P1$)",
@@ -1105,6 +1141,9 @@
         "content": "$1"
       }
     }
+  },
+  "overlay_laneNotice_textNoDepth": {
+    "message": "음절 타이밍이 부정확하면 분석 깊이를 높여보세요"
   },
   "overlay_laneNotice_close": {
     "message": "닫기"
@@ -1131,6 +1170,32 @@
         "content": "$1"
       }
     }
+  },
+  "overlay_playlist_prev": {
+    "message": "이전 영상"
+  },
+  "overlay_playlist_next": {
+    "message": "다음 영상"
+  },
+  "overlay_playlist_status": {
+    "message": "재생목록 · $P1$곡",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "overlay_playlist_noPlaylist": {
+    "message": "재생목록에 속하지 않아요"
+  },
+  "overlay_playlist_noPlaylistTitle": {
+    "message": "이 영상은 재생목록의 일부가 아니에요 — 다음 영상 정보만 보여줘요"
+  },
+  "overlay_playlist_empty": {
+    "message": "표시할 정보가 없어요"
+  },
+  "overlay_playlist_existsTitle": {
+    "message": "서버 싱크 있음"
   },
   "pip_nextUp": {
     "message": "다음 ▸ $P1$",
@@ -1594,7 +1659,7 @@
     }
   },
   "content_completion_partialReadyWarning": {
-    "message": "일부 줄에 $P1$만 붙었어요 — 재생성하면 다시 시도해요",
+    "message": "일부 줄에 $P1$만 붙었어요 — 싱크를 초기화하면 다시 시도해요",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -1616,7 +1681,7 @@
     }
   },
   "content_completion_missingWarning": {
-    "message": "싱크는 만들어졌지만 $P1$이 붙지 않았어요$P2$ — 재생성하면 다시 시도해요",
+    "message": "싱크는 만들어졌지만 $P1$이 붙지 않았어요$P2$ — 싱크를 초기화하면 다시 시도해요",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -1781,13 +1846,13 @@
     "message": "분석 깊이 올리는 중 — 발음·번역 보존 준비…"
   },
   "content_genChip_depthFast": {
-    "message": "빠름"
+    "message": "Fast"
   },
   "content_genChip_depthMedium": {
-    "message": "표준"
+    "message": "Medium"
   },
   "content_genChip_depthHeavy": {
-    "message": "정밀"
+    "message": "Heavy"
   },
   "content_genChip_depthState": {
     "message": "$P1$ · $P2$",
@@ -1810,6 +1875,17 @@
   },
   "content_genChip_etaSoon": {
     "message": "곧 완료"
+  },
+  "content_genChip_etaSeconds": {
+    "message": "$P1$초 남음",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_genChip_etaOverrun": {
+    "message": "예상보다 오래 걸리는 중"
   },
   "content_genChip_stageEta": {
     "message": "$P1$ · $P2$",
@@ -1842,7 +1918,7 @@
     }
   },
   "content_genChip_depthUpgraded": {
-    "message": "정밀 분석으로 전환됨"
+    "message": "Heavy 분석으로 전환됨"
   },
   "panels_search_titleHint": {
     "message": "순수 곡 제목만 입력해 보세요 (아티스트·【】·MV 등은 빼고)"
@@ -1862,13 +1938,13 @@
     "message": "← 돌아가기"
   },
   "panels_depth_fast": {
-    "message": "빠름"
+    "message": "Fast"
   },
   "panels_depth_medium": {
-    "message": "표준"
+    "message": "Medium"
   },
   "panels_depth_heavy": {
-    "message": "정밀"
+    "message": "Heavy"
   },
   "panels_date_today": {
     "message": "오늘"
@@ -1949,8 +2025,23 @@
   "panels_settings_reset_karaokeNotice": {
     "message": "가라오케 타이밍 안내 다시 보기"
   },
+  "panels_settings_reset_fullReset": {
+    "message": "확장 전체 초기화"
+  },
+  "panels_settings_reset_fullResetTitle": {
+    "message": "모든 설정을 기본값으로 되돌리고, 창 위치·곡별 참조·공지 읽음·기여 이력을 지워요"
+  },
+  "panels_settings_reset_fullResetConfirm": {
+    "message": "정말 초기화할까요? — 기여 이력도 지워져요 (4초 안에 다시 누르면 실행돼요)"
+  },
   "panels_settings_reset_karaokeNoticeTitle": {
     "message": "한 번 닫은 안내 배너를 다음 곡부터 다시 보여줘요"
+  },
+  "panels_settings_reset_warnDismiss": {
+    "message": "저신뢰 경고 다시 보기 (전체)"
+  },
+  "panels_settings_reset_warnDismissTitle": {
+    "message": "곡별로 끈 저신뢰 경고 억제를 전부 되살려요"
   },
   "panels_settings_reset_done": {
     "message": "초기화했어요"
@@ -1967,10 +2058,10 @@
     }
   },
   "panels_rating_report": {
-    "message": "신고"
+    "message": "정렬품질 신고"
   },
   "panels_rating_reportTitle": {
-    "message": "가사·타이밍·발음 문제를 알려주세요"
+    "message": "정렬품질 문제를 알려주세요 (가사·타이밍·발음)"
   },
   "panels_rating_sending": {
     "message": "보내는 중…"
@@ -1982,7 +2073,7 @@
     "message": "전송에 실패했어요"
   },
   "panels_report_title": {
-    "message": "무엇이 잘못됐나요?"
+    "message": "정렬품질 신고 — 무엇이 잘못됐나요?"
   },
   "panels_report_commentPh": {
     "message": "무슨 일이 있었는지 적어주세요 (선택)"
@@ -2073,7 +2164,7 @@
     "message": "아직 만든 싱크가 없어요"
   },
   "panels_contrib_headline": {
-    "message": "내가 만든 $P1$곡을 $P2$명이 봤어요",
+    "message": "내가 만든 $P1$곡이 $P2$회 조회됐어요",
     "placeholders": {
       "p1": {
         "content": "$1"
@@ -2146,5 +2237,32 @@
   },
   "overlay_header_contrib": {
     "message": "내 기여 · 남은 횟수"
+  },
+  "overlay_settings_pronPosition_off": {
+    "message": "표시 안 함"
+  },
+  "overlay_settings_pronPosition_center": {
+    "message": "레인 중앙 오버레이"
+  },
+  "panels_settings_mainLanePos_attached": {
+    "message": "부착(패널 밖)"
+  },
+  "overlay_quick_lanePosToAttached": {
+    "message": "레인을 패널 밖 왼쪽에 부착하기"
+  },
+  "panels_settings_row_attachedLaneWidth": {
+    "message": "부착 레인 너비"
+  },
+  "overlay_settings_row_pipLyricsList": {
+    "message": "PiP 가사 목록 컬럼"
+  },
+  "overlay_settings_row_pipLyricsListTitle": {
+    "message": "PiP 창 오른쪽에 스크롤 가능한 가사 목록을 함께 표시합니다. 켜면 창 최대 폭이 넓어집니다."
+  },
+  "pip_controls_lyricsListToggle": {
+    "message": "가사 목록 컬럼 켜기/끄기"
+  },
+  "pip_controls_pronPositionToggle": {
+    "message": "레인 발음 줄 위치 전환(꺼짐/하단/중앙)"
   }
 }
