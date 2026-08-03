@@ -1,6 +1,6 @@
 {
   "name": "everyric2-chrome",
-  "version": "1.5.5",
+  "version": "1.6.0",
   "license": "Apache-2.0",
   "description": "Display time-synced lyrics for any song on YouTube",
   "type": "module",
