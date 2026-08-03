@@ -68,6 +68,11 @@ class JobStatusResponse(BaseModel):
     # 대기열(queued) 잡의 예상 대기 시간(초) — queue_position × all-depth median. median
     # 데이터가 아직 없으면(서버 갓 기동 등) None.
     queue_eta_sec: int | None = None
+    # 경과가 median을 넘었다 — eta_sec은 바닥(5초)에 눌려 있고, 실제 잔여는 모른다.
+    # median은 정의상 잡의 절반이 넘기므로 이 상태 자체는 정상이지만, 확장이 이 구간을
+    # "곧 완료"로 몇 분씩 표시하던 것이 사용자 불신의 원인이었다(실사용 제보). 구버전
+    # 확장은 이 필드를 몰라 기존 동작 그대로다 — additive.
+    eta_overrun: bool = False
 
 
 @router.post("/{job_id}/cancel")
@@ -120,6 +125,7 @@ async def get_job_status(job_id: str):
         depth: str | None = None
         eta_sec: int | None = None
         queue_eta_sec: int | None = None
+        eta_overrun = False
         if job.status == "processing":
             # 원격 워커가 처리 중인 잡은 peek_job_depth가 항상 None을 준다(라이브 깊이는
             # 이 서버 프로세스에서 정렬이 실제로 돌 때만 안다) — eta는 그럴 때 all-depth
@@ -128,9 +134,13 @@ async def get_job_status(job_id: str):
             median = await _median_duration(session, depth) if depth else None
             if median is None:
                 median = await _median_duration(session, None)
-            if median is not None:
-                elapsed = peek_processing_elapsed(job.id) or 0.0
+            elapsed = peek_processing_elapsed(job.id)
+            # 시작 스탬프는 인메모리다 — 서버 재기동으로 잃으면 0으로 치지 않는다.
+            # 0으로 치면 반쯤 지난 잡의 ETA가 full median으로 **되올라간다**(거짓 증가).
+            # 모르면 eta를 비우는 쪽이 정직하다 — 확장은 퍼센트 폴백을 이미 갖고 있다.
+            if median is not None and elapsed is not None:
                 eta_sec = max(_ETA_FLOOR_SEC, round(median - elapsed))
+                eta_overrun = elapsed > median
         elif job.status == "queued" and queue_position:
             median_all = await _median_duration(session, None)
             if median_all is not None:
@@ -147,6 +157,7 @@ async def get_job_status(job_id: str):
             depth=depth,
             eta_sec=eta_sec,
             queue_eta_sec=queue_eta_sec,
+            eta_overrun=eta_overrun,
         )
 
         if job.status == "completed" and job.result_id:

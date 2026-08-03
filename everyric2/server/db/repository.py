@@ -123,6 +123,18 @@ class SyncRepository:
         )
         return list(result.scalars().all())
 
+    async def get_existing_video_ids(self, video_ids: list[str]) -> set[str]:
+        """요청받은 video_id 중 자기 싱크(sync_results 행)가 있는 것만 — POST
+        /api/sync/exists 배치 조회 전용. video_id 열만 select한다(timestamps JSON
+        블롭은 절대 읽지 않는다 — 존재 유무만 필요한 요청 하나가 곡 전체를 실어 나르면
+        안 된다)."""
+        if not video_ids:
+            return set()
+        result = await self.session.execute(
+            select(SyncResult.video_id).where(SyncResult.video_id.in_(video_ids)).distinct()
+        )
+        return set(result.scalars().all())
+
     async def get_all_unique_videos(self, limit: int = 50) -> list[SyncResult]:
         """Get one sync result per unique video_id, ordered by most recent."""
         from sqlalchemy import func
@@ -558,6 +570,17 @@ class SyncLinkRepository:
             select(SyncLink).where(SyncLink.video_id == video_id)
         )
         return result.scalar_one_or_none()
+
+    async def get_existing_video_ids(self, video_ids: list[str]) -> set[str]:
+        """요청받은 video_id 중 링크(다른 영상의 싱크를 빌려 쓰는 행)가 있는 것만 — POST
+        /api/sync/exists 배치 조회 전용. `get_sync`가 자기 싱크 없는 영상에도 링크
+        폴백을 내주므로(GET /api/sync/{video_id} 참고) 링크만 있는 영상도 존재로 친다."""
+        if not video_ids:
+            return set()
+        result = await self.session.execute(
+            select(SyncLink.video_id).where(SyncLink.video_id.in_(video_ids))
+        )
+        return set(result.scalars().all())
 
     async def delete_involving(self, video_id: str) -> int:
         """이 영상이 소유자이거나 소스인 링크 전부 삭제 — 싱크 초기화 시 정합성 유지

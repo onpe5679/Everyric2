@@ -141,7 +141,7 @@ def test_eta_sec_falls_back_to_all_depth_median_when_depth_unknown():
     asyncio.run(body())
 
 
-def test_eta_sec_is_floored_at_five():
+def test_eta_sec_is_floored_at_five_and_flags_overrun():
     async def body():
         async with _env() as sm:
             job_id = await _make_job(sm, status="processing")
@@ -152,6 +152,41 @@ def test_eta_sec_is_floored_at_five():
 
             resp = await get_job_status(job_id)
             assert resp.eta_sec == 5
+            # 바닥값에 눌린 상태를 확장이 "곧 완료"로 몇 분씩 표시하지 않도록 초과를
+            # 별도 신호로 낸다 (additive — 구버전 확장은 이 필드를 모른다)
+            assert resp.eta_overrun is True
+
+    asyncio.run(body())
+
+
+def test_eta_overrun_is_false_while_within_median():
+    async def body():
+        async with _env() as sm:
+            job_id = await _make_job(sm, status="processing")
+            worker_core._JOB_DEPTH[job_id] = "medium"
+            await _record_metrics(sm, "medium", [100.0])
+            worker_core._JOB_PROCESSING_START[job_id] = time.monotonic() - 10.0
+
+            resp = await get_job_status(job_id)
+            assert resp.eta_overrun is False
+
+    asyncio.run(body())
+
+
+def test_eta_sec_is_none_when_start_stamp_was_lost():
+    """서버 재기동으로 인메모리 스탬프가 사라진 잡 — elapsed를 0으로 치면 반쯤 지난 잡의
+    ETA가 full median으로 **되올라간다**(거짓 증가). 모르면 비우는 것이 정직하다."""
+
+    async def body():
+        async with _env() as sm:
+            job_id = await _make_job(sm, status="processing")
+            worker_core._JOB_DEPTH[job_id] = "fast"
+            await _record_metrics(sm, "fast", [10.0])
+            # _JOB_PROCESSING_START에 스탬프 없음 (재기동 시나리오)
+
+            resp = await get_job_status(job_id)
+            assert resp.eta_sec is None
+            assert resp.eta_overrun is False
 
     asyncio.run(body())
 

@@ -1431,6 +1431,48 @@ async def find_link_candidates(
         )
 
 
+# POST /api/sync/exists — video_id 최대 100개 (POST /api/stats/views와 같은 상한 근거:
+# 배치 조회 하나가 무제한 IN절로 DB를 두들기는 것을 막는다).
+_MAX_EXISTS_VIDEO_IDS = 100
+
+
+class SyncExistsRequest(BaseModel):
+    video_ids: list[str] = Field(max_length=_MAX_EXISTS_VIDEO_IDS)
+
+
+class SyncExistsResponse(BaseModel):
+    exists: dict[str, bool]
+
+
+@router.post("/exists", response_model=SyncExistsResponse)
+async def sync_exists(request: SyncExistsRequest):
+    """요청한 video_id들의 싱크 존재 여부를 일괄 조회한다 (additive, 확장 개편의 영상별
+    싱크 존재 배지용).
+
+    **GET이 아니라 POST여야 한다** — `@router.get("/{video_id}")` 캐치올(바로 아래)이
+    라우트 등록 순서상 GET /api/sync/exists를 "video_id=exists"로 그대로 삼켜 버린다.
+    POST /api/stats/views(stats.py)와 같은 배치 조회 모양을 그대로 따른다.
+
+    `sync_results`(자기 싱크)뿐 아니라 `sync_links`(빌려 온 싱크)도 존재로 친다 —
+    `GET /api/sync/{video_id}`가 자기 싱크 없는 영상에도 링크 폴백을 내주므로(바로
+    아래 `get_sync` 참고), 링크만 있는 영상을 false로 답하면 확장이 "싱크 없음" 배지를
+    잘못 띄운다.
+
+    쿼리는 video_id 열만 본다 — `timestamps` JSON 블롭은 절대 select하지 않는다(존재
+    유무만 필요한 요청 하나가 곡 전체를 실어 나르면 안 된다). 응답은 요청 전체를 덮는
+    dict다(요청하지 않은 video_id는 안 실린다) — 없는 영상은 False.
+    """
+    ids = [vid for vid in request.video_ids if _VIDEO_ID_RE.match(vid)]
+    if len(ids) != len(request.video_ids):
+        raise HTTPException(status_code=422, detail="invalid video_id in video_ids")
+
+    async with get_session() as session:
+        own = await SyncRepository(session).get_existing_video_ids(ids)
+        linked = await SyncLinkRepository(session).get_existing_video_ids(ids)
+        found = own | linked
+        return SyncExistsResponse(exists={vid: vid in found for vid in ids})
+
+
 @router.get("/{video_id}", response_model=SyncLookupResponse)
 async def get_sync(
     video_id: str,
