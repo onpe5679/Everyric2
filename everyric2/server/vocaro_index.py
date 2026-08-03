@@ -91,7 +91,10 @@ def match(title: str) -> SongEntry | None:
     for q in queries:
         hits: list[SongEntry] = []
         for entry in entries:
-            for field in (entry.ja, entry.ko):
+            # 슬러그가 3순위 별칭인 이유(2026-08-03 실측): 인덱스는 ko/ja 제목만 갖는데
+            # 영상 제목이 영문 전사("Candy Cookie Chocolate")인 곡은 어느 쪽에도 안
+            # 걸린다 — 위키 슬러그(candy-cookie-chocolate)가 바로 그 영문 전사다.
+            for field in (entry.ja, entry.ko, entry.slug.replace("-", " ")):
                 if field and _normalize_title(field) == q:
                     hits.append(entry)
                     break
@@ -121,7 +124,7 @@ def match(title: str) -> SongEntry | None:
     for q in queries:
         best: tuple[int, SongEntry] | None = None
         for entry in entries:
-            for field in (entry.ja, entry.ko):
+            for field in (entry.ja, entry.ko, entry.slug.replace("-", " ")):
                 if not field:
                     continue
                 n = _normalize_title(field)

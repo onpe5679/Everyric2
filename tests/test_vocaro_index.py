@@ -198,3 +198,34 @@ def test_same_title_without_artist_hint_keeps_deterministic_first_entry():
     result = vi.match("シンデレラ")
     assert result is not None
     assert result.slug == "cinderella-zig"  # 힌트 없으면 기존 순서 유지(결정론)
+
+
+# ── 슬러그 영문 별칭 (2026-08-03 실측: candy-cookie-chocolate) ──
+
+
+def test_english_transliterated_title_matches_via_slug_alias():
+    # 인덱스는 ko/ja만 갖는데 영상 제목이 영문 전사인 곡 — 슬러그가 그 전사다.
+    _set_entries([
+        SongEntry(slug="candy-cookie-chocolate", ko="캔디 쿠키 초콜릿", ja="キャンディークッキーチョコレート"),
+    ])
+    result = vi.match("Candy Cookie Chocolate / Hatsune Miku")
+    assert result is not None
+    assert result.slug == "candy-cookie-chocolate"
+
+
+def test_slug_alias_participates_in_containment_pass():
+    # 영문 전사 제목에 장식이 붙어 정확 일치가 깨져도 포함 매칭으로 잡힌다
+    _set_entries([
+        SongEntry(slug="candy-cookie-chocolate", ko="캔디 쿠키 초콜릿", ja=None),
+    ])
+    result = vi.match("Candy Cookie Chocolate (Official MV)")
+    assert result is not None
+    assert result.slug == "candy-cookie-chocolate"
+
+
+def test_slug_alias_does_not_bypass_artist_token_guard():
+    # 슬러그에 아티스트 구분자가 붙은 항목(cinderella-deco-27)의 별칭이 아티스트
+    # 토큰("deco27")만으로 엉뚱한 곡에 붙으면 안 된다 — 기존 3중 가드가 필드
+    # 무관하게 적용되는지 고정.
+    _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
+    assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
