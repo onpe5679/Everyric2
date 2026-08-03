@@ -152,6 +152,21 @@ const SIDEBAR_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none"
 const PRON_OFF_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="4.5" y1="19.5" x2="19.5" y2="4.5"/></svg>';
 const PRON_BOTTOM_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="15" width="18" height="5" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
 const PRON_CENTER_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="10.5" width="18" height="5" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
+/** 노트 부착 — 오선 위쪽에 음절이 점점이 붙은 모양(하단/중앙 밴드와 한눈에 구분된다) */
+const PRON_NOTE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="6" y="8" width="3" height="3" fill="currentColor" stroke="none"/><rect x="11" y="8" width="3" height="3" fill="currentColor" stroke="none"/><rect x="16" y="8" width="3" height="3" fill="currentColor" stroke="none"/></svg>';
+/** 노트 부착 + 하단 줄 동시 */
+const PRON_BOTH_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="6" y="7.5" width="3" height="3" fill="currentColor" stroke="none"/><rect x="11" y="7.5" width="3" height="3" fill="currentColor" stroke="none"/><rect x="16" y="7.5" width="3" height="3" fill="currentColor" stroke="none"/><rect x="3" y="15" width="18" height="5" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
+
+/** 코너 발음 버튼의 순환 순서 — 설정 시트의 다섯 값을 모두 지나 제자리로 돌아온다.
+ *  기본값 'note'에서 시작해 «더하는» 방향(both = 노트 + 하단)으로 먼저 가고, 끄기는
+ *  한 바퀴 끝에 둔다: 한 번 눌렀을 때 표시가 사라지는 게 아니라 늘어나야 한다. */
+const PRON_POSITION_CYCLE: Record<PipOptions['pitchPronPosition'], PipOptions['pitchPronPosition']> = {
+  note: 'both',
+  both: 'center',
+  center: 'bottom',
+  bottom: 'off',
+  off: 'note',
+};
 
 const MIN_VIDEO_RATIO = 0.15;
 const MAX_VIDEO_RATIO = 0.75;
@@ -666,17 +681,20 @@ export class PipController {
       title: t('pip.controls.panelToggle'),
       on: { click: () => this.togglePanel() },
     }, icon(FIND_SVG));
-    // 레인 발음 줄 위치 순환 — off → bottom → center. 설정 시트에서 'note'·'both'를
-    // 직접 고른 상태라면(메인 패널 전용 값) 이 버튼은 'off'로 되돌린 뒤부터 순환한다
-    // (코너 버튼은 3상태만 다루는 축약 컨트롤이라는 것을 명확히 하기 위한 선택).
+    // 레인 발음 표시 순환 — note → both → center → bottom → off → note.
+    //
+    // 예전 순환은 off → bottom → center 세 값만 돌아서, 기본값 'note'에서 한 번만
+    // 눌러도 'off'로 떨어지고 'note'·'both'로는 **영영 돌아올 수 없었다**(설정 시트를
+    // 열기 전까지). 노트에 붙는 음절 표시는 가라오케의 기본 화면인데다 이 설정값은
+    // PiP 전용이 아니라 메인 패널 부착 레인과 공유하는 전역값이라, 코너 버튼을 한 번
+    // 누른 순간 양쪽 화면에서 노트 음절이 통째로 사라졌다("갑자기 노트별 음절 표시가
+    // 안 된다" 실사용 제보의 정체). 축약 컨트롤이라도 기본값을 가둬서는 안 된다 —
+    // 설정 시트의 다섯 값을 모두 순환에 넣어 어느 상태에서 시작해도 되돌아올 수 있게 한다.
     this.cornerPronBtn = h('button', {
       className: 'ey-pip-mini',
       title: t('pip.controls.pronPositionToggle'),
       on: {
-        click: () => {
-          const next = this.pronPosition === 'off' ? 'bottom' : this.pronPosition === 'bottom' ? 'center' : 'off';
-          opts.onPronPositionChange(next);
-        },
+        click: () => opts.onPronPositionChange(PRON_POSITION_CYCLE[this.pronPosition]),
       },
     });
     this.cornerLyricsBtn = h('button', {
@@ -1247,12 +1265,16 @@ export class PipController {
       this.cornerPanelBtn.classList.toggle('on', this.panelActive);
     }
     if (this.cornerPronBtn) {
-      const icons = { off: PRON_OFF_SVG, bottom: PRON_BOTTOM_SVG, center: PRON_CENTER_SVG } as const;
-      // 코너 버튼은 off/bottom/center 3상태만 다룬다 — 설정 시트에서 'note'·'both'를
-      // 직접 고른 상태는 이 버튼이 알 수 없는 4번째 값이라 off 아이콘으로 대표해 둔다
-      // (다음 클릭이 정확히 off→bottom 규약을 따르므로 사용자가 헷갈릴 일은 없다)
-      const key = this.pronPosition === 'bottom' || this.pronPosition === 'center' ? this.pronPosition : 'off';
-      this.cornerPronBtn.replaceChildren(icon(icons[key]));
+      // 다섯 값 모두 자기 아이콘을 갖는다 — 예전엔 'note'·'both'를 off 아이콘으로
+      // 대표해서, 노트 음절이 멀쩡히 보이는 기본 상태가 "꺼짐"으로 표시됐다
+      const icons = {
+        off: PRON_OFF_SVG,
+        note: PRON_NOTE_SVG,
+        both: PRON_BOTH_SVG,
+        bottom: PRON_BOTTOM_SVG,
+        center: PRON_CENTER_SVG,
+      } as const;
+      this.cornerPronBtn.replaceChildren(icon(icons[this.pronPosition]));
       this.cornerPronBtn.classList.toggle('on', this.pronPosition !== 'off');
       // 노트 데이터(레인)가 있는 곡에서만 의미가 있다 — 가라오케 코너 버튼과 노출 조건을 맞춘다
       this.cornerPronBtn.style.display = this.lane.hasNotes() ? '' : 'none';

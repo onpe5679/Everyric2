@@ -429,7 +429,14 @@ export class PitchLaneRenderer {
     const lyricH = Math.round(Math.max(16, Math.min(lyricCap, ch * 0.15)) * fs);
     const lyricPx = Math.max(13, Math.round(lyricH * 0.72));
     const pronPx = Math.max(10, Math.round(lyricPx * 0.8));
-    const pronRowH = hasPronRow ? pronPx + 6 : 0;
+    // 다음 라인 발음 미리보기(운영자 요청 2026-08-04: "이중 표시 밑에 다음 라인 발음을
+    // 작게") — 별도 토글을 새로 만들지 않고 위치 설정(bottom·both·center)에 얹는다.
+    // 하단 줄을 고른 사용자는 «따라 부르려고» 고른 것이고, 다음 줄 미리보기는 그 목적에
+    // 항상 보태는 정보라 매번 켜게 할 이유가 없다.
+    const pronNextPx = Math.max(9, Math.round(pronPx * PRON_NEXT_SCALE));
+    // 마지막 줄이라 미리보기가 없는 순간에도 높이는 그대로 잡는다 — 줄이 바뀔 때마다
+    // 오선 높이가 출렁이면 노트가 위아래로 튄다
+    const pronRowH = hasPronRow ? pronPx + pronNextPx + 9 : 0;
     const trCap = compact ? Math.min(22, cw * 0.07) : 22;
     const trPx = Math.round(Math.max(12, Math.min(trCap, ch * 0.085)) * fs);
     const trH = hasTr ? trPx + 7 : 0;
@@ -627,10 +634,25 @@ export class PitchLaneRenderer {
     if (this.opts.countdown) {
       const next = pages.find(p => p.start > now + 0.05 && p.hasNotes);
       if (next) {
-        const prevEnd = pages.reduce(
-          (acc, p) => (p.end <= next.start + 0.01 && p.end > acc ? p.end : acc), 0);
+        // 앞선 라인들이 가장 늦게 끝나는 시각. 예전엔 "다음 라인 시작 전에 끝난" 라인만
+        // 후보로 봤는데(p.end <= next.start + 0.01), 라인 끝은 노트로 늘어나므로 직전
+        // 라인이 다음 라인 시작을 조금만 넘겨도 그 라인이 통째로 후보에서 빠졌다.
+        // 그러면 한참 전 라인의 끝이 prevEnd가 되어 있지도 않은 묵음이 생기고, 사용자가
+        // 그 라인을 «부르고 있는 도중에» 카운트다운이 떴다 — 실측 gdmLEu5fVz4에서
+        // L20이 L21 시작을 0.158초 넘겼을 뿐인데(끝 123.856 vs 시작 123.698) prevEnd가
+        // 두 줄 앞 116.5로 밀려 "7.2초 묵음"이 만들어졌고, 1:59.7~2:03.7 내내 오탐이었다.
+        // 겹침 여부와 무관하게 «앞선 라인»이면 전부 본다(배열 순서에 기대지 않는다).
+        let prevEnd = 0;
+        for (const p of pages) {
+          if (p.start < next.start && p.end > prevEnd) prevEnd = p.end;
+        }
         const remain = next.start - now;
-        if (remain <= 4 && next.start - prevEnd >= 5 && now >= prevEnd) {
+        // 정렬이 놓친 가창은 라인에 남지 않는다 — VAD가 지금 목소리를 보고 있으면
+        // 라인 데이터가 묵음이라 해도 카운트다운을 띄우지 않는다. vad_regions가 없는
+        // 곡에서는 조용히 통과한다(있는 신호만 쓰고, 없는 신호를 요구하지 않는다).
+        const voiceNow = (this.debugMeta?.vad_regions ?? [])
+          .some(([s, e]) => s <= now && now < e);
+        if (remain <= 4 && next.start - prevEnd >= 5 && now >= prevEnd && !voiceNow) {
           const num = Math.max(1, Math.ceil(remain));
           // 숫자를 라인 시작 시각 위치에 그린다 (창 밖이면 가장자리에 고정)
           const nx = Math.max(Math.min(playheadX + 30, cw - 30), Math.min(cw - 30, x(next.start)));
@@ -680,21 +702,33 @@ export class PitchLaneRenderer {
     }
     ty += lyricH;
 
-    // ── 발음 폴백 줄 (음절 타이밍이 아예 없는 곡): 현재 라인 발음 그라데이션
-    const page = this.index >= 0 ? pages[Math.min(this.index, pages.length - 1)] : undefined;
+    // ── 발음 줄: 현재 라인은 크게(음절 타이밍 채움) + 그 아래 다음 라인은 작게(미리보기)
+    const pageIdx = this.index >= 0 ? Math.min(this.index, pages.length - 1) : -1;
+    const page = pageIdx >= 0 ? pages[pageIdx] : undefined;
+    // 아직 첫 줄 전(pageIdx = -1)이면 pages[0]이 «다음 줄»이다 — 간주 동안 첫 소절을
+    // 미리 읽을 수 있고, 카운트다운과 짝이 맞는다
+    const nextPage = pageIdx + 1 < pages.length ? pages[pageIdx + 1] : undefined;
     if (hasPronRow) {
       if (page && resolvedPronunciation(page.line, this.opts.pronScript)) {
-        this.renderPronFallback(ctx, page, now, cw, ty + pronRowH * 0.5, colors, pronPx);
+        this.renderPronFallback(ctx, page, now, cw, ty + 3 + pronPx * 0.5, colors, pronPx);
       }
+      this.renderPronNext(ctx, nextPage, cw, ty + 6 + pronPx + pronNextPx * 0.5, colors, pronNextPx);
       ty += pronRowH;
     }
 
     // ── 중앙 오버레이 발음(pronPosition==='center'): 세로 공간을 새로 차지하지 않고
     // 레인 위에 반투명하게 겹쳐 그린다 — staffH 계산에는 관여하지 않는다.
-    if (hasPronCenter && page && resolvedPronunciation(page.line, this.opts.pronScript)) {
+    if (hasPronCenter) {
+      const centerPx = Math.round(lyricPx * 1.05);
+      const centerNextPx = Math.max(10, Math.round(centerPx * PRON_NEXT_SCALE));
+      const cy = padTop + staffH * 0.55;
       ctx.save();
       ctx.globalAlpha = 0.62;
-      this.renderPronFallback(ctx, page, now, cw, padTop + staffH * 0.55, colors, Math.round(lyricPx * 1.05));
+      if (page && resolvedPronunciation(page.line, this.opts.pronScript)) {
+        this.renderPronFallback(ctx, page, now, cw, cy, colors, centerPx);
+      }
+      this.renderPronNext(
+        ctx, nextPage, cw, cy + (centerPx + centerNextPx) * 0.5 + 4, colors, centerNextPx);
       ctx.restore();
     }
 
@@ -1047,7 +1081,18 @@ export class PitchLaneRenderer {
     ctx.textBaseline = 'middle';
   }
 
-  /** 발음 폴백 (음절 타이밍 없는 곡) — 현재 라인 발음을 가운데 정렬 + 진행률 그라데이션 */
+  /**
+   * 발음 줄(하단·중앙 오버레이) — 현재 라인 발음을 가운데 정렬하고 «부른 만큼» accent로 덮는다.
+   *
+   * 채움 경계는 **음절 타이밍(pron_segs)**을 따른다. 예전엔 라인 구간을 글자 수로 균등
+   * 나눈 선형 보간이라(=지금 라인의 몇 %쯤 지났나) 실제 음절 시각과 어긋났다 — 실측
+   * 9416음절에서 중앙값 0.61자, p90 2.18자, 최대 10.03자가 밀렸고 33%가 한 글자 이상,
+   * 12%가 두 글자 이상 어긋났다. 끝이 꼬리음으로 늘어난 줄일수록 심해서, 노트는 이미
+   * 다음 음절인데 발음 줄 채움은 아직 앞 음절에 머무는 "타이밍이 안 맞는 이중 표시"가 됐다.
+   *
+   * 세그가 없거나 세그를 이어 붙인 문자열이 표시 문자열과 다르면(표기 불일치) 예전 선형
+   * 보간으로 조용히 되돌아간다 — 어긋난 곡을 억지로 맞추면 엉뚱한 자리에서 채움이 끊긴다.
+   */
   private renderPronFallback(
     ctx: CanvasRenderingContext2D,
     page: PitchLine,
@@ -1065,20 +1110,71 @@ export class PitchLaneRenderer {
     const maxW = cw - 16;
     ctx.fillStyle = colors.dim;
     ctx.fillText(pron, cw / 2, py, maxW);
-    const span = Math.max(0.001, page.end - page.start);
-    const sungRatio = Math.max(0, Math.min(1, (now - page.start) / span));
-    if (sungRatio <= 0) return;
-    const textW = Math.min(ctx.measureText(pron).width, maxW);
+
+    const fullW = ctx.measureText(pron).width;
+    const textW = Math.min(fullW, maxW);
+    // maxW를 넘으면 fillText가 가로로 눌러 그린다 — 채움 폭도 같은 비율로 눌러야 글자와 맞는다
+    const squeeze = fullW > 0 ? textW / fullW : 1;
+    const chars = pronCharProgress(
+      resolvedPronSegments(page.line, this.opts.pronScript), pron, now);
+    let sungW: number;
+    if (chars == null) {
+      const span = Math.max(0.001, page.end - page.start);
+      sungW = textW * Math.max(0, Math.min(1, (now - page.start) / span));
+    } else {
+      // 글자 폭이 제각각이라 비율이 아니라 앞부분 실제 폭을 잰다(진행 중 글자는 부분 폭)
+      const whole = Math.floor(chars);
+      const head = ctx.measureText(pron.slice(0, whole)).width;
+      const cur = whole < pron.length ? ctx.measureText(pron[whole]).width : 0;
+      sungW = (head + cur * (chars - whole)) * squeeze;
+    }
+    if (sungW <= 0) return;
     const x0 = cw / 2 - textW / 2;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(x0, py - fontPx, textW * sungRatio, fontPx * 2);
+    ctx.rect(x0, py - fontPx, sungW, fontPx * 2);
     ctx.clip();
     ctx.fillStyle = colors.accent;
     ctx.fillText(pron, cw / 2, py, maxW);
     ctx.restore();
   }
+
+  /**
+   * 다음 라인 발음 미리보기 — 현재 라인 발음 바로 아래에 작은 글씨로.
+   *
+   * 진행 채움(accent)은 일부러 넣지 않는다: 아직 부르지 않은 줄이라 채울 진행이 없고,
+   * 여기에도 채움을 넣으면 «지금 부르는 줄»과 «다음 줄»의 구분이 흐려진다. 위계는
+   * 크기(PRON_NEXT_SCALE)와 밝기 두 채널로 동시에 준다 — 크기만으로는 작은 레인에서
+   * 두 줄이 비슷해 보인다.
+   *
+   * 알파는 곱셈이라(호출부의 globalAlpha를 덮어쓰지 않는다) 중앙 오버레이의 반투명
+   * (0.62) 위에 겹쳐도 미리보기가 현재 줄보다 진해지는 역전이 생기지 않는다.
+   */
+  private renderPronNext(
+    ctx: CanvasRenderingContext2D,
+    page: PitchLine | undefined,
+    cw: number,
+    py: number,
+    colors: PitchColors,
+    fontPx: number,
+  ): void {
+    if (!page) return;
+    const pron = resolvedPronunciation(page.line, this.opts.pronScript);
+    if (!pron) return;
+    ctx.save();
+    ctx.font = `${fontPx}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = colors.dim;
+    ctx.globalAlpha *= 0.55;
+    ctx.fillText(pron, cw / 2, py, cw - 16);
+    ctx.restore();
+  }
 }
+
+/** 다음 라인 발음 미리보기의 글자 크기 배율 — 현재 라인보다 확실히 작아야 «지금 부르는
+ *  줄»과 «다음 줄»이 한눈에 갈린다(밝기도 함께 낮춘다: renderPronNext 주석). */
+const PRON_NEXT_SCALE = 0.72;
 
 /** 발음 세그의 최소 표시 폭(초) — 이보다 짧으면 노트 겹침 판정(overlap>0)을 통과하지
  *  못해 음절이 통째로 안 그려진다(코덱스 감사 b2NTglk9tvI: 1119개 중 132개가 길이 0).
@@ -1142,6 +1238,48 @@ function widenZeroLengthSegs(segs: PronSegment[]): PronSegment[] {
   return out;
 }
 
+/**
+ * 지금 시각이 발음 문자열의 몇 번째 글자에 해당하는가(소수부 = 그 글자 안에서의 진행률).
+ * 발음 줄 채움 경계를 음절 타이밍에 맞추는 데 쓴다.
+ *
+ * 세그가 없거나, 세그를 이어 붙인 문자열이 표시 문자열과 한 글자라도 다르면 null을
+ * 돌려준다 — 그런 곡은 세그와 표시 문자열의 글자 대응이 성립하지 않으므로 호출부가
+ * 예전 선형 보간으로 되돌아가야 한다(억지로 맞추면 채움이 엉뚱한 자리에서 끊긴다).
+ */
+function pronCharProgress(
+  segs: PronSegment[] | undefined, pron: string, now: number,
+): number | null {
+  if (!segs || segs.length === 0) return null;
+  let concat = '';
+  for (const s of segs) concat += s.text;
+  if (concat !== pron) return null;
+  let off = 0;
+  for (const s of segs) {
+    if (now >= s.end) {
+      off += s.text.length;
+      continue;
+    }
+    // 아직 이 음절 전(간주·음절 사이 틈) — 앞 음절까지만 채운 채 기다린다
+    if (now <= s.start) return off;
+    const dur = s.end - s.start;
+    const frac = dur > 0 ? (now - s.start) / dur : 1;
+    return off + s.text.length * Math.max(0, Math.min(1, frac));
+  }
+  return off;
+}
+
+/**
+ * 겹치는 노트가 없는 발음 세그를 «가장 가까운» 노트에 붙일 때 허용하는 최대 거리(초).
+ *
+ * 음절이 노트 사이 틈에 떨어지면 겹침(overlap>0) 판정만으로는 어느 노트에도 안 붙어
+ * 화면에서 조용히 사라진다 — 실측 37곡 21835음절 중 2643개(12.1%)가 그렇다. 그중
+ * 782개는 ZERO_SEG_EPS 도입(감사 C5) 전까지 최소폭 확장 덕에 «우연히» 붙던 것이고,
+ * 확장 문턱이 0.06 → 1e-3으로 좁아지면서 노트 부착이 곡당 최대 13.3%까지 사라졌다.
+ * 확장을 되돌리면 C5가 고친 +180ms 밀림이 되살아나므로, 옮기는 단계가 아니라 붙이는
+ * 단계에서 푼다 — 세그 시각은 그대로 두고 부착만 가까운 노트로 구제한다.
+ */
+const NEAR_NOTE_TOLERANCE = MIN_SEG_WIDTH;
+
 /** 인접 라인 노트가 겹칠 때 표시(dispEnd)만 클립하는 상한 — 이보다 큰 겹침은 진짜
  *  하모니/듀엣일 수 있어 손대지 않는다(실측: 문제 사례는 0.06~0.27초). */
 const MAX_CLIP_OVERLAP = 0.5;
@@ -1190,7 +1328,10 @@ function collectPitchData(lines: LyricLine[], script: PronScript): PitchData {
     // 라틴 우세 줄(영어 곡)은 표기 설정과 무관하게 'en'(원문 철자) 세그를 쓴다 — 노트에
     // za/we/zaa 같은 오염된 로마자 대신 That/mor/ning처럼 원문 음절이 붙어야 한다(운영자
     // 요구사항). 발음 **줄** 표시는 이 판정과 별개로 기존 script(표기 설정)를 그대로 쓴다.
-    const noteSegs = isLatinDominant(line.text) ? line.pronSegsByScript?.['en'] : undefined;
+    const latinSegs = isLatinDominant(line.text) ? line.pronSegsByScript?.['en'] : undefined;
+    // 빈 배열은 "en 세그가 없다"와 같은 뜻이다 — ??는 null·undefined만 걸러내므로 빈
+    // 배열이 그대로 통과하면 그 줄의 노트 발음이 폴백조차 못 타고 통째로 사라진다
+    const noteSegs = latinSegs && latinSegs.length > 0 ? latinSegs : undefined;
     const rawPronSegs = noteSegs ?? resolvedPronSegments(line, script);
     // 길이 0 세그는 overlap 판정을 절대 통과하지 못해(ov는 항상 0, bestOv 초기값도 0이라
     // `>` 비교가 갱신되지 않는다) 노트 부착 전에 최소폭을 부여해 둔다.
@@ -1204,6 +1345,18 @@ function collectPitchData(lines: LyricLine[], script: PronScript): PitchData {
           if (ov > bestOv) {
             bestOv = ov;
             best = n;
+          }
+        }
+        if (!best) {
+          // 노트 사이 틈에 떨어진 음절 — 가장 가까운 노트에 붙여 구제한다
+          // (NEAR_NOTE_TOLERANCE 주석에 실측 근거). 못 붙이면 화면에서 그냥 사라진다.
+          let bestGap = NEAR_NOTE_TOLERANCE;
+          for (const n of lineNotes) {
+            const gap = Math.max(n.start - seg.end, seg.start - n.end, 0);
+            if (gap < bestGap) {
+              bestGap = gap;
+              best = n;
+            }
           }
         }
         if (best) best.pron = best.pron ? best.pron + seg.text : seg.text;
