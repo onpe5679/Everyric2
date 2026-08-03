@@ -275,15 +275,24 @@ LEGACY_ADDRESSES_ENV = "EVERYRIC_AUDIO_SOURCE_ADDRESSES"
 def _apply_egress(ydl_opts: dict[str, Any], egress: str) -> None:
     """**egress 값을 yt-dlp 옵션에 적용하는 유일한 지점** — 전환은 이 함수만 바꾼다.
 
-    오늘: 값은 로컬 바인딩 IP라 ``source_address``로 넣는다.
-    나중: 회선별 로컬 프록시로 옮기면 ``ydl_opts["proxy"] = egress`` 한 줄로 끝난다
-          (yt-dlp가 ``--proxy``를 그대로 지원한다). 목록 순회·재시도 판정·로깅은 egress를
-          불투명 문자열로만 다루므로 그때 손댈 곳이 없다.
+    스킴이 있으면 **프록시**, 없으면 **로컬 바인딩 IP**다. 두 형식을 모두 받는다.
 
-    **값의 형태를 검증하지 않는다** — IPv4 정규식 같은 것을 넣으면 프록시 URL이 들어올 때
-    깨진다. 주소인지 URL인지는 호스트가 아는 지식이고 앱이 알 필요가 없다(계층 분할).
+    왜 프록시로 옮겼나(2026-08-02 사고). 바인딩 IP는 DHCP가 준 **파생값**이라 리스 갱신마다
+    바뀐다(실측: 리스 78분, 3일 간격 두 번 변경). 그 값이 env·DB 원장·``ip rule``·문서 네
+    곳에 복사돼 있어서, 한 번 바뀌면 네 곳이 동시에 거짓이 되고 바인드는 ``EAI_ADDRFAMILY``로
+    조용히 실패했다 — 12시간 동안 잡 실패율 59.8%. **주소가 전부 바뀌는 날에는 모든 회선이
+    동시에 죽는다.**
+
+    프록시 형식(``http://127.0.0.1:3131``)은 **우리가 정한 고정 이름**이라 절대 안 바뀐다.
+    실제 공인 IP는 프록시가 연결 시점에 인터페이스에서 읽으므로 어디에도 저장되지 않는다.
+
+    **값의 형태를 그 이상 검증하지 않는다** — IPv4 정규식 같은 것을 넣으면 다른 형식이
+    들어올 때 깨진다. 주소인지 URL인지는 호스트가 아는 지식이다(계층 분할).
     """
-    ydl_opts["source_address"] = egress
+    if "://" in egress:
+        ydl_opts["proxy"] = egress
+    else:
+        ydl_opts["source_address"] = egress
 
 
 def parse_egress_targets(raw: str | None) -> list[str]:
