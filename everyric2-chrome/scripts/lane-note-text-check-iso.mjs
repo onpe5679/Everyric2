@@ -100,6 +100,14 @@ try {
   });
   console.log('INFO: 화면 줄 샘플 =', JSON.stringify(source.slice(0, 3)));
 
+  // 커밋본과 같은 이유로 재기 전에 영상을 멈춘다(설정마다 다른 순간을 보면 잉크가
+  // 통째로 달라진다 — 근거는 lane-note-text-check.mjs 주석).
+  await page.evaluate(() => {
+    const v = document.querySelector('video.html5-main-video') ?? document.querySelector('video');
+    v?.pause();
+  });
+  await page.waitForTimeout(800);
+
   const results = {};
   for (const pos of ['off', 'bottom', 'center', 'both']) {
     await setSettings({ pitchPronPosition: pos });

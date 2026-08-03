@@ -67,7 +67,24 @@ const MEASURE = `(() => {
       darkRatio: ink ? +(dark / ink).toFixed(4) : 0,
       brightRatio: ink ? +(bright / ink).toFixed(4) : 0 };
   }
+  // 크로마키가 «가사창 열»까지 닿는가 — 문서 블랭킷(:root.ey-chroma body.ey-pip *)은
+  // Shadow DOM 경계를 못 넘는다. 패널 배경이 불투명하게 남으면 스트리머 화면에서
+  // 오른쪽 열만 검은 박스로 남는다.
+  const panelEl = shadow('.ey-panel');
+  const bg = panelEl ? getComputedStyle(panelEl).backgroundColor : null;
+  const opaque = (v) => {
+    if (!v) return null;
+    const m = /rgba?\(([^)]+)\)/.exec(v);
+    if (!m) return null;
+    const p = m[1].split(',').map(s => parseFloat(s));
+    return (p[3] === undefined ? 1 : p[3]) > 0.05;
+  };
   return {
+    panelBg: bg,
+    panelBgOpaque: opaque(bg),
+    // 블랭킷의 «예외» 규칙이 겨냥하는 요소들이 실제로 어디 있는가(문서 vs 그림자)
+    chipInLightDom: !!document.querySelector('.ey-gen-chip'),
+    chipInShadow: !!shadow('.ey-gen-chip'),
     panelLine: ts(shadow('.ey-line')),
     panelTitle: ts(shadow('.ey-song-title')),
     shortLine: ts(document.querySelector('.ey-pip-stage .ey-pip-line.current .ey-line')),
@@ -128,6 +145,7 @@ try {
     console.log(`   가사창 줄   text-shadow: ${m.panelLine}`);
     console.log(`   단축 표시   text-shadow: ${m.shortLine} (앞뒤 줄: ${m.shortSide})`);
     console.log(`   레인 캔버스 외곽선 잉크: ${m.lane ? `${m.lane.dark}/${m.lane.ink} (${(m.lane.darkRatio * 100).toFixed(2)}%)` : '캔버스 없음'}`);
+    console.log(`   가사창 배경: ${m.panelBg} (불투명=${m.panelBgOpaque})`);
     if (shot) {
       await pip.screenshot({ path: resolve(__dirname, `../pip-outline-${shot}.png`) });
       console.log(`   screenshot: pip-outline-${shot}.png`);
@@ -150,6 +168,25 @@ try {
       { streamTextOutline: true, pipChromaKey: chroma },
       chroma === 'off' ? 'outline-plain' : `outline-${chroma}`);
   }
+
+  // 크로마키 예외 규칙(:root.ey-chroma body.ey-pip .ey-gen-chip 등)이 겨냥하는 요소가
+  // 그림자 안에만 있다면 그 규칙은 애초에 죽은 코드다 — 블랭킷이 패널을 덮을 «의도»였다는 증거.
+  console.log(`\n칩 위치: light DOM=${results.green.chipInLightDom} / shadow=${results.green.chipInShadow}`);
+  for (const chroma of ['green', 'blue', 'magenta']) {
+    check(results[chroma].panelBgOpaque === false,
+      `[${chroma}] 가사창 배경도 키 컬러로 비침(검은 박스로 안 남음)`, results[chroma].panelBg);
+  }
+  // 누출 방지 — 크로마키가 꺼져 있으면 패널 배경은 원래대로 불투명해야 한다
+  check(results.off.panelBgOpaque === true,
+    '[크로마 off] 가사창 배경은 그대로 불투명(투명화가 새지 않음)', results.off.panelBg);
+  // 메인 창(유튜브 페이지)은 크로마키와 무관하다 — :host-context가 PiP 밖으로 새면
+  // 크로마키를 켠 사용자의 **일반 오버레이 패널**까지 투명해진다
+  const mainBg = await page.evaluate(() => {
+    const p = document.getElementById('everyric-root')?.shadowRoot?.querySelector('.ey-panel');
+    return p ? getComputedStyle(p).backgroundColor : null;
+  });
+  check(!!mainBg && !/rgba\([^)]*,\s*0\s*\)/.test(mainBg),
+    '메인 창 패널은 크로마키 green 중에도 불투명(PiP 밖으로 안 샘)', mainBg);
 
   for (const [chroma, m] of Object.entries(results)) {
     check(m.panelLine !== 'none', `[${chroma}] 가사창 줄에 외곽선`, m.panelLine?.slice(0, 60));
