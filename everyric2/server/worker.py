@@ -269,6 +269,15 @@ STAGE_WINDOWS: dict[str, tuple[int, int]] = {
     # 창을 등록하지 않으면 _stage_monitor의 기본 창(36,88)이 걸려 진행률이 대기 중에
     # 88까지 치솟는다. 전사 정렬의 시작(50) 바로 앞에 둬 진행률이 되돌아가지 않게 한다.
     LINE_META_WAIT_STAGE: (48, 50),
+    # 캐시 확인 직후(라우팅 전, run_pipeline의 정렬 진입 경계)도 이제 이 이름으로 보고한다
+    # (그 시점의 실제 작업 — 오디오 로드·CTC 웜업·정렬 준비 — 가 이 단계의 정의에 속한다).
+    # 창 자체는 넓히지 않는다: _stage_monitor의 ``progress = max(progress, lo)``가 창
+    # 경계와 무관하게 항상 비감소를 보장하고(단조성은 이미 런타임이 담보), 창을 36까지
+    # 넓히면 test_wait_stage_sits_between_separation_and_alignment의 불변식
+    # (``hi <= align_lo``, LINE_META_WAIT_STAGE 창이 항상 이 창보다 앞에 오게 하는 순서
+    # 보장)이 깨진다. 진입 직후 잠깐(36%, 이 창 하한 미만) sub-progress가 0으로 클램프됐다가
+    # 모니터 첫 틱에 50으로 올라가는 것은 기존에도 있던 전이 패턴(예전엔 기본값 "보컬 분리"
+    # 에서 여기로 튀었다)과 동일해 새로운 회귀가 아니다.
     "전사 정렬": (50, 72),
     "타이밍 보정": (72, 80),
     "멜로디 분석": (80, 88),
@@ -1712,8 +1721,14 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
         # 캐시로 완결 — 오디오는 hooks.cache_check가 이미 정리했다
         return None
 
-    # 캐시 미스 → 정렬 진입 (취소 경계 겸)
-    if not await hooks.progress(36, "보컬 분리"):
+    # 캐시 미스 → 정렬 진입 (취소 경계 겸). 이 시점엔 라우팅이 아직 안 끝나 분리가 실제로
+    # 일어날지조차 모른다(새 스택 fast는 아예 안 한다) — "보컬 분리"가 아니라 기존 어휘 중
+    # 지금 실제로 하는 일(오디오 로드·CTC 웜업·정렬 준비)과 맞는 "전사 정렬"로 보고한다.
+    # 분리가 실제로 일어나는 순간에만 "보컬 분리"를 낸다 — 구스택은 바로 아래(_run_alignment의
+    # report("보컬 분리") 호출), 새 스택은 medium/heavy 진입 시(_run_new_stack_alignment의
+    # report("보컬 분리") 호출 두 곳)에만(운영자 지시, 2026-08-04: 실제로 안 하는 작업을
+    # 표시하면 안 된다).
+    if not await hooks.progress(36, "전사 정렬"):
         Path(audio_path).unlink(missing_ok=True)
         return None
 
@@ -1730,8 +1745,13 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
     resolver = _resolve_line_meta if (job.await_line_meta and not job.line_meta) else None
 
     # 정렬(CTC+분리+보정+멜로디)은 수십 초 걸리는 단일 블록 — 정렬 스레드가 단계명을
-    # stage_holder에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 보고한다
-    stage_holder: dict[str, str] = {"stage": "보컬 분리"}
+    # stage_holder에 쓰고, 모니터가 단계 창 안에서 진행률을 차오르게 하며 보고한다.
+    # 초기값은 바로 위 progress(36, "전사 정렬") 보고와 맞춰 "전사 정렬"이다 — 정렬
+    # 스레드가 아직 report를 한 번도 안 부른 그 짧은 틈(라우팅 전)에 모니터가 먼저
+    # 돌면 이 기본값을 읽는다. 분리가 실제로 확정되는 순간(구스택은 _run_alignment,
+    # 새 스택은 _run_new_stack_alignment의 medium/heavy 진입) on_stage 콜백이
+    # "보컬 분리"로 즉시 덮어쓴다.
+    stage_holder: dict[str, str] = {"stage": "전사 정렬"}
     monitor = asyncio.create_task(_stage_monitor(hooks.report, stage_holder, start=36))
 
     def _on_depth(depth: str) -> None:
@@ -4802,6 +4822,11 @@ def _run_new_stack_alignment(
             # deep.sep_result를 그대로 넘긴다 — 이미 medium이 분리해 둔 스템을 재사용
             # 한다(운영자 지시, 2026-08-04: 한 요청 안의 승급은 재분리하지 않는다).
             # _run_deep_stage의 sep_result is None 가드가 재분리를 자동으로 건너뛴다.
+            # 깊이 통지는 heavy 계산 **시작 전**에 낸다 — GET /api/job의 ETA median이
+            # 이 깊이를 키로 고르므로, 계산이 도는 내내 medium으로 남아 있으면 ETA가
+            # medium 중앙값 기준 "곧 완료"에 눌러앉는다(실사용 제보). 기각되면 아래서
+            # medium으로 되돌린다 — 시도가 도는 동안만 heavy가 사실이다.
+            _notify_depth(_DEPTH_HEAVY)
             escalated = _run_deep_stage(
                 audio, deep.sep_result, lyric_lines, lang, settings, report, _DEPTH_HEAVY
             )
@@ -4811,7 +4836,6 @@ def _run_new_stack_alignment(
                     f"Heavy-depth escalation adopted: {stranded_before} -> {stranded_after} "
                     "stranded sites"
                 )
-                _notify_depth(_DEPTH_HEAVY)
                 escalated.alignment_text += "-escalated"
                 escalated.routing_meta = {
                     **deep.routing_meta,
@@ -4824,6 +4848,7 @@ def _run_new_stack_alignment(
                 f"Heavy-depth escalation rejected (no improvement: {stranded_before} -> "
                 f"{stranded_after} stranded sites) — staying at medium"
             )
+            _notify_depth(_DEPTH_MEDIUM)
             deep.routing_meta["stranded_before"] = stranded_before
             deep.routing_meta["stranded_after"] = stranded_after
 

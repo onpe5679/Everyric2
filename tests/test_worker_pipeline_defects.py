@@ -18,6 +18,10 @@
    모순되는데도(예: language=ja인데 가사가 독일어) 그대로 저장·서빙되던 것(F6,
    2026-08-04 감사, Atvsg_zogxo 실측). AND 조건(붕괴 + 모순)이 둘 다 있어야만 막는다 —
    신호 없이 품질만 낮은 곡은 절대 막지 않는다.
+⑧ 캐시 미스 → 정렬 진입 경계(run_pipeline)가 라우팅(fast/medium/heavy) 판정 전에
+   "보컬 분리"를 무조건 냈던 것 — fast 잡(분리 없음)에서도 사용자가 분리 중이라는
+   거짓 단계를 봤다(실사용 제보, 2026-08-04). 진입 시점의 실제 작업과 맞는 "전사 정렬"로
+   교체했다.
 """
 
 import contextlib
@@ -1280,3 +1284,74 @@ class TestLanguageMismatchQualityGate:
             quality_score=0.00007, language="en", lyrics="genuinely difficult audio, low conf",
         )
         assert isinstance(result, worker_mod.PipelineResult)
+
+
+# ── ⑧ 캐시 미스 → 정렬 진입 경계가 라우팅 전에 "보컬 분리"를 내던 것(실사용 제보,
+# 2026-08-04: "전사 버튼 누르면 보컬 분리 뜬 다음에 fast 전사중이 떠") ─────────────
+
+
+class TestEntryStageBeforeRoutingIsTruthful:
+    """run_pipeline이 캐시 미스 뒤 정렬 스레드를 띄우기 **전에** 자체적으로 보고하는
+    진입 단계명 — 이 시점엔 아직 라우팅(fast/medium/heavy)이 안 끝나 분리가 실제로
+    일어날지조차 모른다(fast는 아예 안 한다). 실제로 하지 않을 수도 있는 "보컬 분리"를
+    낼 수 없고, 이 시점의 실제 작업(오디오 로드·CTC 웜업·정렬 준비)과 맞는 "전사 정렬"
+    이어야 한다(운영자 지시, 2026-08-04)."""
+
+    def test_entry_progress_reports_transcribe_align_not_separation(self, tmp_path, monkeypatch):
+        import asyncio
+
+        from everyric2.server import worker as worker_mod
+
+        audio_file = tmp_path / "audio.wav"
+        audio_file.write_bytes(b"fake-audio")
+        monkeypatch.setattr(
+            worker_mod,
+            "_acquire_audio",
+            lambda job: {"audio_path": str(audio_file), "audio_hash": "deadbeef"},
+        )
+
+        def fake_fast_alignment(
+            audio_path, lyrics, lang, line_meta=None, on_stage=None, resolver=None,
+            video_id=None, min_depth=None, on_depth=None,
+        ):
+            # fast 라우팅 흉내 — 분리 없이 곧장 실제 정렬(전사 정렬)만 보고한다.
+            if on_stage is not None:
+                on_stage("전사 정렬")
+            try:
+                return {
+                    "timestamps": [{"text": lyrics.splitlines()[0], "start": 0.0, "end": 1.0}],
+                    "language": "ko",
+                    "quality_score": 0.9,
+                    "debug": {"alignment_text": "original"},
+                    "alignment_text": "original",
+                    "tempo": None,
+                    "key": None,
+                }
+            finally:
+                Path(audio_path).unlink(missing_ok=True)
+
+        monkeypatch.setattr(worker_mod, "_run_alignment", fake_fast_alignment)
+
+        seen: list[tuple[int, str]] = []
+
+        class _Hooks:
+            async def report(self, progress, stage):
+                seen.append((progress, stage))
+
+            async def progress(self, progress, stage):
+                seen.append((progress, stage))
+                return True
+
+            async def cache_check(self, audio_hash, audio_path):
+                return False
+
+        job = worker_mod.JobInput(job_id="job-entry-stage", video_id=VID_A, lyrics="라인1")
+        result = asyncio.run(worker_mod.run_pipeline(job, _Hooks()))
+        assert isinstance(result, worker_mod.PipelineResult)
+
+        # 캐시 확인(35%) 직후, 정렬 스레드가 뜨기 전 run_pipeline 자신이 낸 36% 진입
+        # 보고 — fast 잡(분리 없음)에서 이 라벨이 "보컬 분리"면 안 된다.
+        entry_calls = [stage for progress, stage in seen if progress == 36]
+        assert entry_calls, f"36% 진입 경계 보고가 없다: {seen}"
+        assert entry_calls[0] == "전사 정렬"
+        assert "보컬 분리" not in [stage for _, stage in seen]

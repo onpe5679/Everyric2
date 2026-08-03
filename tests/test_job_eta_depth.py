@@ -266,3 +266,78 @@ def test_recent_durations_filters_by_depth_and_respects_limit():
                 assert len(capped) == 2
 
     asyncio.run(body())
+
+
+# ── ⑥ 깊이 승급(fast/medium → heavy) 중 ETA 재동기화 ─────────────────
+#
+# 실사용 제보(2026-08-04): fast로 진행 중 진행 칩이 "곧 완료"까지 갔다가 heavy로
+# 자동 승급되면 실제 남은 시간이 크게 늘어나는데 표시가 "곧 완료"에 눌러앉는다.
+# 여기서 확인하는 것: **서버의 GET /api/job/{id} 응답 자체는 depth가 바뀐 바로 다음
+# 요청부터 즉시 새 depth의 median을 쓴다** — peek_job_depth()는 순수 dict 읽기라
+# 캐시가 없고, 30초 TTL median 캐시(_ETA_MEDIAN_CACHE)도 depth별로 키가 분리돼
+# 있어("fast" 캐시와 "heavy" 캐시가 다른 슬롯) 승급 후 무효화가 따로 필요 없다.
+# 즉 서버 쪽엔 재동기화를 막는 캐시·지연이 없다 — 실사고의 진짜 원인은 두 곳:
+#   ① worker._run_new_stack_alignment의 en medium→heavy stranded-site 재시도
+#      경로(worker.py:4816-4842)가 _notify_depth(heavy)를 heavy 재계산이 **끝난
+#      뒤**에야 부른다(worker.py:4834) — 그 사이 내내 _JOB_DEPTH는 "medium"에
+#      머물러 있다. 다른 에이전트가 이 구간(worker.py 4727+ stage 보고부)을 지금
+#      수정 중이라 여기서는 건드리지 않는다 — team-lead·해당 에이전트에게 위치만
+#      보고한다(정확한 수정: _notify_depth(_DEPTH_HEAVY)를 4825의 재계산 호출
+#      *이전*으로 옮긴다).
+#   ② 클라이언트의 etaSec 증가 클램프(≤30s) — 다른 에이전트 담당, 여기선 건드리지
+#      않는다.
+# 이 테스트는 ①·②가 고쳐졌을 때(depth가 제때 갱신되기만 하면) 서버 응답이 즉시
+# 따라온다는 것을 못박는다 — 즉 "그 두 곳만 고치면 충분하다"는 근거다.
+
+
+def test_eta_immediately_uses_new_depth_median_right_after_promotion():
+    """진행 중 잡의 _JOB_DEPTH가 medium→heavy로 바뀌는 순간, 캐시나 지연 없이 바로
+    다음 GET 응답이 heavy median 기준 eta_sec을 낸다(중간에 아무것도 손대지 않았다)."""
+
+    async def body():
+        async with _env() as sm:
+            job_id = await _make_job(sm, status="processing")
+            worker_core._JOB_DEPTH[job_id] = "medium"
+            await _record_metrics(sm, "medium", [50.0, 50.0, 50.0])
+            await _record_metrics(sm, "heavy", [500.0, 500.0, 500.0])
+            # 승급 전에도 실제 경과가 있었다는 것을 재현 — medium 단계에서 10초를 쓴
+            # 뒤 heavy로 넘어갔다고 가정(스탬프는 job 시작 시각 그대로, 리셋하지 않음
+            # — 위 record()가 기록한 것처럼 heavy median도 원래 total 소요시간 기준).
+            worker_core._JOB_PROCESSING_START[job_id] = time.monotonic() - 10.0
+
+            resp_before = await get_job_status(job_id)
+            assert resp_before.depth == "medium"
+            assert 35 <= resp_before.eta_sec <= 45  # 50 - 10
+
+            # 승급 순간 — 워커가 _notify_depth("heavy")를 부르면 벌어지는 일과 동일
+            # (여기선 그 콜백 타이밍 문제를 우회해 직접 갱신한다).
+            worker_core._JOB_DEPTH[job_id] = "heavy"
+
+            resp_after = await get_job_status(job_id)
+            assert resp_after.depth == "heavy"
+            # heavy median(500)이 즉시 반영된다 — medium 캐시에 눌리거나(별도 키라
+            # 애초에 안 섞인다) 갱신이 지연되는 일이 없다.
+            assert 485 <= resp_after.eta_sec <= 495  # 500 - 10
+            assert resp_after.eta_overrun is False
+
+    asyncio.run(body())
+
+
+def test_median_cache_is_keyed_per_depth_so_promotion_does_not_need_invalidation():
+    """30초 TTL median 캐시가 depth별로 분리돼 있는지 직접 확인 — "fast" 캐시를
+    먼저 데워도(TTL 안에서) "heavy" 조회는 그 값을 안 물려받는다."""
+
+    async def body():
+        async with _env() as sm:
+            await _record_metrics(sm, "fast", [10.0])
+            await _record_metrics(sm, "heavy", [500.0])
+
+            async with sm() as s:
+                fast_median = await job_api._median_duration(s, "fast")
+                heavy_median = await job_api._median_duration(s, "heavy")
+
+            assert fast_median == 10.0
+            assert heavy_median == 500.0
+            assert set(job_api._ETA_MEDIAN_CACHE.keys()) == {"fast", "heavy"}
+
+    asyncio.run(body())
