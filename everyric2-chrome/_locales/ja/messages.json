@@ -65,6 +65,27 @@
   "pip_controls_videoToggle": {
     "message": "映像表示のオン/オフ"
   },
+  "pip_controls_panelColToggle": {
+    "message": "歌詞ウィンドウの列をたたむ/開く"
+  },
+  "pip_controls_centerColToggle": {
+    "message": "映像・歌詞1行・再生コントロールの列をたたむ/開く — たたむとカラオケレーンだけになります"
+  },
+  "pip_controls_laneColToggle": {
+    "message": "カラオケレーンの列をたたむ/開く"
+  },
+  "pip_controls_playlistColToggle": {
+    "message": "再生リストの列をたたむ/開く"
+  },
+  "pip_controls_shortLyricsToggle": {
+    "message": "映像の下の歌詞1行を表示/非表示"
+  },
+  "pip_controls_dualPosition": {
+    "message": "発音の二重表示 — 位置を切り替え（オフ / 下 / 中央 / 両方）"
+  },
+  "pip_controls_autoCollapsed": {
+    "message": "オンですがウィンドウが狭くたたまれています — 広げると再表示されます"
+  },
   "pip_controls_panelToggle": {
     "message": "歌詞検索パネルの開閉"
   },
@@ -73,6 +94,9 @@
   },
   "pip_controls_videoRatioDrag": {
     "message": "ドラッグで映像/歌詞の比率を調整"
+  },
+  "pip_controls_colWidthDrag": {
+    "message": "ドラッグして列の幅を調整"
   },
   "pip_songKeyLabel": {
     "message": "キー $P1$",
@@ -360,7 +384,7 @@
     }
   },
   "panels_paste_placeholder": {
-    "message": "歌詞をここに貼り付けるとAIがタイミングを合わせます\n[Verse]・1番・サビなどのパート表記やコメント行は自動で除外されます。"
+    "message": "歌詞をここに貼り付けるとAIがタイミングを合わせます\n[Verse]・1番・サビなどのパート表記やコメント行は自動で除外されます。\n原文・訳(または原文・読み・訳)が行ごとに対で繰り返される歌詞も、そのまま貼り付ければ自動で読み分けます。"
   },
   "panels_paste_attributionPlaceholder": {
     "message": "出典(任意) — 例: ナムウィキ, Genius"
@@ -900,9 +924,6 @@
   "overlay_settings_pitchFont_small": {
     "message": "小"
   },
-  "overlay_settings_pronPosition_note": {
-    "message": "ノートの上"
-  },
   "overlay_settings_pronPosition_bottom": {
     "message": "画面下部"
   },
@@ -986,7 +1007,7 @@
     "message": "歌詞ソースの優先順位"
   },
   "overlay_settings_row_pipKeepPanel": {
-    "message": "PiP中もパネルの歌詞を維持"
+    "message": "PiP中もメインウィンドウのパネルを維持"
   },
   "overlay_settings_row_pipShowVideo": {
     "message": "PiPに映像も一緒に表示"
@@ -1099,6 +1120,27 @@
   "overlay_settings_row_pipChromaKeyTitle": {
     "message": "PiPウィンドウの背景を単色キーカラーにします — OBSなどでクロマキー合成し、配信画面に歌詞を重ねられます"
   },
+  "overlay_settings_row_pipShortLyrics": {
+    "message": "PiP映像の下に歌詞1行"
+  },
+  "overlay_settings_row_pipShortLyricsTitle": {
+    "message": "PiPウィンドウの映像のすぐ下に、いま歌っている行だけを大きく表示します — オフにするとその領域は映像と再生コントロールが使います"
+  },
+  "overlay_settings_row_pipShowPanel": {
+    "message": "PiPにメイン歌詞ウィンドウの列を表示"
+  },
+  "overlay_settings_row_pipShowPanelTitle": {
+    "message": "PiPウィンドウの右側に全機能の歌詞ウィンドウ（検索・設定・オフセット）を開きます — オフにすると映像と現在の行だけになります。ウィンドウが狭いと自動的にたたまれ、広げるとこの設定どおりに戻ります"
+  },
+  "overlay_notice_autoCollapsed": {
+    "message": "ウィンドウの幅が狭いため自動的にたたまれました。広げると再び表示されます"
+  },
+  "overlay_settings_row_streamTextOutline": {
+    "message": "文字の縁取り（配信用）"
+  },
+  "overlay_settings_row_streamTextOutlineTitle": {
+    "message": "歌詞と曲名に縁取りを付けます — キーカラーや映像の上でも文字が背景に埋もれません"
+  },
   "overlay_settings_chroma_off": {
     "message": "オフ"
   },
@@ -1149,6 +1191,9 @@
   },
   "overlay_quick_lanePos": {
     "message": "レーンの位置を変更"
+  },
+  "overlay_quick_laneSwap": {
+    "message": "レーンと映像の位置を入れ替え"
   },
   "overlay_quick_lanePosToLeft": {
     "message": "レーンを歌詞の左列に移動"
@@ -2247,6 +2292,14 @@
       },
       "p2": {
         "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_quotaUnlimited": {
+    "message": "無制限 · 使用$P1$回",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
       }
     }
   },

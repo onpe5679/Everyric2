@@ -1,4 +1,5 @@
 import type { DebugInfo, LyricLine, LyricsSource, PanelGeometry, SearchCandidate, ServerLogEntry, ServerStatus, Settings, SongInfo, SongKey, SongTempo, SourceAttribution, SyncDebugMeta, SyncListItem, SyncPreviousVersion } from '../types';
+import type { MicSample } from '../lib/mic-pitch';
 import { resolveScript } from '../lib/lang';
 import { t } from '../lib/i18n';
 import { needsHostPermission, serverUsable, statusLine, unknownStatus } from '../lib/server-status';
@@ -55,6 +56,11 @@ const MINI_POS_LEFT_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill=
 const MINI_POS_BOTTOM_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="3" y="14" width="18" height="6" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
 /** 레인 배치 토글 — 부착(패널 밖 왼쪽에 따로 붙는 작은 상자 + 간격 + 본문 상자) */
 const MINI_POS_ATTACHED_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="1.5" y="5" width="5" height="14" rx="1" fill="currentColor" stroke="none" opacity="0.75"/><rect x="9" y="4" width="13.5" height="16" rx="2"/></svg>';
+/** PiP 열 스왑 — 강조가 오른쪽에 있어 «레인이 오른쪽으로 갔다»를 그린다(LEFT의 거울) */
+/** 레인 머리 — 멜로디(음표) / 메트로놈(추) */
+const LANE_NOTE_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
+const LANE_METRO_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M9 2h6l4 19H5L9 2zm1.6 2L7.4 19h9.2l-1.2-6.1-2.7 2.7-1.4-1.4L15 10.4 13.9 4h-3.3z"/></svg>';
+const MINI_POS_RIGHT_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="15" y="4" width="6" height="16" fill="currentColor" stroke="none" opacity="0.75"/></svg>';
 /**
  * 헤더 공지·기여 버튼 도안 — ICONS(dom.ts)에 넣지 않은 이유는 그 집합이 패널·PiP가
  * 함께 쓰는 최소 공용 아이콘이기 때문이다. 이 둘은 메인 패널 헤더에만 있다.
@@ -104,6 +110,26 @@ function thumbUrl(videoId: string): string {
  * 화면 구현이 하나뿐이어야 두 창이 영원히 같은 모습을 유지한다.
  */
 export type OverlayChrome = 'floating' | 'filled';
+
+/**
+ * 부착 패널(레인·재생목록)을 **패널 바깥의 남의 열**에 꽂아 달라는 요청 — filled 전용.
+ *
+ * floating에서는 이 둘이 `.ey-panel`의 Shadow DOM 형제로 살면서 화면 좌표로 떠 있다.
+ * PiP 창에서는 그럴 수 없다: 창을 가로로 [레인][영상 열][가사창][재생목록]으로 나누는데,
+ * host 하나의 Shadow DOM은 그 사이사이로 쪼개질 수 없기 때문이다(영상 열이 가운데 끼어
+ * 있다). 그래서 filled에서만 이 두 조각을 PiP 문서의 light DOM 열에 직접 붙인다 —
+ * 같은 CSS 전문이 PiP 문서 <head>에도 주입돼 있어 `.ey-attach-lane` 규칙과 `:root`
+ * 변수가 그대로 먹고, 레인 캔버스의 색 소스는 여전히 `this.panel`이라 테마도 안 갈라진다.
+ */
+export interface OverlaySlots {
+  /** 가라오케 레인 부착 패널이 들어갈 자리 (영상 왼쪽 열) */
+  laneSlot?: Element;
+  /** 재생목록 부착 패널이 들어갈 자리 (가사창 오른쪽 열) */
+  playlistSlot?: Element;
+  /** 열 구성(레인 표시 여부 등)이 바뀌었을 때 — 창 주인이 폭·접힘을 다시 계산한다.
+   *  노트 없는 곡으로 넘어가면 레인이 스스로 꺼지는데, 그때 열이 공간을 반납해야 한다. */
+  onColumnsChanged?: () => void;
+}
 
 export interface OverlayCallbacks {
   onSeek: (time: number) => void;
@@ -164,6 +190,10 @@ export interface OverlayCallbacks {
   loadServerLog: () => Promise<ServerLogEntry[]>;
   /** 확장 전체 초기화 — 설정 시트 ♻️ 범주의 2단계 확인(같은 버튼 재클릭) 뒤에만 불린다 */
   onFullReset: () => void;
+  /** 마이크 음정 궤적 공급자 — 레인이 매 프레임 최근 샘플을 끌어온다. 검출이 꺼져 있으면
+   *  빈 배열을 돌려준다. 예전엔 PiP 창에만 배선돼 있어 메인 패널 레인에는 궤적이 아예
+   *  뜨지 않았는데, 두 창이 같은 인스턴스를 쓰는 지금은 배선도 한 곳이면 된다. */
+  getMicSamples: () => MicSample[];
 }
 
 /** 'sheet' = 공지·기여처럼 본문 자리를 통째로 빌린 화면 — 가사가 없으므로 하이라이트·
@@ -192,10 +222,15 @@ const USER_SCROLL_HOLD_MS = 4000;
 /** 줄을 클릭했을 때 그 줄 안쪽으로 밀어 넣는 양 — 브라우저 시크가 요청 지점 이하로
  *  스냅해 한 줄 위가 활성화되는 것을 막는다. 사람이 못 느낄 만큼 작아야 한다. */
 const SEEK_INTO_LINE_SEC = 0.05;
-/** 좌측 레인 열 폭의 하한/상한 — 하한은 압축 렌더로도 못 읽는 폭, 상한은 가사창을
- *  레인이 잡아먹기 시작하는 폭(그 이상은 PiP 창을 쓰는 편이 낫다) */
+/**
+ * 좌측 레인 열 폭의 하한 — 압축 렌더로도 못 읽는 폭이다.
+ *
+ * 상한(예전 LANE_WIDTH_MAX=480)은 없앴다. "레인이 가사창을 잡아먹는다"는 것은 사용자가
+ * 손잡이를 끝까지 끌었을 때의 **선택**이지 막을 일이 아니고(운영자 지시: "이런 건 왜
+ * 제한이 있는지 모르겠어 없애버려"), 남는 진짜 제약은 «가사 목록에 LANE_BODY_MIN은
+ * 남겨야 한다»는 물리 한계 하나뿐이다 — 그건 clampLaneWidth의 roomCap이 이미 지킨다.
+ */
 const LANE_WIDTH_MIN = 140;
-const LANE_WIDTH_MAX = 480;
 /** 레인이 아무리 넓어져도 가사 목록에 남겨 두는 최소 폭 */
 const LANE_BODY_MIN = 160;
 /** 디바이더 폭 (CSS .ey-lane-divider와 같은 값) — 2단 성립 여부 계산에 필요하다 */
@@ -208,10 +243,9 @@ const LANE_DIVIDER_W = 8;
  * 읽히는 1단이 낫고, 패널을 넓히면 즉시 2단으로 복귀한다(handlePanelResize).
  */
 const LANE_TWO_COL_MIN = LANE_WIDTH_MIN + LANE_BODY_MIN + LANE_DIVIDER_W;
-/** 부착(attached) 레인 패널의 폭 하한/상한 — 패널 폭에서 깎이는 내부 열이 아니라 화면에
- *  독립적으로 뜨므로 LANE_WIDTH_MAX(480)보다 넓게 허용한다 */
+/** 부착(attached) 레인 패널의 폭 하한 — 상한은 «화면 밖으로 나가지 않는다»는 물리
+ *  클램프뿐이다(예전 고정 상한 560px 제거, LANE_WIDTH_MIN 주석과 같은 근거) */
 const ATTACH_WIDTH_MIN = 140;
-const ATTACH_WIDTH_MAX = 560;
 /** 부착 패널과 메인 패널 사이 간격(px) */
 const ATTACH_GAP = 8;
 /** 재생목록 부착 패널의 고정 폭(px) — 레인 부착 패널과 달리 사용자 조절 손잡이를 두지
@@ -312,6 +346,26 @@ export class LyricsOverlay {
    * 만들지 않고 옮기기만 하는 이유는 캔버스가 하나여야 렌더러 attach가 유지되기 때문이다.
    */
   private laneWrap: HTMLDivElement;
+  /**
+   * 레인 열 머리 — **가라오케 전용 컨트롤이 사는 곳.**
+   *
+   * 운영자 원칙: «컨트롤은 자기가 제어하는 열에 붙어야 한다». 예전에는 멜로디·메트로놈이
+   * PiP 중앙 열 푸터(재생 컨트롤 자리)에 섞여 있었고, 마디 창·계이름·카운트다운은 설정
+   * 시트 깊숙이 있어 가라오케 중에 닿기 어려웠다. 레인 위에 붙이면 «지금 보고 있는 것»과
+   * «그것을 조절하는 것»이 한자리에 온다.
+   *
+   * laneWrap 안에 두므로 배치(left/bottom/attached·PiP 열)를 따라 통째로 움직이고,
+   * **두 표면이 같은 코드로 같은 컨트롤을 얻는다**(구현 단일화).
+   */
+  private laneHead: HTMLDivElement;
+  private laneWindowLabel!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
+  private laneModeBtn!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
+  private laneMelodyBtn!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
+  private laneMetroBtn!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
+  private laneMetroRateBtn!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
+  private laneMetroBeatBtn!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
+  private laneSolfegeBtn!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
+  private laneCountBtn!: HTMLButtonElement; // buildLaneHead가 채운다(생성자에서 호출)
   /** 레인/가사 경계 드래그 손잡이 — 'left' 배치에서만 DOM에 붙는다 */
   private laneDivider: HTMLDivElement;
   /**
@@ -433,6 +487,19 @@ export class LyricsOverlay {
 
   private geometry: PanelGeometry;
   private applyingGeometry = false;
+  /**
+   * applySettings가 유발한 재배치가 «사용자의 창 크기 조절»로 오인되지 않게 하는 빗장.
+   *
+   * 실제 사고: PiP에서 모듈을 토글하면 content가 applySettings를 **양쪽에** 방송하고,
+   * 그 결과 메인 패널이 내부 재배치(레인 열 폭·재생목록 열)를 한다. 그 리플로우를
+   * ResizeObserver가 잡아 handlePanelResize가 «패널 크기가 바뀌었다»로 읽고
+   * geometry를 덮어쓴 뒤 **저장까지** 했다 — 사용자가 손대지도 않은 메인 창 크기가
+   * PiP 토글 한 번에 초기화되는 정체다.
+   *
+   * 불변식: 모듈 on/off는 자기 표면의 열 공간만 바꾸고 **다른 표면의 기하는 건드리지
+   * 않는다.** applyingGeometry와 같은 규약(다음 프레임에 스스로 풀림)으로 막는다.
+   */
+  private applyingSettings = false;
   private saveGeomTimer = 0;
   /** mountInto에서 «대상 문서의 창»으로 만든다 — unbindWindow가 끊으면 null */
   private resizeObserver: ResizeObserver | null = null;
@@ -462,9 +529,30 @@ export class LyricsOverlay {
   /** applyGeometry가 거는 «다음 프레임에 플래그 되돌리기» 핸들. 콜백이 자기 필드만
    *  만져서 실해는 없지만, teardown 잔재가 0이어야 다음 회귀를 하네스가 잡아낸다 */
   private geomRaf = 0;
+  /** applyingSettings를 «다음 프레임에» 되돌리는 핸들 — destroy가 반드시 걷는다 */
+  private settingsRaf = 0;
   /** 두 번 눌러 확인이 «무장»된 버튼과 원래 툴팁 (confirmTwice) */
   private armedBtn: HTMLElement | null = null;
   private armedTitle = '';
+  /** 메인 레인이 폭 부족으로 가로 띠로 접혔음을 이미 알렸는가 — 전이에서만 한 번 알린다 */
+  private laneFoldedNotified = false;
+  /** 폭 유도 글자 배율(widthFontScale)을 마지막으로 반영한 패널 폭 — 같은 폭이면 다시 걸지 않는다 */
+  private lastFontWidth = -1;
+  /** 레인에 **지금 실제로 적용된** 표시 구간(마디). 설정 왕복이 늦어도 휠 연속 조작이
+   *  한 단계씩 움직이도록 화면 값을 직접 들고 있는다(attachLaneWheel 주석) */
+  private laneWindow = 4;
+  /** 부착 패널을 내보낸 바깥 열 (filled 전용, OverlaySlots) */
+  private laneSlot: Element | null = null;
+  private playlistSlot: Element | null = null;
+  /** 열 구성이 바뀌었음을 창 주인에게 알린다 — 폭·접힘 재계산은 그쪽이 한다 */
+  private onColumnsChanged: (() => void) | null = null;
+  /** 가사 단축 표시(현재 줄 한 줄) — PiP 중앙 열이 빌려 가는 뷰. attachShortView가 만든다 */
+  private shortEl: HTMLDivElement | null = null;
+  private shortPrevEl: HTMLDivElement | null = null;
+  private shortCurrentEl: HTMLDivElement | null = null;
+  private shortNextEl: HTMLDivElement | null = null;
+  /** 단축 표시의 현재 줄 안 채움 대상 — 매 프레임 updateFillTargets가 갱신한다 */
+  private shortFillTargets: FillTarget[] = [];
 
   constructor(
     cssText: string,
@@ -482,10 +570,12 @@ export class LyricsOverlay {
     // floating은 «좌표를 가진 패널»을 띄우는 0크기 앵커고, filled는 창 전체가 패널이라
     // 호스트부터 창을 덮는다 — 이 한 줄이 기하 층의 존재 여부를 가른다
     this.host.style.cssText = this.chrome === 'filled'
-      // PiP 창 안에서는 영상 미러와 플레이어 컨트롤 사이의 «흐름 요소»로 산다 —
-      // fixed로 창을 덮으면 그 둘을 가려 버린다. 남는 세로를 전부 가져가되(flex:1),
-      // min-height:0이어야 내부 스크롤이 부모를 밀어내지 않는다.
-      ? 'all:initial;position:relative;display:block;flex:1 1 auto;min-height:0;'
+      // PiP 창 안에서는 가로 행의 **한 열**로 산다(영상 열 오른쪽). fixed로 창을 덮으면
+      // 레인·영상·재생목록을 전부 가려 버린다. 실제 폭은 pip.ts applyColumnLayout이
+      // flex-basis로 매기고(열 디바이더로 조절), 높이는 행의 stretch가 채운다.
+      // 패널 자신은 이 호스트 안에서 position:absolute라 크기를 한 픽셀도 보태지 않으므로
+      // basis를 auto로 두면 «내용 0»이 되어 계산만 헷갈린다 — 0 + grow로 시작한다.
+      ? 'all:initial;position:relative;display:block;flex:1 1 0;min-width:0;'
       : 'all:initial;position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;';
     const shadow = this.host.attachShadow({ mode: 'open' });
 
@@ -527,6 +617,14 @@ export class LyricsOverlay {
     const gearBtn = this.headerButton(ICONS.gear, t('overlay.header.settings'), () => this.toggleSettings());
     this.collapseBtn = this.headerButton(ICONS.collapse, t('overlay.header.collapse'), () => this.setCollapsed(!this.geometry.collapsed));
     const closeBtn = this.headerButton(ICONS.close, t('overlay.header.close'), () => this.setVisible(false));
+    // 접기·닫기·PiP 열기는 «떠 있는 패널»에만 있는 개념이다. 창을 통째로 채우는 인스턴스에서
+    // 접으면 빈 창만 남고, 닫으면 아무것도 없는 창이 남는다(창을 닫는 것은 창 자신의 몫이다).
+    // 그래서 세 버튼은 filled에서 아예 내리고, 그 상태가 뒤집히지 않도록 setPipEnabled도
+    // 아래에서 한 번 더 막는다.
+    if (this.chrome === 'filled') {
+      this.collapseBtn.style.display = 'none';
+      closeBtn.style.display = 'none';
+    }
 
     this.header = h('div', { className: 'ey-header' },
       h('div', { className: 'ey-header-left' },
@@ -697,9 +795,14 @@ export class LyricsOverlay {
       title: t('overlay.mainLane.seekTitle'),
       on: { click: e => this.seekFromLane(e) },
     });
+    // 휠 확대축소·팬 — h()의 on:이 아니라 직접 건다(preventDefault를 하려면 passive:false가
+    // 필요하고, 휠은 크롬에서 기본이 passive다)
+    this.attachLaneWheel();
     this.laneNotice = h('div', { className: 'ey-lane-notice' });
     this.laneNotice.style.display = 'none';
-    this.laneWrap = h('div', { className: 'ey-lane-wrap' }, this.laneCanvas, this.laneNotice);
+    this.laneHead = this.buildLaneHead();
+    this.laneWrap = h('div', { className: 'ey-lane-wrap' },
+      this.laneHead, this.laneCanvas, this.laneNotice);
     this.laneWrap.style.display = 'none';
     this.laneDivider = this.buildLaneDivider();
     this.attachDivider = this.buildAttachDivider();
@@ -734,17 +837,26 @@ export class LyricsOverlay {
     // 대한 답이다. 헤더(.ey-actions)는 이미 버튼 7개로 꽉 차서 제목을 밀어내므로,
     // 제목 바로 아래 언어 칩 줄과 같은 계열의 얇은 줄을 따로 둔다.
     this.quickLaneBtn = this.miniButton(MINI_LANE_SVG, t('overlay.quick.lane'),
-      () => this.callbacks.onSettingsChange({ modMainLane: !this.settings.modMainLane }));
+      () => this.callbacks.onSettingsChange(this.chrome === 'filled'
+        ? { pitchGuide: !this.settings.pitchGuide }
+        : { modMainLane: !this.settings.modMainLane }));
     // 배치 토글은 레인이 켜져 있을 때만 의미가 있다 — syncQuickRow가 표시를 정한다.
     // 3단 순환: left → bottom → attached → left (LANE_POS_CYCLE 참고)
+    // 레인 «위치» 버튼은 표면에 따라 다른 것을 옮긴다.
+    //   floating: 패널 안 배치 순환(left → bottom → attached)
+    //   filled  : 부착 개념이 없어 순환이 유명무실하다 → **레인 열과 중앙 열을 맞바꾼다**.
+    //             기본 배치에서는 레인과 가사창이 창 양 끝이라 둘을 함께 보기 어렵다
+    //             (운영자 용례: 따라 부르며 가사도 같이 보고 싶다).
     this.quickLanePosBtn = this.miniButton(MINI_POS_LEFT_SVG, t('overlay.quick.lanePos'),
-      () => this.callbacks.onSettingsChange({
-        mainLanePos: LANE_POS_CYCLE[this.settings.mainLanePos],
-      }));
+      () => this.callbacks.onSettingsChange(this.chrome === 'filled'
+        ? { pipLaneSwapped: !this.settings.pipLaneSwapped }
+        : { mainLanePos: LANE_POS_CYCLE[this.settings.mainLanePos] }));
     this.quickCaptionBtn = this.miniButton(MINI_CAPTION_SVG, t('overlay.quick.caption'),
       () => this.callbacks.onSettingsChange({ videoCaptions: !this.settings.videoCaptions }));
     this.quickPlaylistBtn = this.miniButton(MINI_PLAYLIST_SVG, t('overlay.quick.playlist'),
-      () => this.callbacks.onSettingsChange({ modPlaylist: !this.settings.modPlaylist }));
+      () => this.callbacks.onSettingsChange(this.chrome === 'filled'
+        ? { pipPlaylist: !this.settings.pipPlaylist }
+        : { modPlaylist: !this.settings.modPlaylist }));
     // 번역 언어 칩을 같은 줄 오른쪽 끝에 함께 싣는다 — 별도 줄로 두면 얇은 줄이 두 개
     // 쌓여 세로 공간만 먹는다(실사용 제보). 칩 줄 표시/숨김(renderLangChips)은 그대로
     // 자기 display로 하고, 접힘 상태는 퀵 줄과 함께 사라진다.
@@ -790,14 +902,24 @@ export class LyricsOverlay {
    * canvas.ownerDocument로 ResizeObserver·devicePixelRatio·CSS 변수를 잡는데,
    * h()가 만든 캔버스는 문서에 붙기 전까지 «메인 문서» 소속이기 때문이다.
    */
-  mountInto(doc: Document, container?: Element): void {
+  mountInto(doc: Document, container?: Element, slots?: OverlaySlots): void {
     if (this.doc === doc) return;
     if (this.doc) this.unbindWindow();
     this.doc = doc;
     this.win = doc.defaultView;
     // 유튜브 페이지에서는 documentElement 직속(페이지 레이아웃에 끼어들지 않는 0크기 앵커),
-    // PiP에서는 영상 미러와 플레이어 컨트롤 «사이»에 흐름 요소로 들어간다
+    // PiP에서는 창을 가로로 나눈 가운데 열 하나로 들어간다
     (container ?? doc.documentElement).append(this.host);
+    // 부착 패널을 «패널 바깥의 남의 열»로 내보낸다 — filled 전용. 근거는 OverlaySlots 주석.
+    if (slots?.laneSlot) {
+      this.laneSlot = slots.laneSlot;
+      slots.laneSlot.append(this.attachPanel);
+    }
+    if (slots?.playlistSlot) {
+      this.playlistSlot = slots.playlistSlot;
+      slots.playlistSlot.append(this.attachPlaylistPanel);
+    }
+    this.onColumnsChanged = slots?.onColumnsChanged ?? null;
     this.lane.attach(this.laneCanvas, this.panel);
     this.applyGeometry();
     const RO = (this.win as unknown as { ResizeObserver?: typeof ResizeObserver })?.ResizeObserver
@@ -809,6 +931,13 @@ export class LyricsOverlay {
     if (this.chrome === 'floating') {
       this.win?.addEventListener('resize', this.handleWindowResize);
       doc.addEventListener('fullscreenchange', this.handleFullscreenChange);
+    }
+    // 배치를 **여기서 한 번 더** 돌린다. 생성자의 applySettings가 이미 한 번 돌았지만
+    // 그때는 아직 slots가 없어(mountInto가 방금 넣었다) 레인이 패널 안쪽 열로 갔고,
+    // 바깥 열의 표시 여부도 정해지지 않았다. 슬롯을 아는 지금이 진짜 배치 시점이다.
+    if (slots) {
+      this.applyLaneVisibility();
+      this.updatePlaylistPlacement();
     }
   }
 
@@ -854,6 +983,8 @@ export class LyricsOverlay {
     this.resizeObserver = null;
     (this.win ?? window).cancelAnimationFrame(this.geomRaf);
     this.geomRaf = 0;
+    (this.win ?? window).cancelAnimationFrame(this.settingsRaf);
+    this.settingsRaf = 0;
     // 등록과 «같은 조건»으로만 해제한다 — filled는 애초에 걸지 않았다. removeEventListener
     // 자체는 무해하지만, 조건이 어긋나 있으면 읽는 사람이 "filled에도 리스너가 있나?"로
     // 오해하고, 등록/해제 대칭을 보는 누수 계측도 음수로 어긋난다(반복 측정에서 실제로 발생).
@@ -875,6 +1006,11 @@ export class LyricsOverlay {
    */
   destroy(): void {
     this.unbindWindow();
+    // 아래 host.remove()는 «host 안»만 걷는다 — filled에서 바깥 열로 내보낸 세 조각
+    // (단축 표시·부착 레인·부착 재생목록)은 남의 부모에 붙어 있으므로 따로 떼어낸다.
+    this.detachShortView();
+    if (this.laneSlot) this.attachPanel.remove();
+    if (this.playlistSlot) this.attachPlaylistPanel.remove();
     clearTimeout(this.saveGeomTimer);
     clearTimeout(this.noticeTimer);
     clearTimeout(this.confirmTimer);
@@ -1407,10 +1543,14 @@ export class LyricsOverlay {
         this.resumeChip.style.display = '';
       }
     }
+    // 단축 표시(PiP 중앙 열)도 같은 지점에서 따라온다 — 별도 갱신 경로를 만들지 않는다
+    this.renderShortView();
   }
 
   updateTime(time: number, paused = false): void {
     updateFillTargets(this.activeWordEls, time);
+    // 단축 표시의 현재 줄도 같은 함수로 채운다(목록과 채움 규칙이 갈라질 수 없다)
+    if (this.shortFillTargets.length > 0) updateFillTargets(this.shortFillTargets, time);
     this.updateVocalGlow(time);
     this.lastTime = time;
     this.lanePaused = paused;
@@ -1441,13 +1581,174 @@ export class LyricsOverlay {
     if (this.laneShown) this.lane.render(this.lastTime, this.lanePaused);
   }
 
+  // ── 가사 단축 표시 (PiP 중앙 열이 빌려 가는 뷰) ──────────────────
+  //
+  // 「영상 바로 아래 현재 줄 한 줄」은 PiP의 오래된 화면이고 운영자가 유지를 지시했다.
+  // 그런데 그것을 pip.ts가 다시 그리면 가사 렌더 구현이 **세 번째**로 늘어난다(메인 목록,
+  // 레인, 그리고 이것) — 이번 재작업이 없애려던 바로 그 구조다. 그래서 소유자를 이 클래스로
+  // 둔다: 줄 DOM은 목록과 **완전히 같은** buildLineEl이 만들고, 채움은 같은
+  // collectFillTargets/updateFillTargets가 굴리며, 갱신 시점도 이미 도는 highlightLine·
+  // updateTime·refreshTranslations에 얹힌다. pip.ts는 «어디에 놓을지»만 정한다.
+
   /**
-   * 레인 표시 조건 = [모듈] 설정 on + 싱크 가사 화면 + 노트 데이터 있음.
+   * 단축 표시 뷰를 만들어 주어진 컨테이너에 붙인다 (PiP 문서의 light DOM).
+   * 같은 CSS 전문이 PiP 문서 <head>에 주입돼 있어 `.ey-pip-stage`·`.ey-line` 규칙이 그대로 먹는다.
+   */
+  attachShortView(container: Element): void {
+    if (!this.shortEl) {
+      this.shortPrevEl = h('div', { className: 'ey-pip-line prev', attrs: { dir: 'auto' } });
+      this.shortCurrentEl = h('div', { className: 'ey-pip-line current', attrs: { dir: 'auto' } });
+      this.shortNextEl = h('div', { className: 'ey-pip-line next', attrs: { dir: 'auto' } });
+      // 앞뒤 줄 클릭 = 그 줄로 시크 (구 pip.ts seekRelative와 같은 규약)
+      this.shortPrevEl.addEventListener('click', () => this.seekToLine(this.currentIndex - 1));
+      this.shortNextEl.addEventListener('click', () => this.seekToLine(this.currentIndex + 1));
+      this.shortCurrentEl.addEventListener('click', () => this.seekToLine(this.currentIndex));
+      this.shortEl = h('div', { className: 'ey-pip-stage' },
+        this.shortPrevEl, this.shortCurrentEl, this.shortNextEl);
+    }
+    container.append(this.shortEl);
+    this.renderShortView();
+  }
+
+  /** 단축 표시를 떼어 낸다 — 창이 닫힐 때(destroy가 host만 걷으므로 이건 따로 걷어야 한다) */
+  detachShortView(): void {
+    this.shortEl?.remove();
+    this.shortFillTargets = [];
+  }
+
+  private seekToLine(index: number): void {
+    const line = this.lines[index];
+    if (line && line.time !== null) this.callbacks.onSeek(line.time + SEEK_INTO_LINE_SEC);
+  }
+
+  /**
+   * 단축 표시 다시 그리기 — 현재 줄만 «진짜 줄»로, 앞뒤는 흐린 한 줄 텍스트로.
+   * 현재 줄의 원문/발음/번역과 카라오케 채움 구조가 가사 목록과 한 글자도 다르지 않다.
+   */
+  private renderShortView(): void {
+    if (!this.shortEl || !this.shortCurrentEl) return;
+    const cur = this.currentIndex >= 0 ? this.lines[this.currentIndex] : undefined;
+    if (this.shortPrevEl) this.shortPrevEl.textContent = this.lines[this.currentIndex - 1]?.text ?? '';
+    if (this.shortNextEl) this.shortNextEl.textContent = this.lines[this.currentIndex + 1]?.text ?? '';
+    if (!cur) {
+      this.shortCurrentEl.replaceChildren('♪');
+      this.shortFillTargets = [];
+      return;
+    }
+    const { el } = buildLineEl(cur, resolveScript(this.settings), this.settings);
+    el.classList.add('active'); // 목록의 «현재 줄»과 같은 강조 규칙을 그대로 받는다
+    this.shortCurrentEl.replaceChildren(el);
+    this.shortFillTargets = collectFillTargets(el);
+  }
+
+  // ── 레인 다리 (창 주인이 부르는 세 가지) ────────────────────────
+  //
+  // PiP 창은 «창»의 일(OS 테마 변경 알림·재생 배속·재생 재개)을 알고 패널은 모른다.
+  // 레인 렌더러를 통째로 노출하는 대신 필요한 세 동작만 이름 붙여 내준다.
+
+  /**
+   * 이 패널이 «레인 열을 원하는가» / «재생목록 열을 원하는가».
+   *
+   * 창 주인(pip.ts)이 열 폭을 계산할 때 쓴다. **자기가 쓴 style.display를 되읽으면 안
+   * 되기 때문에** 따로 내준다 — 한 번 접은 열은 영원히 «원하지 않음»으로 굳어 창을 다시
+   * 넓혀도 돌아오지 않는다(실측으로 잡힌 자기참조 래치).
+   */
+  laneVisible(): boolean {
+    return this.laneShown;
+  }
+
+  playlistVisible(): boolean {
+    // 표면별 키 — 메인에서 재생목록을 끄더라도 PiP의 열은 그대로다(그 반대도)
+    return this.chrome === 'filled' ? this.settings.pipPlaylist : this.settings.modPlaylist;
+  }
+
+  /** OS/앱 테마가 바뀌어 CSS 변수가 낡았다 — 캐시한 레인 색을 버리고 즉시 한 번 다시 그린다 */
+  refreshLaneColors(): void {
+    this.lane.refreshColors();
+    this.renderLane();
+  }
+
+  /** 원본 video 배속 — 마이크 궤적의 벽시계→곡 시간 환산에 필요하다 */
+  setLanePlaybackRate(rate: number): void {
+    this.lane.setOptions({ playbackRate: rate });
+  }
+
+  /** 재생이 재개되면 수동 스크롤(드래그·휠 팬)을 풀고 오토스크롤로 되돌린다 */
+  clearLaneManualScroll(): void {
+    this.lane.setManualT0(null);
+  }
+
+  /**
+   * 레인 캔버스 위 휠 — 순수 세로 휠은 표시 구간(마디) 확대축소, 가로 휠·Shift+세로휠은
+   * 일시정지 중 좌우 탐색(팬).
+   *
+   * 예전에는 PiP 창의 캔버스에만 있었다(구 pip.ts attachPitchPointer). 두 창이 같은
+   * 인스턴스를 쓰는 지금은 «이식»이 아니라 **한 곳에 두기**다 — 여기에 한 번 달면
+   * 메인 패널 레인과 PiP 레인이 함께 얻는다.
+   *
+   * Ctrl+휠은 브라우저 확대/축소와 충돌하니 절대 건드리지 않는다. ±값·클램프는 설정
+   * 시트의 마디 창 행과 정확히 같은 축을 쓴다(새 배율 축을 만들지 않는 것이 버그 표면을
+   * 최소화한다는 지시) — 저장은 onSettingsChange 한 경로로만 나간다.
+   */
+  private attachLaneWheel(): void {
+    this.laneCanvas.addEventListener('wheel', (e: WheelEvent) => {
+      if (!this.laneShown) return;
+      if (!e.ctrlKey && !e.shiftKey && e.deltaX === 0 && e.deltaY !== 0) {
+        e.preventDefault(); // 레인 위에서만 막는다 — 가사 목록 스크롤 침범 금지
+        // **저장된 설정이 아니라 지금 화면의 값**에서 출발한다. onSettingsChange는
+        // 저장소를 한 바퀴 돌아 applySettings로 되돌아오므로, 빠르게 두 번 굴리면 두
+        // 번째가 아직 낡은 값을 읽어 4→2→8처럼 튄다(실측). 화면에 실제로 적용한 값을
+        // 들고 있으면 연속 조작이 언제나 한 단계씩 움직인다.
+        const cur = this.laneWindow;
+        const next = e.deltaY < 0
+          ? Math.max(0.5, cur / 2)   // 휠 위로 = 확대(표시 구간 축소)
+          : Math.min(16, cur * 2);   // 휠 아래로 = 축소(표시 구간 확장)
+        if (next === cur) return;
+        // 저장 왕복을 기다리지 않고 그 자리에서 먼저 반영한다 — 일시정지 중엔 tick이
+        // 없어 다음 프레임을 기다리면 «안 먹는» 것처럼 보인다
+        this.laneWindow = next;
+        this.lane.setOptions({ windowMeasures: next });
+        this.syncLaneHead(); // 라벨이 저장 왕복을 기다리지 않게
+        this.renderLane();
+        this.callbacks.onSettingsChange({ pitchWindowMeasures: next });
+        return;
+      }
+      if (!this.lanePaused) return;
+      const view = this.lane.viewport();
+      if (!view) return;
+      const delta = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+      if (delta === 0) return;
+      e.preventDefault();
+      this.lane.setManualT0((this.lane.getManualT0() ?? view.t0) + delta * (view.W / view.plotW));
+      this.renderLane();
+    }, { passive: false });
+  }
+
+  /**
+   * 이 창에서 «레인을 보고 싶다»는 설정이 켜져 있는가 — 두 크롬이 서로 다른 스위치를 본다.
+   *
+   * floating(유튜브 페이지 위 패널): `modMainLane`. 좁은 패널에서 레인이 가사 목록을
+   *   밀어내므로 기본 꺼짐인 **옵트인 모듈**이다.
+   * filled(PiP 창): `pitchGuide`(가라오케 기능 자체, 기본 켜짐). PiP는 애초에 가라오케를
+   *   보려고 여는 창이라 «모듈을 켜야 나오는» 것이 아니다 — 재작업 전 PiP도 정확히 이
+   *   설정으로 레인을 띄웠고, 여기서 modMainLane을 쓰면 기본값이 꺼짐이라 **PiP를 열어도
+   *   가라오케가 안 나오는** 회귀가 된다(실브라우저 검증에서 실제로 잡혔다).
+   *
+   * 「같은 UI」에 어긋나지 않는다: 두 창 모두 같은 캔버스·같은 렌더러·같은 표시 설정을
+   * 쓰고, 갈리는 것은 «이 창에 띄울지»라는 창별 취향 하나뿐이다(퀵 줄 토글도 각 창에서
+   * 자기 스위치를 뒤집는다).
+   */
+  private laneWanted(): boolean {
+    return this.chrome === 'filled' ? this.settings.pitchGuide : this.settings.modMainLane;
+  }
+
+  /**
+   * 레인 표시 조건 = 위 laneWanted + 싱크 가사 화면 + 노트 데이터 있음.
    * 노트가 없는 곡(자막·LRCLIB 싱크)에서 빈 오선지만 남기지 않으려는 것으로, PiP의
    * applyPitchVisibility와 같은 규칙이다.
    */
   private applyLaneVisibility(): void {
-    const show = this.settings.modMainLane && this.stateKind === 'synced' && this.lane.hasNotes();
+    const show = this.laneWanted() && this.stateKind === 'synced' && this.lane.hasNotes();
     this.laneShown = show;
     this.laneWrap.style.display = show ? '' : 'none';
     this.applyLanePlacement();
@@ -1466,10 +1767,24 @@ export class LyricsOverlay {
    */
   private applyLanePlacement(): void {
     const panelW = this.panel.clientWidth || this.geometry.width;
-    const attached = this.settings.mainLanePos === 'attached';
+    // filled에서는 레인이 **언제나** 부착 패널로 간다 — PiP 창의 레인 자리는 영상 왼쪽
+    // 열이고(운영자 지시), 그 열을 pip.ts가 laneSlot으로 내주기 때문이다. 패널 안쪽
+    // 좌측 열(mainLanePos='left')로 두면 레인이 가사창 안에 갇혀 영상 오른쪽으로 밀린다.
+    // 좌표 계산(updateAttachPlacement)은 아래에서 filled를 그냥 통과시킨다 — 자리는
+    // flex 열이 정하지 절대좌표가 정하지 않는다.
+    const attached = this.chrome === 'filled'
+      ? this.laneSlot !== null
+      : this.settings.mainLanePos === 'attached';
     // 패널이 2단을 못 담을 만큼 좁으면 설정과 무관하게 가로 띠로 — LANE_TWO_COL_MIN 주석 참고.
     // attached는 패널 폭과 무관(부착 패널은 화면에 독립적으로 뜬다)하므로 이 좁음 폴백과 무관하다.
-    const left = !attached && this.settings.mainLanePos === 'left' && panelW >= LANE_TWO_COL_MIN;
+    const left = !attached && this.settings.mainLanePos !== 'bottom' && panelW >= LANE_TWO_COL_MIN;
+    // 메인 표면의 «자동 접힘» — 사용자가 'left'를 골랐는데 패널이 2단을 못 담아 가로 띠로
+    // 되돌아간 경우다(LANE_TWO_COL_MIN). 지금까지 조용히 일어나서 «배치 버튼이 안 먹는다»로
+    // 읽혔다. PiP의 열 접힘과 같은 규약으로 한 줄 알린다 — 전이에서만 한 번.
+    const laneFolded = this.chrome === 'floating' && this.settings.mainLanePos === 'left'
+      && this.laneShown && panelW < LANE_TWO_COL_MIN;
+    if (laneFolded && !this.laneFoldedNotified) this.notifyAutoCollapsed();
+    this.laneFoldedNotified = laneFolded;
     this.mainRow.classList.toggle('lane-left', left);
     if (attached) {
       if (this.laneWrap.parentElement !== this.attachPanel) this.attachPanel.append(this.laneWrap);
@@ -1495,20 +1810,24 @@ export class LyricsOverlay {
   }
 
   /**
-   * 레인 열 폭 클램프 — 설정 범위(140~480px)에 더해 **패널이 실제로 내줄 수 있는 폭**까지
-   * 본다. 패널 최소 폭이 280px이라, 480px 열을 그대로 적용하면 가사 목록이 통째로 사라진다.
+   * 레인 열 폭 클램프 — 하한과 **패널이 실제로 내줄 수 있는 폭**만 본다.
+   *
+   * 고정 상한은 없앴다(LANE_WIDTH_MIN 주석). 남은 roomCap은 취향이 아니라 물리다:
+   * 패널 최소 폭이 280px이라 레인이 그 전부를 가져가면 가사 목록이 통째로 사라진다.
    */
   private clampLaneWidth(px: number): number {
     const panelW = this.panel.clientWidth || this.geometry.width;
     const roomCap = Math.max(LANE_WIDTH_MIN, panelW - LANE_BODY_MIN);
-    return Math.round(Math.min(Math.max(px, LANE_WIDTH_MIN), Math.min(LANE_WIDTH_MAX, roomCap)));
+    return Math.round(Math.min(Math.max(px, LANE_WIDTH_MIN), roomCap));
   }
 
-  /** 부착 패널 폭 클램프 — 패널 폭과 무관한 고정 범위(140~560px)만 본다. 패널에서
-   *  깎이는 내부 열이 아니라는 것이 애초에 부착 모드를 만든 이유이므로 clampLaneWidth의
-   *  panelW 상한(roomCap)은 여기 적용하지 않는다. */
+  /** 부착 패널 폭 클램프 — 하한 + «화면 밖 금지» 물리 상한. 패널에서 깎이는 내부 열이
+   *  아니라는 것이 애초에 부착 모드를 만든 이유이므로 clampLaneWidth의 roomCap은 여기
+   *  적용하지 않는다. */
   private clampAttachedWidth(px: number): number {
-    return Math.round(Math.min(ATTACH_WIDTH_MAX, Math.max(ATTACH_WIDTH_MIN, px)));
+    const winW = this.win?.innerWidth ?? window.innerWidth;
+    const screenCap = Math.max(ATTACH_WIDTH_MIN, winW - EDGE_MARGIN * 2);
+    return Math.round(Math.min(screenCap, Math.max(ATTACH_WIDTH_MIN, px)));
   }
 
   /**
@@ -1523,7 +1842,22 @@ export class LyricsOverlay {
    * 풀리는 반면 숨김은 부착 모드를 껐다 켜기 전까지 원인을 알 수 없다(판단 근거).
    */
   private updateAttachPlacement(): void {
-    const show = this.settings.mainLanePos === 'attached' && this.laneShown && !this.geometry.collapsed;
+    // filled: 자리는 pip.ts가 내준 **flex 열**이 정한다. 절대좌표 로직(아래)을 태우면
+    // 메인 창 geometry 기준으로 계산돼 PiP 창 구석에 뭉친다 — 그래서 여기서 갈라선다.
+    // 이 창에서 할 일은 «열을 보이게 할지»뿐이고, 꺼지면 열이 공간을 반납한다.
+    if (this.chrome === 'filled') {
+      this.attachPanel.style.display = this.laneShown ? '' : 'none';
+      this.attachPanel.style.left = '';
+      this.attachPanel.style.top = '';
+      this.attachPanel.style.width = '';
+      this.attachPanel.style.height = '';
+      // **열 자체의 표시는 창 주인이 정한다** — 좁은 창 자동 접힘과 같은 판단이라
+      // 두 곳에서 쓰면 서로 덮어쓴다. 바뀐 사실만 알리고 결정은 넘긴다.
+      this.onColumnsChanged?.();
+      return;
+    }
+    const show = this.settings.mainLanePos === 'attached'
+      && this.laneShown && !this.geometry.collapsed;
     if (!show) {
       this.attachPanel.style.display = 'none';
       return;
@@ -1556,6 +1890,21 @@ export class LyricsOverlay {
    * 끝에 맞춰 클램프한다(레인 쪽과 같은 판단 근거 — 완전히 숨기는 것보다 겹침이 낫다).
    */
   private updatePlaylistPlacement(): void {
+    // filled(PiP 창): «패널 밖»이 없으므로 같은 패널을 본문 오른쪽 열로 눕힌다 —
+    // 부착 레인이 좌측 열로 눕는 것(applyLanePlacement)과 대칭이고, DOM·조각은 그대로라
+    // 두 창에 뜨는 재생목록이 한 픽셀도 갈라지지 않는다.
+    if (this.chrome === 'filled') {
+      // filled: 가사창 오른쪽 **열**이 자리다(pip.ts가 playlistSlot으로 내준다).
+      // 절대좌표는 여기서도 금물 — 좌표를 갖던 시절의 인라인 스타일을 반드시 걷어낸다.
+      // 열 표시 여부는 위 laneSlot과 같은 이유로 창 주인이 정한다.
+      this.attachPlaylistPanel.style.left = '';
+      this.attachPlaylistPanel.style.top = '';
+      this.attachPlaylistPanel.style.width = '';
+      this.attachPlaylistPanel.style.height = '';
+      this.attachPlaylistPanel.style.display = this.settings.modPlaylist ? '' : 'none';
+      this.onColumnsChanged?.();
+      return;
+    }
     const show = this.settings.modPlaylist && !this.geometry.collapsed;
     if (!show) {
       this.attachPlaylistPanel.style.display = 'none';
@@ -1656,6 +2005,91 @@ export class LyricsOverlay {
     return divider;
   }
 
+  /**
+   * 레인 머리 컨트롤 — 가라오케 중에 손이 가는 것들만. 나머지(옥타브·밝기 등)는
+   * 설정 시트에 남긴다: 곡마다 바꾸는 값이 아니라 한 번 정하고 잊는 값이다.
+   *
+   * 저장은 전부 onSettingsChange 한 경로다(새 축을 만들지 않는다는 규약) — 설정 시트의
+   * 같은 항목을 만지는 것과 완전히 같은 결과가 된다.
+   */
+  private buildLaneHead(): HTMLDivElement {
+    const set = (patch: Partial<Settings>): void => this.callbacks.onSettingsChange(patch);
+    const btn = (cls: string, title: string, onClick: () => void): HTMLButtonElement =>
+      h('button', {
+        className: `ey-lane-head-btn ${cls}`, title, attrs: { type: 'button' },
+        on: { click: onClick },
+      });
+
+    this.laneMelodyBtn = btn('', t('pip.controls.melody'),
+      () => set({ melodyPlayback: !this.settings.melodyPlayback }));
+    this.laneMelodyBtn.append(icon(LANE_NOTE_SVG));
+    this.laneMetroBtn = btn('', t('pip.controls.metronome'),
+      () => set({ metronome: !this.settings.metronome }));
+    this.laneMetroBtn.append(icon(LANE_METRO_SVG));
+    // 메트로놈 세부(배속·시작 박)는 메트로놈이 켜져 있을 때만 뜻이 있다 — syncLaneHead가 가린다
+    this.laneMetroRateBtn = btn('ey-lane-head-text', t('pip.controls.metronomeRate'), () => {
+      const r = this.settings.metronomeRate;
+      set({ metronomeRate: r === 1 ? 2 : r === 2 ? 0.5 : 1 });
+    });
+    this.laneMetroBeatBtn = btn('ey-lane-head-text', t('pip.controls.metronomeBeat'),
+      () => set({ metronomeBeat: (this.settings.metronomeBeat + 1) % 4 }));
+
+    // 마디 창 ± — 휠 확대축소와 **같은 축·같은 클램프**(laneWindow가 화면 정본)
+    const minus = btn('ey-lane-head-text', t('pip.controls.windowMinus'), () => {
+      const next = Math.max(0.5, this.laneWindow / 2);
+      if (next === this.laneWindow) return;
+      this.laneWindow = next;
+      this.lane.setOptions({ windowMeasures: next });
+      this.renderLane();
+      set({ pitchWindowMeasures: next });
+    });
+    minus.textContent = '−';
+    const plus = btn('ey-lane-head-text', t('pip.controls.windowPlus'), () => {
+      const next = Math.min(16, this.laneWindow * 2);
+      if (next === this.laneWindow) return;
+      this.laneWindow = next;
+      this.lane.setOptions({ windowMeasures: next });
+      this.renderLane();
+      set({ pitchWindowMeasures: next });
+    });
+    plus.textContent = '+';
+    this.laneWindowLabel = btn('ey-lane-head-text', t('pip.controls.windowLabel'), () => {});
+    this.laneWindowLabel.disabled = true;
+
+    this.laneModeBtn = btn('ey-lane-head-text', t('pip.controls.modeToggle'),
+      () => set({ pitchScrollMode: this.settings.pitchScrollMode === 'page' ? 'scroll' : 'page' }));
+    this.laneSolfegeBtn = btn('ey-lane-head-text', t('overlay.settings.row.solfegeNotation'),
+      () => set({ solfegeNotation: this.settings.solfegeNotation === 'korean' ? 'english' : 'korean' }));
+    this.laneCountBtn = btn('ey-lane-head-text', t('overlay.settings.row.pitchCountdown'),
+      () => set({ pitchCountdown: !this.settings.pitchCountdown }));
+
+    return h('div', { className: 'ey-lane-head' },
+      this.laneMelodyBtn, this.laneMetroBtn, this.laneMetroRateBtn, this.laneMetroBeatBtn,
+      minus, this.laneWindowLabel, plus, this.laneModeBtn,
+      this.laneSolfegeBtn, this.laneCountBtn);
+  }
+
+  /** 레인 머리 컨트롤의 라벨·on 상태를 현재 설정에 맞춘다 */
+  private syncLaneHead(): void {
+    const s = this.settings;
+    this.laneMelodyBtn.classList.toggle('on', s.melodyPlayback);
+    this.laneMetroBtn.classList.toggle('on', s.metronome);
+    // 배속·시작 박은 메트로놈이 꺼져 있으면 조절할 대상이 없다
+    this.laneMetroRateBtn.style.display = s.metronome ? '' : 'none';
+    this.laneMetroBeatBtn.style.display = s.metronome ? '' : 'none';
+    this.laneMetroRateBtn.textContent = s.metronomeRate === 0.5 ? '½×' : `${s.metronomeRate}×`;
+    this.laneMetroBeatBtn.textContent = t('overlay.settings.metronomeBeat.n', [String(s.metronomeBeat + 1)]);
+    const m = this.laneWindow;
+    this.laneWindowLabel.textContent = m === 0.5
+      ? t('overlay.settings.pitchWindow.half')
+      : t('overlay.settings.pitchWindow.bars', [String(m)]);
+    this.laneModeBtn.textContent = s.pitchScrollMode === 'page'
+      ? t('pip.controls.modeFixed') : t('pip.controls.modeScroll');
+    this.laneSolfegeBtn.textContent = s.solfegeNotation === 'korean' ? '도레미' : 'CDE';
+    this.laneCountBtn.textContent = '4·3·2·1';
+    this.laneCountBtn.classList.toggle('on', s.pitchCountdown);
+  }
+
   private miniButton(svg: string, title: string, onClick: () => void): HTMLButtonElement {
     return h('button', {
       className: 'ey-mini', title, attrs: { type: 'button' }, on: { click: onClick },
@@ -1664,26 +2098,46 @@ export class LyricsOverlay {
 
   /** 퀵 토글 줄의 on/off 상태·툴팁을 현재 설정에 맞춘다 (표시 언어 변경도 여기서 흡수) */
   private syncQuickRow(): void {
-    this.quickLaneBtn.classList.toggle('on', this.settings.modMainLane);
+    this.quickLaneBtn.classList.toggle('on', this.laneWanted());
     this.quickLaneBtn.title = t('overlay.quick.lane');
     this.quickCaptionBtn.classList.toggle('on', this.settings.videoCaptions);
     this.quickCaptionBtn.title = t('overlay.quick.caption');
-    this.quickPlaylistBtn.classList.toggle('on', this.settings.modPlaylist);
+    this.quickPlaylistBtn.classList.toggle('on', this.playlistVisible());
     this.quickPlaylistBtn.title = t('overlay.quick.playlist');
     // 배치 버튼은 "지금 어디에 있는가"가 아니라 "누르면 어디로 가는가"를 말한다 —
-    // 아이콘은 현재 배치를 그리고 툴팁이 목적지를 밝힌다
-    const pos = this.settings.mainLanePos;
-    const POS_ICON: Record<Settings['mainLanePos'], string> = {
-      left: MINI_POS_LEFT_SVG, bottom: MINI_POS_BOTTOM_SVG, attached: MINI_POS_ATTACHED_SVG,
-    };
-    const POS_NEXT_TITLE: Record<Settings['mainLanePos'], string> = {
-      left: t('overlay.quick.lanePosToBottom'),
-      bottom: t('overlay.quick.lanePosToAttached'),
-      attached: t('overlay.quick.lanePosToLeft'),
-    };
-    this.quickLanePosBtn.replaceChildren(icon(POS_ICON[pos]));
-    this.quickLanePosBtn.title = POS_NEXT_TITLE[pos];
-    this.quickLanePosBtn.style.display = this.settings.modMainLane ? '' : 'none';
+    // 아이콘은 현재 배치를 그리고 툴팁이 목적지를 밝힌다.
+    if (this.chrome === 'filled') {
+      // PiP: 부착 개념이 없어 순환이 무의미하다 → 레인 열 ⇄ 중앙 열 맞바꾸기.
+      // 아이콘도 «지금 레인이 어느 쪽인가»를 그려 눌렀을 때의 결과가 읽히게 한다.
+      const swapped = this.settings.pipLaneSwapped;
+      this.quickLanePosBtn.replaceChildren(icon(swapped ? MINI_POS_RIGHT_SVG : MINI_POS_LEFT_SVG));
+      this.quickLanePosBtn.title = t('overlay.quick.laneSwap');
+      this.quickLanePosBtn.classList.toggle('on', swapped);
+    } else {
+      const pos = this.settings.mainLanePos;
+      const POS_ICON: Record<Settings['mainLanePos'], string> = {
+        left: MINI_POS_LEFT_SVG, bottom: MINI_POS_BOTTOM_SVG, attached: MINI_POS_ATTACHED_SVG,
+      };
+      const POS_NEXT_TITLE: Record<Settings['mainLanePos'], string> = {
+        left: t('overlay.quick.lanePosToBottom'),
+        bottom: t('overlay.quick.lanePosToAttached'),
+        attached: t('overlay.quick.lanePosToLeft'),
+      };
+      this.quickLanePosBtn.replaceChildren(icon(POS_ICON[pos]));
+      this.quickLanePosBtn.title = POS_NEXT_TITLE[pos];
+    }
+    this.quickLanePosBtn.style.display = this.laneWanted() ? '' : 'none';
+  }
+
+  /**
+   * 「폭이 모자라 자동으로 접혔다」를 사용자에게 알린다 — **이 표면의 알림 칩**으로.
+   *
+   * 사용자가 펼침 버튼을 눌렀는데 아무 일도 안 일어난 것처럼 보이는 상황이 이 지시의
+   * 출발점이다(운영자). 새 UI를 만들지 않고 이미 있는 한 줄 칩을 그대로 쓴다 —
+   * 어떤 화면 위에도 뜨고, 자동으로 사라지며, 두 창이 각자 자기 것을 갖고 있다.
+   */
+  notifyAutoCollapsed(): void {
+    this.setNoticeChip(t('overlay.notice.autoCollapsed'), 7000);
   }
 
   /**
@@ -1802,7 +2256,16 @@ export class LyricsOverlay {
     }
   }
 
+  /**
+   * 패널 표시/숨김 — «떠 있는 패널»에만 뜻이 있다.
+   *
+   * filled는 창이 곧 패널이라 숨기면 빈 창만 남는다. content가 곡 없는 페이지로 이동할 때
+   * 거는 setVisible(false)가 PiP 창까지 비워서는 안 되므로(그 창은 사용자가 닫기 전까지
+   * 살아 있다는 것이 PiP의 설계다) 여기서 스스로 막는다 — 호출부는 방송만 하고 «어느
+   * 인스턴스인지»를 따지지 않아도 된다.
+   */
   setVisible(visible: boolean): void {
+    if (this.chrome === 'filled') return;
     this.visible = visible;
     this.updateHostVisibility();
   }
@@ -1866,9 +2329,10 @@ export class LyricsOverlay {
     this.serverBar.style.display = '';
   }
 
+  /** PiP 열기 버튼 노출 — filled 인스턴스는 «이미 그 PiP 창 안»이라 언제나 숨는다 */
   setPipEnabled(enabled: boolean): void {
-    this.pipEnabled = enabled;
-    this.pipBtn.style.display = enabled && this.stateKind === 'synced' ? '' : 'none';
+    this.pipEnabled = enabled && this.chrome === 'floating';
+    this.pipBtn.style.display = this.pipEnabled && this.stateKind === 'synced' ? '' : 'none';
   }
 
   setPipActive(active: boolean): void {
@@ -1912,6 +2376,7 @@ export class LyricsOverlay {
     if (this.currentIndex >= 0 && this.lineEls[this.currentIndex]) {
       this.activeWordEls = collectFillTargets(this.lineEls[this.currentIndex]);
     }
+    this.renderShortView(); // 단축 표시도 같은 줄 객체를 보므로 함께 다시 짓는다
   }
 
   setTranslationStatus(text: string | null): void {
@@ -2294,14 +2759,22 @@ export class LyricsOverlay {
   }
 
   applySettings(settings: Settings): void {
+    // 이 안에서 일어나는 리플로우는 «사용자의 창 조절»이 아니다 — 기하 갱신·저장 금지
+    this.applyingSettings = true;
+    const w = this.win ?? window;
+    w.cancelAnimationFrame(this.settingsRaf);
+    this.settingsRaf = w.requestAnimationFrame(() => { this.applyingSettings = false; });
     this.settings = settings;
+    this.laneWindow = settings.pitchWindowMeasures; // 설정이 정본 — 휠이 앞서 간 값도 여기서 맞춰진다
     // 번역 언어가 설정 시트·다른 경로로 바뀌어도 제목바 칩의 "현재 선택"이 따라가야 한다
     this.renderLangChips();
     this.panel.classList.remove('ey-fs-small', 'ey-fs-medium', 'ey-fs-large');
     this.panel.classList.add(`ey-fs-${settings.fontSize}`);
-    // 3단 프리셋 위에 얹는 미세 배율 — Shadow DOM 안이라 document.body가 아니라 패널
-    // 엘리먼트 자신에 심어야 overlay.css의 --ey-line-size calc()가 이 값을 본다
-    this.panel.style.setProperty('--ey-main-fs', String(settings.mainFontScale));
+    this.applyFontScale();
+    // 스트리밍용 글자 외곽선 — 크로마키/영상 위에 얹힐 때 얇은 글자가 배경에 먹히지
+    // 않도록 CSS가 text-shadow 링을 두른다(설정 streamTextOutline)
+    this.panel.classList.toggle('ey-text-outline', settings.streamTextOutline);
+    this.attachPanel.classList.toggle('ey-text-outline', settings.streamTextOutline);
     // 테마 판정은 lib/theme.ts 한 곳에서만 — PiP도 content가 같은 값을 받아 칠한다.
     // attachPanel은 this.panel의 형제라 CSS 변수를 :host에서 상속받지만, 라이트 테마
     // 오버라이드(.ey-panel.ey-light)는 클래스 스코프라 자신도 같은 클래스를 받아야 한다.
@@ -2323,7 +2796,7 @@ export class LyricsOverlay {
     this.lane.setOptions({
       windowMeasures: settings.pitchWindowMeasures,
       scrollMode: settings.pitchScrollMode,
-      fontScale: settings.pitchFontScale,
+      fontScale: settings.pitchFontScale * this.widthFontScale(),
       countdown: settings.pitchCountdown,
       solfege: settings.solfegeNotation,
       lineOpacity: settings.pitchLineOpacity,
@@ -2333,10 +2806,39 @@ export class LyricsOverlay {
       showF0: settings.pitchF0Curve,
       showConfidence: settings.debugInfo,
       metronomeBeat: settings.metronomeBeat,
+      // 마이크 궤적 — 예전엔 PiP 창에만 배선돼 있었다. 인스턴스가 하나의 클래스가 된
+      // 지금은 여기 한 줄이 두 창을 모두 덮는다(검출이 꺼져 있으면 빈 배열이 온다).
+      micOctave: settings.micOctave,
+      getMicSamples: this.callbacks.getMicSamples,
     });
     this.lane.refreshColors(); // 테마가 바뀌었을 수 있다 — CSS 변수를 다시 읽게 한다
+    this.syncLaneHead();
     this.applyLaneVisibility();
     this.renderPlaylistPanel();
+  }
+
+  /**
+   * 패널 폭에서 유도하는 **완만한** 글자 배율 — 사용자가 정한 배율(mainFontScale·
+   * pitchFontScale)에 곱해진다.
+   *
+   * PiP 창을 넓히면 글자도 어느 정도 따라 커져야 한다는 운영자 요구인데, 폭에 정비례로
+   * 걸면 창을 조금만 늘려도 글자가 튀어 «급변»한다. 0.35제곱이면 폭이 두 배가 돼도 글자는
+   * 1.27배에 그치고(360→720px), 절반이 돼도 0.78배까지만 준다 — 눈에는 «따라오는» 정도로
+   * 읽히고 줄바꿈 위치가 통째로 뒤집히지는 않는다. 상·하한은 그 위의 안전장치다.
+   *
+   * 기준 폭 360px = 기본 패널 폭(340)과 저장 없는 PiP 기본 폭(440)의 사이 — 어느 쪽에서도
+   * 처음 열었을 때 배율이 1 근처라 «갑자기 글자가 달라졌다»가 생기지 않는다.
+   */
+  private widthFontScale(): number {
+    const w = this.panel.clientWidth || this.geometry.width;
+    if (!(w > 0)) return 1;
+    return Math.min(1.5, Math.max(0.8, Math.pow(w / 360, 0.35)));
+  }
+
+  /** 3단 프리셋(--ey-line-size) 위에 얹는 미세 배율 — Shadow DOM 안이라 document.body가
+   *  아니라 패널 엘리먼트 자신에 심어야 overlay.css의 calc()가 이 값을 본다 */
+  private applyFontScale(): void {
+    this.panel.style.setProperty('--ey-main-fs', String(this.settings.mainFontScale * this.widthFontScale()));
   }
 
   // ── 내부 헬퍼 ─────────────────────────────────────────────────
@@ -2949,12 +3451,13 @@ export class LyricsOverlay {
         kind: 'select', key: 'pitchPronPosition', label: t('overlay.settings.row.pronPosition'),
         title: t('overlay.settings.row.pronPositionTitle'),
         value: this.settings.pitchPronPosition,
+        // 'note'는 목록에서 빠졌다 — 노트 위 음절은 이제 설정 밖에서 항상 표시된다.
+        // 남은 값은 «이중표시 줄»의 자리다.
         options: [
           ['off', t('overlay.settings.pronPosition.off')],
-          ['note', t('overlay.settings.pronPosition.note')],
           ['bottom', t('overlay.settings.pronPosition.bottom')],
-          ['both', t('overlay.settings.pronPosition.both')],
           ['center', t('overlay.settings.pronPosition.center')],
+          ['both', t('overlay.settings.pronPosition.both')],
         ],
         onChange: v => set({ pitchPronPosition: v as Settings['pitchPronPosition'] }),
       },
@@ -2964,7 +3467,10 @@ export class LyricsOverlay {
         kind: 'range', key: 'mainLaneWidth', label: t('panels.settings.row.mainLaneWidth'),
         keywords: '가사창 레인 너비 width',
         value: this.settings.mainLaneWidth,
-        min: LANE_WIDTH_MIN, max: LANE_WIDTH_MAX, step: 10, format: px,
+        // 슬라이더 최대값은 «고를 수 있는 범위»일 뿐 상한이 아니다 — 실제 제한은
+        // clampLaneWidth의 roomCap(가사 목록에 남겨야 하는 최소 폭)뿐이다. 저장값이
+        // 이보다 크면 슬라이더가 그 값을 표시하지 못하므로 함께 늘린다.
+        min: LANE_WIDTH_MIN, max: Math.max(720, this.settings.mainLaneWidth), step: 10, format: px,
         onChange: v => set({ mainLaneWidth: Math.round(v) }),
       },
       {
@@ -2979,11 +3485,11 @@ export class LyricsOverlay {
         onChange: v => set({ mainLanePos: v as Settings['mainLanePos'] }),
       },
       {
-        // mainLaneWidth와 별개 값 — 부착 패널은 패널 폭에서 깎이지 않으므로 상한이 더 넓다
+        // mainLaneWidth와 별개 값 — 부착 패널은 패널 폭에서 깎이지 않으므로 화면 폭까지 넓힐 수 있다
         kind: 'range', key: 'attachedLaneWidth', label: t('panels.settings.row.attachedLaneWidth'),
         keywords: '가사창 레인 부착 너비 width attached',
         value: this.settings.attachedLaneWidth,
-        min: ATTACH_WIDTH_MIN, max: ATTACH_WIDTH_MAX, step: 10, format: px,
+        min: ATTACH_WIDTH_MIN, max: Math.max(720, this.settings.attachedLaneWidth), step: 10, format: px,
         onChange: v => set({ attachedLaneWidth: Math.round(v) }),
       },
     ];
@@ -3008,14 +3514,19 @@ export class LyricsOverlay {
         onChange: v => set({ captionBgOpacity: v }),
       },
       {
+        // 표면별 키 — PiP 창의 설정 시트에서 이 행을 만지면 **그 창의** 재생목록이
+        // 바뀐다(메인 것이 아니라). 퀵 줄·코너 버튼과 같은 규칙이라 «이 창에서 보이는
+        // 토글은 전부 이 창의 것»으로 일관된다.
         kind: 'checkbox', key: 'modPlaylist', label: t('overlay.settings.row.modPlaylist'),
-        title: t('overlay.settings.row.modPlaylistTitle'), value: this.settings.modPlaylist,
-        onChange: v => set({ modPlaylist: v }),
+        title: t('overlay.settings.row.modPlaylistTitle'), value: this.playlistVisible(),
+        onChange: v => set(this.chrome === 'filled' ? { pipPlaylist: v } : { modPlaylist: v }),
       },
       {
+        // 표면별 키 — floating은 modMainLane(옵트인 모듈), filled는 pitchGuide.
+        // laneWanted()가 그 판정을 쥐고 있으므로 표시값도 거기서 읽는다.
         kind: 'checkbox', key: 'modMainLane', label: t('overlay.settings.row.modMainLane'),
-        title: t('overlay.settings.row.modMainLaneTitle'), value: this.settings.modMainLane,
-        onChange: v => set({ modMainLane: v }),
+        title: t('overlay.settings.row.modMainLaneTitle'), value: this.laneWanted(),
+        onChange: v => set(this.chrome === 'filled' ? { pitchGuide: v } : { modMainLane: v }),
       },
     ];
 
@@ -3029,9 +3540,18 @@ export class LyricsOverlay {
         value: this.settings.pipShowVideo, onChange: v => set({ pipShowVideo: v }),
       },
       {
-        kind: 'checkbox', key: 'pipLyricsList', label: t('overlay.settings.row.pipLyricsList'),
-        title: t('overlay.settings.row.pipLyricsListTitle'),
-        value: this.settings.pipLyricsList, onChange: v => set({ pipLyricsList: v }),
+        // 중앙 열(영상 폭)의 «현재 줄 한 줄» — 끄면 그 자리를 영상·컨트롤이 나눠 갖는다.
+        // 제거된 pipLyricsList(오른쪽 가사 목록 컬럼)의 자리를 이어받은 토글이라 총량은 ±0이다.
+        kind: 'checkbox', key: 'pipShortLyrics', label: t('overlay.settings.row.pipShortLyrics'),
+        title: t('overlay.settings.row.pipShortLyricsTitle'),
+        value: this.settings.pipShortLyrics, onChange: v => set({ pipShortLyrics: v }),
+      },
+      {
+        // 코너 미니 버튼과 같은 값 — 시트에도 두는 이유는 «어디서 껐는지» 잊었을 때
+        // 찾을 곳이 필요해서다(코너 버튼은 빠른 길이지 유일한 길이 아니다)
+        kind: 'checkbox', key: 'pipShowPanel', label: t('overlay.settings.row.pipShowPanel'),
+        title: t('overlay.settings.row.pipShowPanelTitle'),
+        value: this.settings.pipShowPanel, onChange: v => set({ pipShowPanel: v }),
       },
       {
         kind: 'select', key: 'pipChromaKey', label: t('overlay.settings.row.pipChromaKey'),
@@ -3045,6 +3565,13 @@ export class LyricsOverlay {
           ['magenta', t('overlay.settings.chroma.magenta')],
         ],
         onChange: v => set({ pipChromaKey: v as Settings['pipChromaKey'] }),
+      },
+      {
+        // 크로마키 바로 밑 — 둘 다 «방송 화면에서 읽히게» 하는 설정이라 함께 찾게 된다
+        kind: 'checkbox', key: 'streamTextOutline', label: t('overlay.settings.row.streamTextOutline'),
+        title: t('overlay.settings.row.streamTextOutlineTitle'),
+        keywords: '방송 obs 외곽선 테두리 outline stroke',
+        value: this.settings.streamTextOutline, onChange: v => set({ streamTextOutline: v }),
       },
       {
         // PiP 창 안 디바이더로도 바꾸는 값 — 다음에 여는 창부터 이 높이로 열린다
@@ -3326,6 +3853,16 @@ export class LyricsOverlay {
   }
 
   private handlePanelResize(): void {
+    // 폭이 실제로 바뀌었을 때만 글자 배율을 다시 건다 — 매 옵저버 콜백마다 CSS 변수를
+    // 쓰면 (변수가 레이아웃을 바꾸지 않더라도) 옵저버가 자기 자신을 다시 부를 여지를
+    // 남긴다. 값이 그대로면 아무 것도 하지 않는 것이 그 여지를 원천 차단한다.
+    const w = this.panel.clientWidth;
+    if (w !== this.lastFontWidth) {
+      this.lastFontWidth = w;
+      this.applyFontScale();
+      this.lane.setOptions({ fontScale: this.settings.pitchFontScale * this.widthFontScale() });
+      this.renderLane();
+    }
     // 레인 열 폭은 패널 폭에 대해 상대적으로 클램프되고, 패널이 아주 좁아지면 2단 자체가
     // 가로 띠로 접힌다 — 그 판정을 모두 쥔 applyLanePlacement를 그대로 다시 태운다.
     // 저장값(mainLaneWidth)은 건드리지 않으므로 패널을 도로 넓히면 원래 폭으로 돌아온다.
@@ -3335,7 +3872,9 @@ export class LyricsOverlay {
       this.applyLanePlacement();
       this.renderLane();
     }
-    if (this.applyingGeometry || this.geometry.collapsed) {
+    // filled는 창이 곧 패널이라 저장할 «기하»가 없다 — 값을 붙들고 있을 이유도 없다
+    if (this.applyingGeometry || this.applyingSettings || this.geometry.collapsed
+      || this.chrome === 'filled') {
       this.updateAttachPlacement();
       this.updatePlaylistPlacement();
       return;

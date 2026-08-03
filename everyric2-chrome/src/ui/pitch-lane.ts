@@ -87,6 +87,65 @@ function evenlyPlaceHeard(heard: string, start: number, end: number): [string, n
   return out;
 }
 
+/**
+ * **노트 위 음절과 이중표시 줄이 함께 쓰는 단 하나의 텍스트 소스.**
+ *
+ * 운영자 원칙("말이 발음이지"): 화면에 붙는 것은 «발음»이 아니라 «그 줄을 따라 부를 때
+ * 읽을 것»이다. 줄마다 정책이 다르다:
+ *   - 라틴 우세(영어 곡): 원문 철자 음절 — za/we/zaa 같은 오염된 로마자가 아니라 That/mor/ning
+ *   - 발음 표기가 있는 줄(일본어 등): 그 표기의 음절(설정한 표기 = 로마자/한글/가나)
+ *   - 둘 다 없는 줄(한국어 등 — 원문이 곧 읽는 것): **원문을 음절로 쪼갠다**
+ *
+ * 마지막 폴백이 핵심이다. 예전에는 발음 세그가 없으면 노트에 아무것도 안 붙어서 한국어
+ * 곡의 노트가 통째로 비어 있었다("노트 하나하나마다 아무것도 표시가 안 되면 안 돼").
+ * 단어 타이밍(words)을 글자 수로 비례 분할해 «빈 노트»를 없앤다.
+ *
+ * 두 표시가 같은 함수를 쓴다는 것이 요점이다 — 갈라지면 노트와 아래 줄이 다른 글자를
+ * 보여주게 되고, 그것이 정확히 이번에 없앤 «구현이 둘» 문제의 축소판이다.
+ */
+export function laneTextSegments(line: LyricLine, script: PronScript): PronSegment[] | undefined {
+  // 1) 영어 곡 — 원문 철자 음절(서버가 en 세그로 준다)
+  const latin = isLatinDominant(line.text) ? line.pronSegsByScript?.['en'] : undefined;
+  if (latin && latin.length > 0) return latin;
+  // 2) 발음 표기 음절
+  const pron = resolvedPronSegments(line, script);
+  if (pron && pron.length > 0) return pron;
+  // 3) 폴백 — 원문을 글자 단위로. 단어 타이밍이 있으면 그 구간을 글자 수로 나눈다.
+  return originalTextSegments(line);
+}
+
+/**
+ * 원문을 «음절»(CJK는 글자, 라틴은 단어)로 쪼개 타이밍을 붙인다 — 발음 표기가 없는
+ * 줄(한국어 등)의 노트를 비우지 않기 위한 폴백.
+ *
+ * 단어 타이밍(words)이 있으면 각 단어 구간을 글자 수로 균등 분할하고, 없으면 라인 구간
+ * 전체를 글자 수로 나눈다. 정밀하지는 않지만 «아무것도 없음»보다 언제나 낫고, 노트 부착은
+ * 최대 겹침으로 붙으므로 약간의 오차는 붙는 노트를 바꾸지 않는다.
+ */
+function originalTextSegments(line: LyricLine): PronSegment[] | undefined {
+  const out: PronSegment[] = [];
+  const push = (text: string, start: number, end: number): void => {
+    const chars = Array.from(text.trim());
+    if (chars.length === 0) return;
+    const span = Math.max(0.001, end - start) / chars.length;
+    for (let i = 0; i < chars.length; i++) {
+      out.push({ text: chars[i], start: start + i * span, end: start + (i + 1) * span });
+    }
+  };
+  if (line.words && line.words.length > 0) {
+    for (let i = 0; i < line.words.length; i++) {
+      const w = line.words[i];
+      const end = w.end ?? line.words[i + 1]?.start ?? line.endTime ?? w.start + 0.4;
+      // 라틴 단어는 글자로 쪼개면 읽을 수 없다 — 단어 통째로 한 세그
+      if (isLatinDominant(w.word)) out.push({ text: w.word, start: w.start, end });
+      else push(w.word, w.start, end);
+    }
+  } else if (line.time !== null) {
+    push(line.text, line.time, line.endTime ?? line.time + 4);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 export interface PitchNote {
   midi: number;
   start: number;
@@ -165,7 +224,9 @@ export interface PitchLaneOptions {
   /** 발음 표기 위치: off = 표시 안 함, note = 노트마다 위에 부착, bottom = 화면 하단 중앙,
    *  both = 노트 부착 + 하단 동시, center = 레인 중앙에 반투명 오버레이(운영자 요청
    *  2026-08-03: "노트에 붙는 발음만으로는 타이밍이 튀어 따라 부르기 어렵다") */
-  pronPosition: 'off' | 'note' | 'bottom' | 'both' | 'center';
+  /** **이중표시 줄만** 제어한다 — 노트 위 음절은 설정과 무관하게 항상 표시된다.
+   *  off=줄 없음 / bottom=레인 아래 줄 / center=레인 위 중앙 오버레이 / both=둘 다 */
+  pronPosition: 'off' | 'bottom' | 'both' | 'center';
   /** 발음 표기 방식(hangul/romaji/kana/…) — 호출부가 lib/lang.resolveScript로 해석해 넘긴다 */
   pronScript: PronScript;
   /** RAW f0 곡선 상시 표시 (설정 pitchF0Curve) — 디버그 언더레이와 독립 */
@@ -211,7 +272,7 @@ const DEFAULT_OPTIONS: PitchLaneOptions = {
   solfege: 'korean',
   lineOpacity: 1,
   f0Opacity: 1,
-  pronPosition: 'note',
+  pronPosition: 'off',
   pronScript: 'hangul',
   showF0: true,
   showConfidence: false,
@@ -404,14 +465,16 @@ export class PitchLaneRenderer {
     // (운영자 요청 2026-08-03: "노트 말고도 밑에도"), 'center'=레인 위 반투명 중앙
     // 오버레이(운영자 요청 2026-08-03: "노트에 붙는 발음만으로는 타이밍이 튀어
     // 따라 부르기 어렵다" — 세로 공간을 새로 차지하지 않고 레인 위에 겹쳐 그린다).
+    // **노트 위 음절 텍스트는 설정에서 분리돼 언제나 켜져 있다** (운영자 지시 2026-08-04:
+    // "가라오케 노트 하나하나마다는 절대 아무것도 표시가 안 되면 안 돼"). 예전에는
+    // pronPosition이 'off'/'bottom'이면 노트가 통째로 비었고, 코너 버튼 순환 함정에
+    // 걸려 'off'가 저장된 사용자는 설정 시트를 찾기 전까지 영영 빈 노트를 봤다.
+    // 이제 pronPosition은 «이중표시 줄»만 제어한다: off / bottom / center / both(둘 다).
     const pronPos = this.opts.pronPosition;
-    const noteAttach = pronPos === 'note' || pronPos === 'both';
-    const hasSegs = noteAttach
-      && pages.some(p => (resolvedPronSegments(p.line, this.opts.pronScript)?.length ?? 0) > 0);
-    const hasPronRow = (pronPos === 'bottom' || pronPos === 'both' || (pronPos === 'note' && !hasSegs))
-      && pages.some(p => resolvedPronunciation(p.line, this.opts.pronScript));
-    const hasPronCenter = pronPos === 'center'
-      && pages.some(p => resolvedPronunciation(p.line, this.opts.pronScript));
+    const hasPronRow = (pronPos === 'bottom' || pronPos === 'both')
+      && pages.some(p => laneLineText(p.line, this.opts.pronScript));
+    const hasPronCenter = (pronPos === 'center' || pronPos === 'both')
+      && pages.some(p => laneLineText(p.line, this.opts.pronScript));
     const hasTr = pages.some(p => p.line.translation);
     const fs = this.opts.fontScale;
     // 좌측 음정 라벨 사이드바(멜로다인식) — 플롯은 그만큼 오른쪽에서 시작.
@@ -595,9 +658,9 @@ export class PitchLaneRenderer {
         ctx.fillStyle = isCurrent ? colors.text : colors.dim;
         ctx.fillText(noteLabel(n.midi, this.opts.solfege), lx, Math.max(namePx * 0.7, top - namePx * 0.7));
       }
-      // 발음 — 계이름처럼 노트 바로 아래에 부착 (설정 pronPosition === 'note'일 때만;
-      // 'bottom'이면 collectPitchData가 채워둔 n.pron은 무시하고 하단 폴백 줄만 사용)
-      if (n.pron && noteAttach) {
+      // 노트 위 음절 — 계이름처럼 노트 바로 아래에 부착. **설정과 무관하게 항상 그린다**
+      // (위 pronPos 주석: 이 텍스트는 이중표시 줄 설정에서 분리됐다).
+      if (n.pron) {
         ctx.font = `${pronPx}px system-ui, sans-serif`;
         ctx.fillStyle = n.start <= now ? colors.accent : colors.dim;
         ctx.fillText(n.pron, lx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
@@ -1102,7 +1165,7 @@ export class PitchLaneRenderer {
     colors: PitchColors,
     fontPx: number,
   ): void {
-    const pron = resolvedPronunciation(page.line, this.opts.pronScript) ?? '';
+    const pron = laneLineText(page.line, this.opts.pronScript);
     if (!pron) return;
     ctx.font = `${fontPx}px system-ui, sans-serif`;
     ctx.textAlign = 'center';
@@ -1116,7 +1179,7 @@ export class PitchLaneRenderer {
     // maxW를 넘으면 fillText가 가로로 눌러 그린다 — 채움 폭도 같은 비율로 눌러야 글자와 맞는다
     const squeeze = fullW > 0 ? textW / fullW : 1;
     const chars = pronCharProgress(
-      resolvedPronSegments(page.line, this.opts.pronScript), pron, now);
+      laneTextSegments(page.line, this.opts.pronScript), pron, now);
     let sungW: number;
     if (chars == null) {
       const span = Math.max(0.001, page.end - page.start);
@@ -1159,7 +1222,7 @@ export class PitchLaneRenderer {
     fontPx: number,
   ): void {
     if (!page) return;
-    const pron = resolvedPronunciation(page.line, this.opts.pronScript);
+    const pron = laneLineText(page.line, this.opts.pronScript);
     if (!pron) return;
     ctx.save();
     ctx.font = `${fontPx}px system-ui, sans-serif`;
@@ -1170,6 +1233,21 @@ export class PitchLaneRenderer {
     ctx.fillText(pron, cw / 2, py, cw - 16);
     ctx.restore();
   }
+}
+
+/**
+ * 이중표시 줄에 쓸 **한 줄 문자열** — 위 laneTextSegments를 이어 붙인다.
+ *
+ * 세그를 이어 붙이는 이유는 노트와 글자가 정확히 같아야 하기 때문이다. 예전에는 줄이
+ * resolvedPronunciation(표기별 전체 문자열)을, 노트는 세그를 각각 읽어서 영어 곡에서
+ * 서로 다른 글자가 나왔다(노트=원문 철자, 줄=로마자 근사). 소스를 하나로 묶으면
+ * 그 어긋남이 원리적으로 불가능해진다.
+ */
+function laneLineText(line: LyricLine, script: PronScript): string {
+  const segs = laneTextSegments(line, script);
+  if (!segs || segs.length === 0) return '';
+  // 라틴 세그(단어 단위)는 공백으로, CJK 음절은 붙여서 — 읽는 모양을 원문과 맞춘다
+  return segs.map(sg => sg.text).join(isLatinDominant(line.text) ? ' ' : '');
 }
 
 /** 다음 라인 발음 미리보기의 글자 크기 배율 — 현재 라인보다 확실히 작아야 «지금 부르는
@@ -1328,11 +1406,9 @@ function collectPitchData(lines: LyricLine[], script: PronScript): PitchData {
     // 라틴 우세 줄(영어 곡)은 표기 설정과 무관하게 'en'(원문 철자) 세그를 쓴다 — 노트에
     // za/we/zaa 같은 오염된 로마자 대신 That/mor/ning처럼 원문 음절이 붙어야 한다(운영자
     // 요구사항). 발음 **줄** 표시는 이 판정과 별개로 기존 script(표기 설정)를 그대로 쓴다.
-    const latinSegs = isLatinDominant(line.text) ? line.pronSegsByScript?.['en'] : undefined;
-    // 빈 배열은 "en 세그가 없다"와 같은 뜻이다 — ??는 null·undefined만 걸러내므로 빈
-    // 배열이 그대로 통과하면 그 줄의 노트 발음이 폴백조차 못 타고 통째로 사라진다
-    const noteSegs = latinSegs && latinSegs.length > 0 ? latinSegs : undefined;
-    const rawPronSegs = noteSegs ?? resolvedPronSegments(line, script);
+    // 노트 위 텍스트 = 이중표시 줄과 **같은 소스**(laneTextSegments). 발음이 없는 줄도
+    // 원문 음절로 폴백하므로 «빈 노트»가 생기지 않는다.
+    const rawPronSegs = laneTextSegments(line, script);
     // 길이 0 세그는 overlap 판정을 절대 통과하지 못해(ov는 항상 0, bestOv 초기값도 0이라
     // `>` 비교가 갱신되지 않는다) 노트 부착 전에 최소폭을 부여해 둔다.
     const pronSegs = rawPronSegs ? widenZeroLengthSegs(rawPronSegs) : undefined;

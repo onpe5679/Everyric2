@@ -255,18 +255,48 @@ try {
   const pitch = await page.evaluate(() => {
     const w = window.documentPictureInPicture?.window;
     if (!w) return { open: false };
-    const c = w.document.querySelector('.ey-pip-pitch');
-    if (!c) return { open: true, canvasPresent: false };
-    const visible = w.getComputedStyle(c).display !== 'none';
+    // PiP 창 안의 가사 UI는 **메인 가사창과 같은 인스턴스**다(2026-08-04 재작업) —
+    // 예전의 반쪽 캔버스(.ey-pip-pitch)는 사라졌고, 레인은 패널의 Shadow DOM 안
+    // .ey-main-lane 하나뿐이다. 두 창이 같은 셀렉터로 검사된다는 것 자체가 «구현이
+    // 하나»라는 이 재작업의 목적을 그대로 재는 지표다.
+    const host = w.document.getElementById('everyric-root');
+    if (!host?.shadowRoot) return { open: true, panelPresent: false };
+    const root = host.shadowRoot;
+    // 레인은 Shadow DOM 밖(왼쪽 열)이다 — 3열 구조에서 부착 패널이 문서로 나간다
+    const c = w.document.querySelector('.ey-main-lane') ?? root.querySelector('.ey-main-lane');
+    if (!c) return { open: true, panelPresent: true, canvasPresent: false };
+    const visible = w.getComputedStyle(c.closest('.ey-lane-wrap') ?? c).display !== 'none';
     let drawnPx = 0;
     try {
       const data = c.getContext('2d').getImageData(0, 0, c.width || 1, c.height || 1).data;
       for (let i = 3; i < data.length; i += 4) if (data[i] > 0) drawnPx++;
     } catch { /* ignore */ }
-    return { open: true, canvasPresent: true, visible, width: c.width, height: c.height, drawnPx };
+    return {
+      open: true, panelPresent: true, canvasPresent: true, visible,
+      width: c.width, height: c.height, drawnPx,
+      // «메인 창에만 있던» 것들이 실제로 PiP 안에도 그려졌는가 (운영자 지적 항목)
+      lineCount: root.querySelectorAll('.ey-line').length,
+      hasSearchBtn: !!root.querySelector('.ey-header .ey-btn[title*="검색"]'),
+      hasGearBtn: !!root.querySelector('.ey-header .ey-btn[title*="설정"]'),
+      hasOffsetRow: !!root.querySelector('.ey-offset'),
+      hasQuickRow: !!root.querySelector('.ey-quick-row'),
+      filled: !!root.querySelector('.ey-panel.ey-panel-filled'),
+      // 반쪽 구현이 정말로 사라졌는지 — 남아 있으면 이중 표시가 된다.
+      // .ey-pip-stage(영상 아래 한 줄)는 유지가 지시된 화면이라 제외하고, 대신 그 안이
+      // 공용 .ey-line인지를 본다(그게 「세 번째 구현 금지」의 진짜 불변식이다).
+      legacyStage: !!w.document.querySelector('.ey-pip-pitch, .ey-pip-panel, .ey-pip-lyricscol'),
+      shortUsesSharedLine: !!w.document.querySelector('.ey-pip-stage .ey-pip-line.current .ey-line'),
+    };
   });
   check(pitch.open, 'PiP 창 열림', pitch);
   if (pitch.open) {
+    check(pitch.panelPresent, 'PiP 안에 가사 패널 인스턴스가 세워짐', pitch);
+    check(pitch.filled === true, 'PiP 패널이 filled 크롬으로 렌더됨(.ey-panel-filled)', pitch);
+    check(pitch.legacyStage === false, '예전 반쪽 PiP UI(캔버스·패널·목록 컬럼)가 남아 있지 않음', pitch);
+    check(pitch.shortUsesSharedLine === true, '가사 단축 표시가 공용 줄 렌더러(.ey-line)를 씀', pitch);
+    check(pitch.lineCount > 0, `PiP 안에 가사 줄이 그려짐 (${pitch.lineCount}줄)`);
+    check(Boolean(pitch.hasSearchBtn && pitch.hasGearBtn), 'PiP 헤더에 검색·설정 버튼 존재', pitch);
+    check(Boolean(pitch.hasOffsetRow && pitch.hasQuickRow), 'PiP에 오프셋 줄·퀵 토글 줄 존재', pitch);
     check(pitch.canvasPresent && pitch.visible, '피아노롤 캔버스 존재 + 표시됨', pitch);
     check(pitch.canvasPresent && pitch.drawnPx > 50, '피아노롤에 노트 픽셀이 실제로 그려짐', pitch);
   }

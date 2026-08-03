@@ -65,6 +65,27 @@
   "pip_controls_videoToggle": {
     "message": "영상 함께 표시 켜기/끄기"
   },
+  "pip_controls_panelColToggle": {
+    "message": "가사창 열 접기/펴기"
+  },
+  "pip_controls_centerColToggle": {
+    "message": "영상·가사 한 줄·재생 컨트롤 열 접기/펴기 — 접으면 가라오케 레인만 남아요"
+  },
+  "pip_controls_laneColToggle": {
+    "message": "가라오케 레인 열 접기/펴기"
+  },
+  "pip_controls_playlistColToggle": {
+    "message": "재생목록 열 접기/펴기"
+  },
+  "pip_controls_shortLyricsToggle": {
+    "message": "영상 아래 가사 한 줄 표시/숨기기"
+  },
+  "pip_controls_dualPosition": {
+    "message": "발음 이중표시 — 위치 바꾸기(끄기 / 아래 / 가운데 / 둘 다)"
+  },
+  "pip_controls_autoCollapsed": {
+    "message": "켜져 있지만 창이 좁아 접혔어요 — 창을 넓히면 다시 나와요"
+  },
   "pip_controls_panelToggle": {
     "message": "가사 찾기 패널 열기/닫기"
   },
@@ -73,6 +94,9 @@
   },
   "pip_controls_videoRatioDrag": {
     "message": "드래그해서 영상/가사 비율 조절"
+  },
+  "pip_controls_colWidthDrag": {
+    "message": "드래그해서 열 너비 조절"
   },
   "pip_songKeyLabel": {
     "message": "키 $P1$",
@@ -360,7 +384,7 @@
     }
   },
   "panels_paste_placeholder": {
-    "message": "여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요\n[Verse]·1절·후렴 같은 파트 표기와 주석 줄은 자동으로 걸러내요."
+    "message": "여기에 가사를 붙여넣으면 AI가 타이밍을 맞춰줘요\n[Verse]·1절·후렴 같은 파트 표기와 주석 줄은 자동으로 걸러내요.\n원문·번역(또는 원문·발음·번역)이 줄마다 짝지어 반복되는 가사도 그대로 붙여넣으면 알아서 나눠 읽어요."
   },
   "panels_paste_attributionPlaceholder": {
     "message": "출처 (선택) — 예: 나무위키, Genius"
@@ -900,9 +924,6 @@
   "overlay_settings_pitchFont_small": {
     "message": "작게"
   },
-  "overlay_settings_pronPosition_note": {
-    "message": "노트 위"
-  },
   "overlay_settings_pronPosition_bottom": {
     "message": "화면 하단"
   },
@@ -986,7 +1007,7 @@
     "message": "가사 소스 우선순위"
   },
   "overlay_settings_row_pipKeepPanel": {
-    "message": "PiP 중에도 패널 가사 유지"
+    "message": "PiP 중에도 메인 창 패널 유지"
   },
   "overlay_settings_row_pipShowVideo": {
     "message": "PiP에 영상 함께 표시"
@@ -1099,6 +1120,27 @@
   "overlay_settings_row_pipChromaKeyTitle": {
     "message": "PIP 창 배경을 단색 키 컬러로 바꿔요 — OBS 등에서 크로마키 필터로 배경만 떼어내 방송 화면에 가사를 얹을 수 있어요"
   },
+  "overlay_settings_row_pipShortLyrics": {
+    "message": "PiP 영상 아래 가사 한 줄"
+  },
+  "overlay_settings_row_pipShortLyricsTitle": {
+    "message": "PiP 창에서 영상 바로 아래에 지금 부르는 줄만 크게 보여줘요 — 끄면 그 자리를 영상과 재생 컨트롤이 나눠 가져요"
+  },
+  "overlay_settings_row_pipShowPanel": {
+    "message": "PiP에 메인 가사창 열 표시"
+  },
+  "overlay_settings_row_pipShowPanelTitle": {
+    "message": "PiP 창 오른쪽에 전 기능 가사창(검색·설정·오프셋)을 펼쳐요 — 끄면 영상과 현재 줄만 남아요. 창이 좁으면 자동으로 접히고, 넓히면 이 설정 그대로 돌아와요"
+  },
+  "overlay_notice_autoCollapsed": {
+    "message": "창 폭이 좁아 자동으로 접혔어요. 창을 넓히면 다시 표시돼요"
+  },
+  "overlay_settings_row_streamTextOutline": {
+    "message": "글자 외곽선(방송용)"
+  },
+  "overlay_settings_row_streamTextOutlineTitle": {
+    "message": "가사와 곡 제목에 테두리를 둘러요 — 크로마키 배경이나 영상 위에서도 글자가 배경에 묻히지 않아요"
+  },
   "overlay_settings_chroma_off": {
     "message": "끔"
   },
@@ -1149,6 +1191,9 @@
   },
   "overlay_quick_lanePos": {
     "message": "레인 위치 바꾸기"
+  },
+  "overlay_quick_laneSwap": {
+    "message": "레인·영상 위치 바꾸기"
   },
   "overlay_quick_lanePosToLeft": {
     "message": "레인을 가사 왼쪽 열로 옮기기"
@@ -2247,6 +2292,14 @@
       },
       "p2": {
         "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_quotaUnlimited": {
+    "message": "무제한 · 사용 $P1$회",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
       }
     }
   },

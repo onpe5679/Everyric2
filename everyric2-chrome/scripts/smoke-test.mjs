@@ -7,6 +7,7 @@ import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
+import { readPipPanel } from './lib/pip-panel.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -51,6 +52,12 @@ try {
     await ensureLocalServerPermissionForServerUrl(ctx, sw, extId, localServer);
     injected.serverUrl = localServer;
   }
+  // 아래 PiP 검사는 «두 창이 동시에 가사를 보여준다»를 재므로 pipKeepPanel이 켜져 있어야
+  // 한다. 이제 기본이 false이고(운영자 지시), 마커 없는 저장본은 1회성 마이그레이션이
+  // 레거시로 보고 강제로 내린다 — 마커를 함께 넣어 «이미 마이그레이션을 거친 뒤 사용자가
+  // 다시 켠» 상태를 만든다(src/lib/settings.ts MIGRATION_PIP_KEEP_PANEL).
+  injected.pipKeepPanel = true;
+  injected.settingsMigrations = ['pipKeepPanel-default-false-2026-08'];
   if (Object.keys(injected).length > 0) {
     await sw.evaluate(s => chrome.storage.local.set({ settings: s }), injected);
     console.log('settings injected:', JSON.stringify(injected));
@@ -147,40 +154,32 @@ try {
   console.log('screenshot saved:', shot);
 
   // PiP 테스트 — playwright 클릭은 실제 user gesture이며 open shadow DOM을 관통한다
-  // 기본 설정(pipKeepPanel=true)에서는 PiP를 열어도 패널 가사가 유지되어야 한다.
+  // pipKeepPanel을 켠 상태(위에서 주입)에서는 PiP를 열어도 패널 가사가 유지되어야 한다.
+  // 기본값은 false라 그때는 메인이 "PiP로 보는 중" 안내로 접힌다 — 다른 화면이다.
   let pipResult = 'skipped';
   const pipBtn = page.locator('[title="PiP 창으로 보기"]');
   if (await pipBtn.count() > 0 && await pipBtn.isVisible()) {
     await pipBtn.click();
     await page.waitForTimeout(2500);
-    const pipState = await page.evaluate(() => {
-      const w = window.documentPictureInPicture?.window;
+    // PiP 안 가사 UI는 메인 창과 같은 인스턴스다 — 읽는 법은 lib/pip-panel.mjs 한 곳에 있다
+    const pipRaw = await page.evaluate(readPipPanel());
+    const mainPanel = await page.evaluate(() => {
       const sr = document.getElementById('everyric-root')?.shadowRoot;
-      const videoWrap = w?.document.querySelector('.ey-pip-video');
-      // 음정 바: canvas 존재/표시 여부 + 실제로 그려진 픽셀 수 (알파 > 0)
-      let pitch = { present: false, visible: false, drawnPx: 0 };
-      const pitchCanvas = w?.document.querySelector('.ey-pip-pitch');
-      if (pitchCanvas) {
-        pitch.present = true;
-        pitch.visible = w.getComputedStyle(pitchCanvas).display !== 'none';
-        try {
-          const data = pitchCanvas.getContext('2d')
-            .getImageData(0, 0, pitchCanvas.width || 1, pitchCanvas.height || 1).data;
-          for (let i = 3; i < data.length; i += 4) if (data[i] > 0) pitch.drawnPx++;
-        } catch { /* 크기 0 등 — drawnPx 0 유지 */ }
-      }
       return {
-        open: !!w,
-        pipCurrentLine: w?.document.querySelector('.ey-pip-line.current')?.textContent?.slice(0, 60) ?? null,
         panelLineCount: sr?.querySelectorAll('.ey-line').length ?? 0,
         panelActiveLine: sr?.querySelector('.ey-line.active')?.textContent?.slice(0, 60) ?? null,
-        videoMirror: videoWrap ? w.getComputedStyle(videoWrap).display !== 'none' : false,
-        hasVolume: !!w?.document.querySelector('.ey-pip-volume'),
-        hasDivider: !!w?.document.querySelector('.ey-pip-divider'),
-        volumeValue: w?.document.querySelector('.ey-pip-volume')?.value ?? null,
-        pitch,
       };
     });
+    const pipState = {
+      open: pipRaw.open,
+      pipCurrentLine: pipRaw.currentLine ?? null,
+      ...mainPanel,
+      videoMirror: pipRaw.videoMirror ?? false,
+      hasVolume: pipRaw.hasVolume ?? false,
+      hasDivider: pipRaw.hasDivider ?? false,
+      volumeValue: pipRaw.volumeValue ?? null,
+      pitch: pipRaw.lane ?? { present: false, visible: false, drawnPx: 0 },
+    };
     console.log('pip check (both visible) =', JSON.stringify(pipState));
 
     // EVERYRIC_SMOKE_PITCH=1 → 음정 바가 실제로 그려졌는지 검증

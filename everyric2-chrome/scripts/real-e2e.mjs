@@ -17,6 +17,7 @@ import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
+import { readPipPanel } from './lib/pip-panel.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -211,25 +212,14 @@ try {
   // 6) PiP + 음정 바 (FCPE notes가 실제로 그려지는지)
   await page.locator('[title="PiP 창으로 보기"]').click();
   await page.waitForTimeout(3000);
-  const pip = await page.evaluate(() => {
-    const w = window.documentPictureInPicture?.window;
-    let pitch = { present: false, visible: false, drawnPx: 0 };
-    const c = w?.document.querySelector('.ey-pip-pitch');
-    if (c) {
-      pitch.present = true;
-      pitch.visible = w.getComputedStyle(c).display !== 'none';
-      try {
-        const data = c.getContext('2d').getImageData(0, 0, c.width || 1, c.height || 1).data;
-        for (let i = 3; i < data.length; i += 4) if (data[i] > 0) pitch.drawnPx++;
-      } catch { /* ignore */ }
-    }
-    return {
-      open: !!w,
-      currentLine: w?.document.querySelector('.ey-pip-line.current')?.textContent?.slice(0, 50) ?? null,
-      pron: w?.document.querySelector('.ey-pip-pron')?.textContent?.slice(0, 50) ?? '',
-      pitch,
-    };
-  });
+  // PiP 안 가사 UI는 메인 창과 같은 인스턴스다 — 읽는 법은 lib/pip-panel.mjs 한 곳에 있다
+  const pipRaw = await page.evaluate(readPipPanel());
+  const pip = {
+    open: pipRaw.open,
+    currentLine: pipRaw.currentLine ?? null,
+    pron: pipRaw.pron ?? '',
+    pitch: pipRaw.lane ?? { present: false, visible: false, drawnPx: 0 },
+  };
   check(pip.open, 'PiP 열림', pip.currentLine);
   if (pip.pron) console.log('PASS: PiP 발음 표기 =', JSON.stringify(pip.pron));
   else console.log('WARN: 현재 라인에 발음 표기 없음 (해당 라인이 발음 없는 라인일 수 있음)');
@@ -244,13 +234,13 @@ try {
       await pipPage.setViewportSize({ width: 1100, height: 330 });
       await pipPage.waitForTimeout(600);
       const wide = await pipPage.evaluate(() => {
-        const stage = document.querySelector('.ey-pip-stage');
+        // 가사 영역 = 패널 인스턴스의 호스트(예전 .ey-pip-stage 자리)
+        const root = document.getElementById('everyric-root');
         const video = document.querySelector('.ey-pip-video');
-        const pitch = document.querySelector('.ey-pip-pitch');
-        const cur = document.querySelector('.ey-pip-line.current');
+        const cur = root?.shadowRoot?.querySelector('.ey-line.active');
         return {
-          stageH: stage?.clientHeight ?? 0,
-          pitchH: pitch?.clientHeight ?? 0,
+          stageH: root?.clientHeight ?? 0,
+          pitchH: root?.shadowRoot?.querySelector('.ey-lane-wrap')?.clientHeight ?? 0,
           videoH: video?.clientHeight ?? 0,
           curFontPx: cur ? parseFloat(getComputedStyle(cur).fontSize) : 0,
           winH: window.innerHeight,

@@ -248,9 +248,13 @@ if (!pipOpened) {
 } else {
   const pipCol = await page.evaluate(() => {
     const w = window.documentPictureInPicture.window;
-    const col = w.document.querySelector('.ey-pip-lyricscol');
+    // 2026-08-04 재작업: 오른쪽 전용 가사 컬럼(.ey-pip-lyricscol)과 설정 pipLyricsList는
+    // 사라졌다 — PiP 창 안이 통째로 메인 가사창과 같은 패널이 되면서 «본문이 곧 가사
+    // 목록»이 됐기 때문이다. 이 검사의 의도(간이 렌더 금지, 메인과 같은 .ey-line 구조)는
+    // 그대로 살아 있으므로 대상만 패널 본문으로 바꾼다.
+    const root = w.document.getElementById('everyric-root')?.shadowRoot;
+    const col = root?.querySelector('.ey-body');
     if (!col) return { present: false };
-    // 모양 동등성: 메인 가사창과 같은 .ey-line 구조여야 한다 (운영자 요구 — 간이 렌더 금지)
     const lines = col.querySelectorAll('.ey-line').length;
     const pronLines = col.querySelectorAll('.ey-line-pron').length;
     const karaokeSpans = col.querySelectorAll('.ey-word, .ey-pron-syl').length;

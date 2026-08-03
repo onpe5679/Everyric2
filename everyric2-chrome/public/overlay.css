@@ -32,7 +32,9 @@
   display: flex;
   flex-direction: column;
   min-width: 280px;
-  max-width: 640px;
+  /* 상한은 «화면 밖으로 나가지 않는다»만 남긴다 — 예전의 640px 고정 상한은 취향이었고,
+     넓은 모니터에서 가사창을 크게 쓰려는 사용자를 막을 이유가 없다(운영자 지시). */
+  max-width: calc(100vw - 16px);
   min-height: 180px;
   max-height: calc(100vh - 16px);
   /* 브라우저 기본 폼 컨트롤(드롭다운 팝업 등)이 패널 테마를 따르게 한다 —
@@ -77,6 +79,13 @@
   inset: 0;
   width: auto;
   height: auto;
+  /* 불투명 단색 + blur 제거. 창 배경 위에 반투명을 겹칠 이유가 없고(PiP는 rAF로 매
+     프레임 다시 그리므로 blur 비용이 계속 든다), 무엇보다 **자기 색을 자기가 정해야**
+     한다: 투명으로 두면 글자색은 패널의 테마(.ey-light)를 따르는데 배경은 문서 루트의
+     테마를 따라, 둘이 어긋나는 순간 어두운 배경에 어두운 글자가 된다(실측으로 확인). */
+  background: var(--ey-bg-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   /* 폭 상한은 «남의 화면 위에 얹힌 패널»이라서 있던 제약이다. 창이 곧 패널이면
      상한이 있을 이유가 없다(운영자 지적: "이런 건 왜 제한이 있는지 모르겠어"). */
   max-width: none;
@@ -87,6 +96,30 @@
   border-radius: 0;
   box-shadow: none;
   resize: none;
+}
+
+/* 스트리밍용 글자 외곽선 (설정 streamTextOutline) — 크로마키 배경이나 영상 위에 얹힐 때
+   얇은 글자가 배경에 먹히는 것을 막는다. -webkit-text-stroke는 글자 안쪽을 파고들어
+   작은 글자를 뭉개므로, 사방 그림자 네 겹으로 «바깥쪽만» 두른다. 색은 테마와 무관하게
+   검정 — 이 옵션을 켜는 이유가 밝은 배경(키 컬러·영상) 위에서 읽히게 하는 것이다. */
+.ey-panel.ey-text-outline .ey-line,
+.ey-panel.ey-text-outline .ey-song-title,
+.ey-panel.ey-text-outline .ey-song-artist,
+.ey-attach-lane.ey-text-outline .ey-lane-notice {
+  text-shadow:
+    -1px -1px 0 rgba(0, 0, 0, 0.85), 1px -1px 0 rgba(0, 0, 0, 0.85),
+    -1px 1px 0 rgba(0, 0, 0, 0.85), 1px 1px 0 rgba(0, 0, 0, 0.85),
+    0 0 3px rgba(0, 0, 0, 0.6);
+}
+
+/* 라이트 테마에서는 흰 외곽선이 맞다 — 어두운 글자를 밝은 배경에서 떼어 낸다 */
+.ey-panel.ey-light.ey-text-outline .ey-line,
+.ey-panel.ey-light.ey-text-outline .ey-song-title,
+.ey-panel.ey-light.ey-text-outline .ey-song-artist {
+  text-shadow:
+    -1px -1px 0 rgba(255, 255, 255, 0.9), 1px -1px 0 rgba(255, 255, 255, 0.9),
+    -1px 1px 0 rgba(255, 255, 255, 0.9), 1px 1px 0 rgba(255, 255, 255, 0.9),
+    0 0 3px rgba(255, 255, 255, 0.7);
 }
 
 /* 라이트 테마 변수 — 오버레이 패널과 PiP **문서 루트**가 같은 값을 공유한다.
@@ -305,9 +338,6 @@
 .ey-dot.auth { background: #e0a052; }
 .ey-dot.perm { background: #6a9fe0; }
 
-/* PiP: 푸터 위 고정 슬롯 — 패널(가사 찾기)이 닫혀 있어도 사유가 보인다 */
-.ey-pip-server-bar { padding-top: 4px; }
-
 /* 검색 시트 복귀 버튼 — 시트 최상단에서 눈에 띄게 */
 .ey-search-back { align-self: center; }
 
@@ -332,7 +362,9 @@
   pointer-events: none;
 }
 
-.ey-panel.collapsed::after { display: none; }
+.ey-panel.collapsed::after,
+/* 창이 곧 패널이면 크기 조절 손잡이가 가리킬 대상이 없다(창 자신이 크기를 정한다) */
+.ey-panel.ey-panel-filled::after { display: none; }
 
 /* ── 헤더 ─────────────────────────────────────────────────────── */
 
@@ -994,20 +1026,12 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* 이어질 재생목록의 인라인 임베드 목록(.ey-nextup-pl*)은 2026-08-03 재작업으로
-   전용 부착 패널(.ey-attach-playlist, .ey-pl-*)로 대체됐다. */
-.ey-pip-nextup {
-  color: var(--ey-text-dim);
-  font-size: calc(10px * var(--ey-pip-fs, 1));
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-
 /* [모듈] 가라오케 레인 (설정 modMainLane) — 배치 두 가지를 같은 캔버스로 그린다.
    'bottom'(레거시): 푸터 위 고정 높이 가로 띠. 가사 목록(.ey-body)이 성장을 계속
    가져가도록 고정 높이 + flex-shrink: 0.
    'left': 가사 왼쪽 세로 열. 폭은 JS(mainLaneWidth)가 .ey-lane-wrap에 지정하고,
    높이는 가사 목록과 같이 남는 공간을 채운다.
-   PiP 레인(.ey-pip-pitch)과 렌더러(ui/pitch-lane.ts)는 완전히 같다. */
+   PiP 창의 레인도 같은 인스턴스가 그린다 — 캔버스가 하나뿐이라 갈라질 수 없다. */
 .ey-main-lane {
   width: 100%;
   height: 160px;
@@ -1017,6 +1041,42 @@
   box-sizing: border-box;
   cursor: pointer;
 }
+
+/* 레인 열 머리 — 가라오케 전용 컨트롤. «컨트롤은 자기가 제어하는 열에 붙는다»는
+   원칙에 따라 멜로디·메트로놈·마디 창·진행 방식·계이름·카운트다운이 여기 모인다.
+   좁은 열에서도 쓸 수 있도록 줄바꿈을 허용하고 버튼을 최소 크기로 눌러 담는다. */
+.ey-lane-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 4px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ey-border);
+}
+
+.ey-lane-head-btn {
+  height: 20px;
+  min-width: 20px;
+  padding: 0 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ey-text-faint);
+  font-family: var(--ey-font);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ey-lane-head-btn:hover { background: var(--ey-elev-hover); color: var(--ey-text); }
+.ey-lane-head-btn.on { color: var(--ey-accent); }
+.ey-lane-head-btn:disabled { cursor: default; background: transparent; color: var(--ey-text-dim); }
+.ey-lane-head-text { white-space: nowrap; }
 
 /* 레인 열 — 캔버스와 음절 타이밍 안내 배너를 함께 담는다(배치가 바뀌면 통째로 옮긴다) */
 .ey-lane-wrap {
@@ -1274,7 +1334,8 @@
 }
 /* 칩·서버 배너·패널 조각은 읽혀야 하는 전경 요소다 — 배경을 되살린다(코덱스 감사 Med:
    위 블랭킷이 진행/알림 칩 배경까지 지워 키 컬러 위에서 텍스트만 떠 보였다) */
-:root.ey-chroma body.ey-pip .ey-pip-chip,
+:root.ey-chroma body.ey-pip .ey-gen-chip,
+:root.ey-chroma body.ey-pip .ey-notice-chip,
 :root.ey-chroma body.ey-pip .ey-server-bar,
 :root.ey-chroma body.ey-pip .ey-feedback-pop {
   background: rgba(8, 8, 8, 0.82) !important;
@@ -1486,13 +1547,17 @@
    PiP 창
    ========================================================================== */
 
-/* body는 가로(row)로 나뉜다: [.ey-pip-main(예전 세로 스택 전체)] [.ey-pip-lyricscol(대칭
-   UI, 기본 꺼짐)]. 컬럼이 꺼져 있으면 .ey-pip-main이 flex:1로 폭 전체를 그대로 먹어
-   2026-08 이전과 픽셀 단위로 동일하다 — 아래 .ey-pip-corner는 position:fixed라 무관하다. */
+/* 창 안은 가로 한 줄이다 (운영자 지시 2026-08-04):
+     [레인] │ [중앙 열: 영상 ↑ / 가사 단축 표시 / 재생 컨트롤 ↓] │ [가사창] [재생목록]
+   가사·검색·설정·레인·재생목록은 전부 LyricsOverlay(filled) 인스턴스가 그리므로,
+   여기에는 «열 자리를 만들어 주는» 규칙만 있다 (.ey-pip-corner는 그 위 툴바 줄이다). */
 body.ey-pip {
   margin: 0;
   display: flex;
-  flex-direction: row;
+  /* 세로: [코너 툴바][열 행]. 예전에는 코너가 position:fixed로 떠 있었는데, 열 토글이
+     7개로 늘면서 레인 열 머리(.ey-lane-head)를 그대로 덮어 버렸다(실측 스크린샷).
+     자리를 차지하는 진짜 툴바로 만들면 겹침이 원리적으로 사라진다. */
+  flex-direction: column;
   height: 100vh;
   background: var(--ey-bg-solid);
   color: var(--ey-text);
@@ -1500,46 +1565,80 @@ body.ey-pip {
   font-family: var(--ey-font);
   overflow: hidden;
   user-select: none;
-  /* 가라오케 글자 크기 배율 — JS(setPitchFontScale)가 갱신. 레인(캔버스)뿐 아니라
-     스테이지 가사/발음/번역까지 함께 커지도록 폰트 계산에 곱해 쓴다 */
-  --ey-pip-fs: 1;
 }
 
-.ey-pip-main {
+/* 창 전체를 채우는 가로 행 — [레인][중앙][가사창][재생목록].
+   폭은 전부 JS(pip.ts applyColumnLayout)가 flex-basis로 매긴다. 절대좌표를 쓰지 않는
+   것이 핵심이다: 부착 패널의 화면 좌표 로직은 메인 창 geometry 기준이라 여기서 돌면
+   조각들이 창 구석에 뭉친다. */
+.ey-pip-row {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   flex: 1 1 auto;
   min-width: 0;
   height: 100%;
   overflow: hidden;
 }
 
-/* 오른쪽 가사 목록 컬럼 — 대칭 UI(설정 pipLyricsList, 기본 꺼짐). 표시/숨김은
-   JS(applyLyricsListVisibility)가 style.display로 정한다.
-   줄 하나의 DOM은 메인 가사창과 완전히 같은 .ey-line 구조(line-render.ts 공용 렌더러)라
-   위쪽 .ey-line/.ey-word/.ey-line-pron/.ey-line-tr 규칙이 그대로 적용된다 — 운영자 불만
-   ("PIP·메인 가사창 모양이 다르다") 해소: 여기서는 폭이 좁은 컨텍스트에 필요한
-   글자 크기·좌우 여백만 최소로 오버라이드한다. */
-.ey-pip-lyricscol {
-  display: none;
-  flex-direction: column;
-  flex: 0 0 260px;
-  width: 260px;
-  min-width: 200px;
-  max-width: 40%;
-  border-left: 1px solid var(--ey-border);
-  overflow-y: auto;
-  padding: 6px 4px;
+.ey-pip-col {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
   box-sizing: border-box;
-  /* 메인 기본(15px)의 0.9배 — 260px 고정 폭에 맞춘 축소. .ey-line.active의 1.13배
-     확대도 이 값 기준으로 다시 계산되어 함께 줄어든다 */
-  --ey-line-size: 13.5px;
 }
 
-.ey-pip-lyricscol .ey-line { padding: 6px 8px; }
+/* 레인 열 — 영상 왼쪽. 안에는 overlay의 부착 레인 패널(.ey-attach-lane)이 들어온다 */
+.ey-pip-lane-col { display: flex; border-right: 1px solid var(--ey-border); }
+/* 재생목록 열 — 가사창 오른쪽 */
+.ey-pip-playlist-col { display: flex; border-left: 1px solid var(--ey-border); }
+
+/* 열 안으로 들어온 부착 패널은 «떠 있는 상자»가 아니라 열 그 자체다 — 좌표·그림자·
+   테두리를 벗기고 열을 가득 채운다(overlay.ts의 filled 분기가 인라인 좌표를 비워 준다) */
+.ey-pip-col > .ey-attach-lane,
+.ey-pip-col > .ey-attach-playlist {
+  position: static;
+  flex: 1 1 auto;
+  width: auto;
+  height: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 부착 레인 패널이 열로 들어오면 자체 폭 손잡이는 필요 없다 — 열 디바이더가 대신한다 */
+.ey-pip-col > .ey-attach-lane > .ey-attach-divider { display: none; }
+
+/* 중앙 열 — 기존 PiP의 세로 구성을 그대로 유지한다: 영상 ↑ / 가사 단축 표시 / 컨트롤 ↓ */
+.ey-pip-center {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+
+/* 열 사이 세로 디바이더 — 가로 디바이더(.ey-pip-divider)의 세로판 */
+.ey-pip-vdivider {
+  width: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ey-pip-vdivider .ey-pip-divider-grip {
+  width: 3px;
+  height: 36px;
+}
+
+.ey-pip-vdivider:hover .ey-pip-divider-grip { background: var(--ey-text-dim); }
 
 /* 영상 미러 (captureStream) — 창이 가로로 넓어져 16:9 높이가 커져도
-   가사 스테이지의 min-height를 지키도록 shrink를 허용한다 */
+   가사 단축 표시의 min-height를 지키도록 shrink를 허용한다 */
 .ey-pip-video {
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -1577,203 +1676,72 @@ body.ey-pip {
 
 .ey-pip-divider:hover .ey-pip-divider-grip { background: var(--ey-text-dim); }
 
+/* ── 가사 단축 표시 (중앙 열, 영상 바로 아래) ─────────────────────
+   현재 줄 하나를 크게. 예전 PiP의 스테이지 자리이고 운영자가 유지를 지시했다.
+   **줄 DOM은 가사 목록과 완전히 같은 .ey-line**이다(overlay.attachShortView가
+   buildLineEl로 만든다) — 그래서 원문/발음/번역의 모양·카라오케 채움이 목록과
+   한 픽셀도 갈라질 수 없다. 여기 있는 것은 «한 줄만 크게 보여주는» 레이아웃뿐이다. */
+.ey-pip-stage-slot {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
 .ey-pip-stage {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: min(3.5vh, 24px);
-  padding: 12px 20px 8px;
+  gap: min(2.5vh, 14px);
+  padding: 8px 14px;
   text-align: center;
-  min-height: 104px; /* 영상이 아무리 커져도 가사 3~4줄은 항상 보이게 */
   overflow: hidden;
-  container-type: size; /* 아래 cqh 폰트가 스테이지 실제 높이에 맞춰 줄어들게 */
+  container-type: size; /* 아래 cqh 폰트가 이 영역 실제 높이에 맞춰 줄어들게 */
 }
 
 .ey-pip-line {
   max-width: 100%;
+  min-width: 0;
   word-break: keep-all;
   overflow-wrap: break-word;
-  transition: opacity 0.2s, color 0.2s;
 }
 
+/* 앞/뒤 줄은 흐린 한 줄 — 지금 부르는 줄이 어디쯤인지만 알려 준다 */
 .ey-pip-line.prev, .ey-pip-line.next {
-  /* vw가 아니라 cqw — 가사 목록 컬럼(.ey-pip-lyricscol)이 열려 스테이지 폭이 줄어들면
-     글자도 그 폭을 따라 줄어야 넘치지 않는다(container-type: size가 .ey-pip-stage에 있다) */
-  font-size: calc(clamp(10px, min(3.6cqw, 11cqh), 16px) * var(--ey-pip-fs, 1));
+  font-size: clamp(10px, min(3.6cqw, 11cqh), 16px);
   color: var(--ey-text-faint);
   cursor: pointer;
   display: -webkit-box;
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  flex-shrink: 0;
 }
 
+.ey-pip-line.prev:empty, .ey-pip-line.next:empty { display: none; }
 .ey-pip-line.prev:hover, .ey-pip-line.next:hover { color: var(--ey-text-dim); }
 
+/* 현재 줄 — 공용 .ey-line이 안에 들어온다. 글자 크기는 이 영역 크기를 따라간다
+   (--ey-line-size를 덮어써서 .ey-line 계열 규칙이 그대로 커진다) */
 .ey-pip-line.current {
-  font-size: calc(clamp(15px, min(6.5cqw, 24cqh), 34px) * var(--ey-pip-fs, 1));
-  font-weight: 700;
-  line-height: 1.35;
-  color: var(--ey-text);
   cursor: pointer;
-  /* 아주 긴 원문이 번역·발음 줄을 스테이지 밖으로 밀어내지 않게 상한 */
-  display: -webkit-box;
-  -webkit-line-clamp: 4;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  /* 번역(.ey-pip-tr)·발음(.ey-pip-pron)처럼 flex-shrink 대상에서 빼야 한다 — 안 그러면
-     세로 공간이 부족할 때 원문이 축소분을 전부 떠안아, line-clamp가 만든 박스 높이보다
-     실제 렌더 높이가 더 작아지면서 마지막 줄 글자가 중간에서 잘린다. 대신 아래
-     컨테이너 쿼리로 공간이 좁을 때 clamp 값 자체를 줄여 필요한 높이를 미리 낮춘다. */
   flex-shrink: 0;
-}
-
-/* 세로 공간이 좁아지면(.ey-pip-stage 실제 높이 기준) 원문이 요구하는 줄 수를 미리
-   줄여서, flex-shrink 없이도 스테이지 안에 들어가게 한다 — 중간에서 잘리는 대신
-   처음부터 짧게 보여준다. 번역·발음(flex-shrink:0)은 그대로 보존된다. */
-@container (max-height: 260px) {
-  .ey-pip-line.current { -webkit-line-clamp: 3; }
-}
-@container (max-height: 190px) {
-  .ey-pip-line.current { -webkit-line-clamp: 2; }
-}
-@container (max-height: 130px) {
-  .ey-pip-line.current { -webkit-line-clamp: 1; }
-}
-
-.ey-pip-line.current .ey-word.sung { color: var(--ey-accent); }
-
-.ey-pip-tr {
-  font-size: calc(clamp(11px, min(4cqw, 14cqh), 18px) * var(--ey-pip-fs, 1));
-  color: var(--ey-text-dim);
-  max-width: 100%;
-  word-break: keep-all;
-  overflow-wrap: break-word;
-  /* 번역은 밀려나 사라지지 않고 항상 최대 2줄 보이게 */
-  flex-shrink: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.ey-pip-tr:empty { display: none; }
-
-/* 현재 라인의 발음 표기 (원문과 번역 사이) */
-.ey-pip-pron {
-  font-size: calc(clamp(11px, min(3.8cqw, 12cqh), 17px) * var(--ey-pip-fs, 1));
-  color: var(--ey-text-dim);
-  max-width: 100%;
-  word-break: keep-all;
-  overflow-wrap: break-word;
-  flex-shrink: 0; /* 발음 줄도 번역처럼 밀려나 사라지지 않게 */
-}
-
-.ey-pip-pron:empty { display: none; }
-/* PiP 발음 음절 카라오케 필 — 패널(.ey-line.active .ey-pron-syl.sung)과 동일 색 */
-.ey-pip-pron .ey-pron-syl.sung { color: var(--ey-accent); }
-
-body.ey-hide-pron .ey-pip-pron { display: none; }
-
-/* 가라오케 음정 레인 — 노트 데이터가 있는 곡에서만 표시. 높이는 JS(설정값)가 지정 */
-.ey-pip-pitch {
   width: 100%;
-  height: 170px;
-  flex-shrink: 0;
-  display: block;
-  border-top: 1px solid var(--ey-border);
-  box-sizing: border-box;
+  --ey-line-size: clamp(15px, min(6cqw, 20cqh), 32px);
 }
 
-/* 레인 높이 조절 디바이더 */
-.ey-pip-pitch-divider { cursor: ns-resize; }
-
-/* 레인이 켜져 있으면 스테이지(현재 라인/발음/번역)는 중복 표시라 숨긴다.
-   스테이지가 빠지면 flex 성장 요소가 없어지므로 영상이 남는 공간을 흡수한다 */
-body.ey-lane-active .ey-pip-stage { display: none; }
-body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
-
-/* 이전/다음 영상 재생목록(footer 목록 버튼) — 가사 목록 컬럼(.ey-pip-lyricscol)과는
-   다른 목록이다(이건 유튜브 재생목록, 그건 이 곡의 가사 줄). 여태 골격만 있고 스타일이
-   비어 있어 버튼 더미가 맨몸으로 렌더됐다(코덱스 감사). */
-.ey-pip-playlist {
-  flex: 0 1 auto;
-  max-height: 40%;
-  overflow-y: auto;
-  border-top: 1px solid var(--ey-border);
-  padding: 4px 0;
-}
-
-.ey-pip-playlist-item {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  padding: 6px 14px;
-  border: none;
+.ey-pip-line.current .ey-line {
   background: transparent;
-  color: var(--ey-text-dim);
-  text-align: left;
-  cursor: pointer;
-  font-family: var(--ey-font);
+  padding: 0;
+  text-align: center;
 }
 
-.ey-pip-playlist-item:hover { background: var(--ey-elev-hover); color: var(--ey-text); }
-.ey-pip-playlist-item.current { color: var(--ey-accent); }
-
-.ey-pip-playlist-title {
-  font-size: 12px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ey-pip-playlist-by {
-  font-size: 10px;
-  color: var(--ey-text-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ey-pip-playlist-item.current .ey-pip-playlist-by { color: inherit; opacity: 0.8; }
-
-/* 가사 패널(검색·붙여넣기·싱크 생성 — 메인 패널과 같은 panels.ts 조각을 담는 컨테이너).
-   .ey-pip-main 안에서 flex:1로 남는 세로 공간을 채우고 내용이 넘치면 스스로 스크롤한다. */
-.ey-pip-panel {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 10px 14px;
-  box-sizing: border-box;
-}
-
-.ey-pip-panel-plain {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* PiP 진행/알림 칩 — 푸터 위 얇은 줄. 메인 패널의 .ey-gen-chip / .ey-notice-chip과
-   같은 정보를 같은 색 규약(진행=강조 노랑 계열, 알림=초록 계열)으로 창 안에 띄운다.
-   창이 좁으므로 줄바꿈을 허용하고, 잘릴 때는 title에 전문이 있다. */
-.ey-pip-chip {
-  flex-shrink: 0;
-  margin: 0 12px 4px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--ey-accent-soft);
-  color: var(--ey-text);
-  font-size: 11px;
-  line-height: 1.35;
-  align-self: flex-start;
-  max-width: calc(100% - 24px);
-  box-sizing: border-box;
-}
-
-.ey-pip-notice { background: rgba(80, 180, 140, 0.18); }
+/* 목록에서는 활성 줄에 왼쪽 강조 막대가 붙지만, 가운데 정렬된 한 줄짜리 뷰에서는
+   막대가 글자를 밀어 중심을 흐트러뜨린다 — 색 강조만 남긴다 */
+.ey-pip-line.current .ey-line.active { border-left: 0; box-shadow: none; }
 
 .ey-pip-footer {
   display: flex;
@@ -1781,15 +1749,6 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   gap: 2px;
   padding: 0 12px 8px;
   flex-shrink: 0;
-}
-
-.ey-pip-title {
-  font-size: 11px;
-  color: var(--ey-text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: center;
 }
 
 .ey-pip-controls {
@@ -1822,18 +1781,6 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
 .ey-pip-play.on { color: var(--ey-accent); }
 .ey-pip-play.on:hover { color: var(--ey-accent); }
 
-/* 메트로놈 세부 버튼 (배속·마디 시작 박) — 텍스트 라벨형 미니 버튼 */
-.ey-pip-metro-opt {
-  width: auto;
-  min-width: 26px;
-  padding: 0 4px;
-  font-family: var(--ey-font);
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--ey-text-dim);
-}
-.ey-pip-metro-opt:hover { color: var(--ey-text); }
-
 /* PiP 창을 아주 작게 줄여도 컨트롤이 한 줄에 짓눌리지 않게 줄바꿈 허용 */
 .ey-pip-controls {
   flex-wrap: wrap;
@@ -1842,13 +1789,14 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
 
 /* PiP 좌상단 미니 설정 — 가라오케 기능·영상 표시 토글. 반투명으로 떠 있다가 호버 시 선명 */
 .ey-pip-corner {
-  position: fixed;
-  top: 6px;
-  left: 6px;
   display: flex;
+  align-items: center;
   gap: 4px;
-  z-index: 60;
-  opacity: 0.38;
+  flex-shrink: 0;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--ey-border);
+  /* 평소엔 물러나 있다가 마우스를 올리면 또렷해진다 — 자리를 차지하되 시선은 안 뺏는다 */
+  opacity: 0.5;
   transition: opacity 0.15s;
 }
 .ey-pip-corner:hover { opacity: 1; }
@@ -2445,4 +2393,11 @@ body.ey-lane-active .ey-pip-video { flex: 1 1 auto; max-height: none; }
   border-bottom: 1px solid var(--ey-border);
   background: var(--ey-elev);
   flex-shrink: 0;
+}
+
+/* 코너 미니 버튼이 «켜져 있지만 지금은 자리가 없어 접힌» 상태 — 창을 넓히면 돌아온다.
+   꺼진 것(회색)과 켜진 것(강조색) 사이의 중간 상태라 점선 테두리로 구분한다. */
+.ey-pip-mini.ey-pip-mini-auto {
+  outline: 1px dashed var(--ey-text-faint);
+  outline-offset: 1px;
 }

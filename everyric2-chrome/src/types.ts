@@ -478,6 +478,11 @@ export interface LimitBucket {
   limit: number;
   used: number;
   remaining: number;
+  /** 이 카테고리를 마지막으로 쓴 시점 + window_hours(롤링 회복 시각), UTC ISO.
+   *  null이면 이 세션에서 아직 한 번도 안 써서 회복 시각 자체가 없다(additive 필드 —
+   *  구서버는 필드 자체가 없어 undefined일 수 있다. panels.ts buildContributionSheet가
+   *  다음 회복 안내를 여기서 읽는다). */
+  next_reset_at?: string | null;
 }
 
 /** GET /api/limits/{video_id} — enforced=false면 서버가 한도를 강제하지 않는 배포다 */
@@ -602,13 +607,53 @@ export interface Settings {
   lyricsSourcePriority: 'vocaro' | 'lrclib';
   pipKeepPanel: boolean;
   pipShowVideo: boolean;
-  /** PiP 창 오른쪽에 스크롤 가사 목록 컬럼을 함께 표시(대칭 UI) — 기본 꺼짐(창이 넓어져야
-   *  하므로 옵트인). 켜지면 clampPipSize 상한도 넓어진다(pip.ts MAX_PIP_WIDTH_WITH_LIST) */
-  pipLyricsList: boolean;
+  // pipLyricsList(PiP 오른쪽 가사 목록 컬럼)는 제거됐다 — PiP 창 안이 통째로 메인 가사창과
+  // 같은 패널이 된 뒤로 «본문이 곧 가사 목록»이라 별도 컬럼이 가리킬 대상이 없다.
   /** 빈 문자열이면 헤더 생략 */
   apiKey: string;
   /** PiP에서 영상 영역이 차지하는 세로 비율 (0 = 자동 16:9) */
   pipVideoRatio: number;
+  /** PiP 중앙 열의 «가사 단축 표시»(영상 바로 아래, 현재 줄 한 줄) — 기본 켜짐.
+   *  제거된 pipLyricsList(오른쪽 가사 목록 컬럼)의 자리를 이어받는다: 그쪽은 창 안이
+   *  통째로 메인 가사창이 되면서 가리킬 대상이 없어졌고, 이쪽이 «영상 폭 구역의 한 줄»이다. */
+  pipShortLyrics: boolean;
+  /** PiP 창에서 가사창 열이 차지하는 폭(px) — 중앙 열과의 세로 디바이더로 조절.
+   *  레인 열 폭은 attachedLaneWidth를 그대로 쓴다(설정을 새로 늘리지 않는다). */
+  pipPanelWidth: number;
+  // ── PiP 창 «표면 고유» 레이아웃 상태 ────────────────────────────
+  //
+  // 펼침·폭은 표면(유튜브 페이지 / PiP 창)마다 별개다(운영자 지시 2026-08-04):
+  // 메인에서 레인을 접어도 PiP의 레인은 그대로여야 한다. 두 표면이 한 키를 나눠 쓰면
+  // 한쪽을 정리하는 순간 다른 쪽이 함께 무너진다. 그래서 공유하던 두 값을 갈랐다:
+  //   재생목록 표시 : modPlaylist(메인) / pipPlaylist(PiP)
+  //   레인 열 폭    : attachedLaneWidth(메인 부착) / pipLaneWidth(PiP 열)
+  // 레인 표시는 이미 갈라져 있다 — modMainLane(메인) / pitchGuide(PiP).
+  /** PiP 창에 재생목록 열을 펼칠지 (메인의 modPlaylist와 별개) */
+  pipPlaylist: boolean;
+  /** PiP 레인 열 폭(px) — 메인 부착 레인(attachedLaneWidth)과 별개 */
+  pipLaneWidth: number;
+  /** 레인 열과 중앙 열(영상·단축 표시·컨트롤)의 좌우를 맞바꾼다.
+   *  기본 [레인][중앙][가사창] ⇄ 스왑 [중앙][레인][가사창] — 스왑하면 레인이 가사창
+   *  바로 옆에 와서 «따라 부르며 가사도 같이 보기»가 쉬워진다(운영자 용례). */
+  pipLaneSwapped: boolean;
+  /**
+   * 이미 실행한 1회성 설정 마이그레이션의 id 목록.
+   *
+   * 「값을 한 번만 갈아엎어야 하는데, 그 뒤 사용자가 되돌린 선택은 존중해야 한다」는
+   * 요구를 만족시키는 유일한 방법이다 — 값만 봐서는 «옛 기본값을 흡수한 것»과
+   * «사용자가 골라 켠 것»을 구분할 수 없다(둘 다 그냥 true다).
+   * 새 마이그레이션을 추가할 때 id를 하나 늘리고 migrateSettings에 분기를 더한다.
+   */
+  settingsMigrations: string[];
+  /** PiP 중앙 열(영상 미러·가사 단축 표시·재생 컨트롤)을 펼쳐 둘지.
+   *  끄면 «가라오케 단독 모드» — 레인만 남는 창이 된다(운영자 요청: "기존처럼 가라오케
+   *  창만 볼 수 있는 모드"). 폭 부족 **자동** 접힘에서는 중앙 열이 최후까지 남지만,
+   *  그건 자동 규칙이지 사용자 선택의 제한이 아니다 — 이 값은 언제나 존중된다. */
+  pipShowCenter: boolean;
+  /** PiP 창 오른쪽 «메인 가사창 열»을 펼쳐 둘지 — 끄면 영상 + 현재 줄만 남는(옛 PiP의 모습)
+   *  좁은 창이 된다. 좁아서 **자동으로** 접히는 것과 달리 이건 사용자의 명시적 선택이라
+   *  저장된다(창을 다시 넓혀도 접힌 채로 있다). 코너 미니 버튼으로 즉시 토글. */
+  pipShowPanel: boolean;
   /** PiP 창 너비(px) — 닫을 때 기억, 0 = 미설정(기존 기본값 440 사용) */
   pipWidth: number;
   /** PiP 창 높이(px) — 닫을 때 기억, 0 = 미설정(showVideo에 따라 500/260 사용) */
@@ -636,6 +681,9 @@ export interface Settings {
   vocalGlow: boolean;
   /** PIP 크로마키 스트리밍 모드 — 'off'가 아니면 PIP 배경을 단색 키 컬러로 (OBS 키잉용) */
   pipChromaKey: 'off' | 'green' | 'blue' | 'magenta';
+  /** 스트리밍용 글자 외곽선 — 가사·제목에 검은(라이트 테마는 흰) 테를 둘러 크로마키
+   *  키 컬러나 영상 위에서도 글자가 배경에 먹히지 않게 한다 */
+  streamTextOutline: boolean;
   /** [모듈] 영상 자막 — 플레이어 화면 자체에 현재 줄을 자막처럼 표시 (Language Reactor식).
    *  켜져 있는 동안 유튜브 자체 자막은 숨긴다. */
   videoCaptions: boolean;
@@ -655,11 +703,19 @@ export interface Settings {
   /** [모듈] 가라오케 레인 — PIP 전용이던 음정 레인(피아노롤)을 메인 가사창 아래에도 표시.
    *  그리는 코드는 PIP와 완전히 같고(ui/pitch-lane.ts), 표시 취향도 같은 설정을 따른다 */
   modMainLane: boolean;
-  /** 발음 표기 위치: off = 표시 안 함, note = 노트마다 위에 부착, bottom = 화면 하단 중앙
-   *  (진행률 그라데이션), both = 노트 부착 + 하단 동시, center = 레인 중앙에 반투명 오버레이.
-   *  hidePronForEnglish·showPronunciation과 무관하게 이 값 하나로만 켜고 끈다(노트·레인
-   *  발음은 스테이지 발음 줄과 별개 계약 — lib/lang.ts 게이트를 타지 않는다). */
-  pitchPronPosition: 'off' | 'note' | 'bottom' | 'both' | 'center';
+  /**
+   * 레인의 **이중표시 줄** 위치: off = 없음, bottom = 레인 아래 줄(진행률 그라데이션),
+   * center = 레인 위 중앙 반투명 오버레이, both = 둘 다.
+   *
+   * **노트 위 음절 텍스트는 이 설정에 들어 있지 않다** — 언제나 표시된다(운영자 지시
+   * 2026-08-04). 예전에는 'note'가 이 목록에 있었고 'off'를 고르면 노트까지 비어서,
+   * 코너 버튼 순환 함정에 걸린 사용자가 빈 노트에 갇혔다. 저장된 'note'/'both'는
+   * settings.ts의 migrateSettings가 새 값으로 옮긴다.
+   *
+   * hidePronForEnglish·showPronunciation과 무관하다(레인은 스테이지 발음 줄과 별개 계약 —
+   * lib/lang.ts 게이트를 타지 않는다).
+   */
+  pitchPronPosition: 'off' | 'bottom' | 'both' | 'center';
   /** PiP 하단 가라오케 음정 바 표시 (노트 데이터가 있는 곡에서만) */
   pitchGuide: boolean;
   /** 가라오케 창에서 노트를 신디사이즈로 재생 */

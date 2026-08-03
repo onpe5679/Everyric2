@@ -65,6 +65,27 @@
   "pip_controls_videoToggle": {
     "message": "Toggle video display"
   },
+  "pip_controls_panelColToggle": {
+    "message": "Collapse or expand the lyrics panel column"
+  },
+  "pip_controls_centerColToggle": {
+    "message": "Collapse or expand the video / one-line lyrics / playback column — collapse it for a lane-only karaoke window"
+  },
+  "pip_controls_laneColToggle": {
+    "message": "Collapse or expand the karaoke lane column"
+  },
+  "pip_controls_playlistColToggle": {
+    "message": "Collapse or expand the playlist column"
+  },
+  "pip_controls_shortLyricsToggle": {
+    "message": "Show or hide the one-line lyrics under the video"
+  },
+  "pip_controls_dualPosition": {
+    "message": "Pronunciation echo line — cycle position (off / bottom / center / both)"
+  },
+  "pip_controls_autoCollapsed": {
+    "message": "On, but folded away because the window is narrow — widen it and it comes back"
+  },
   "pip_controls_panelToggle": {
     "message": "Open/close lyrics search panel"
   },
@@ -73,6 +94,9 @@
   },
   "pip_controls_videoRatioDrag": {
     "message": "Drag to resize video/lyrics ratio"
+  },
+  "pip_controls_colWidthDrag": {
+    "message": "Drag to resize this column"
   },
   "pip_songKeyLabel": {
     "message": "Key $P1$",
@@ -360,7 +384,7 @@
     }
   },
   "panels_paste_placeholder": {
-    "message": "Paste lyrics here and AI will time them for you\nPart labels ([Verse], Chorus, etc.) and comment lines are filtered out automatically."
+    "message": "Paste lyrics here and AI will time them for you\nPart labels ([Verse], Chorus, etc.) and comment lines are filtered out automatically.\nLyrics with original/translation (or original/pronunciation/translation) lines paired per line are parsed as-is, too."
   },
   "panels_paste_attributionPlaceholder": {
     "message": "Source (optional) — e.g. Namu Wiki, Genius"
@@ -900,9 +924,6 @@
   "overlay_settings_pitchFont_small": {
     "message": "Small"
   },
-  "overlay_settings_pronPosition_note": {
-    "message": "Above notes"
-  },
   "overlay_settings_pronPosition_bottom": {
     "message": "Bottom of screen"
   },
@@ -986,7 +1007,7 @@
     "message": "Lyrics source priority"
   },
   "overlay_settings_row_pipKeepPanel": {
-    "message": "Keep panel lyrics during PiP"
+    "message": "Keep the main-window panel open during PiP"
   },
   "overlay_settings_row_pipShowVideo": {
     "message": "Show video together in PiP"
@@ -1099,6 +1120,27 @@
   "overlay_settings_row_pipChromaKeyTitle": {
     "message": "Turns the PiP window background into a solid key color — key it out in OBS to overlay lyrics on your stream"
   },
+  "overlay_settings_row_pipShortLyrics": {
+    "message": "One-line lyrics under the PiP video"
+  },
+  "overlay_settings_row_pipShortLyricsTitle": {
+    "message": "Shows just the line being sung, large, right under the PiP video — turn it off and the video and controls take that space"
+  },
+  "overlay_settings_row_pipShowPanel": {
+    "message": "Show the full lyrics panel in PiP"
+  },
+  "overlay_settings_row_pipShowPanelTitle": {
+    "message": "Opens the full lyrics panel (search, settings, offset) on the right of the PiP window — turn it off for just the video and current line. It folds away automatically on narrow windows and returns as set when you widen them"
+  },
+  "overlay_notice_autoCollapsed": {
+    "message": "Folded away automatically because the window is too narrow. Widen it to see it again"
+  },
+  "overlay_settings_row_streamTextOutline": {
+    "message": "Text outline (for streaming)"
+  },
+  "overlay_settings_row_streamTextOutlineTitle": {
+    "message": "Outlines lyrics and the song title so text stays readable over a key color or video background"
+  },
   "overlay_settings_chroma_off": {
     "message": "Off"
   },
@@ -1149,6 +1191,9 @@
   },
   "overlay_quick_lanePos": {
     "message": "Change lane position"
+  },
+  "overlay_quick_laneSwap": {
+    "message": "Swap the lane and video columns"
   },
   "overlay_quick_lanePosToLeft": {
     "message": "Move the lane to the left of the lyrics"
@@ -2247,6 +2292,14 @@
       },
       "p2": {
         "content": "$2"
+      }
+    }
+  },
+  "panels_contrib_quotaUnlimited": {
+    "message": "Unlimited · $P1$ used",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
       }
     }
   },

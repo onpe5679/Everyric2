@@ -11,6 +11,7 @@ import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureLocalServerPermissionForServerUrl } from './lib/local-server-permission.mjs';
+import { readPipPanel } from './lib/pip-panel.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
@@ -83,24 +84,13 @@ try {
   await page.locator('[title="PiP 창으로 보기"]').click();
   await page.waitForTimeout(3000);
 
-  const pip = await page.evaluate(() => {
-    const w = window.documentPictureInPicture?.window;
-    let pitch = { present: false, visible: false, drawnPx: 0 };
-    const c = w?.document.querySelector('.ey-pip-pitch');
-    if (c) {
-      pitch.present = true;
-      pitch.visible = w.getComputedStyle(c).display !== 'none';
-      try {
-        const data = c.getContext('2d').getImageData(0, 0, c.width || 1, c.height || 1).data;
-        for (let i = 3; i < data.length; i += 4) if (data[i] > 0) pitch.drawnPx++;
-      } catch { /* ignore */ }
-    }
-    return {
-      open: !!w,
-      pron: w?.document.querySelector('.ey-pip-pron')?.textContent?.slice(0, 40) ?? '',
-      pitch,
-    };
-  });
+  // PiP 안 가사 UI는 메인 창과 같은 인스턴스다 — 읽는 법은 lib/pip-panel.mjs 한 곳에 있다
+  const pipRaw = await page.evaluate(readPipPanel());
+  const pip = {
+    open: pipRaw.open,
+    pron: pipRaw.pron ?? '',
+    pitch: pipRaw.lane ?? { present: false, visible: false, drawnPx: 0 },
+  };
   check(pip.open, 'PiP 열림');
   check(pip.pitch.present && pip.pitch.visible && pip.pitch.drawnPx > 50, '음정 바 (신규 UI) 렌더링', pip.pitch);
   if (pip.pron) console.log('PASS: PiP 발음 =', JSON.stringify(pip.pron));
@@ -130,14 +120,8 @@ try {
   await page.waitForTimeout(1000);
   await page.locator('[title="PiP 창으로 보기"]').click();
   await page.waitForTimeout(2500);
-  const off = await page.evaluate(() => {
-    const w = window.documentPictureInPicture?.window;
-    const c = w?.document.querySelector('.ey-pip-pitch');
-    return {
-      open: !!w,
-      pitchVisible: c ? w.getComputedStyle(c).display !== 'none' : false,
-    };
-  });
+  const offRaw = await page.evaluate(readPipPanel());
+  const off = { open: offRaw.open, pitchVisible: offRaw.lane?.visible ?? false };
   check(off.open && !off.pitchVisible, 'pitchGuide OFF → 음정 바 숨김', off);
 
   console.log(failed ? 'FRESH PROFILE CHECK: FAIL' : 'FRESH PROFILE CHECK: PASS');
