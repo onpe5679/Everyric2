@@ -1,4 +1,7 @@
-import type { LyricLine, SyncDebugMeta, SyncPreviousVersion } from '../types';
+import type {
+  BgRequest, EveryricSegment, LyricLine, MessageResponse, SyncDebugMeta, SyncPreviousVersion,
+  SyncVersionDetail, SyncVersionSummary, SyncVersionsResponse,
+} from '../types';
 import { t } from '../lib/i18n';
 import { h } from './dom';
 
@@ -66,14 +69,82 @@ export interface DebugPanelRefs {
 }
 
 /**
+ * 고스트 비교 Δ 계산 — 직전 세대든 저장된 특정 버전이든 같은 로직으로 적용한다. 줄 텍스트가
+ * 같은 라인만 대응시킨다(재처리 = 같은 가사의 재정렬일 때만 A/B가 성립). 반환값은 대응된
+ * 줄 수 — 호출부가 각자의 문구(출처마다 다르다)로 상태 줄을 조립하는 데 쓴다. 이 함수 자체는
+ * "누구와 비교 중인지"를 몰라도 된다 — 그래서 "이전 세대와 비교"·"깊이·버전 비교" 두 버튼이
+ * 이 하나를 공유한다.
+ */
+function applyGhostDeltas(
+  lines: LyricLine[], deltaEls: HTMLSpanElement[], timestamps: EveryricSegment[],
+): number {
+  let matched = 0;
+  lines.forEach((line, i) => {
+    const old = timestamps[i];
+    const deltaEl = deltaEls[i];
+    if (!deltaEl) return;
+    if (!old || old.text !== line.text || line.time === null) {
+      deltaEl.textContent = 'Δ—';
+      deltaEl.classList.remove('big');
+      return;
+    }
+    matched++;
+    const d = line.time - old.start;
+    deltaEl.textContent = `Δ${d >= 0 ? '+' : ''}${d.toFixed(2)}s`;
+    // 0.15s 이내는 흐리게(사실상 동일), 그 밖은 또렷하게 — 큰 이동만 눈에 띄게
+    deltaEl.classList.toggle('big', Math.abs(d) > 0.15);
+  });
+  return matched;
+}
+
+function clearGhostDeltas(deltaEls: HTMLSpanElement[]): void {
+  deltaEls.forEach(el => { el.textContent = ''; el.classList.remove('big'); });
+}
+
+/** 서버가 준 원본 문자열(타임존 표기 없는 UTC)을 로컬 HH:MM으로 — content.ts
+ *  formatSyncCreated와 같은 UTC 판정 규칙(Z·오프셋이 없으면 UTC로 간주)을 쓴다. */
+function formatHHMM(raw: string | null | undefined): string {
+  if (!raw) return '-';
+  const text = raw.trim();
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(text);
+  const at = new Date(hasZone ? text : `${text.replace(' ', 'T')}Z`);
+  if (Number.isNaN(at.getTime())) return '-';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+/**
+ * content.ts의 sendToBackground와 같은 목적의 최소판 — 이 모듈은 SYNC_VERSIONS·
+ * SYNC_VERSION_GET을 overlay 콜백을 거치지 않고 직접 부른다(팀 배선: 이 두 요청은
+ * videoId 하나만 있으면 끝나서 overlay.ts·content.ts에 새 콜백을 늘릴 이유가 없다).
+ * orphan 탭(확장 리로드 후 남은 content script) 가드만 있으면 충분하다 — 실패는
+ * 패널의 상태 줄이 대신 보여준다(content.ts처럼 영구 알림을 띄우지 않는다).
+ */
+async function sendMessageDirect<T>(message: BgRequest): Promise<MessageResponse<T>> {
+  if (!chrome.runtime?.id) {
+    return { error: 'extension context invalidated' };
+  }
+  try {
+    return await chrome.runtime.sendMessage(message) as MessageResponse<T>;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * @param onSeek 이미 SEEK_INTO_LINE_SEC 같은 보정이 필요하면 호출부가 콜백 안에서 적용한다 —
  *   이 함수는 line.time을 그대로 넘긴다.
+ * @param loadPrevious 있으면 "이전 세대와 비교" 버튼을 그린다(기존과 동일한 동작).
+ * @param videoId SYNC_VERSIONS·SYNC_VERSION_GET을 직접 부르는 데 필요하다 — 없으면(호출부
+ *   미배선) "깊이·버전 비교" 버튼 자체를 생략한다. "이전 세대와 비교"는 이 값과 무관하게
+ *   기존과 동일하게 동작한다.
  */
 export function buildDebugPanel(
   lines: LyricLine[],
   debugMeta: SyncDebugMeta | null | undefined,
   onSeek: (time: number) => void,
   loadPrevious?: () => Promise<SyncPreviousVersion | null>,
+  videoId?: string | null,
 ): DebugPanelRefs {
   const el = h('div', { className: 'ey-debug-panel' });
 
@@ -97,53 +168,187 @@ export function buildDebugPanel(
     return { el };
   }
 
-  // A/B 고스트 비교 — 서버가 보관한 직전 세대(재처리로 덮어써지기 전)의 줄 시각과
-  // 지금 화면의 줄 시각을 라인 단위 Δ로 대비한다. 줄 텍스트가 같은 라인만 비교하고
-  // (재생성 = 같은 가사의 재정렬일 때만 A/B가 성립), 다른 줄은 Δ— 로 남긴다.
+  // 고스트 비교 Δ 자리 — 두 비교 경로(이전 세대·특정 버전) 모두 같은 배열에 쓴다
   const deltaEls: HTMLSpanElement[] = [];
-  if (loadPrevious) {
+
+  // A/B 고스트 비교 바 — 서버가 보관한 다른 세대(직전 세대 또는 저장된 특정 버전)의 줄
+  // 시각과 지금 화면의 줄 시각을 라인 단위 Δ로 대비한다. 줄 텍스트가 같은 라인만 비교하고
+  // (재생성 = 같은 가사의 재정렬일 때만 A/B가 성립), 다른 줄은 Δ— 로 남긴다.
+  //
+  // "이전 세대와 비교"(loadPrevious)와 "깊이·버전 비교"(videoId)는 activeKey 하나로
+  // "지금 뭘 비교 중인가"를 함께 추적한다 — 같은 항목을 다시 누르면 비교가 해제되고,
+  // 다른 항목을 누르면 비교 대상이 바뀐다(Δ는 항상 하나의 출처만 표시).
+  if (loadPrevious || videoId) {
     const status = h('span', { className: 'ey-debug-compare-status' });
-    const btn = h('button', {
-      className: 'ey-btn',
-      attrs: { type: 'button' },
-      text: t('debugPanel.comparePrev'),
-      on: {
-        click: () => {
-          btn.disabled = true;
-          status.textContent = '…';
-          void loadPrevious().then(prev => {
-            if (!prev?.found || !prev.timestamps || prev.timestamps.length === 0) {
-              status.textContent = t('debugPanel.comparePrevNone');
-              btn.disabled = false; // 이력 없음/구서버 — 재시도 가능하게 되살린다(감사 Low)
-              return;
-            }
-            let matched = 0;
-            lines.forEach((line, i) => {
-              const old = prev.timestamps?.[i];
-              const deltaEl = deltaEls[i];
-              if (!deltaEl) return;
-              if (!old || old.text !== line.text || line.time === null) {
-                deltaEl.textContent = 'Δ—';
+    let activeKey: string | null = null; // 'prev' | 버전 id | null
+    let prevBtn: HTMLButtonElement | null = null;
+    let versionsListEl: HTMLDivElement | null = null;
+    const versionRowEls = new Map<string, HTMLButtonElement>();
+
+    const paintActive = (): void => {
+      if (prevBtn) prevBtn.classList.toggle('active', activeKey === 'prev');
+      versionRowEls.forEach((rowEl, id) => {
+        const active = activeKey === id;
+        // .ey-debug-row에는 .active 스타일이 없어(그 클래스는 .ey-btn 전용) 인라인으로 칠한다
+        rowEl.style.background = active ? 'var(--ey-accent-soft)' : '';
+        rowEl.style.color = active ? 'var(--ey-accent)' : '';
+      });
+    };
+
+    const clearComparison = (): void => {
+      activeKey = null;
+      clearGhostDeltas(deltaEls);
+      status.textContent = '';
+      paintActive();
+    };
+
+    const bar = h('div', { className: 'ey-debug-compare-bar' });
+
+    if (loadPrevious) {
+      const btn = h('button', {
+        className: 'ey-btn',
+        attrs: { type: 'button' },
+        text: t('debugPanel.comparePrev'),
+        on: {
+          click: () => {
+            if (activeKey === 'prev') { clearComparison(); return; }
+            btn.disabled = true;
+            status.textContent = '…';
+            void loadPrevious().then(prev => {
+              btn.disabled = false; // 재시도·재비교 모두 가능하게 항상 되살린다
+              if (!prev?.found || !prev.timestamps || prev.timestamps.length === 0) {
+                activeKey = null;
+                status.textContent = t('debugPanel.comparePrevNone');
+                paintActive();
                 return;
               }
-              matched++;
-              const d = line.time - old.start;
-              deltaEl.textContent = `Δ${d >= 0 ? '+' : ''}${d.toFixed(2)}s`;
-              // 0.15s 이내는 흐리게(사실상 동일), 그 밖은 또렷하게 — 큰 이동만 눈에 띄게
-              deltaEl.classList.toggle('big', Math.abs(d) > 0.15);
+              activeKey = 'prev';
+              const matched = applyGhostDeltas(lines, deltaEls, prev.timestamps);
+              status.textContent = t('debugPanel.comparePrevLoaded', [
+                prev.engine_version ?? t('debugPanel.engineLegacy'),
+                String(matched), String(lines.length),
+              ]);
+              paintActive();
+            }).catch(() => {
+              btn.disabled = false;
+              activeKey = null;
+              status.textContent = t('debugPanel.comparePrevNone');
+              paintActive();
             });
-            status.textContent = t('debugPanel.comparePrevLoaded', [
-              prev.engine_version ?? t('debugPanel.engineLegacy'),
-              String(matched), String(lines.length),
-            ]);
-          }).catch(() => {
-            status.textContent = t('debugPanel.comparePrevNone');
-            btn.disabled = false;
-          });
+          },
         },
-      },
-    }) as HTMLButtonElement;
-    el.append(h('div', { className: 'ey-debug-compare-bar' }, btn, status));
+      }) as HTMLButtonElement;
+      prevBtn = btn;
+      bar.append(btn);
+    }
+
+    if (videoId) {
+      const vid = videoId; // 클로저 안에서 string으로 좁혀 매 사용마다 null 체크를 피한다
+      const list = h('div', { className: 'ey-debug-panel-list' });
+      list.style.display = 'none';
+      versionsListEl = list;
+      let versionsLoaded: SyncVersionSummary[] | null = null; // 재조회 없이 펼침/접힘만 토글하기 위한 캐시
+
+      const renderVersionRows = (versions: SyncVersionSummary[]): void => {
+        versionRowEls.clear();
+        list.replaceChildren();
+        if (versions.length === 0) {
+          list.append(h('div', {
+            className: 'ey-debug-panel-empty', text: t('debugPanel.compareVersionsEmpty'),
+          }));
+          return;
+        }
+        for (const v of versions) {
+          const qualityText = v.quality_score != null ? ` · q=${v.quality_score.toFixed(3)}` : '';
+          const rowEl = h('button', {
+            className: 'ey-debug-row',
+            attrs: { type: 'button' },
+            title: t('debugPanel.compareVersionRowTitle'),
+          },
+            h('span', { className: 'ey-debug-row-time', text: formatHHMM(v.created_at) }),
+            h('span', { className: 'ey-debug-row-chip', text: v.depth ?? '?' }),
+            h('div', { className: 'ey-debug-row-text' },
+              h('div', {
+                className: 'ey-debug-row-orig',
+                text: `${v.engine_version ?? t('debugPanel.engineLegacy')}${qualityText}`,
+              })),
+          ) as HTMLButtonElement;
+          rowEl.addEventListener('click', () => {
+            if (activeKey === v.id) { clearComparison(); return; }
+            rowEl.disabled = true;
+            status.textContent = '…';
+            void sendMessageDirect<SyncVersionDetail>({
+              type: 'SYNC_VERSION_GET', payload: { videoId: vid, resultId: v.id },
+            }).then(res => {
+              rowEl.disabled = false;
+              const detail = res.data;
+              if (!detail?.timestamps || detail.timestamps.length === 0) {
+                activeKey = null;
+                status.textContent = t('debugPanel.compareVersionNone');
+                paintActive();
+                return;
+              }
+              activeKey = v.id;
+              const matched = applyGhostDeltas(lines, deltaEls, detail.timestamps);
+              status.textContent = t('debugPanel.compareVersionLoaded', [
+                detail.engine_version ?? v.engine_version ?? t('debugPanel.engineLegacy'),
+                detail.depth ?? v.depth ?? '?',
+                String(matched), String(lines.length),
+              ]);
+              paintActive();
+            }).catch(() => {
+              rowEl.disabled = false;
+              activeKey = null;
+              status.textContent = t('debugPanel.compareVersionNone');
+              paintActive();
+            });
+          });
+          versionRowEls.set(v.id, rowEl);
+          list.append(rowEl);
+        }
+        paintActive();
+      };
+
+      const versionsBtn = h('button', {
+        className: 'ey-btn',
+        attrs: { type: 'button' },
+        text: t('debugPanel.compareVersions'),
+        on: {
+          click: () => {
+            if (versionsLoaded) {
+              // 이미 불러온 목록 — 펼침/접힘만 토글한다(재조회 없음)
+              const show = list.style.display === 'none';
+              list.style.display = show ? '' : 'none';
+              versionsBtn.classList.toggle('active', show);
+              return;
+            }
+            versionsBtn.disabled = true;
+            void sendMessageDirect<SyncVersionsResponse>({
+              type: 'SYNC_VERSIONS', payload: { videoId: vid },
+            }).then(res => {
+              versionsBtn.disabled = false;
+              const versions = res.data?.versions ?? [];
+              versionsLoaded = versions;
+              renderVersionRows(versions);
+              list.style.display = '';
+              versionsBtn.classList.add('active');
+              if (!res.data) status.textContent = t('debugPanel.compareVersionsFailed');
+            }).catch(() => {
+              versionsBtn.disabled = false;
+              versionsLoaded = [];
+              renderVersionRows([]);
+              list.style.display = '';
+              status.textContent = t('debugPanel.compareVersionsFailed');
+            });
+          },
+        },
+      }) as HTMLButtonElement;
+      bar.append(versionsBtn);
+    }
+
+    bar.append(status);
+    el.append(bar);
+    if (versionsListEl) el.append(versionsListEl);
   }
 
   const list = h('div', { className: 'ey-debug-panel-list' });

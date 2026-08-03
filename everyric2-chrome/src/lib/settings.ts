@@ -40,6 +40,8 @@ export const DEFAULT_SETTINGS: Settings = {
   vocalGlow: true,
   pipChromaKey: 'off',
   videoCaptions: false,
+  captionFontScale: 1,
+  captionBgOpacity: 0.75,
   modNextUp: false,
   modMainLane: false,
   pitchPronPosition: 'note',

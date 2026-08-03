@@ -225,6 +225,38 @@
       }
     }
   },
+  "debugPanel_compareVersions": {
+    "message": "Depth/version compare"
+  },
+  "debugPanel_compareVersionsEmpty": {
+    "message": "No stored versions"
+  },
+  "debugPanel_compareVersionsFailed": {
+    "message": "Couldn't load the version list"
+  },
+  "debugPanel_compareVersionLoaded": {
+    "message": "Version $P1$ · depth=$P2$ · $P3$/$P4$ lines matched (Δ = current − version)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      },
+      "P4": {
+        "content": "$4"
+      }
+    }
+  },
+  "debugPanel_compareVersionNone": {
+    "message": "Couldn't load this version"
+  },
+  "debugPanel_compareVersionRowTitle": {
+    "message": "Click to compare with this version (click again to clear)"
+  },
   "debugPanel_heardPrefix": {
     "message": "Heard: $P1$",
     "placeholders": {
@@ -1014,6 +1046,12 @@
   },
   "overlay_settings_row_videoCaptionsTitle": {
     "message": "Shows the current lyric line as captions on the YouTube player itself (with pronunciation/translation). YouTube's own captions are hidden while on"
+  },
+  "overlay_settings_row_captionFontScale": {
+    "message": "Caption font size"
+  },
+  "overlay_settings_row_captionBgOpacity": {
+    "message": "Caption background opacity"
   },
   "overlay_settings_row_modNextUp": {
     "message": "[Module] Next video info"

@@ -268,6 +268,36 @@ export interface SyncPreviousVersion {
   engine_version?: string | null;
 }
 
+/** GET /api/sync/{video_id}/versions 항목 — 깊이·버전 비교 목록의 한 행 (최신순, ≤10) */
+export interface SyncVersionSummary {
+  id: string;
+  engine?: string | null;
+  engine_variant?: string | null;
+  engine_version?: string | null;
+  language?: string | null;
+  quality_score?: number | null;
+  created_at?: string | null;
+  /** fast/medium/heavy — 서버 라우팅 깊이. null/없음이면 스탬프 도입 전 구세대 */
+  depth?: 'fast' | 'medium' | 'heavy' | null;
+}
+
+/** GET /api/sync/{video_id}/versions */
+export interface SyncVersionsResponse {
+  versions: SyncVersionSummary[];
+}
+
+/** GET /api/sync/{video_id}/versions/{result_id} — 목록에서 고른 버전의 전체 타임스탬프.
+ *  서버가 모르는 id면 404 → request()가 null을 준다(SyncPreviousVersion의 found=false와
+ *  달리 이 엔드포인트는 소프트 실패 필드가 없다는 게 서버 팀과의 계약이다). */
+export interface SyncVersionDetail {
+  timestamps?: EveryricSegment[];
+  language?: string | null;
+  quality_score?: number | null;
+  created_at?: string | null;
+  engine_version?: string | null;
+  depth?: 'fast' | 'medium' | 'heavy' | null;
+}
+
 /** RAW f0 곡선 (다운샘플) — midi[i]의 시각 = t0 + i*dt */
 export interface F0Curve {
   t0: number;
@@ -507,6 +537,10 @@ export interface Settings {
   /** [모듈] 영상 자막 — 플레이어 화면 자체에 현재 줄을 자막처럼 표시 (Language Reactor식).
    *  켜져 있는 동안 유튜브 자체 자막은 숨긴다. */
   videoCaptions: boolean;
+  /** 영상 자막 글자 크기 배율 — 0.7~1.6 권장, 기본 1(현행과 동일) */
+  captionFontScale: number;
+  /** 영상 자막 배경 불투명도 — 0~1, 기본 0.75(현행과 동일) */
+  captionBgOpacity: number;
   /** [모듈] 다음 영상 정보 — 메인 패널·PIP에 다음 재생 영상 제목 표시 */
   modNextUp: boolean;
   /** [모듈] 가라오케 레인 — PIP 전용이던 음정 레인(피아노롤)을 메인 가사창 아래에도 표시.
@@ -658,6 +692,10 @@ export type BgRequest =
   | { type: 'SYNC_LIST' }
   /** 이 영상 싱크의 직전 세대 조회 — 디버그 패널의 A/B 고스트 비교용 */
   | { type: 'SYNC_PREVIOUS'; payload: { videoId: string } }
+  /** 이 영상 싱크의 저장된 버전 목록(최신순 ≤10) — 디버그 패널의 깊이·버전 비교용 */
+  | { type: 'SYNC_VERSIONS'; payload: { videoId: string } }
+  /** 목록에서 고른 특정 버전의 전체 타임스탬프 — 모르는 id면 서버가 404(→ null) */
+  | { type: 'SYNC_VERSION_GET'; payload: { videoId: string; resultId: string } }
   /** 정렬 품질 별점 + 오류 제보 (수집 전용) */
   | { type: 'SYNC_FEEDBACK'; payload: { videoId: string; rating: number; category?: string; comment?: string } }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }

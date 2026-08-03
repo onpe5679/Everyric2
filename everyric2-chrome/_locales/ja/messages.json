@@ -225,6 +225,38 @@
       }
     }
   },
+  "debugPanel_compareVersions": {
+    "message": "深度・バージョン比較"
+  },
+  "debugPanel_compareVersionsEmpty": {
+    "message": "保存されたバージョンがありません"
+  },
+  "debugPanel_compareVersionsFailed": {
+    "message": "バージョン一覧を読み込めませんでした"
+  },
+  "debugPanel_compareVersionLoaded": {
+    "message": "バージョン $P1$ · 深度=$P2$ · 対応 $P3$/$P4$行 (Δ = 現在 − バージョン)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      },
+      "P4": {
+        "content": "$4"
+      }
+    }
+  },
+  "debugPanel_compareVersionNone": {
+    "message": "このバージョンを読み込めませんでした"
+  },
+  "debugPanel_compareVersionRowTitle": {
+    "message": "クリックしてこのバージョンと比較(もう一度クリックで解除)"
+  },
   "debugPanel_heardPrefix": {
     "message": "認識: $P1$",
     "placeholders": {
@@ -1014,6 +1046,12 @@
   },
   "overlay_settings_row_videoCaptionsTitle": {
     "message": "YouTubeプレイヤー画面自体に現在の歌詞行を字幕のように表示します（発音・翻訳付き）。オンの間はYouTube自体の字幕は隠れます"
+  },
+  "overlay_settings_row_captionFontScale": {
+    "message": "字幕の文字サイズ"
+  },
+  "overlay_settings_row_captionBgOpacity": {
+    "message": "字幕背景の不透明度"
   },
   "overlay_settings_row_modNextUp": {
     "message": "[モジュール] 次の動画情報"

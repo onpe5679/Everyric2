@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchPreviousSync, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, submitFeedback, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
+import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchPreviousSync, fetchSyncVersion, fetchSyncVersions, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, submitFeedback, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { mirahezeLookup } from './lib/miraheze';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
@@ -313,6 +313,20 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       const server = await getServerConfig();
       return call('sync_previous_failed', sink =>
         fetchPreviousSync(server, message.payload.videoId, sink));
+    }
+
+    case 'SYNC_VERSIONS': {
+      // 디버그 패널의 깊이·버전 비교 — 저장된 버전 목록(최신순 ≤10)
+      const server = await getServerConfig();
+      return call('sync_versions_failed', sink =>
+        fetchSyncVersions(server, message.payload.videoId, sink));
+    }
+
+    case 'SYNC_VERSION_GET': {
+      // 목록에서 고른 버전 하나의 전체 타임스탬프 — 모르는 id면 서버가 404(→ null)
+      const server = await getServerConfig();
+      return call('sync_version_get_failed', sink =>
+        fetchSyncVersion(server, message.payload.videoId, message.payload.resultId, sink));
     }
 
     case 'SYNC_FEEDBACK': {

@@ -121,6 +121,7 @@ async function init(): Promise<void> {
   settings = await getSettings();
   setUiLanguage(settings.uiLanguage); // 이 콘텐츠 스크립트가 실제로 t()를 쓰는 유일한 곳 — 세션 시작 시 한 번 맞춘다
   videoCaption.applyDisplay(resolveScript(settings), settings.showPronunciation, settings.showTranslation);
+  videoCaption.applyStyle({ fontScale: settings.captionFontScale, bgOpacity: settings.captionBgOpacity });
   videoCaption.setEnabled(settings.videoCaptions);
   [cssText, initialGeometry] = await Promise.all([loadCss(), getGeometry()]);
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
@@ -604,6 +605,7 @@ function ensureOverlay(): LyricsOverlay {
     onCancelGenerate: () => void handleCancelGenerate(),
     onUnlinkSync: () => void handleUnlinkSync(),
     onRequestSyncList: () => void handleRequestSyncList(),
+    getVideoId: () => currentVideoId,
     onLoadPreviousSync: async () => {
       const videoId = currentVideoId;
       if (!videoId) return null;
@@ -905,6 +907,11 @@ async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
   // 영상 자막 모듈 — 켜고 끄기 + 표시 방식(표기/발음/번역) 즉시 반영
   if (patch.videoCaptions !== undefined) {
     videoCaption.setEnabled(patch.videoCaptions);
+  }
+  if (patch.captionFontScale !== undefined || patch.captionBgOpacity !== undefined) {
+    videoCaption.applyStyle({
+      fontScale: settings.captionFontScale, bgOpacity: settings.captionBgOpacity,
+    });
   }
   // 다음 영상 정보 모듈 — 토글 즉시 반영(끄면 즉시 숨김, 켜면 즉시 조회)
   if (patch.modNextUp !== undefined) {

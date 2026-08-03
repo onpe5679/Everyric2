@@ -225,6 +225,38 @@
       }
     }
   },
+  "debugPanel_compareVersions": {
+    "message": "깊이·버전 비교"
+  },
+  "debugPanel_compareVersionsEmpty": {
+    "message": "저장된 버전이 없어요"
+  },
+  "debugPanel_compareVersionsFailed": {
+    "message": "버전 목록을 불러오지 못했어요"
+  },
+  "debugPanel_compareVersionLoaded": {
+    "message": "버전 $P1$ · 깊이=$P2$ · 대응 $P3$/$P4$줄 (Δ = 현재 − 버전)",
+    "placeholders": {
+      "P1": {
+        "content": "$1"
+      },
+      "P2": {
+        "content": "$2"
+      },
+      "P3": {
+        "content": "$3"
+      },
+      "P4": {
+        "content": "$4"
+      }
+    }
+  },
+  "debugPanel_compareVersionNone": {
+    "message": "이 버전을 불러오지 못했어요"
+  },
+  "debugPanel_compareVersionRowTitle": {
+    "message": "클릭해서 이 버전과 비교 (다시 클릭하면 해제)"
+  },
   "debugPanel_heardPrefix": {
     "message": "들림: $P1$",
     "placeholders": {
@@ -1014,6 +1046,12 @@
   },
   "overlay_settings_row_videoCaptionsTitle": {
     "message": "유튜브 화면 자체에 현재 가사 줄을 자막처럼 띄워요 (발음·번역 포함). 켜져 있는 동안 유튜브 자체 자막은 숨겨져요"
+  },
+  "overlay_settings_row_captionFontScale": {
+    "message": "자막 글자 크기"
+  },
+  "overlay_settings_row_captionBgOpacity": {
+    "message": "자막 배경 불투명도"
   },
   "overlay_settings_row_modNextUp": {
     "message": "[모듈] 다음 영상 정보"

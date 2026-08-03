@@ -1,4 +1,4 @@
-import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, SyncPreviousVersion, TranslateResult } from '../types';
+import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, SyncPreviousVersion, SyncVersionDetail, SyncVersionsResponse, TranslateResult } from '../types';
 import { affectsServerStatus, failureKindFromStatus, failureToStatus, maskPath, maskSecret, okStatus } from './server-status';
 import { localPermissionBlock, normalizeLoopbackUrl } from './host-permissions';
 
@@ -229,6 +229,34 @@ export async function fetchPreviousSync(
 ): Promise<SyncPreviousVersion | null> {
   return request<SyncPreviousVersion>(
     server, `/api/sync/${encodeURIComponent(videoId)}/previous`, undefined, 8000, sink,
+  );
+}
+
+/**
+ * 이 영상 자기 싱크의 저장된 버전 목록(최신순, ≤10) — 디버그 패널의 깊이·버전 비교용.
+ * fetchPreviousSync와 달리 목록 자체가 없다는 소프트 실패 필드가 없다 — 이 엔드포인트가
+ * 없는 구버전 서버는 404 → null이므로 호출부는 조용히 포기한다(다른 additive 엔드포인트와
+ * 같은 규칙).
+ */
+export function fetchSyncVersions(
+  server: ServerConfig, videoId: string, sink?: FailureSink,
+): Promise<SyncVersionsResponse | null> {
+  return request<SyncVersionsResponse>(
+    server, `/api/sync/${encodeURIComponent(videoId)}/versions`, undefined, 8000, sink,
+  );
+}
+
+/**
+ * 목록에서 고른 버전 하나의 전체 타임스탬프 — 디버그 패널이 이걸로 고스트 비교를 그린다.
+ * 서버가 모르는 result_id면 404 → null (이 버전이 만료·삭제됐거나 오타).
+ */
+export function fetchSyncVersion(
+  server: ServerConfig, videoId: string, resultId: string, sink?: FailureSink,
+): Promise<SyncVersionDetail | null> {
+  return request<SyncVersionDetail>(
+    server,
+    `/api/sync/${encodeURIComponent(videoId)}/versions/${encodeURIComponent(resultId)}`,
+    undefined, 8000, sink,
   );
 }
 

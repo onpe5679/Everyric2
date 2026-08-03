@@ -59,6 +59,9 @@ export interface OverlayCallbacks {
   onRequestSyncList: () => void;
   /** 이 영상 싱크의 직전 세대 조회 — 디버그 패널 A/B 고스트 비교용. 이력 없으면 found=false */
   onLoadPreviousSync: () => Promise<SyncPreviousVersion | null>;
+  /** 디버그 패널 "깊이·버전 비교" 버튼이 SYNC_VERSIONS를 직접 호출할 때 필요 — 콜백이
+   *  아니라 값 자체가 필요해서 게터로 둔다 */
+  getVideoId: () => string | null;
   /** 분석 깊이 올리기/구세대 업그레이드 — minDepth 없으면 일반 재생성(=신 스택 자동 라우팅) */
   onDepthUpgrade: (minDepth?: 'medium' | 'heavy') => void;
   /** 정렬 품질 별점(1~5) + 선택 오류 제보 전송 — 성공 여부를 돌려준다 */
@@ -1412,7 +1415,8 @@ export class LyricsOverlay {
     // "UI만" 모듈이라 이 보정을 모른다(라인 목록의 클릭 시크와 같은 이유·같은 값)
     const { el } = buildDebugPanel(this.lines, this.debugMeta,
       time => this.callbacks.onSeek(time + SEEK_INTO_LINE_SEC),
-      () => this.callbacks.onLoadPreviousSync());
+      () => this.callbacks.onLoadPreviousSync(),
+      this.callbacks.getVideoId());
     this.debugPanelEl.replaceChildren(el);
     this.debugPanelEl.style.display = '';
   }
