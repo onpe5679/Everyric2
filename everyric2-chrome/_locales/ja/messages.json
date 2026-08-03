@@ -1723,5 +1723,72 @@
   },
   "overlay_settings_row_pitchLineOpacityTitle": {
     "message": "f0曲線・ノートバーの不透明度を調整します"
+  },
+  "content_genChip_preparingDepth": {
+    "message": "解析深度を上げています — 発音・翻訳の保存を準備中…"
+  },
+  "content_genChip_depthFast": {
+    "message": "高速"
+  },
+  "content_genChip_depthMedium": {
+    "message": "標準"
+  },
+  "content_genChip_depthHeavy": {
+    "message": "精密"
+  },
+  "content_genChip_depthState": {
+    "message": "$P1$ · $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "content_genChip_etaMinutes": {
+    "message": "残り約$P1$分",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_genChip_etaSoon": {
+    "message": "まもなく完了"
+  },
+  "content_genChip_stageEta": {
+    "message": "$P1$ · $P2$",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "content_genChip_queueEta": {
+    "message": "待機列$P1$番目 · 約$P2$分",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "content_genChip_queueEtaNoPos": {
+    "message": "待機列 · 約$P1$分",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "content_genChip_depthUpgraded": {
+    "message": "精密解析に切り替わりました"
   }
 }

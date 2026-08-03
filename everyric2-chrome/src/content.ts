@@ -18,11 +18,13 @@ import {
   selectTranslationTrack,
   type YtCaptionTrack,
 } from './lib/yt-captions';
+import { CONTRIB_MAX, CONTRIB_STORAGE_KEY } from './types';
 import type {
   ApiFailure,
   BgRequest,
   CaptionLine,
   ContentMessage,
+  ContribEntry,
   GenerateResponse,
   JobStatusResponse,
   LinkCandidatesResponse,
@@ -75,13 +77,38 @@ let lastVocaro: { videoId: string; lines: VocaroLine[] } | null = null; // 싱�
  */
 let keptLyrics: { videoId: string; data: LyricsData } | null = null;
 /** 진행 중인 전사 잡 — videoId 키. 영상을 이동해도 백그라운드로 계속 추적한다 */
-const generatingJobs = new Map<string, {
+interface TrackedJob {
   jobId: string; progress: number; queueLabel?: string;
   stage?: string; stageProgress?: number; title?: string;
-}>();
+  /** 서버가 알려준 분석 깊이 — 라우팅 판정 뒤부터 실린다(구버전 서버는 영영 없다) */
+  depth?: 'fast' | 'medium' | 'heavy';
+  /** 남은 예상 시간(초) / 큐 대기 예상(초) — 없으면 화면은 퍼센트로 폴백한다 */
+  etaSec?: number;
+  queueEtaSec?: number;
+  queuePosition?: number;
+  /** heavy 승격을 이미 알렸는가 — 폴링마다 같은 칩이 다시 뜨지 않게 하는 일회성 표식 */
+  heavyNoticed?: boolean;
+  /**
+   * **이 탭이 직접 낸 잡인가** — 폴링 주체와 실패 알림 자격을 함께 정한다.
+   *
+   * 폴링: 모든 탭이 모든 잡을 폴링하면 요청이 탭수×잡수로 곱해진다(유튜브를 여러 개 열어
+   * 두는 것이 이 확장의 표준 사용 형태다). 남의 잡은 그 탭이 폴링해 storage에 반영하고,
+   * 이 탭은 그 반영을 이어받아 칩에만 비춘다.
+   *
+   * 알림: 서버에 기록이 없는 잡(gone)을 실패로 알릴 자격도 여기서 갈린다. storage에서
+   * 복원한 잡은 이전 세션의 잔해라 서버 기록이 이미 없는 것이 정상인데(탭을 진행 중에
+   * 닫으면 항목이 남는다), 그것까지 알리면 사용자는 **아무것도 시키지 않은 브라우저 시작
+   * 직후에** "싱크 생성 실패"를 받는다. 내가 방금 낸 잡이 사라진 것만 사고다.
+   */
+  owned?: boolean;
+}
+const generatingJobs = new Map<string, TrackedJob>();
 // 생성 요청 준비 단계(LLM 번역·독음 대기, 수십 초) 중인 영상 — 잡 등록 전이라
 // generatingJobs가 비어 있어, 이 가드가 없으면 버튼 연타가 전부 서버로 나간다
 const preparingGenerate = new Set<string>();
+// 그중 **깊이 올리기**로 시작된 준비 — 같은 준비 단계라도 사용자에게는 다른 사건이라
+// 칩 문구를 가른다(updateGenChip). 생성 가드는 위 preparingGenerate가 그대로 담당한다.
+const preparingDepthUpgrade = new Set<string>();
 // 진행 중 잡을 탭 간 공유하는 storage 키 — 다른 탭/새 탭에서도 진행 칩이 이어진다
 const JOBS_STORAGE_KEY = 'activeJobs';
 /**
@@ -127,28 +154,47 @@ async function init(): Promise<void> {
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
   await restoreActiveJobs();
   watchJobsFromOtherTabs();
+  watchSettingsFromOtherTabs();
   observeNavigation();
   checkCurrentPage();
 }
 
-/** 다른 탭이 새로 시작한 전사 잡을 실시간으로 이어받는다 (storage 이벤트).
- *  삭제 동기화는 하지 않는다 — 다른 탭이 마감한 잡은 이 탭 폴링도 곧
- *  completed/404를 보고 스스로 정리하므로, 이벤트 순서 경합으로 산 잡을
- *  잘못 지우는 위험만 남기 때문. */
+/**
+ * 다른 탭의 전사 잡 목록 변화를 이어받는다 (storage 이벤트) — 추가와 **삭제 양쪽**.
+ *
+ * 예전에는 추가만 반영했다. 그때는 모든 탭이 모든 잡을 폴링해서 남이 마감한 잡도 이 탭
+ * 폴링이 곧 completed/404로 보고 스스로 정리했기 때문이다(그래서 삭제 동기화의 경합
+ * 위험만 피하는 것이 맞았다). 폴링을 자기 잡으로 좁힌 지금은 그 자가 정리가 없다 —
+ * 삭제를 안 받으면 남의 탭에서 이미 끝난 잡이 이 탭 칩에 "다른 영상 전사 중 1건"으로
+ * 영원히 남는다.
+ *
+ * **지우는 것은 내 잡이 아닌 것뿐이다.** persistActiveJobs는 탭 간 read-merge-write라,
+ * 다른 탭이 내 쓰기 직전 상태를 읽어 저장하면 방금 낸 내 잡이 잠깐 빠진 스냅샷이 돌 수
+ * 있다 — 그걸 근거로 내 산 잡을 지우면 진행 추적이 통째로 끊긴다. 남의 잡은 그 사이
+ * 다시 나타나면 아래 추가 경로가 도로 넣으므로 잘못 지워도 자가 복구된다.
+ */
 function watchJobsFromOtherTabs(): void {
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local' || !changes[JOBS_STORAGE_KEY]) return;
       const jobs = (changes[JOBS_STORAGE_KEY].newValue ?? {}) as
         Record<string, { jobId: string; title?: string }>;
-      let added = false;
+      let dirty = false;
       for (const [videoId, job] of Object.entries(jobs)) {
         if (job?.jobId && !generatingJobs.has(videoId)) {
+          // 남의 탭 잡 — owned를 세우지 않는다. 지금 이 탭이 보고 있는 영상이 아니면
+          // 폴링하지 않고 칩에만 비춘다(pollableJobs 참고).
           generatingJobs.set(videoId, { jobId: job.jobId, progress: 0, title: job.title });
-          added = true;
+          dirty = true;
         }
       }
-      if (added) {
+      for (const [videoId, job] of [...generatingJobs]) {
+        if (!job.owned && !jobs[videoId]) {
+          generatingJobs.delete(videoId);
+          dirty = true;
+        }
+      }
+      if (dirty) {
         ensurePolling();
         updateGenChip();
       }
@@ -165,6 +211,8 @@ async function restoreActiveJobs(): Promise<void> {
     if (!jobs) return;
     for (const [videoId, job] of Object.entries(jobs)) {
       if (job?.jobId && !generatingJobs.has(videoId)) {
+        // owned를 세우지 않는다 — 이전 세션의 잔해일 수 있어 서버 기록 소실이 사고가
+        // 아니다(TrackedJob.owned 주석). 지금 보는 영상의 것이면 그래도 폴링된다.
         generatingJobs.set(videoId, { jobId: job.jobId, progress: 0, title: job.title });
       }
     }
@@ -181,20 +229,59 @@ function removeJob(videoId: string): void {
   void persistActiveJobs();
 }
 
-/** 진행 중 잡 목록을 storage에 반영 — 다른 탭이 이어받을 수 있게.
- *  통째로 덮어쓰면 탭끼리 서로의 잡을 지우므로 read-merge-write:
- *  이 탭의 잡은 얹고, 이 탭이 마감한 잡만 걷어낸다. */
-async function persistActiveJobs(): Promise<void> {
-  try {
-    const stored = await chrome.storage.local.get(JOBS_STORAGE_KEY);
-    const merged: Record<string, { jobId: string; title?: string }> = {
-      ...(stored[JOBS_STORAGE_KEY] as Record<string, { jobId: string; title?: string }> | undefined),
-    };
-    for (const v of finishedJobs) delete merged[v];
-    finishedJobs.clear();
-    for (const [v, j] of generatingJobs) merged[v] = { jobId: j.jobId, title: j.title };
-    await chrome.storage.local.set({ [JOBS_STORAGE_KEY]: merged });
-  } catch { /* storage 실패는 치명적이지 않다 */ }
+/**
+ * 진행 중 잡 목록을 storage에 반영 — 다른 탭이 이어받을 수 있게.
+ *
+ * 통째로 덮어쓰면 탭끼리 서로의 잡을 지우므로 read-merge-write: 이 탭의 잡은 얹고, 이 탭이
+ * 마감한 잡만 걷어낸다.
+ *
+ * **저장은 한 줄로 세운다(saveChain과 같은 이유).** read-merge-write가 비원자라 겹치면
+ * 나중 것이 먼저 것의 결과를 덮는데, 여기서는 그 손해가 더 크다: `finishedJobs.clear()`가
+ * 두 실행 사이에 끼면 **아직 반영되지 않은 삭제 목록이 사라져** 마감된 잡이 storage에
+ * 영구히 남는다. 그 유령 항목은 브라우저를 켤 때마다 복원돼 죽은 잡을 폴링한다.
+ */
+let persistJobsChain: Promise<void> = Promise.resolve();
+
+function persistActiveJobs(): Promise<void> {
+  const next = persistJobsChain.catch(() => undefined).then(async () => {
+    try {
+      const stored = await chrome.storage.local.get(JOBS_STORAGE_KEY);
+      const merged: Record<string, { jobId: string; title?: string }> = {
+        ...(stored[JOBS_STORAGE_KEY] as Record<string, { jobId: string; title?: string }> | undefined),
+      };
+      for (const v of finishedJobs) delete merged[v];
+      finishedJobs.clear();
+      for (const [v, j] of generatingJobs) merged[v] = { jobId: j.jobId, title: j.title };
+      await chrome.storage.local.set({ [JOBS_STORAGE_KEY]: merged });
+    } catch { /* storage 실패는 치명적이지 않다 — 마감 목록은 다음 저장에서 다시 시도된다 */ }
+  });
+  persistJobsChain = next;
+  return next;
+}
+
+/**
+ * 이 브라우저가 만든 싱크 이력에 한 건 적는다 (로컬 전용, ContribEntry 문서 참고).
+ *
+ * 서버에는 "누가 만들었나"가 없으므로 완료를 **관측한 탭**이 적는 것이 유일한 기록 경로다.
+ * jobId로 중복을 막는다 — 같은 영상을 두 탭이 함께 보고 있으면 완료도 양쪽이 관측한다.
+ * 저장은 잡 목록과 같은 이유로 직렬화한다(read-merge-write 경합).
+ */
+let contribChain: Promise<void> = Promise.resolve();
+
+function recordContribution(entry: ContribEntry): Promise<void> {
+  const next = contribChain.catch(() => undefined).then(async () => {
+    try {
+      const stored = await chrome.storage.local.get(CONTRIB_STORAGE_KEY);
+      const list = (stored[CONTRIB_STORAGE_KEY] as ContribEntry[] | undefined) ?? [];
+      if (list.some(e => e.jobId === entry.jobId)) return; // 다른 탭이 이미 적었다
+      list.push(entry);
+      // 상한 초과분은 앞(오래된 것)부터 버린다 — 최근 기여가 화면의 관심사다
+      const capped = list.length > CONTRIB_MAX ? list.slice(list.length - CONTRIB_MAX) : list;
+      await chrome.storage.local.set({ [CONTRIB_STORAGE_KEY]: capped });
+    } catch { /* 기록 실패는 표시에만 영향 — 조용히 넘어간다 */ }
+  });
+  contribChain = next;
+  return next;
 }
 
 async function loadCss(): Promise<string> {
@@ -574,7 +661,9 @@ function ensureOverlay(): LyricsOverlay {
       const videoId = currentVideoId;
       if (!videoId) return false;
       const res = await sendToBackground<{ ok: boolean }>({
-        type: 'SYNC_FEEDBACK', payload: { videoId, rating, category, comment },
+        // 어느 깊이로 만든 싱크에 대한 평가인지 함께 — 같은 곡도 깊이마다 결과가 달라서,
+        // 이게 없으면 별점이 "이 곡" 평가로만 남아 깊이별 품질을 가를 수 없다
+        type: 'SYNC_FEEDBACK', payload: { videoId, rating, category, comment, depth: currentSyncDepth() },
       });
       return Boolean(res.data?.ok);
     },
@@ -619,6 +708,28 @@ function ensureOverlay(): LyricsOverlay {
   }, initialGeometry);
   overlay.setServerStatus(serverStatus); // 이미 알고 있는 상태를 새 패널에 즉시 반영
   return overlay;
+}
+
+/**
+ * 서버가 준 깊이 문자열 중 **이 확장이 아는 것만** 통과시킨다.
+ *
+ * 타입에 유니온을 적어 두어도 네트워크 값은 무엇이든 올 수 있다 — 서버가 깊이 어휘를
+ * 넓히면(예: 새 단계 추가) 라벨 표에 없는 값이 그대로 들어와 `t(undefined)`로 진행 칩
+ * 렌더가 통째로 터진다. 모르는 값은 "모름"으로 다루는 편이 언제나 낫다(단계명 표가
+ * 모르는 stage를 원문 그대로 흘려보내는 것과 같은 전방 호환 규칙).
+ */
+function knownDepth(value: string | null | undefined): 'fast' | 'medium' | 'heavy' | undefined {
+  return value === 'fast' || value === 'medium' || value === 'heavy' ? value : undefined;
+}
+
+/**
+ * 지금 보고 있는 싱크가 어느 깊이로 만들어졌는가 — 서버 라우팅 판정(debugMeta.routing.route).
+ *
+ * 구세대 싱크·비 everyric 소스에는 이 메타가 없다(undefined) — 그때는 값을 지어내지 않는다.
+ * 서버가 나중에 route 어휘를 넓혀도 모르는 값은 걸러 보내지 않는다(빈 값이 틀린 값보다 낫다).
+ */
+function currentSyncDepth(): 'fast' | 'medium' | 'heavy' | undefined {
+  return knownDepth(currentData?.debugMeta?.routing?.route);
 }
 
 /** 최근 서버 요청 기록 — 백그라운드가 마스킹까지 마친 것을 그대로 받는다 */
@@ -850,8 +961,51 @@ async function handleRequestSyncList(): Promise<void> {
   overlay?.showSyncList(res.data ?? []);
 }
 
+/**
+ * 이 탭에서 설정을 바꿨다 — 저장하고 그 자리에서 반영한다.
+ *
+ * `settings`를 저장 **전에** 낙관적으로 선반영하는 것이 자기 쓰기 되울림을 막는 장치다:
+ * storage.onChanged는 `set()`의 await보다 먼저 올 수 있어 순서에 기댈 수 없는데, 값이 이미
+ * 같으면 아래 watchSettingsFromOtherTabs의 차이 계산이 빈 patch를 내놓아 저절로 무시된다
+ * (별도 플래그·타임스탬프 없이 값 자체로 판정한다). saveSettings의 반환값이 최종 권위다 —
+ * 다른 탭이 그 사이 쓴 값까지 병합돼 오므로 그것으로 덮어쓴다.
+ */
 async function handleSettingsChange(patch: Partial<Settings>): Promise<void> {
+  settings = { ...settings, ...patch };
   settings = await saveSettings(patch);
+  applySettingsPatch(patch);
+}
+
+/**
+ * 다른 탭·옵션 페이지의 설정 변경을 이 탭에도 실시간 반영한다.
+ *
+ * 지금까지 이 리스너는 잡 목록(activeJobs)만 봤다 — 그래서 옵션 페이지에서 서버 주소나
+ * 표시 설정을 바꿔도 열려 있던 유튜브 탭은 **새로고침 전까지** 옛 설정으로 돌았다(설정을
+ * 바꾼 사용자는 당연히 즉시 바뀔 것으로 기대한다). 적용은 이 탭의 설정 시트가 쓰는 것과
+ * 같은 applySettingsPatch를 그대로 태운다 — 경로가 갈리면 "여기서만 되는 설정"이 생긴다.
+ */
+function watchSettingsFromOtherTabs(): void {
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes.settings) return;
+      const next = changes.settings.newValue as Partial<Settings> | undefined;
+      if (!next) return;
+      // 실제로 달라진 키만 추린다 — 이 탭이 방금 쓴 값이면 차이가 없어 빈 patch가 된다
+      const patch: Partial<Settings> = {};
+      for (const key of Object.keys(next) as (keyof Settings)[]) {
+        if (next[key] !== undefined && next[key] !== settings[key]) {
+          (patch as Record<string, unknown>)[key] = next[key];
+        }
+      }
+      if (Object.keys(patch).length === 0) return;
+      settings = { ...settings, ...patch };
+      applySettingsPatch(patch);
+    });
+  } catch { /* 이벤트 미지원 환경 — 이 탭의 설정 변경만 반영된다(기존 동작) */ }
+}
+
+/** 설정 patch를 실행 중인 화면에 반영 — 저장은 하지 않는다(호출부가 이미 했거나 남의 쓰기다) */
+function applySettingsPatch(patch: Partial<Settings>): void {
   if (patch.uiLanguage !== undefined) setUiLanguage(settings.uiLanguage);
   overlay?.applySettings(settings);
   // 키를 고치는 것이 인증 실패의 정상 복구 경로다 — URL과 함께 즉시 재확인한다
@@ -1929,6 +2083,10 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
   panel.setAvailableLangs(null);
   if (pip.isOpen()) pip.showPanelLoading(); // PiP도 같은 검색 상태를 따라간다
   updateGenChip(); // 이 영상(또는 다른 영상)의 전사 진행 칩은 검색과 무관하게 유지
+  // 이 영상의 잡이 추적 목록에 있으면 폴링을 (다시) 켠다 — 남의 탭이 시작한 잡은 폴링
+  // 대상이 아니라 타이머가 꺼져 있을 수 있는데, 그 영상으로 이동한 지금은 이 탭이 결과를
+  // 화면에 반영해야 하는 자리다(pollableJobs 참고)
+  if (generatingJobs.has(videoId)) ensurePolling();
   // 알림 칩은 영상별 사건이다 — **영상이 바뀔 때만** 지난 알림을 지우고, 이 영상의 검증이
   // 아직 돌고 있으면 배지를 되살린다(돌아왔을 때도 진행 중임을 알 수 있게).
   // 같은 영상의 재조회에서 지우면 안 된다: 자동 연결 성공은 "알림 → 재조회" 순서라
@@ -2763,7 +2921,7 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
     if (!alreadyDone) {
       // 패널을 점유하지 않는다 — 현재 화면(가사/검색)은 그대로 두고 작은 칩으로 진행률만 표시.
       // 다른 영상으로 이동해도 잡은 계속 추적되고, 완료 후 돌아오면 조회 시 자동 반영된다.
-      generatingJobs.set(videoId, { jobId, progress: 0, title: currentSong?.title });
+      generatingJobs.set(videoId, { jobId, progress: 0, title: currentSong?.title, owned: true });
       void persistActiveJobs();
       ensurePolling();
     }
@@ -2811,6 +2969,9 @@ async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
   if (!videoId || !data?.synced || data.source !== 'everyric') return;
   if (generatingJobs.has(videoId) || preparingGenerate.has(videoId)) return;
   preparingGenerate.add(videoId);
+  // 깊이 올리기와 단순 재생성은 준비 단계에서 하는 일이 같지만(발음·번역 재조달) 사용자
+  // 입장에서는 다른 사건이다 — 칩 문구를 가르기 위한 표식만 따로 세운다
+  if (minDepth) preparingDepthUpgrade.add(videoId);
   updateGenChip();
 
   try {
@@ -2885,11 +3046,19 @@ async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
       if (videoId === currentVideoId) reportFailure(t('content.failure.regenerateRequest'), note);
       return;
     }
-    generatingJobs.set(videoId, { jobId: res.data.job_id, progress: 0, title: currentSong?.title });
+    generatingJobs.set(videoId, {
+      jobId: res.data.job_id, progress: 0, title: currentSong?.title, owned: true,
+      // 깊이를 지정해 다시 만드는 중이면 그 깊이가 곧 이 잡의 깊이다 — 서버 응답을
+      // 기다리지 않고 배지를 먼저 세운다(첫 폴링 전 2초 동안 배지가 비지 않게).
+      depth: minDepth,
+      // 사용자가 스스로 올린 깊이는 "전환됐다"고 알릴 사건이 아니다
+      heavyNoticed: minDepth === 'heavy',
+    });
     void persistActiveJobs();
     ensurePolling();
   } finally {
     preparingGenerate.delete(videoId);
+    preparingDepthUpgrade.delete(videoId);
     updateGenChip();
   }
 }
@@ -2973,18 +3142,38 @@ async function handleCancelGenerate(): Promise<void> {
   updateGenChip();
 }
 
+/**
+ * 이 탭이 실제로 서버에 물어볼 잡들.
+ *
+ * 예전에는 열린 모든 유튜브 탭이 **모든** 잡을 폴링했다 — restoreActiveJobs와
+ * watchJobsFromOtherTabs가 남의 탭 잡까지 generatingJobs에 넣기 때문이다. 탭 N개 ×
+ * 진행 잡 M개면 2초마다 N×M 요청이 나가고, 같은 잡의 완료를 여러 탭이 각자 관측해
+ * removeJob·알림이 중복됐다. 폴링 주체를 좁혀도 화면은 손해가 없다 — 남의 잡은 그 탭이
+ * 폴링해 storage에 반영하고, 이 탭은 storage 이벤트로 그 상태를 이어받아 칩에 비춘다.
+ *
+ * 지금 보고 있는 영상의 잡만은 남이 시작했어도 직접 폴링한다: 완료 즉시 이 화면을 새
+ * 싱크로 갈아야 하는 곳이라, 남의 탭 반영을 기다릴 수 없다.
+ */
+function pollableJobs(): [string, TrackedJob][] {
+  return [...generatingJobs].filter(([videoId, job]) => job.owned || videoId === currentVideoId);
+}
+
 async function pollJobs(): Promise<void> {
-  // 커버 자동 연결 검증 잡도 같은 타이머에 얹혀 돈다 — 둘 다 비어야 타이머를 멈춘다
-  if (generatingJobs.size === 0 && linkJobs.size === 0) {
+  const targets = pollableJobs();
+  // 물어볼 것이 없으면 타이머를 멈춘다 — 커버 자동 연결 검증 잡도 같은 타이머에 얹혀
+  // 도므로 둘 다 비어야 한다. **남의 탭 잡만 남은 경우도 여기서 멈춘다**: 그 상태는
+  // storage 이벤트로 갱신되므로 2초마다 깨어 있을 이유가 없고, 이 탭이 그 영상으로
+  // 이동하면 searchLyrics가 다시 켠다.
+  if (targets.length === 0 && linkJobs.size === 0) {
     stopPolling();
     updateGenChip();
     return;
   }
   // 폴링 간격 백오프는 **전사 잡** 응답만 근거로 한다 (아래 for 루프가 도는 경우).
   // 전사 잡이 없는데 anyResponse=false로 읽히면 멀쩡한 서버에서 간격이 늘어난다.
-  const hadSyncJobs = generatingJobs.size > 0;
+  const hadSyncJobs = targets.length > 0;
   let anyResponse = false;
-  for (const [videoId, job] of [...generatingJobs]) {
+  for (const [videoId, job] of targets) {
     const res = await sendToBackground<JobStatusResponse>({ type: 'JOB_STATUS', payload: { jobId: job.jobId } });
     if (generatingJobs.get(videoId)?.jobId !== job.jobId) continue; // 그 사이 교체/취소됨
     const status = res.data;
@@ -2994,6 +3183,14 @@ async function pollJobs(): Promise<void> {
     if (status.status === 'completed') {
       removeJob(videoId);
       const label = job.title ?? videoId;
+      // 이 브라우저의 기여 이력에 적는다 — 서버엔 "누가 만들었나"가 없다(ContribEntry 문서)
+      void recordContribution({
+        videoId,
+        jobId: job.jobId,
+        title: label,
+        completedAt: Date.now(),
+        depth: knownDepth(status.depth) ?? job.depth,
+      });
       if (videoId === currentVideoId) {
         // 결과를 불러온 **뒤에** 알린다 — 잡 성공만 보고 "준비됐어요"라고 하면 발음·번역이
         // 한 줄도 안 붙은 싱크까지 성공으로 보고된다(실측: 자막 경로 0/35줄)
@@ -3015,7 +3212,12 @@ async function pollJobs(): Promise<void> {
       }
     } else if (status.status === 'failed') {
       removeJob(videoId);
-      // gone = 서버에 잡 기록이 없음(재시작 등) — 무한 폴링 대신 명시적으로 마감
+      // 이전 세션에서 복원한 잡의 gone(서버에 기록 없음)은 **사고가 아니라 만료다.**
+      // 탭을 진행 중에 닫으면 항목이 storage에 남고, 며칠 뒤 브라우저를 켜면 이미 지워진
+      // 잡을 되살려 폴링한다 — 그 404를 실패로 알리면 사용자는 시키지도 않은 "싱크 생성
+      // 실패"를 브라우저 시작마다 받는다(실측 증상). 내가 방금 낸 잡이 사라진 경우(owned)는
+      // 여전히 알린다 — 그건 진짜로 알아야 하는 사고다.
+      if (status.gone && !job.owned) continue;
       const errMsg = status.gone
         ? t('content.error.jobGone')
         : (status.error || t('content.error.syncGenerationFailed'));
@@ -3029,6 +3231,19 @@ async function pollJobs(): Promise<void> {
       job.progress = status.progress ?? job.progress;
       job.stage = status.stage ?? undefined;
       job.stageProgress = status.stage_progress ?? undefined;
+      job.etaSec = status.eta_sec ?? undefined;
+      job.queueEtaSec = status.queue_eta_sec ?? undefined;
+      job.queuePosition = status.queue_position ?? undefined;
+      // 깊이가 도중에 heavy로 바뀌는 것은 **서버가 판단을 바꿨다**는 사건이다(라우팅이
+      // 얕게 잡았다가 결과가 나빠 다시 깊게 간다). 시간이 갑자기 늘어나는 이유를 말해
+      // 주지 않으면 멈춘 것처럼 보인다 — 승격 순간에 한 번만 알린다.
+      const prevDepth = job.depth;
+      job.depth = knownDepth(status.depth) ?? job.depth;
+      if (job.depth === 'heavy' && prevDepth !== undefined && prevDepth !== 'heavy'
+        && !job.heavyNoticed && videoId === currentVideoId) {
+        job.heavyNoticed = true;
+        showNotice(t('content.genChip.depthUpgraded'), 12000);
+      }
       job.queueLabel = status.queue_position != null && status.queue_position > 0
         ? t('content.queue.position', [String(status.queue_position)])
         : (status.status === 'queued' || status.status === 'pending' ? t('content.queue.label') : undefined);
@@ -3125,6 +3340,49 @@ function stageLabel(stage: string): string {
   return key ? t(key) : stage;
 }
 
+/** 분석 깊이 라벨 — 헤더 깊이 버튼의 1·2·3과 같은 것을 사람 말로 부른 것 */
+const DEPTH_LABEL_KEYS: Record<string, string> = {
+  fast: 'content.genChip.depthFast',
+  medium: 'content.genChip.depthMedium',
+  heavy: 'content.genChip.depthHeavy',
+};
+
+/**
+ * 남은 시간 문구 — 1분 미만은 초를 세지 않는다.
+ *
+ * 초 단위로 카운트다운하면 서버 추정이 흔들릴 때마다 숫자가 튀어(90→40→70) 표시 자체를
+ * 못 믿게 된다. 분 단위는 그 흔들림을 흡수하고, 1분 안쪽은 어차피 곧이므로 "곧 완료"로
+ * 뭉갠다. 0 이하(추정 초과)도 같은 문구다 — 음수를 보여줄 수는 없다.
+ */
+function etaText(sec: number): string {
+  if (sec < 60) return t('content.genChip.etaSoon');
+  return t('content.genChip.etaMinutes', [String(Math.round(sec / 60))]);
+}
+
+/** 진행 칩의 상태 조각 — 대기열 → ETA → 단계·퍼센트 순으로 아는 것 중 가장 구체적인 것 */
+function jobStateText(job: TrackedJob): string {
+  // 대기 중: 순번과 예상 대기를 함께 (둘 중 아는 것만)
+  if (job.queueLabel) {
+    if (job.queueEtaSec != null) {
+      const minutes = String(Math.max(1, Math.round(job.queueEtaSec / 60)));
+      return job.queuePosition != null && job.queuePosition > 0
+        ? t('content.genChip.queueEta', [String(job.queuePosition), minutes])
+        : t('content.genChip.queueEtaNoPos', [minutes]);
+    }
+    return job.queueLabel;
+  }
+  // 진행 중: 서버가 남은 시간을 알려주면 퍼센트보다 그것이 사용자에게 쓸모 있다.
+  // 퍼센트는 폴백으로 남긴다 — 구버전 서버는 eta_sec 자체가 없다.
+  if (job.etaSec != null) {
+    return job.stage
+      ? t('content.genChip.stageEta', [stageLabel(job.stage), etaText(job.etaSec)])
+      : etaText(job.etaSec);
+  }
+  return job.stage
+    ? t('content.genChip.stageProgress', [stageLabel(job.stage), String(job.stageProgress ?? 0), String(job.progress)])
+    : t('content.genChip.percentOnly', [String(job.progress)]);
+}
+
 /** 진행 칩 갱신 — 현재 영상 잡의 진행률, 그 외 영상 잡은 건수로 요약.
  *  메인 패널과 PiP 양쪽에 같은 문구를 밀어넣는다 (닫혀 있는 쪽은 no-op) — PiP만 보며
  *  '싱크 생성'을 누른 사용자에게 지금까지 진행 표시가 아예 없었다. */
@@ -3133,15 +3391,23 @@ function updateGenChip(): void {
   const others = generatingJobs.size - (cur ? 1 : 0);
   let text: string | null = null;
   if (!cur && currentVideoId && preparingGenerate.has(currentVideoId)) {
-    // 잡 등록 전 준비 단계 — 버튼이 무반응처럼 보이지 않게 즉시 표시
-    text = t('content.genChip.preparing');
+    // 잡 등록 전 준비 단계 — 버튼이 무반응처럼 보이지 않게 즉시 표시.
+    // 깊이 올리기도 같은 준비(발음·번역 재조달)를 하지만 문구는 가른다: 여기서
+    // "AI 번역·독음 요청"이라고 말하면, 정렬만 다시 시키려던 사용자는 자기가 누르지 않은
+    // 번역이 왜 도는지 알 수 없다(사용자 혼란 제보). 하는 일이 아니라 **무엇을 위한
+    // 일인지**를 말한다 — 발음·번역은 재생성 요청에 함께 실어 보내야 보존된다(그 배선이
+    // handleRegenerate의 lineMeta 재조달이다).
+    text = preparingDepthUpgrade.has(currentVideoId)
+      ? t('content.genChip.preparingDepth')
+      : t('content.genChip.preparing');
   } else if (cur) {
-    // 단계명이 오면 "보컬 분리 60% · 전체 68%"처럼 무슨 과정인지 함께 보여준다
-    const state = cur.queueLabel
-      ?? (cur.stage
-        ? t('content.genChip.stageProgress', [stageLabel(cur.stage), String(cur.stageProgress ?? 0), String(cur.progress)])
-        : t('content.genChip.percentOnly', [String(cur.progress)]));
-    text = t('content.genChip.transcribing', [state, others > 0 ? t('content.genChip.othersSuffix', [String(others)]) : '']);
+    // 단계명·남은 시간이 오면 무슨 과정이 얼마나 남았는지 함께 보여준다
+    const state = jobStateText(cur);
+    // 깊이는 알 때만 앞에 붙인다 — 라우팅 판정 전과 구버전 서버에서는 배지가 없다
+    const labeled = cur.depth
+      ? t('content.genChip.depthState', [t(DEPTH_LABEL_KEYS[cur.depth]), state])
+      : state;
+    text = t('content.genChip.transcribing', [labeled, others > 0 ? t('content.genChip.othersSuffix', [String(others)]) : '']);
   } else if (others > 0) {
     text = t('content.genChip.othersOnly', [String(others)]);
   }
@@ -3151,7 +3417,9 @@ function updateGenChip(): void {
     .map(([v, j]) => ({
       title: j.title ?? v,
       state: j.queueLabel
-        ?? (j.stage ? t('content.genChip.stageOnly', [stageLabel(j.stage), String(j.stageProgress ?? 0)]) : t('content.genChip.percentOnly', [String(j.progress)])),
+        ?? (j.etaSec != null
+          ? etaText(j.etaSec)
+          : j.stage ? t('content.genChip.stageOnly', [stageLabel(j.stage), String(j.stageProgress ?? 0)]) : t('content.genChip.percentOnly', [String(j.progress)])),
       isCurrent: v === currentVideoId,
     }))
     .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
@@ -3166,26 +3434,55 @@ const POLL_MS_NORMAL = 2000;
 const POLL_MS_SLOW = 10000;
 let pollMs = POLL_MS_NORMAL;
 let pollFailStreak = 0;
+/** 폴링 사이클이 살아 있는가 — 타이머 대기 중이거나 pollJobs 실행 중 */
+let pollActive = false;
 
+/**
+ * 폴링을 **자기 예약 체인**으로 돈다 (setInterval 아님).
+ *
+ * setInterval(2초)로 돌리면 pollJobs가 그보다 오래 걸릴 때 회차가 겹친다 — 잡마다 순차
+ * await이고 한 건이 최대 4초(JOB_STATUS 타임아웃)까지 걸리므로 잡이 두엇만 있어도 늘
+ * 겹쳤다. 겹친 두 회차가 같은 완료를 각자 보고 removeJob·완료 알림·searchLyrics를 두 번씩
+ * 실행했다. 다음 회차를 **이전 회차가 끝난 뒤에** 예약하면 겹침 자체가 구조적으로 불가능해
+ * 별도 in-flight 플래그가 필요 없다.
+ */
 function ensurePolling(): void {
-  if (pollTimer === undefined) {
-    pollTimer = window.setInterval(() => void pollJobs(), pollMs);
-  }
+  if (pollActive) return;
+  pollActive = true;
+  schedulePoll();
 }
 
-/** 폴링 주기 변경 — 진행 중이면 타이머를 새 주기로 갈아 끼운다 */
+function schedulePoll(): void {
+  pollTimer = window.setTimeout(() => {
+    pollTimer = undefined;
+    void runPollCycle();
+  }, pollMs);
+}
+
+async function runPollCycle(): Promise<void> {
+  try {
+    await pollJobs();
+  } catch { /* 한 회차의 예외로 폴링이 죽으면 진행 표시가 영원히 멈춘다 — 다음 회차로 */ }
+  // pollJobs가 stopPolling()으로 마감했으면 여기서 끝난다
+  if (pollActive) schedulePoll();
+}
+
+/** 폴링 주기 변경 — 대기 중인 타이머는 새 주기로 갈아 끼운다.
+ *  실행 중이면 타이머가 없다(끝난 뒤 새 pollMs로 예약되므로 따로 할 일이 없다). */
 function setPollInterval(ms: number): void {
   if (pollMs === ms) return;
   pollMs = ms;
   if (pollTimer !== undefined) {
-    clearInterval(pollTimer);
-    pollTimer = window.setInterval(() => void pollJobs(), ms);
+    clearTimeout(pollTimer);
+    pollTimer = undefined;
+    schedulePoll();
   }
 }
 
 function stopPolling(): void {
+  pollActive = false;
   if (pollTimer !== undefined) {
-    clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = undefined;
   }
 }

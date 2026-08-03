@@ -69,7 +69,10 @@ export async function vocaroLookup(server: ServerConfig, title: string): Promise
 
   // 2) 제목 첫 글자에 해당하는 '수록곡 일람' 인덱스에서 제목 매칭
   //    (곡 슬러그는 번역자가 수동으로 지어 규칙이 없으므로 인덱스가 유일한 안정 경로)
-  const entries = await getIndexEntries(server, indexPageFor(trimmed));
+  //    인덱스가 지원하지 않는 제목(일본어 원제 등)은 여기서 끝낸다 — indexPageFor 주석 참고.
+  const indexPage = indexPageFor(trimmed);
+  if (!indexPage) return null;
+  const entries = await getIndexEntries(server, indexPage);
   const match = entries ? findMatch(entries, trimmed) : null;
   if (match && match.slug !== guessed) {
     return fetchSongPage(server, match.slug);
@@ -95,7 +98,20 @@ function guessSlug(title: string): string | null {
 // 한글 초성 ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ → allsongs-h1~h14 (쌍자음은 기본 자음에 합침)
 const CHOSEONG_TO_INDEX = [1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 7, 8, 9, 9, 10, 11, 12, 13, 14];
 
-function indexPageFor(title: string): string {
+/**
+ * 이 제목을 찾아볼 '수록곡 일람' 인덱스 페이지 — **인덱스가 지원하지 않는 제목이면 null**.
+ *
+ * 이 인덱스는 위키 등재 제목(한국어 독음 또는 원어 로마자/숫자) 기준으로 나뉜다. 일본어
+ * 원제(「我ら！ゴミ分別団」)를 넣으면 어느 초성·알파벳에도 안 걸려 예전에는 잡동사니
+ * 페이지(`allsongs-symbols`)로 떨어졌고, 거기서 findMatch의 포함 매칭이 **아무 상관 없는
+ * 곡**을 집어 그 가사를 원곡 가사로 띄웠다(실측 오매칭 사고). 후보가 실제로 있을 리 없는
+ * 자리에서 포함 매칭을 돌리는 것은 오답을 만드는 일밖에 하지 않는다.
+ *
+ * 원제 매칭은 서버 인덱스(`/api/vocaro/match`)의 몫이다 — 거기엔 원제·한국어 표기가 함께
+ * 있고 다중 후보 가드도 서버에 있다. 이 클라이언트 경로는 **초성 인덱스가 실제로 답할 수
+ * 있는 제목**(한글·라틴·숫자 시작)으로만 남기고, 나머지는 못 찾았다고 말한다.
+ */
+function indexPageFor(title: string): string | null {
   const ch = title.trim().charAt(0);
   const code = ch.charCodeAt(0);
   if (code >= 0xac00 && code <= 0xd7a3) {
@@ -104,7 +120,7 @@ function indexPageFor(title: string): string {
   const lower = ch.toLowerCase();
   if (lower >= 'a' && lower <= 'z') return `allsongs-${lower}`;
   if (ch >= '0' && ch <= '9') return 'allsongs-num';
-  return 'allsongs-symbols';
+  return null;
 }
 
 // ── 인덱스 조회 (24시간 캐시) ──────────────────────────────────

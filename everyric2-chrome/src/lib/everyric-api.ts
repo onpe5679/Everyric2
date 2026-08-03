@@ -1,4 +1,4 @@
-import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, SyncPreviousVersion, SyncVersionDetail, SyncVersionsResponse, TranslateResult } from '../types';
+import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LimitsResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, NoticesResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, SyncPreviousVersion, SyncVersionDetail, SyncVersionsResponse, TranslateResult, ViewStatsResponse } from '../types';
 import { affectsServerStatus, failureKindFromStatus, failureToStatus, maskPath, maskSecret, okStatus } from './server-status';
 import { localPermissionBlock, normalizeLoopbackUrl } from './host-permissions';
 
@@ -207,10 +207,14 @@ export function lookupSync(
   );
 }
 
-/** 정렬 품질 별점(1~5) + 선택 오류 제보 — 수집 전용, 응답은 {ok: true} */
+/** 정렬 품질 별점(1~5) + 선택 오류 제보 — 수집 전용, 응답은 {ok: true}.
+ *  depth는 제보 대상 싱크의 분석 깊이(옵션) — 구버전 서버는 모르는 키를 그냥 무시한다. */
 export function submitFeedback(
   server: ServerConfig,
-  payload: { video_id: string; rating: number; category?: string; comment?: string },
+  payload: {
+    video_id: string; rating: number; category?: string; comment?: string;
+    depth?: 'fast' | 'medium' | 'heavy';
+  },
   sink?: FailureSink,
 ): Promise<{ ok: boolean } | null> {
   return request<{ ok: boolean }>(server, '/api/sync/feedback', {
@@ -573,6 +577,47 @@ export function generateSyncFromCaption(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ video_id: videoId }),
   }, 15000, sink);
+}
+
+// ── 공지 · 쿼터 · 조회수 ─────────────────────────────────────────
+// 셋 다 나중에 붙은 additive 엔드포인트다 — 이게 없는 자체 호스팅 서버에서는 404 → null이
+// 되고 호출부가 기능만 조용히 끈다(다른 additive 경로와 같은 규칙). 어느 것도 가사 표시
+// 경로에 있지 않으므로 타임아웃을 짧게 잡아 실패를 빨리 확정한다.
+
+/** 서버 공지 목록 — 확장 안 공지함이 그대로 그린다 */
+export function fetchNotices(
+  server: ServerConfig, sink?: FailureSink,
+): Promise<NoticesResponse | null> {
+  return request<NoticesResponse>(server, '/api/notices', undefined, 4000, sink);
+}
+
+/** 이 영상 기준 남은 한도(생성·파괴적 동작) — enforced=false면 한도를 안 거는 배포다 */
+export function fetchLimits(
+  server: ServerConfig, videoId: string, sink?: FailureSink,
+): Promise<LimitsResponse | null> {
+  return request<LimitsResponse>(
+    server, `/api/limits/${encodeURIComponent(videoId)}`, undefined, 4000, sink,
+  );
+}
+
+/**
+ * 여러 영상의 조회 수를 한 번에.
+ *
+ * 서버 상한이 100건이라 **여기서 자른다** — 넘겨서 422를 받으면 목록 전체가 빈손이 되는데,
+ * 이 값은 기여 이력의 곁들이 정보라 일부라도 있는 편이 언제나 낫다(제목 상한을 clip하는
+ * 것과 같은 판단). 빈 배열이면 서버를 부르지 않는다.
+ */
+const VIEW_STATS_MAX = 100;
+
+export function fetchViewStats(
+  server: ServerConfig, videoIds: string[], sink?: FailureSink,
+): Promise<ViewStatsResponse | null> {
+  if (videoIds.length === 0) return Promise.resolve({ views: {} });
+  return request<ViewStatsResponse>(server, '/api/stats/views', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_ids: videoIds.slice(0, VIEW_STATS_MAX) }),
+  }, 6000, sink);
 }
 
 export interface VocaroMatchResponse {

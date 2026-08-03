@@ -422,9 +422,82 @@ export interface JobStatusResponse {
   /** 현재 진행 단계명 (다운로드/전사 정렬/보컬 분리/…) + 단계 내 진행률(%) */
   stage?: string | null;
   stage_progress?: number | null;
+  /** 이 잡이 실제로 타고 있는 분석 깊이 — 라우팅 판정이 끝난 뒤부터 실린다(그전엔 null).
+   *  진행 도중 heavy로 승격되면 이 값이 바뀐다(서버 재라우팅) — 화면은 그때 한 번 알린다.
+   *  구버전 서버는 필드 자체가 없다(undefined) → 깊이 배지를 숨긴다. */
+  depth?: 'fast' | 'medium' | 'heavy' | null;
+  /** 남은 예상 시간(초) — 서버가 단계별 실측으로 유동 산출한다. 없으면 퍼센트로 폴백 */
+  eta_sec?: number | null;
+  /** 큐에서 자기 차례가 오기까지의 예상 대기(초) — queued 상태에서만 의미가 있다 */
+  queue_eta_sec?: number | null;
   /** 서버가 404를 반환 — 잡 기록이 사라짐(서버 재시작 등). 폴링은 실패로 마감한다 */
   gone?: boolean;
 }
+
+// ── 공지 · 쿼터 · 조회수 (additive 엔드포인트) ────────────────────
+// 셋 다 구버전 서버에는 없다 — 404 → null이므로 호출부는 조용히 기능만 끈다.
+
+/** GET /api/notices 항목 — 확장 안 공지함에 그대로 표시된다 */
+export interface ServerNotice {
+  id: string;
+  title: string;
+  body: string;
+  /** 표시 강도 — critical은 닫아도 다시 뜨는 등급으로 쓸 수 있다(표시 정책은 UI가 정한다) */
+  level: 'info' | 'warning' | 'critical';
+  created_at: string;
+  /** 게시 종료 시각 — 지난 공지는 서버가 이미 걸러 보내지만 클라이언트도 확인할 수 있다 */
+  ends_at?: string | null;
+}
+
+export interface NoticesResponse {
+  notices: ServerNotice[];
+}
+
+/** 한도 한 종류의 사용량 — remaining이 0이면 그 동작이 지금 막혀 있다는 뜻 */
+export interface LimitBucket {
+  limit: number;
+  used: number;
+  remaining: number;
+}
+
+/** GET /api/limits/{video_id} — enforced=false면 서버가 한도를 강제하지 않는 배포다 */
+export interface LimitsResponse {
+  enforced: boolean;
+  /** 싱크 생성·재생성 한도 */
+  generate: LimitBucket;
+  /** 파괴적 동작(초기화·링크 해제) 한도 */
+  destructive: LimitBucket;
+  window_hours: number;
+}
+
+/** POST /api/stats/views — videoId → 조회 수. 서버가 모르는 영상은 키 자체가 없다 */
+export interface ViewStatsResponse {
+  views: Record<string, number>;
+}
+
+/**
+ * 이 브라우저가 만든 싱크 한 건 — `chrome.storage.local`의 `ey_contrib` 배열 항목.
+ *
+ * **로컬 전용이다.** 서버는 누가 무엇을 만들었는지 사용자 단위로 갖고 있지 않고, 가질
+ * 이유도 없다(계정이 없다). "내가 만든 곡"을 말할 수 있는 유일한 근거가 이 목록이라
+ * 완료를 관측한 탭이 직접 적는다. 최신이 뒤(append), 상한을 넘으면 앞에서 버린다.
+ */
+export interface ContribEntry {
+  videoId: string;
+  /** 같은 완료를 여러 탭이 중복 기록하지 않게 하는 열쇠 */
+  jobId: string;
+  title: string;
+  /** 완료를 관측한 시각 (epoch ms) */
+  completedAt: number;
+  /** 서버가 알려준 분석 깊이 — 구버전 서버·라우팅 전 완료면 없다 */
+  depth?: 'fast' | 'medium' | 'heavy';
+}
+
+/** ContribEntry 배열이 담기는 storage 키 — 기여 이력 UI가 같은 상수를 읽는다 */
+export const CONTRIB_STORAGE_KEY = 'ey_contrib';
+
+/** 기여 이력 보관 상한 — 넘으면 오래된 것부터 버린다 */
+export const CONTRIB_MAX = 500;
 
 // ── 서버 오류 표면 ──────────────────────────────────────────────
 // 예전에는 서버 요청 실패가 전부 `null` 하나로 뭉개져서, 화면이 "이 곡엔 가사가 없다"와
@@ -580,6 +653,15 @@ export interface Settings {
   pronunciationScript: 'auto' | 'hangul' | 'romaji' | 'kana' | 'ipa';
   /** 확장 UI 언어 — 'auto'면 브라우저 로케일. 지금은 값만 저장(i18n 태스크에서 소비) */
   uiLanguage: 'auto' | 'ko' | 'en' | 'ja';
+  /** 메인 가사창 가라오케 레인이 왼쪽 열일 때의 열 너비(px) — 레인/가사 경계 드래그로 조절.
+   *  mainLanePos가 'bottom'이면 무시된다(그때는 pitchLaneHeight가 크기를 정한다). */
+  mainLaneWidth: number;
+  /** 메인 가사창 레인 배치: 'left' = 가사 왼쪽 세로 열, 'bottom' = 가사 아래 가로 띠(레거시).
+   *  modMainLane이 켜져 있을 때만 의미가 있다. */
+  mainLanePos: 'left' | 'bottom';
+  /** 가라오케 음절 타이밍 안내 배너(깊이 업그레이드 유도)를 사용자가 닫았는가 —
+   *  한 번 닫으면 다시 띄우지 않는다(곡마다 다시 뜨면 그 자체가 소음이다). */
+  karaokeTimingNoticeDismissed: boolean;
 }
 
 /** 디버그 스트립에 표시할 내부 상태 스냅샷 */
@@ -696,8 +778,10 @@ export type BgRequest =
   | { type: 'SYNC_VERSIONS'; payload: { videoId: string } }
   /** 목록에서 고른 특정 버전의 전체 타임스탬프 — 모르는 id면 서버가 404(→ null) */
   | { type: 'SYNC_VERSION_GET'; payload: { videoId: string; resultId: string } }
-  /** 정렬 품질 별점 + 오류 제보 (수집 전용) */
-  | { type: 'SYNC_FEEDBACK'; payload: { videoId: string; rating: number; category?: string; comment?: string } }
+  /** 정렬 품질 별점 + 오류 제보 (수집 전용).
+   *  depth는 **제보 대상 싱크가 어느 깊이로 만들어졌는지** — 같은 곡이라도 깊이마다 결과가
+   *  다르므로 이게 없으면 별점 분포를 깊이별로 가를 수 없다(구버전 서버는 무시한다). */
+  | { type: 'SYNC_FEEDBACK'; payload: { videoId: string; rating: number; category?: string; comment?: string; depth?: 'fast' | 'medium' | 'heavy' } }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'JOB_CANCEL'; payload: { jobId: string } }
   | { type: 'NOTIFY'; payload: { id?: string; title: string; message: string } }
@@ -710,7 +794,16 @@ export type BgRequest =
    *  (service worker에서 request()를 부르면 제스처 컨텍스트가 없어 실패한다.) */
   | { type: 'OPEN_OPTIONS' }
   | { type: 'VOCARO_LOOKUP'; payload: { title: string } }
+  /** 서버 원제 인덱스에 제목 하나를 묻는다(가사 본문 없이 slug/표기만) — 일본어 원제처럼
+   *  클라이언트 초성 인덱스가 구조적으로 못 찾는 제목의 유일한 경로다. */
+  | { type: 'VOCARO_MATCH'; payload: { title: string } }
   | { type: 'VOCARO_PAGE'; payload: { slug: string } }
+  /** 서버 공지 목록 — 없는 서버(404)면 조용히 기능만 꺼진다 */
+  | { type: 'NOTICES_GET' }
+  /** 이 영상 기준 남은 한도 — 생성 버튼 옆 잔여 표시용 */
+  | { type: 'LIMITS_GET'; payload: { videoId: string } }
+  /** 여러 영상의 조회 수 한 번에 (최대 100건) — 기여 이력 화면이 쓴다 */
+  | { type: 'STATS_VIEWS'; payload: { videoIds: string[] } }
   | { type: 'MIRAHEZE_LOOKUP'; payload: { title: string } }
   | { type: 'YT_CAPTION_TEXT'; payload: { videoId: string; lang: string; auto: boolean } }
   | { type: 'GENERATE_FROM_CAPTION'; payload: { videoId: string } }

@@ -1,5 +1,5 @@
 import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib';
-import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchPreviousSync, fetchSyncVersion, fetchSyncVersions, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, submitFeedback, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
+import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchLimits, fetchNotices, fetchPreviousSync, fetchSyncVersion, fetchSyncVersions, fetchViewStats, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, submitFeedback, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { mirahezeLookup } from './lib/miraheze';
 import { fetchSongPage, vocaroLookup } from './lib/vocaro';
@@ -253,13 +253,32 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     case 'SERVER_LOG':
       return { data: getServerLog() };
 
+    /**
+     * 위키 곡 페이지 조회 — **서버 원제 인덱스가 1차, 클라이언트 초성 인덱스는 폴백.**
+     *
+     * 순서를 뒤집었다(예전엔 클라 우선). 클라 인덱스는 한국어 독음 제목만 답할 수 있는데
+     * 유튜브 제목은 대개 일본어 원제라, 답할 수 없는 자리에서 포함 매칭이 엉뚱한 곡을
+     * 집어 **그 가사를 원곡 가사로** 띄우는 사고가 났다(「我ら！ゴミ分別団」 실측).
+     * 서버 인덱스는 원제·한국어 표기를 함께 갖고 다중 후보 가드도 거기 있다 — 정답을 알
+     * 가능성이 높은 쪽을 먼저 묻고, 그 뒤에야 좁아진 클라 경로로 내려간다
+     * (lib/vocaro.indexPageFor가 이제 지원 못 하는 제목에 null을 준다).
+     */
     case 'VOCARO_LOOKUP': {
       const server = await getServerConfig();
-      const direct = await vocaroLookup(server, message.payload.title);
-      if (direct) return { data: direct };
-      // 일본어 원제는 클라이언트의 한국어 독음 인덱스로 못 찾는다 — 서버 원제 인덱스 폴백
       const matched = await vocaroMatch(server, message.payload.title);
-      return { data: matched?.found && matched.slug ? await fetchSongPage(server, matched.slug) : null };
+      if (matched?.found && matched.slug) {
+        const page = await fetchSongPage(server, matched.slug);
+        if (page) return { data: page };
+      }
+      // 서버가 미발견이거나 페이지를 못 읽은 경우에만 클라 경로 — 초성 인덱스가 답할 수
+      // 있는 제목(한글·라틴·숫자 시작)에서만 결과가 나온다
+      return { data: await vocaroLookup(server, message.payload.title) };
+    }
+
+    // 가사 본문 없이 원제 매칭만 — 제목 확인·후보 표시 경로가 페이지 조회 없이 쓴다
+    case 'VOCARO_MATCH': {
+      const server = await getServerConfig();
+      return call('vocaro_match_failed', sink => vocaroMatch(server, message.payload.title, sink));
     }
 
     case 'MIRAHEZE_LOOKUP': {
@@ -336,7 +355,26 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
         rating: message.payload.rating,
         category: message.payload.category,
         comment: message.payload.comment,
+        // 제보 대상 싱크의 분석 깊이 — 없으면(구싱크·라우팅 메타 부재) 키 자체를 안 보낸다
+        depth: message.payload.depth,
       }, sink));
+    }
+
+    // 공지·한도·조회수 — 셋 다 구버전 서버엔 없다(404 → error). 호출부는 조용히 포기한다.
+    case 'NOTICES_GET': {
+      const server = await getServerConfig();
+      return call('notices_unavailable', sink => fetchNotices(server, sink));
+    }
+
+    case 'LIMITS_GET': {
+      const server = await getServerConfig();
+      return call('limits_unavailable', sink => fetchLimits(server, message.payload.videoId, sink));
+    }
+
+    case 'STATS_VIEWS': {
+      const server = await getServerConfig();
+      return call('stats_views_unavailable', sink =>
+        fetchViewStats(server, message.payload.videoIds, sink));
     }
 
     case 'SYNC_LIST': {
