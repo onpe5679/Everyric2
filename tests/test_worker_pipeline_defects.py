@@ -1127,22 +1127,36 @@ class TestDurationProbeCoversM4a:
         assert not path.exists()  # 거부하면서 오디오도 정리한다
 
 
-# ── ⑦ F6(2026-08-04 감사): 정렬 붕괴 + 언어 불일치는 저장 전에 실패 처리 ───────
+# ── ⑦ F6(2026-08-04 감사, 운영자 재지시로 보강): 정렬 붕괴 + 언어 불일치는 저장 전에
+# 실패 처리 ─────────────────────────────────────────────────────────────
 #
 # 실측 사고 2건 — 잘못된 언어의 가사(일본어 번역 자막·독일어 자막)로 생성된 싱크가
-# quality_score 0.0002~0.0003(완전 붕괴)으로도 그대로 저장·서빙됐다(Atvsg_zogxo류).
-# AND 조건(품질 극단 바닥 + 문자 센서스 모순)이 반드시 둘 다 성립해야 실패시킨다 —
-# 신호 없이 품질만 낮은 곡(진짜 어려운 오디오)은 절대 막지 않는다(과잉 차단 금지).
+# quality_score 완전 붕괴(0.00023/0.00032)로도 그대로 저장·서빙됐다(Atvsg_zogxo류).
+# **품질만으로는 어떤 임계로도 못 가른다** — 로컬 DB 61행 실측에서 정상-어려운 곡
+# (きゅうくらりん 0.00007·D/N/A 0.00026·熱異常 0.00079/0.00203·About Me 0.00140)이
+# 사고 곡(0.00023/0.00032)과 완전히 겹친다(きゅうくらりん은 사고 곡보다도 더 낮다).
+# 그래서 실패 결정권은 언어 불일치 신호에만 있고, quality_score<0.001은 그 신호가
+# 있을 때만 발동을 허가하는 프리필터일 뿐이다(AND, 신호 없이 품질만 낮은 곡은 절대
+# 막지 않는다 — 과잉 차단 금지). 언어 신호 자체도 "우세"가 아니라 **극단 부재**만
+# 본다(language=ja인데 가나 0자 등) — 가나·한글이 소량이라도 있는 혼합곡은 절대
+# 발화하면 안 된다(worker._language_script_mismatch 문서 참고).
 
 
 class TestLanguageMismatchQualityGate:
     """run_pipeline 레벨에서 직접 검증 — _acquire_audio·_run_alignment만 목으로 갈아끼우고
     (⑥ m4a 절과 같은 전략) 그 사이 코어(F6 게이트 포함)는 실제 코드가 돈다."""
 
-    # Atvsg_zogxo 실측 재현: language=ja인데 가사 원문이 독일어(라틴, CJK 문자 0개).
+    # Atvsg_zogxo 실측 재현: language=ja인데 가사 원문이 독일어(라틴, 가나 0자).
     MISMATCHED_LYRICS = "Das ist die deutsche Übersetzung ohne jedes japanische Schriftzeichen"
     # 문자 계열이 실제로 ja와 일치하는 정상 가사(가나 포함).
     MATCHING_JA_LYRICS = "これは日本語の歌詞です"
+    # 혼합곡 — 영어 비중이 압도적으로 높지만 한글이 "조금" 있다(2단어). 운영자 재지시의
+    # 핵심 회귀 대상: 언어 신호는 "우세"가 아니라 "부재"만 봐야 하므로, 이런 곡은 붕괴
+    # 품질이어도 **절대** 실패 처리되면 안 된다.
+    MOSTLY_ENGLISH_MIXED_KO_LYRICS = (
+        "Baby you and I, running through the night, chasing every light, "
+        "never gonna stop this feeling deep inside 사랑해 forever and ever 그대"
+    )
 
     @staticmethod
     def _hooks():
@@ -1200,29 +1214,55 @@ class TestLanguageMismatchQualityGate:
     def test_collapsed_quality_with_script_mismatch_fails_instead_of_saving(
         self, tmp_path, monkeypatch
     ):
-        """(1) 붕괴 + 스크립트 모순 → 실패 처리, 저장(PipelineResult 반환) 없음."""
+        """(1) 붕괴(오채택 사고 실측값 0.00023) + 가나 0자(스크립트 모순) → 실패 처리,
+        저장(PipelineResult 반환) 없음."""
         from everyric2.server import worker as worker_mod
 
         with pytest.raises(worker_mod.PipelineError) as e:
             self._run(
                 tmp_path, monkeypatch,
-                quality_score=0.0002, language="ja", lyrics=self.MISMATCHED_LYRICS,
+                quality_score=0.00023, language="ja", lyrics=self.MISMATCHED_LYRICS,
             )
         # (4) 실패 메시지·failure_kind
         assert "가사 언어가 오디오와 다르게 들려요" in str(e.value)
         assert e.value.failure_kind == "language_mismatch"
 
     def test_collapsed_quality_with_matching_language_still_saves(self, tmp_path, monkeypatch):
-        """(2) 붕괴지만 언어 정합(문자 센서스가 language와 일치) → 기존대로 저장(반환)."""
+        """(2) 붕괴(熱異常 실측값 0.00079)지만 언어 정합(가나 있음) → 기존대로 저장(반환)."""
         worker_mod, result = self._run(
             tmp_path, monkeypatch,
-            quality_score=0.0002, language="ja", lyrics=self.MATCHING_JA_LYRICS,
+            quality_score=0.00079, language="ja", lyrics=self.MATCHING_JA_LYRICS,
         )
         assert isinstance(result, worker_mod.PipelineResult)
-        assert result.quality_score == pytest.approx(0.0002)
+        assert result.quality_score == pytest.approx(0.00079)
+
+    def test_another_collapsed_but_matching_quality_still_saves(self, tmp_path, monkeypatch):
+        """About Me 실측값(0.00140) — 정상-어려운 곡이 오채택 사고 곡(0.00023/0.00032)보다
+        높아도(둘 다 하한 미만) 언어가 정합하면 저장된다. 품질 크기 자체는 이 게이트의
+        판단 근거가 아니라는 것을 다른 실측값으로 한 번 더 못박는다."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.00140, language="ja", lyrics=self.MATCHING_JA_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
+        assert result.quality_score == pytest.approx(0.00140)
+
+    def test_collapsed_mixed_song_with_only_a_little_hangul_is_never_blocked(
+        self, tmp_path, monkeypatch
+    ):
+        """운영자 재지시 핵심 회귀 — 영어 비중이 압도적인 혼합곡(한글이 조금이라도
+        있음)은 붕괴 품질이어도 절대 막으면 안 된다. 언어 신호는 "우세"가 아니라
+        "부재"만 봐야 한다는 것의 직접 증거(youtube_captions.body_language의 5% CJK
+        비중 게이트를 그대로 썼다면 이 테스트가 실패했을 것 — 그 게이트는 F2용이지
+        F6용이 아니다)."""
+        worker_mod, result = self._run(
+            tmp_path, monkeypatch,
+            quality_score=0.00023, language="ko", lyrics=self.MOSTLY_ENGLISH_MIXED_KO_LYRICS,
+        )
+        assert isinstance(result, worker_mod.PipelineResult)
 
     def test_normal_quality_with_script_mismatch_still_saves(self, tmp_path, monkeypatch):
-        """(3) 정상 품질 + 스크립트 모순(혼합 가사 등) → 저장(반환) — 품질 하한 미달이
+        """(3) 정상 품질 + 스크립트 모순(가나 0자) → 저장(반환) — 품질 하한 미달이
         아니면 이 게이트는 절대 개입하지 않는다(과잉 차단 금지)."""
         worker_mod, result = self._run(
             tmp_path, monkeypatch,
@@ -1232,10 +1272,11 @@ class TestLanguageMismatchQualityGate:
         assert result.quality_score == pytest.approx(0.9)
 
     def test_collapsed_quality_with_non_cjk_language_is_never_blocked(self, tmp_path, monkeypatch):
-        """language가 en 등(문자 센서스로 못 가르는 언어)이면 붕괴돼도 이 게이트는 절대
-        개입하지 않는다 — 신호 없이 품질만 낮은 곡은 막지 않는다는 원칙의 직접 증거."""
+        """language가 en 등(문자 존재 여부로 못 가르는 언어)이면 붕괴돼도 이 게이트는
+        절대 개입하지 않는다 — 신호 없이 품질만 낮은 곡은 막지 않는다는 원칙의 직접
+        증거(きゅうくらりん 0.00007류 — 사고 곡보다 더 낮은 정상곡이 실존한다)."""
         worker_mod, result = self._run(
             tmp_path, monkeypatch,
-            quality_score=0.0001, language="en", lyrics="genuinely difficult audio, low conf",
+            quality_score=0.00007, language="en", lyrics="genuinely difficult audio, low conf",
         )
         assert isinstance(result, worker_mod.PipelineResult)
