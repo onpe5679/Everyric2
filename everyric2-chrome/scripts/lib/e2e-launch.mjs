@@ -44,7 +44,9 @@ export async function launchE2E({
   name, serverUrl = LOCAL_SERVER, width = 1600, height = 1000, freshProfile = false,
 } = {}) {
   if (!name) throw new Error('launchE2E: name이 필요하다(고정 경로 키)');
-  const distSrc = resolve(REPO, 'dist');
+  // 원본 dist는 보통 리포의 dist/지만, 다른 에이전트가 쓰는 공유 dist를 덮지 않으려고
+  // 격리 빌드(npx vite build --outDir …)를 가리켜야 할 때가 있다.
+  const distSrc = resolve(REPO, process.env.EVERYRIC_E2E_DIST_SRC ?? 'dist');
   if (!existsSync(join(distSrc, 'manifest.json'))) {
     throw new Error(`dist가 없다(${distSrc}) — 먼저 npm run build 또는 npx vite build`);
   }

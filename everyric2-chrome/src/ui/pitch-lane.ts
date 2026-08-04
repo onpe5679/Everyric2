@@ -880,7 +880,12 @@ export class PitchLaneRenderer {
       const px = parseFloat(/([\d.]+)px/.exec(ctx.font)?.[1] ?? '') || 12;
       ctx.save();
       ctx.strokeStyle = this.colors.outline;
-      ctx.lineWidth = Math.max(2, px * 0.16);
+      // 두께는 DOM 링(overlay.css --ey-outline-ring)과 **같은 굵기로 보이게** 맞춘다.
+      // strokeText는 경로 중앙에 그려져 절반만 글자 밖으로 나가므로, 바깥 두께 0.06em을
+      // 얻으려면 선 폭이 0.12em이어야 한다. 예전 0.16(+최소 2px)은 바깥 0.08em이라 DOM보다
+      // 33% 두꺼웠고, 최소폭 2px 때문에 작은 계이름·발음 글자(10px대)에서는 바깥 1px —
+      // 획 굵기와 맞먹어 글자 속이 메워졌다(운영자 제보의 «검게 뭉친다»와 같은 부류).
+      ctx.lineWidth = Math.max(1, px * 0.12);
       ctx.lineJoin = 'round';
       ctx.miterLimit = 2;
       if (maxW === undefined) ctx.strokeText(text, x, y);

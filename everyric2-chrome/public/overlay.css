@@ -25,6 +25,11 @@
      이 변수를 읽는다). 색 정책이 CSS 한 곳에 남게 하려고 변수로 뺐다. */
   --ey-outline: rgba(0, 0, 0, 0.85);
   --ey-outline-soft: rgba(0, 0, 0, 0.6);
+  /* 외곽선을 켰을 때 쓰는 **불투명** 보조 글자색 — 아래 «불투명하게 만든다» 규칙의 근거
+     참고. -2는 원래 α0.58 자리(발음·번역·레인 안내), -3은 원래 α0.34 자리(앞뒤 줄·
+     비활성 줄)다. 다크 기준 값이고 라이트 테마가 아래에서 어두운 쪽으로 덮는다. */
+  --ey-outline-text-2: #c8c9cb;
+  --ey-outline-text-3: #a0a1a3;
   --ey-radius: 14px;
   --ey-font: 'YouTube Sans', Roboto, 'Noto Sans KR', -apple-system, BlinkMacSystemFont, sans-serif;
   --ey-line-size: 15px;
@@ -118,10 +123,62 @@
 .ey-attach-lane.ey-text-outline .ey-lane-notice,
 .ey-pip-stage.ey-text-outline .ey-pip-line,
 .ey-pip-stage.ey-text-outline .ey-line {
-  text-shadow:
-    -1px -1px 0 var(--ey-outline), 1px -1px 0 var(--ey-outline),
-    -1px 1px 0 var(--ey-outline), 1px 1px 0 var(--ey-outline),
-    0 0 3px var(--ey-outline-soft);
+  text-shadow: var(--ey-outline-ring);
+}
+
+/* 외곽선 링을 **한 곳에서** 정의한다 — 이 값을 쓰는 자리가 셋(기본 줄 / 활성 줄 글로우
+   합성 / 크로마키 예외)이라 따로 적어 두면 반드시 갈라진다(실제로 갈라져 있었다).
+
+   길이 단위가 em인 것이 핵심이다. 글자 실크기는 한 화면 안에서도 10px(단축 앞뒤 줄·
+   레인 안내)부터 36px(넓은 PiP 현재 줄)까지 3.6배로 벌어진다 — 실측 2026-08-04.
+   고정 1px 링은 그 양 끝에서 정반대로 틀린다: 10px 글자에서는 테가 획 굵기와 맞먹어
+   글자 속이 메워져 검게 뭉치고(운영자 제보 "위아래 자막이 검은색으로 보여"), 36px
+   글자에서는 테가 없다시피 얇다("실표시 글자 크기에 맞게 조정돼야지").
+   em을 쓰면 그 자리에서 쓰이는 폰트 크기를 따라가므로 어느 크기에서도 같은 인상이 된다.
+
+   비율 0.06em은 실측 비교로 골랐다(10·13·15·17·28·36px × 후보 4종을 키 컬러/다크
+   배경에 나란히 렌더해 육안 판정): 0.04em은 큰 글자에서 다시 얇아지고, 0.08em은
+   15px 언저리부터 속을 먹기 시작한다. 0.06em은 10px에서 0.6px(획보다 확실히 얇다),
+   15px에서 0.9px(지금까지 문제 없던 기본 크기의 인상을 그대로 유지), 36px에서 2.2px다.
+   -webkit-text-stroke로 바꾸지 않는 이유는 아래 규칙 주석에 있다(안쪽을 파고든다).
+
+   선언 자리가 :root가 아니라 **외곽선이 켜진 그 표면**인 것도 이유가 있다.
+   커스텀 속성 안의 var()는 «선언된 곳»에서 치환돼 그대로 상속된다 — em 길이는 쓰이는
+   곳에서 계산되지만(그래서 크기 비례가 성립한다) 색은 선언 시점에 박힌다. :root에 두면
+   라이트 테마가 --ey-outline을 흰색으로 덮어도 이미 검정이 박힌 뒤라 «라이트인데 검은
+   테»가 된다(실측으로 잡았다: 라이트 검사만 FAIL). .ey-light가 걸리는 바로 그 요소들
+   (.ey-panel / .ey-attach-lane / :root)의 자손인 여기서 선언하면 양쪽 테마가 다 맞는다. */
+.ey-panel.ey-text-outline,
+.ey-attach-lane.ey-text-outline,
+.ey-pip-stage.ey-text-outline {
+  --ey-outline-ring:
+    -0.06em -0.06em 0 var(--ey-outline), 0.06em -0.06em 0 var(--ey-outline),
+    -0.06em 0.06em 0 var(--ey-outline), 0.06em 0.06em 0 var(--ey-outline),
+    0 0 0.12em var(--ey-outline-soft);
+}
+
+/* 외곽선을 켠 동안에는 글자를 **불투명**하게 만든다.
+
+   text-shadow는 글자 «뒤»에 깔린다. 그래서 글자 자체가 반투명이면 검은 링이 글자 속으로
+   그대로 비쳐 «글자 색이 검은색으로 보인다»(운영자 재제보 2026-08-04). 실측으로 확인:
+   링을 달고 있는 요소가 앞뒤 줄 α=0.34, 발음·번역 α=0.34~0.58, 레인 안내 α=0.58로 전부
+   반투명이었고 불투명한 것은 지금 부르는 단어(accent)뿐이었다. α=0.34 글자를 키 컬러
+   위에 놓으면 최종 색이 «글자 34% + 검은 링 66%»가 되어 회흑색으로 내려앉는다.
+
+   **원인이 두께가 아니라 «글자가 배경을 못 가리는 것»이라 링을 얇게 해도 안 없어진다.**
+   그래서 투명도만 걷어 낸다 — 위계는 알파 대신 밝기로 유지하므로(작은 크기·흐린 톤은
+   그대로) 화면 구성은 변하지 않고, 외곽선을 끄면 원래 반투명 값으로 돌아간다. */
+.ey-panel.ey-text-outline .ey-line,
+.ey-panel.ey-text-outline .ey-line-pron,
+.ey-panel.ey-text-outline .ey-line-tr,
+.ey-pip-stage.ey-text-outline .ey-pip-line.prev,
+.ey-pip-stage.ey-text-outline .ey-pip-line.next {
+  color: var(--ey-outline-text-3);
+}
+.ey-pip-stage.ey-text-outline .ey-line-pron,
+.ey-pip-stage.ey-text-outline .ey-line-tr,
+.ey-attach-lane.ey-text-outline .ey-lane-notice {
+  color: var(--ey-outline-text-2);
 }
 
 /* **현재 줄만 외곽선이 사라지던 것**(운영자 실사용 제보 2026-08-04): text-shadow는
@@ -133,11 +190,10 @@
    메인 패널이 같은 구조라 둘 다 잡는다. */
 .ey-panel.ey-text-outline .ey-line.active .ey-word.sung,
 .ey-pip-stage.ey-text-outline .ey-line.active .ey-word.sung {
-  text-shadow:
-    -1px -1px 0 var(--ey-outline), 1px -1px 0 var(--ey-outline),
-    -1px 1px 0 var(--ey-outline), 1px 1px 0 var(--ey-outline),
-    0 0 3px var(--ey-outline-soft),
-    0 0 10px var(--ey-accent-soft);
+  /* 링은 공용 정의를 그대로 쓰고 글로우만 뒤에 얹는다 — 링을 여기 다시 적으면 크기 비율이
+     이 규칙에서만 굳는다. 글로우(0 0 10px)는 외곽선 기능이 아니라 하이라이트 표시라
+     비외곽선 경로(.ey-line.active .ey-word.sung)와 같은 값을 유지한다. */
+  text-shadow: var(--ey-outline-ring), 0 0 10px var(--ey-accent-soft);
 }
 
 /* 라이트 테마 변수 — 오버레이 패널과 PiP **문서 루트**가 같은 값을 공유한다.
@@ -163,6 +219,9 @@
   /* 라이트에서는 흰 외곽선이 맞다 — 어두운 글자를 밝은 배경에서 떼어 낸다 */
   --ey-outline: rgba(255, 255, 255, 0.9);
   --ey-outline-soft: rgba(255, 255, 255, 0.7);
+  /* 불투명 보조 글자색도 방향이 뒤집힌다(어두운 회색 계열) */
+  --ey-outline-text-2: #46464a;
+  --ey-outline-text-3: #6c6c70;
 }
 
 .ey-panel.ey-light {
@@ -1379,10 +1438,7 @@
 :root.ey-chroma body.ey-pip .ey-pip-stage.ey-text-outline .ey-pip-line *,
 :root.ey-chroma body.ey-pip .ey-pip-stage.ey-text-outline .ey-line,
 :root.ey-chroma body.ey-pip .ey-attach-lane.ey-text-outline .ey-lane-notice {
-  text-shadow:
-    -1px -1px 0 var(--ey-outline), 1px -1px 0 var(--ey-outline),
-    -1px 1px 0 var(--ey-outline), 1px 1px 0 var(--ey-outline),
-    0 0 3px var(--ey-outline-soft) !important;
+  text-shadow: var(--ey-outline-ring) !important;
 }
 
 /* 칩·서버 배너·패널 조각은 읽혀야 하는 전경 요소다 — 배경을 되살린다(코덱스 감사 Med:
