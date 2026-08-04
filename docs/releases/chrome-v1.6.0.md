@@ -2,74 +2,275 @@
 
 **[한국어](#한국어)** | **[English](#english)** | **[日本語](#日本語)**
 
+이 릴리스는 1.5.5(7/28, 스토어 심사로 오래 묶여 있었음) 사용자 기준 "그 사이 새로 생긴
+모든 것"을 다룬다. 그래서 신설(NEW) 기능을 맨 앞에 독립 항목으로 두고, 기존 기능이
+크게 좋아진 것과 자잘한 수정은 뒤로 모았다 — 신설이 "개선" 톤에 묻히지 않게.
+
+---
+
 ## 한국어
 
-- **PIP(팝업 재생) 전면 재작업**: 메인 가사창과 PIP가 이제 완전히 같은 UI 구현을 공유합니다.
-  재생목록 같은 모듈을 **창마다 따로** 켜고 끌 수 있습니다 — 한쪽에서 끄면 반대쪽까지
-  같이 꺼지던 문제를 고쳤습니다.
-- **스트리밍(크로마키·글자 외곽선)**: 크로마키 배경을 켜도 가사 목록 부분만 검은 상자로
-  남아 배경을 빼면 그 자리만 화면에 남던 문제를 고쳤습니다. 글자 외곽선은 영상 아래
-  한 줄과 가라오케 레인에도 적용되고, 지금 부르는 줄만 테두리가 빠지던 것도 수리했습니다.
-- **가라오케 레인 개선**: 음절 소실·발음 표시 타이밍·카운트다운 오탐·다음 줄 미리보기 등
-  여러 결함을 고쳤고, 좌측 컬럼·퀵 토글·타이밍 안내 배너가 추가됐습니다.
-- **설정 화면 개편**: 범주별로 접었다 펼 수 있게 바뀌었고, 검색으로 원하는 설정을 바로
-  찾을 수 있습니다. 별점·오류 제보가 분리됐고, 공지사항·내 기여 페이지가 새로 생겼습니다.
-  가사를 따라가다 검색·설정을 열면 화면 중간부터 보이던 문제도 고쳐, 이제 항상 맨 위부터
-  나옵니다.
-- **공지사항 다국어**: 인앱 공지가 보고 있는 표시 언어(한국어·English·日本語)로 나옵니다.
-  해당 언어 번역이 없으면 기본 언어로 보여 줍니다(서버 업데이트 필요 — 아래 참고).
-- **재생목록 부착 패널**: 다음 영상 카드 클릭 이동, "재생목록에 속하지 않아요" 오탐 재시도,
-  서버 싱크 존재 배지 등을 수리했습니다.
-- **진행 표시 정확도**: 분석 깊이(fast/medium/heavy) 배지, 남은 예상 시간(ETA)이 깊이
-  전환 시에도 정확한 값으로 갱신됩니다. 실제로 하지 않는 작업(예: 보컬 분리)을 진행
-  단계로 잘못 표시하던 문제도 고쳤습니다(서버 업데이트 필요 — 아래 참고).
-- **쿼터("남은 횟수") 표시**: 기여 페이지 상단에 싱크 생성·초기화·커버 잇기·정렬 업그레이드
-  각각의 남은 횟수를 표시합니다. 무제한 배포에서도 "무제한 · 사용 N회"로 안내합니다
-  (서버 업데이트 필요 — 아래 참고).
-- **번역·발음 정확도**: 생성 완료 직후 번역이 안 뜨던 문제, 일부 곡의 위키 번역 반복
-  구간 누락, IPA 발음 옵션 복원, en 곡 원문 중복 발음 줄 등을 고쳤습니다. 원문과 함께
-  보이는 발음 줄이 원문보다 앞서거나 늦게 채워지던 것도 수리했습니다(실측 곡 49곡 중
-  어긋나던 16%가 0%로). 또 일부 배포 환경에서 **영어·중국어 발음 표기가 아무 안내 없이
-  빠지던** 문제를 고쳤습니다(서버 업데이트 필요 — 아래 참고).
-- **곡 인식 개선**: 커버 영상·게임/개인 채널 업로드 보카로 곡의 오검출을 줄였고, 곡명
-  부분열이 다른 단어에 잘못 걸리던 오탐(예: "AC/DC"→"AC")을 고쳤습니다.
-- **안정성**: 확장 리로드 시 고아 탭 무반응, rAF 루프 정지로 인한 무반응 등 2건의 프리즈
-  버그를 고쳤습니다. 로케일 파일의 `placeholders` 블록 누락으로 확장 로드 자체가 거부되던
-  회귀도 수복했습니다.
-- 참고: 아래 서버 업데이트 필요 항목은 접속 중인 서버(everyric.moref.co 또는 자체
-  호스팅)가 구버전이어도 그 기능만 조용히 빠질 뿐 다른 기능은 정상 동작합니다 — 진행
-  단계 정직화, 쿼터 표시(커버 잇기·정렬 업그레이드 포함), 재생목록 존재 배지 즉시 갱신,
-  vocaro 동명이곡·롱/숏 버전 오채택 방지, 공지사항 다국어 표시, 영어·중국어 발음 표기.
+### 스토어 changelog (웹스토어 "변경사항" 칸용)
+
+- **커버 잇기** — 원곡 싱크를 커버·인스트 영상에 그대로 연결해서 볼 수 있어요
+- PIP 창에서 이제 검색·설정·다른 영상 연결까지 메인 화면과 똑같이 다 돼요 (크로마키
+  스트리밍 모드 포함)
+- 영상 위 자막 표시, 다음 영상 정보, 별점·오류 제보, 공지사항·내 기여·남은 횟수 페이지 신설
+- 가라오케 레인을 메인 창에서도 켤 수 있고, 음절 표시·발음 타이밍 정확도가 크게 좋아졌어요
+- 분석 깊이 올리기 버튼, 디버그 A/B 비교 등 더 정밀하게 다듬을 수 있는 도구 추가
+- 재생목록 전용 패널, 진행률·남은 시간(ETA) 표시가 더 정직해졌어요
+- 커버 영상·동명이곡·롱숏버전 인식 정확도 개선
+- 발음 표시, 재생목록, 안정성·보안 버그 다수 수정
+
+### 신설
+
+- **커버 잇기(다른 영상 싱크 연결)**: 검색 화면 하단에서 원곡 영상 주소를 넣으면, 커버·
+  인스트 영상에 원곡 싱크를 그대로 연결해 씁니다.
+- **PIP에서 메인과 완전히 같은 기능**: 검색·설정·오프셋 조정·다른 영상 연결까지 PIP 창
+  안에서 전부 됩니다. 재생목록 같은 모듈은 창마다 따로 켜고 끌 수 있습니다. **크로마키
+  스트리밍 모드**(배경 제거 + 글자 외곽선)로 방송 화면에도 바로 쓸 수 있습니다.
+- **가라오케 레인, 메인 창에서도**: 이전엔 PIP 전용이던 피아노롤 레인을 메인 화면에서도
+  모듈로 켤 수 있습니다. 좌측 컬럼 배치, 퀵 토글, 타이밍 안내 배너가 함께 생겼습니다.
+- **영상 위 자막 표시 + 다음 영상 정보**: 유튜브 자막처럼 영상 위에 가사(+발음·번역)를
+  띄우는 모듈과, 다음 재생될 영상 정보를 보여주는 모듈이 새로 생겼습니다.
+- **분석 깊이 올리기 버튼**: 결과의 분석 깊이(빠름/보통/정밀) 배지를 확인하고, 버튼
+  하나로 더 정밀한 재분석을 요청할 수 있습니다.
+- **별점 · 오류 제보**: 별 하나 클릭으로 정렬 품질을 평가하고, 필요하면 별도 버튼으로
+  자세한 오류를 제보할 수 있습니다.
+- **공지사항 · 내 기여 · 남은 횟수 페이지**: 헤더 아이콘으로 공지사항(다국어 지원)과
+  "내가 만든 곡" 기여 이력을 확인하고, 오늘 싱크 생성·초기화·커버 잇기·정렬 업그레이드
+  각각 몇 번 남았는지 볼 수 있습니다(정렬 업그레이드는 싱크 생성과 완전히 별도 예산으로
+  관리됩니다).
+- **재생목록 부착 패널**: 전체 재생목록·이전/다음 곡·현재 곡 강조·서버에 싱크가 있는지
+  배지까지 한 패널에서 봅니다.
+- **디버그 패널 개편**: 엔진 버전·분석 깊이를 한눈에 보고, 이전 결과와 지금 결과를
+  겹쳐 보는 A/B 비교, 서버에 남은 이전 세대와의 버전 비교까지 가능합니다.
+- **매칭된 가사 제목 표시 + 즉시 제보**: 자동으로 찾은 가사가 어느 곡인지 상단에
+  보여주고, 잘못 매칭됐으면 "이 가사가 아니에요"로 바로 제보합니다.
+- 그 외 신설: 설정 화면 범주별 정리 + 검색, 원문/번역이 줄마다 교차된 형식의 수동입력
+  가사 인식, 노래하는 구간에 가사창이 은은하게 빛나는 효과.
+
+### 크게 좋아진 것
+
+- **가라오케 정확도**: 음절이 사라지던 문제를 고쳐 부착률이 87.9%에서 97.4%로 올랐고,
+  발음 이중표시가 원문보다 빠르거나 늦게 채워지던 오차를 대폭 줄였습니다(실측 49곡 중
+  어긋나던 16%가 0%로). 조용한 구간에서 카운트다운이 잘못 뜨는 오탐도 28.3% 줄었습니다.
+- **진행 표시 · 남은 시간(ETA)**: 남은 시간이 초 단위로 실시간으로 줄어들고, 분석 깊이가
+  자동으로 올라갈 때도 바로 정확한 값으로 갱신됩니다. 실제로 하지 않는 "보컬 분리" 단계를
+  표시하던 것도 없앴습니다.
+- **곡 인식 정확도**: 커버 영상·게임/개인 채널에 올라온 보카로 곡 오검출을 줄였고,
+  동명이곡·롱/숏 버전 오채택, "AC/DC"처럼 곡명 일부가 다른 단어에 잘못 걸리던 오탐을
+  고쳤습니다.
+
+### 고친 것
+
+- **발음**: IPA 표기 복원, 영어 곡 발음 중복 표시 제거, 일부 곡 위키 번역 반복 구간 누락,
+  생성 직후 번역이 안 뜨던 것, 붙여넣기로 만든 뒤 "번역이 안 붙었다"고 잘못 초기화를
+  권하던 것, 일부 배포 환경에서 영어·중국어 발음 표기가 아무 안내 없이 빠지던 것.
+- **재생목록**: 다음 영상 카드가 안 눌리던 것, "재생목록에 속하지 않아요" 오탐, 생성
+  완료 직후 배지가 낡은 채로 남던 것.
+- **초기화**: "재생성" 버튼을 "초기화"로 이름을 바꾸고, 이제 타이밍 오프셋·번역까지
+  완전히 함께 초기화됩니다.
+- 검색·설정을 열 때 화면 중간부터 보이던 것 — 이제 항상 맨 위부터 보입니다.
+- **스트리밍 모드**: 크로마키가 가사 목록에는 안 먹히던 것, 지금 부르는 줄만 외곽선이
+  사라지던 것, 외곽선 크기가 화면 배율과 안 맞던 것을 고쳤고, PiP 닫기 확인 화면에서
+  "항상 메인 창 유지"를 바로 켤 수 있게 했습니다.
+- **안정성**: 확장 리로드 뒤 고아 탭이 멈추는 문제, 애니메이션 루프가 멈추는 무반응 2건,
+  로케일 파일 문제로 확장 자체가 로드 거부되던 회귀를 고쳤습니다.
+- **보안**: 인증 키를 아예 안 보낸 요청이 통과되던 우회를 차단했습니다(X-API-Key).
+
+### 참고
+
+아래는 접속 중인 서버(everyric.moref.co 또는 자체 호스팅)가 구버전이면 그 기능만
+조용히 빠질 뿐 다른 기능은 정상 동작합니다 — 진행 단계 정직화, 남은 횟수(쿼터) 표시
+(커버 잇기·정렬 업그레이드 포함), 재생목록 존재 배지 즉시 갱신, 동명이곡·롱/숏 버전
+오채택 방지, 공지사항 다국어 표시, 영어·중국어 발음 표기.
+
+---
 
 ## English
 
-- **PiP overhaul** — the main lyrics panel and the picture-in-picture window now share the exact same UI implementation. Modules such as the playlist can be turned on and off **per window** — previously switching one off switched the other off too.
-- **Streaming (chroma key & text outline)** — with a chroma-key background on, the lyrics list area used to stay a solid black box, so keying out the background left that patch on screen; that is fixed. The text outline now also applies to the single line under the video and to the karaoke lane, and the line you are currently singing no longer loses its outline.
-- **Karaoke lane fixes** — fixed dropped syllables, mistimed pronunciation display, false-positive countdowns, and next-line preview; added a left-side column, quick toggles, and a timing-guide banner.
-- **Settings redesign** — settings are now grouped into collapsible categories with a search box. Rating and error reports are now separate actions, and new Notices / My Contributions pages were added. Opening search or settings while following along no longer drops you into the middle of the page — it always starts at the top.
-- **Notices in your language** — in-app notices now appear in your display language (한국어 / English / 日本語), falling back to the default language when a translation isn't available (requires a server update — see below).
-- **Playlist attachment panel** — fixed the next-video card not being clickable, a false "not part of a playlist" message with retry, and server sync-exists badges.
-- **More accurate progress display** — the analysis-depth badge (fast/medium/heavy) and the estimated time remaining (ETA) now update correctly right when the depth changes mid-job. Also fixed a stage label that claimed work (e.g. vocal separation) was happening when it wasn't (requires a server update — see below).
-- **Quota ("remaining uses") display** — the Contributions page now shows remaining counts for sync generation, reset, cover linking, and depth upgrades at the top. Unlimited deployments now say "Unlimited · used N times" instead of hiding the block (requires a server update — see below).
-- **Translation/pronunciation accuracy** — fixed translations not appearing right after generation completes, missing repeated lines in some songs' wiki translations, restored the IPA pronunciation option, and removed duplicate pronunciation lines for English songs. The pronunciation line shown alongside the original no longer fills ahead of or behind the original (measured across 49 songs: 16% of lines were off, now 0%). Also fixed **English and Chinese pronunciation silently going missing** on some deployments (requires a server update — see below).
-- **Better song detection** — reduced false detections for cover videos and Vocaloid songs uploaded to gaming/personal channels, and fixed substring false matches corrupting song titles (e.g. "AC/DC" → "AC").
-- **Stability** — fixed two freeze bugs (orphaned tabs after extension reload, and a dead requestAnimationFrame loop). Also fixed a regression where a missing `placeholders` block in a locale file caused the extension to fail to load entirely.
-- Note: the server-dependent items below degrade gracefully on an older server (the feature is simply absent, nothing breaks) — stage-label accuracy, the quota display (incl. cover-linking/upgrade), instant playlist-badge refresh, vocaro same-title/long-vs-short-version disambiguation, translated notices, and English/Chinese pronunciation.
+### Store changelog (for the Web Store "What's new" field)
+
+- **Link a cover to its original** — connect a cover/instrumental video to the original
+  song's sync and watch it there directly
+- PiP now does everything the main panel does — search, settings, linking another video's
+  sync (plus a chroma-key streaming mode)
+- New: on-video captions, next-up video info, star-rating & issue reports, and a
+  Notices/Contributions/remaining-quota page
+- The karaoke lane can now run in the main window too, and syllable/pronunciation timing
+  accuracy improved substantially
+- New tools for fine-tuning: a depth-upgrade button and a debug-panel A/B comparison
+- A dedicated playlist panel, and more honest progress/ETA display
+- Better recognition for cover videos, same-title songs, and long/short versions
+- Numerous fixes to pronunciation display, playlist behavior, stability, and security
+
+### New
+
+- **Link a cover to its original (link another video's sync)**: enter the original video's
+  URL at the bottom of the search screen to connect a cover or instrumental video straight
+  to the original song's sync.
+- **PiP now does everything the main panel does**: search, settings, offset adjustment, and
+  linking another video's sync all work inside the PiP window. Modules like the playlist can
+  be turned on/off **per window**. A new **chroma-key streaming mode** (background removal +
+  text outline) makes it usable directly in broadcast layouts.
+- **Karaoke lane, now in the main window too**: the piano-roll lane that used to be
+  PiP-only can now run as a module in the main panel — with a left-side column, quick
+  toggles, and a timing-guide banner.
+- **On-video captions + next-up video info**: two new display modules — captions (with
+  pronunciation/translation) overlaid on the video like YouTube's own captions, and a
+  module showing what's playing next.
+- **Depth-upgrade button**: see the analysis-depth badge (fast/medium/heavy) on a result
+  and request a more thorough re-analysis with one click.
+- **Star rating & issue reports**: rate alignment quality with a single star click, or use
+  a separate button to report a detailed issue.
+- **Notices, Contributions, and remaining-quota pages**: check in-app notices (translated
+  into your language) and your "songs I made" history from header icons, and see how many
+  sync generations, resets, cover-links, and depth upgrades you have left today (depth
+  upgrades now run on a budget completely separate from sync generation).
+- **Playlist attachment panel**: the full playlist, previous/next songs, current-song
+  highlighting, and server sync-exists badges, all in one panel.
+- **Debug panel overhaul**: see the engine version and analysis depth at a glance, compare
+  the current result against a previous one with an A/B ghost overlay, and compare against
+  older generations still stored on the server.
+- **Matched-lyrics title display + instant report**: the header now shows which song the
+  auto-matched lyrics came from, and a "these aren't the right lyrics" button reports it
+  immediately.
+- Also new: categorized/searchable settings, a manual-paste lyrics parser that handles
+  original/translation lines interleaved, and a soft glow on the lyrics panel during sung
+  sections.
+
+### Significantly improved
+
+- **Karaoke accuracy**: fixed dropped syllables, raising note-attachment coverage from
+  87.9% to 97.4%, and greatly reduced how far the dual pronunciation display could fill
+  ahead of or behind the original line (measured across 49 songs: 16% of lines were off,
+  now 0%). False-positive countdowns during quiet sections dropped 28.3%.
+- **Progress display & ETA**: the remaining time now counts down live, second by second,
+  and updates correctly the instant the analysis depth changes mid-job. Also removed a
+  stage label that claimed work (vocal separation) was happening when it wasn't.
+- **Song-detection accuracy**: reduced false detections for cover videos and Vocaloid songs
+  on gaming/personal channels, and fixed mismatches from same-title songs, long/short
+  versions, and substring false matches (e.g. "AC/DC" matching "AC").
+
+### Fixed
+
+- **Pronunciation**: restored the IPA option, removed duplicate pronunciation lines for
+  English songs, fixed missing repeated lines in some songs' wiki translations, fixed
+  translations not appearing right after generation completes, fixed a false "translation
+  didn't attach" prompt nudging users to reset after a manual paste, and fixed English/
+  Chinese pronunciation silently going missing on some deployments.
+- **Playlist**: fixed the next-video card not being clickable, a false "not part of a
+  playlist" message, and a stale sync-exists badge right after generation finished.
+- **Reset**: renamed "Regenerate" to "Reset," which now also fully clears the timing offset
+  and translations.
+- Fixed search/settings opening scrolled to the middle of the page instead of the top.
+- **Streaming mode**: fixed chroma key not applying to the lyrics-list column, the
+  currently-sung line losing its text outline, and the outline size not scaling with the
+  display; also added a quick "always keep the main window" toggle on the PiP-close
+  confirmation screen.
+- **Stability**: fixed two freeze bugs (an orphaned tab after extension reload, and a dead
+  animation loop), and a regression where a broken locale file caused the extension to fail
+  to load entirely.
+- **Security**: closed a bypass that let requests through without an API key
+  (X-API-Key).
+
+### Note
+
+The items below degrade gracefully on an older server — the feature is simply absent,
+nothing else breaks: honest progress-stage labels, the remaining-quota display (incl.
+cover-linking/depth-upgrade), instant playlist-badge refresh, same-title/long-vs-short
+version disambiguation, translated notices, and English/Chinese pronunciation.
+
+---
 
 ## 日本語
 
-- **PiP全面刷新** — メイン歌詞パネルとPiPウィンドウが完全に同じUI実装を共有するようになりました。再生リストなどのモジュールを**ウィンドウごとに個別に**オン/オフできます — 片方で消すともう片方まで一緒に消えていた問題を修正しました。
-- **配信向け表示(クロマキー・文字の縁取り)** — クロマキー背景をオンにしても歌詞リストの部分だけが黒い箱として残り、背景を抜くとその部分が画面に残ってしまう問題を修正しました。文字の縁取りは動画下の1行とカラオケレーンにも適用され、いま歌っている行だけ縁取りが消えていた問題も修正しました。
-- **カラオケレーン改善** — 音節の欠落・発音表示のタイミングずれ・誤検出のカウントダウン・次の行のプレビューなど複数の不具合を修正し、左側カラム・クイックトグル・タイミング案内バナーを追加しました。
-- **設定画面の刷新** — カテゴリ別に折りたたみ可能になり、検索で目的の設定にすぐアクセスできます。評価とエラー報告が分離され、お知らせ・貢献履歴ページが新設されました。歌詞を追っている途中で検索・設定を開くと画面の途中から表示されていた問題も修正し、常に先頭から表示されます。
-- **お知らせの多言語対応** — アプリ内のお知らせが表示言語(한국어・English・日本語)で表示されます。その言語の翻訳がない場合は既定の言語で表示します(効果にはサーバー更新が必要 — 下記参照)。
-- **再生リスト添付パネル** — 次の動画カードがクリックできない問題、「再生リストに属していません」の誤表示、サーバー同期存在バッジを修正しました。
-- **進行状況表示の精度向上** — 解析の深さ(fast/medium/heavy)バッジと推定残り時間(ETA)が、深さが切り替わった直後でも正確な値に更新されるようになりました。実際には行っていない作業(例:ボーカル分離)を進行段階として誤表示していた問題も修正しました(効果にはサーバー更新が必要 — 下記参照)。
-- **クォータ(「残り回数」)表示** — 貢献ページの上部に、同期生成・リセット・カバー連携・解析深度アップグレードそれぞれの残り回数を表示します。無制限デプロイでもブロックを隠さず「無制限 · 使用N回」と案内します(効果にはサーバー更新が必要 — 下記参照)。
-- **翻訳・発音の精度向上** — 生成完了直後に翻訳が表示されない問題、一部楽曲でウィキ翻訳の繰り返し部分が欠落する問題を修正し、IPA発音オプションを復元、英語曲での原文重複発音行を削除しました。原文と並べて表示する発音行が原文より先に、または遅れて塗られる問題も修正しました(49曲の実測でずれていた16%が0%に)。さらに、一部のサーバー環境で**英語・中国語の発音表記が何の案内もなく欠けていた**問題を修正しました(効果にはサーバー更新が必要 — 下記参照)。
-- **曲検出の改善** — カバー動画やゲーム/個人チャンネルに投稿されたボカロ曲の誤検出を減らし、曲名の部分一致が別の単語を壊してしまう誤検出(例:"AC/DC"→"AC")を修正しました。
-- **安定性** — 拡張機能リロード時の孤立タブ無反応、rAFループ停止による無反応という2件のフリーズバグを修正しました。ロケールファイルの`placeholders`ブロック欠落で拡張機能自体が読み込み拒否されるリグレッションも修復しました。
-- 注記: 以下のサーバー依存項目は旧サーバーでも機能が単に表示されないだけで、他の動作には影響しません — 進行段階の正確な表示、クォータ表示(カバー連携・アップグレード含む)、再生リストバッジの即時更新、vocaro同名曲・ロング/ショート版の誤選択防止、お知らせの多言語表示、英語・中国語の発音表記。
+### ストア changelog(ウェブストアの「変更点」欄用)
+
+- **カバーをリンク** — 原曲の同期をカバー・インスト動画にそのまま接続して見られます
+- PiPでも検索・設定・別動画の同期リンクまでメイン画面と同じように全部できるように
+  (配信向けクロマキーモード込み)
+- 動画上の字幕表示、次の動画情報、星評価・不具合報告、お知らせ・貢献・残り回数ページを新設
+- カラオケレーンがメインウィンドウでも使えるようになり、音節表示・発音タイミングの精度が
+  大幅改善
+- 解析深度アップグレードボタン、デバッグA/B比較など、より精密に調整できるツールを追加
+- 再生リスト専用パネル、進行状況・残り時間(ETA)表示がより正直に
+- カバー動画・同名異曲・ロング/ショート版の認識精度を改善
+- 発音表示・再生リスト・安定性・セキュリティの不具合を多数修正
+
+### 新機能
+
+- **カバーをリンク(別動画の同期リンク)**: 検索画面下部で原曲動画のURLを入力すると、
+  カバー・インスト動画に原曲の同期をそのまま接続して使えます。
+- **PiPがメインパネルと完全に同じ機能に**: 検索・設定・オフセット調整・別動画の同期
+  リンクまで、すべてPiPウィンドウ内でできます。再生リストなどのモジュールは**ウィンドウ
+  ごとに個別に**オン/オフできます。新設の**クロマキー配信モード**(背景除去+文字の
+  縁取り)で配信レイアウトにそのまま組み込めます。
+- **カラオケレーンがメインウィンドウでも**: これまでPiP専用だったピアノロール式レーンを
+  メイン画面でもモジュールとして表示できます。左側カラム配置・クイックトグル・タイミング
+  案内バナーも追加されました。
+- **動画上の字幕表示 + 次の動画情報**: YouTube自体の字幕のように動画の上に歌詞(+発音・
+  翻訳)を重ねて表示するモジュールと、次に再生される動画の情報を表示するモジュールが
+  新設されました。
+- **解析深度アップグレードボタン**: 結果の解析深度(fast/medium/heavy)バッジを確認し、
+  ボタン一つでより精密な再解析をリクエストできます。
+- **星評価・不具合報告**: 星をワンクリックで同期品質を評価でき、別ボタンから詳細な
+  不具合を報告できます。
+- **お知らせ・貢献・残り回数ページ**: ヘッダーアイコンからお知らせ(多言語対応)と
+  「自分が作った曲」の貢献履歴を確認でき、今日の同期生成・リセット・カバーリンク・
+  深度アップグレードそれぞれの残り回数を確認できます(深度アップグレードは同期生成とは
+  完全に別予算で管理されます)。
+- **再生リスト添付パネル**: 再生リスト全体・前後の曲・現在の曲のハイライト・サーバー
+  同期存在バッジを1つのパネルで確認できます。
+- **デバッグパネル刷新**: エンジンバージョン・解析深度を一目で確認でき、現在の結果と
+  以前の結果を重ねて比較するA/B比較、サーバーに残る過去世代とのバージョン比較も
+  できます。
+- **マッチした歌詞タイトル表示 + 即時報告**: 自動でマッチした歌詞がどの曲のものかを
+  上部に表示し、間違っていれば「この歌詞ではありません」でその場で報告できます。
+- その他新機能: 設定画面のカテゴリー別整理+検索、原文/翻訳が行ごとに交互になっている
+  形式の手動貼り付け歌詞認識、歌っている区間で歌詞パネルがほのかに光る演出。
+
+### 大幅に改善
+
+- **カラオケ精度**: 音節が欠落する問題を修正し、ノート付着率が87.9%から97.4%に向上、
+  発音の二重表示が原文より先または遅れて塗られるずれを大幅に縮小しました(実測49曲中
+  ずれていた16%が0%に)。静かな区間での誤検出カウントダウンも28.3%減少しました。
+- **進行状況表示・残り時間(ETA)**: 残り時間が秒単位でリアルタイムにカウントダウンし、
+  解析深度が処理中に切り替わった直後でも正確な値にすぐ更新されます。実際には行っていない
+  「ボーカル分離」を進行段階として表示していた問題も解消しました。
+- **曲検出精度**: カバー動画やゲーム/個人チャンネルに投稿されたボカロ曲の誤検出を減らし、
+  同名異曲・ロング/ショート版の誤選択、"AC/DC"が"AC"に誤マッチするような部分一致の
+  誤検出を修正しました。
+
+### 修正
+
+- **発音**: IPA表記オプションを復元、英語曲での原文重複発音行を削除、一部楽曲でウィキ
+  翻訳の繰り返し部分が欠落する問題、生成完了直後に翻訳が表示されない問題、手動貼り付け後に
+  「翻訳が付きませんでした」と誤ってリセットを促していた問題、一部のサーバー環境で英語・
+  中国語の発音表記が何の案内もなく欠けていた問題を修正しました。
+- **再生リスト**: 次の動画カードがクリックできない問題、「再生リストに属していません」の
+  誤表示、生成完了直後にバッジが古いまま残る問題を修正しました。
+- **リセット**: 「再生成」ボタンを「リセット」に改名し、タイミングオフセットと翻訳も
+  完全にリセットされるようになりました。
+- 検索・設定を開いたときに画面の途中から表示されていた問題を修正し、常に先頭から
+  表示されるようになりました。
+- **配信モード**: クロマキーが歌詞リスト列に効かなかった問題、いま歌っている行だけ
+  文字の縁取りが消えていた問題、縁取りのサイズが表示倍率と合っていなかった問題を修正し、
+  PiPを閉じる確認画面で「常にメインウィンドウを維持」をワンタップでオンにできるように
+  しました。
+- **安定性**: 拡張機能リロード後の孤立タブの無反応、アニメーションループ停止による
+  無反応という2件のフリーズバグと、ロケールファイルの不備で拡張機能自体が読み込み
+  拒否されるリグレッションを修正しました。
+- **セキュリティ**: 認証キーを送らないリクエストが通過してしまう抜け道を塞ぎました
+  (X-API-Key)。
+
+### 注記
+
+以下の項目は旧サーバーでもその機能が単に表示されないだけで、他の動作には影響しません
+— 進行段階の正直な表示、残り回数(クォータ)表示(カバーリンク・深度アップグレード含む)、
+再生リストバッジの即時更新、同名異曲・ロング/ショート版の誤選択防止、お知らせの多言語
+表示、英語・中国語の発音表記。
 
 ---
 
