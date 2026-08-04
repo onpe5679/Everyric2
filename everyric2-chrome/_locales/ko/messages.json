@@ -783,7 +783,13 @@
     "message": "PiP 창에서 가사를 표시하고 있어요"
   },
   "overlay_pip_backToPanel": {
-    "message": "패널로 되돌리기"
+    "message": "이번만 패널 보기"
+  },
+  "overlay_pip_keepPanel": {
+    "message": "PiP 중에도 항상 메인 창 유지"
+  },
+  "overlay_pip_keepPanelTitle": {
+    "message": "설정에 저장돼요 — 다음부터는 PiP를 열어도 이 창이 그대로 남아요. 설정에서 다시 끌 수 있어요."
   },
   "overlay_settings_serverStatusTitle": {
     "message": "서버 연결 상태 — $P1$",

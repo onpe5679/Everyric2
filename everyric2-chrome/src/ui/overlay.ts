@@ -1515,7 +1515,22 @@ export class LyricsOverlay {
       h('div', { className: 'ey-state' },
         h('div', { className: 'ey-state-emoji', text: '🪟' }),
         h('div', { className: 'ey-state-text', text: t('overlay.pip.placeholder') }),
-        h('button', { className: 'ey-primary-btn', text: t('overlay.pip.backToPanel'), on: { click: () => this.callbacks.onPipToggle() } }),
+        // 위: **이번 한 번만** 패널로 돌아간다(PiP를 닫는다). 아래: **설정을 바꾼다** —
+        // 두 버튼은 결과 화면이 같아 보이므로(둘 다 가사가 돌아온다) 문구가 그 차이를
+        // 져야 한다. 매번 되돌리기를 누르던 사람에게 «앞으로 계속»을 그 자리에서 준다.
+        h('button', {
+          className: 'ey-primary-btn', text: t('overlay.pip.backToPanel'),
+          attrs: { type: 'button' },
+          on: { click: () => this.callbacks.onPipToggle() },
+        }),
+        // 설정이 켜지는 순간 placeholder 조건이 무너져 메인 패널이 곧바로 가사로 돌아온다
+        // (content의 설정 반영 경로가 담당한다) — 여기서 화면을 직접 갈아끼우지 않는다.
+        h('button', {
+          className: 'ey-secondary-btn', text: t('overlay.pip.keepPanel'),
+          title: t('overlay.pip.keepPanelTitle'),
+          attrs: { type: 'button' },
+          on: { click: () => this.callbacks.onSettingsChange({ pipKeepPanel: true }) },
+        }),
       ),
     );
   }

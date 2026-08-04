@@ -783,7 +783,13 @@
     "message": "ピクチャーインピクチャー画面に歌詞を表示しています"
   },
   "overlay_pip_backToPanel": {
-    "message": "パネルに戻る"
+    "message": "今回だけパネルを表示"
+  },
+  "overlay_pip_keepPanel": {
+    "message": "PiP中もメインパネルを常に表示"
+  },
+  "overlay_pip_keepPanelTitle": {
+    "message": "設定に保存されます — 次からはPiPを開いてもこのパネルが残ります。設定でいつでもオフにできます。"
   },
   "overlay_settings_serverStatusTitle": {
     "message": "サーバー接続状態 — $P1$",

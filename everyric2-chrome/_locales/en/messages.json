@@ -783,7 +783,13 @@
     "message": "Lyrics are showing in the Picture-in-Picture window"
   },
   "overlay_pip_backToPanel": {
-    "message": "Back to panel"
+    "message": "Show panel this time"
+  },
+  "overlay_pip_keepPanel": {
+    "message": "Always keep the main panel during PiP"
+  },
+  "overlay_pip_keepPanelTitle": {
+    "message": "Saved to your settings — from now on the main panel stays visible while PiP is open. You can turn it off again in settings."
   },
   "overlay_settings_serverStatusTitle": {
     "message": "Server status — $P1$",
