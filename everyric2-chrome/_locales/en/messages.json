@@ -14,9 +14,6 @@
   "pip_controls_nextTrack": {
     "message": "Next track"
   },
-  "pip_controls_playlist": {
-    "message": "Playlist"
-  },
   "pip_controls_mute": {
     "message": "Mute"
   },
@@ -59,9 +56,6 @@
   "pip_controls_progressSeek": {
     "message": "Click to seek"
   },
-  "pip_controls_karaokeToggle": {
-    "message": "Toggle karaoke pitch lane"
-  },
   "pip_controls_videoToggle": {
     "message": "Toggle video display"
   },
@@ -85,12 +79,6 @@
   },
   "pip_controls_autoCollapsed": {
     "message": "On, but folded away because the window is narrow — widen it and it comes back"
-  },
-  "pip_controls_panelToggle": {
-    "message": "Open/close lyrics search panel"
-  },
-  "pip_controls_laneHeightDrag": {
-    "message": "Drag to resize the karaoke lane"
   },
   "pip_controls_videoRatioDrag": {
     "message": "Drag to resize video/lyrics ratio"
@@ -613,21 +601,6 @@
   },
   "overlay_feedback_catOther": {
     "message": "Other"
-  },
-  "overlay_feedback_commentPh": {
-    "message": "Anything to add (optional)"
-  },
-  "overlay_feedback_send": {
-    "message": "Send"
-  },
-  "overlay_feedback_needRating": {
-    "message": "Pick a star rating first"
-  },
-  "overlay_feedback_thanks": {
-    "message": "Thanks! This helps improve quality"
-  },
-  "overlay_feedback_failed": {
-    "message": "Failed to send — please try again later"
   },
   "overlay_matched_label": {
     "message": "Matched lyrics"
@@ -1242,22 +1215,8 @@
   "overlay_laneNotice_neverTitle": {
     "message": "Never show this notice again (you can restore it in settings)"
   },
-  "overlay_settings_resetKaraokeNotice": {
-    "message": "Show karaoke timing notice again"
-  },
-  "overlay_settings_resetKaraokeNoticeTitle": {
-    "message": "Brings back the syllable timing notice you turned off with \"Don't show again\""
-  },
   "content_notice_extensionReloaded": {
     "message": "The extension was updated — refresh this page to keep using it in this tab"
-  },
-  "overlay_nextUp_prefix": {
-    "message": "Next ▸ $P1$",
-    "placeholders": {
-      "P1": {
-        "content": "$1"
-      }
-    }
   },
   "overlay_playlist_prev": {
     "message": "Previous video"
@@ -1284,14 +1243,6 @@
   },
   "overlay_playlist_existsTitle": {
     "message": "Server sync available"
-  },
-  "pip_nextUp": {
-    "message": "Next ▸ $P1$",
-    "placeholders": {
-      "P1": {
-        "content": "$1"
-      }
-    }
   },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "Pitch curve brightness"
@@ -2094,12 +2045,6 @@
   "panels_settings_section_reset": {
     "message": "Reset"
   },
-  "panels_settings_row_captionFontScale": {
-    "message": "Video caption text size"
-  },
-  "panels_settings_row_captionBgOpacity": {
-    "message": "Video caption background"
-  },
   "panels_settings_row_mainLaneWidth": {
     "message": "Lyrics panel lane width"
   },
@@ -2367,17 +2312,5 @@
   },
   "panels_settings_row_attachedLaneWidth": {
     "message": "Attached lane width"
-  },
-  "overlay_settings_row_pipLyricsList": {
-    "message": "PiP lyrics list — adds a scrollable list on the right"
-  },
-  "overlay_settings_row_pipLyricsListTitle": {
-    "message": "Show a scrollable lyrics list next to the PiP window. Turning it on widens the window's max width."
-  },
-  "pip_controls_lyricsListToggle": {
-    "message": "Toggle lyrics list column"
-  },
-  "pip_controls_pronPositionToggle": {
-    "message": "Cycle lane pronunciation position (off/bottom/center)"
   }
 }
