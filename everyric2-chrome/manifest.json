@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "default_locale": "ko",
   "name": "Everyric - Synced Lyrics",
-  "version": "1.5.5",
+  "version": "1.6.0",
   "minimum_chrome_version": "103",
   "description": "Display time-synced lyrics for any song on YouTube. Karaoke-style lyric highlighting with community-powered lyrics timing.",
 

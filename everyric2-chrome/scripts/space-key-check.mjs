@@ -6,10 +6,20 @@ import { dirname, resolve } from 'path';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { resolveVideoUrl } from './lib/pick-song.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, '../dist');
-const videoUrl = process.argv[2] ?? 'https://www.youtube.com/watch?v=Xg-qfsKN2_E';
+// 기본 영상은 **로컬 DB에 있을 때만** 그대로 쓴다 — Xg-qfsKN2_E는 프로드에만 남아 있어
+// (2026-08-04 실측) 인자 없이 돌리면 「가사를 찾지 못했어요」에서 전부 실패했다. 그건 제품
+// 결함이 아니라 죽은 기본값이므로, 없을 때만 조건에 맞는 곡으로 갈아끼우고 무엇을 골랐는지 찍는다.
+const pickedSong = process.argv[2]
+  ? { url: process.argv[2], source: 'argv' }
+  : resolveVideoUrl('https://www.youtube.com/watch?v=Xg-qfsKN2_E', { minLines: 20 });
+if (pickedSong.source !== 'argv') {
+  console.log(`[곱] ${pickedSong.videoId}${pickedSong.title ? ' — ' + pickedSong.title : ''} (${pickedSong.note})`);
+}
+const videoUrl = pickedSong.url;
 const userDataDir = mkdtempSync(join(tmpdir(), 'everyric-space-'));
 
 let failed = false;

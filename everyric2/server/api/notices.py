@@ -32,6 +32,11 @@ def _require_admin(x_api_key: str | None) -> None:
         raise HTTPException(status_code=403, detail="어드민 키가 필요해요")
 
 
+class NoticeTranslation(BaseModel):
+    title: str = Field(max_length=200)
+    body: str = Field(max_length=10000)
+
+
 class NoticeItem(BaseModel):
     id: int
     title: str
@@ -39,6 +44,10 @@ class NoticeItem(BaseModel):
     level: str
     created_at: str | None = None
     ends_at: str | None = None
+    # 다국어화(2026-08-04, additive) — {"en": {...}, "ja": {...}} 언어 코드가 키다.
+    # 없으면(구 공지·마이그레이션 전 행) None — 확장은 title/body(한국어)로 폴백한다.
+    # 구버전 확장은 이 필드 자체를 모르고 무시하므로 안전하다.
+    translations: dict[str, NoticeTranslation] | None = None
 
 
 class NoticeListResponse(BaseModel):
@@ -50,6 +59,9 @@ class CreateNoticeRequest(BaseModel):
     body: str = Field(max_length=10000)
     level: str = Field(default="info", pattern="^(info|warning|critical)$")
     ends_at: datetime | None = None
+    # 선택 입력 — 언어 코드는 자유(en·ja 권장이지만 서버가 강제하지 않는다, models.py
+    # Notice.translations 독스트링 참고). 생략하면 title/body(한국어)만 있는 기존과 동일.
+    translations: dict[str, NoticeTranslation] | None = None
 
 
 class NoticeMutationResponse(BaseModel):
@@ -72,6 +84,7 @@ async def list_notices():
                     level=n.level,
                     created_at=n.created_at.isoformat() if n.created_at else None,
                     ends_at=n.ends_at.isoformat() if n.ends_at else None,
+                    translations=n.translations,
                 )
                 for n in notices
             ]
@@ -86,7 +99,15 @@ async def create_notice(
     _require_admin(x_api_key)
     async with get_session() as session:
         notice = await NoticeRepository(session).create(
-            title=request.title, body=request.body, level=request.level, ends_at=request.ends_at
+            title=request.title,
+            body=request.body,
+            level=request.level,
+            ends_at=request.ends_at,
+            # NoticeTranslation은 pydantic 모델이라 JSON 컬럼에 그대로 못 넣는다 —
+            # 순수 dict로 한 번 풀어서(model_dump) 저장한다.
+            translations={
+                lang: tr.model_dump() for lang, tr in request.translations.items()
+            } if request.translations else None,
         )
         return NoticeMutationResponse(id=notice.id)
 

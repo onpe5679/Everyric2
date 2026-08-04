@@ -1614,6 +1614,9 @@ export class LyricsOverlay {
       this.shortEl = h('div', { className: 'ey-pip-stage' },
         this.shortPrevEl, this.shortCurrentEl, this.shortNextEl);
     }
+    // 외곽선은 «지금 설정»을 따라간다 — 이 뷰는 PiP를 열 때 생기므로 그 전에 지나간
+    // applySettings가 못 걸어 준다(applySettings도 shortEl이 있으면 함께 갱신한다).
+    this.shortEl.classList.toggle('ey-text-outline', this.settings.streamTextOutline);
     container.append(this.shortEl);
     this.renderShortView();
   }
@@ -1909,11 +1912,14 @@ export class LyricsOverlay {
       this.attachPlaylistPanel.style.top = '';
       this.attachPlaylistPanel.style.width = '';
       this.attachPlaylistPanel.style.height = '';
-      this.attachPlaylistPanel.style.display = this.settings.modPlaylist ? '' : 'none';
+      // playlistVisible()이어야 한다 — modPlaylist를 직접 읽으면 브로드캐스트 때
+      // filled 인스턴스가 메인 키를 따라가 "메인에서 껐다 켜면 PiP도 껐다 켜지는"
+      // 표면 동기화 버그가 된다(운영자 실확인 P1, 2026-08-04).
+      this.attachPlaylistPanel.style.display = this.playlistVisible() ? '' : 'none';
       this.onColumnsChanged?.();
       return;
     }
-    const show = this.settings.modPlaylist && !this.geometry.collapsed;
+    const show = this.playlistVisible() && !this.geometry.collapsed;
     if (!show) {
       this.attachPlaylistPanel.style.display = 'none';
       return;
@@ -2663,7 +2669,8 @@ export class LyricsOverlay {
   /**
    * 이어질 재생목록 — content가 lib/yt-player.ts로 스크랩한 항목을 그대로 밀어넣는다.
    * null/빈 배열이면 "재생목록에 속하지 않은 영상"으로 보고 다음 영상 카드로 대체한다
-   * (renderPlaylistPanel). 표시 자체는 modPlaylist 설정을 따른다.
+   * (renderPlaylistPanel). 표시 자체는 표면별 판정(playlistVisible — 메인 modPlaylist /
+   * PiP pipPlaylist)을 따른다.
    */
   setPlaylist(items: PlaylistItem[] | null): void {
     this.playlistItems = items ?? [];
@@ -2672,7 +2679,7 @@ export class LyricsOverlay {
 
   /** 재생목록 부착 패널 — 목록이 있으면 스크롤 리스트, 없으면 다음 영상 카드 하나만 */
   private renderPlaylistPanel(): void {
-    if (!this.settings.modPlaylist || this.geometry.collapsed) {
+    if (!this.playlistVisible() || this.geometry.collapsed) {
       this.attachPlaylistPanel.style.display = 'none';
       return;
     }
@@ -2783,6 +2790,10 @@ export class LyricsOverlay {
     // 않도록 CSS가 text-shadow 링을 두른다(설정 streamTextOutline)
     this.panel.classList.toggle('ey-text-outline', settings.streamTextOutline);
     this.attachPanel.classList.toggle('ey-text-outline', settings.streamTextOutline);
+    // 단축 표시는 **PiP 문서의 light DOM**이라 위 두 줄(패널·부착 패널)이 안 덮는다 —
+    // 빠뜨리면 PiP에서 제일 크게 보이는 줄만 테 없이 남는다(운영자 제보로 실측된 결함).
+    // shortEl은 PiP를 열 때 생기므로 attachShortView에서도 같은 클래스를 건다.
+    this.shortEl?.classList.toggle('ey-text-outline', settings.streamTextOutline);
     // 테마 판정은 lib/theme.ts 한 곳에서만 — PiP도 content가 같은 값을 받아 칠한다.
     // attachPanel은 this.panel의 형제라 CSS 변수를 :host에서 상속받지만, 라이트 테마
     // 오버라이드(.ey-panel.ey-light)는 클래스 스코프라 자신도 같은 클래스를 받아야 한다.
@@ -2811,6 +2822,9 @@ export class LyricsOverlay {
       f0Opacity: settings.pitchF0Opacity,
       pronPosition: settings.pitchPronPosition,
       pronScript: resolveScript(settings),
+      // 캔버스 글자에는 CSS text-shadow가 안 닿는다 — 같은 설정을 레인까지 배선해
+      // strokeText로 직접 두르게 한다(pitch-lane.ts inkText).
+      textOutline: settings.streamTextOutline,
       showF0: settings.pitchF0Curve,
       showConfidence: settings.debugInfo,
       metronomeBeat: settings.metronomeBeat,
@@ -2993,6 +3007,10 @@ export class LyricsOverlay {
 
   private resetBody(): void {
     this.body.replaceChildren();
+    // 스크롤 위치도 되돌린다 — 안 그러면 카라오케 자동 스크롤로 내려간 위치를 새 화면이
+    // 그대로 물려받아, 검색 시트를 열었는데 검색창 대신 «싱크 초기화(서버 저장 삭제)»가
+    // 첫 화면에 오는 사고가 난다(감사 A1-D1 실측: scrollTop 2599 → 시트 머리 y=-480).
+    this.body.scrollTop = 0;
     // 화면 전환마다 도는 지점이라 분리된(더 이상 DOM에 없는) 생성 버튼 참조를 여기서도
     // 걸러낸다 — 그 버튼들이 들고 있던 가사 전문 클로저가 다음 setServerStatus까지
     // 기다리지 않고 곧바로 해제된다(5fps 감사 #3, 메모리 누적 방지).

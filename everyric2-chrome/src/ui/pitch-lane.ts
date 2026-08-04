@@ -200,6 +200,9 @@ interface PitchColors {
   accent: string;
   /** 가사·현재 노트 테두리 */
   text: string;
+  /** 스트리밍용 글자 외곽선 색 (설정 streamTextOutline) — 다크는 검정, 라이트는 흰색.
+   *  DOM 글자의 text-shadow 링과 **같은 CSS 변수**에서 온다(색 정책은 CSS 한 곳). */
+  outline: string;
 }
 
 /** 마지막 렌더 뷰포트 — 클릭·드래그의 좌표→시간 역변환용 */
@@ -238,6 +241,11 @@ export interface PitchLaneOptions {
   pronPosition: 'off' | 'bottom' | 'both' | 'center';
   /** 발음 표기 방식(hangul/romaji/kana/…) — 호출부가 lib/lang.resolveScript로 해석해 넘긴다 */
   pronScript: PronScript;
+  /** 스트리밍용 글자 외곽선(설정 streamTextOutline) — 켜면 캔버스 글자에 테를 두른다.
+   *  DOM 글자는 CSS text-shadow가 맡지만 **캔버스에는 CSS가 원리상 닿지 않아서**
+   *  같은 설정을 여기까지 배선해 strokeText로 직접 그린다(운영자 실사용 제보:
+   *  크로마키+외곽선을 켰는데 PiP 레인 글자에 테가 없다). */
+  textOutline: boolean;
   /** RAW f0 곡선 상시 표시 (설정 pitchF0Curve) — 디버그 언더레이와 독립 */
   showF0: boolean;
   /** 디버그: 글자별 CTC 신뢰도 색 + 진단 레이어(VAD 스트립·타이밍 레인·헤더) */
@@ -283,6 +291,7 @@ const DEFAULT_OPTIONS: PitchLaneOptions = {
   f0Opacity: 1,
   pronPosition: 'off',
   pronScript: 'hangul',
+  textOutline: false,
   showF0: true,
   showConfidence: false,
   countdown: true,
@@ -583,7 +592,7 @@ export class PitchLaneRenderer {
       const pc = ((m % 12) + 12) % 12;
       if (semiPx < 9 && (semiPx >= 5 ? BLACK_KEYS.has(pc) : pc !== 0)) continue;
       ctx.fillStyle = pc === 0 ? colors.text : colors.dim;
-      ctx.fillText(`${PITCH_NAMES_EN[pc]}${Math.floor(m / 12) - 1}`, sidebarW - 3, y(m));
+      this.inkText(ctx, `${PITCH_NAMES_EN[pc]}${Math.floor(m / 12) - 1}`, sidebarW - 3, y(m));
     }
     ctx.textAlign = 'center';
     // 세로 눈금: 템포가 있으면 첫 비트에 정렬된 비트(옅게)/마디(진하게) 격자,
@@ -665,14 +674,14 @@ export class PitchLaneRenderer {
       if (w >= 14) {
         ctx.font = `bold ${namePx}px system-ui, sans-serif`;
         ctx.fillStyle = isCurrent ? colors.text : colors.dim;
-        ctx.fillText(noteLabel(n.midi, this.opts.solfege), lx, Math.max(namePx * 0.7, top - namePx * 0.7));
+        this.inkText(ctx, noteLabel(n.midi, this.opts.solfege), lx, Math.max(namePx * 0.7, top - namePx * 0.7));
       }
       // 노트 위 음절 — 계이름처럼 노트 바로 아래에 부착. **설정과 무관하게 항상 그린다**
       // (위 pronPos 주석: 이 텍스트는 이중표시 줄 설정에서 분리됐다).
       if (n.pron) {
         ctx.font = `${pronPx}px system-ui, sans-serif`;
         ctx.fillStyle = n.start <= now ? colors.accent : colors.dim;
-        ctx.fillText(n.pron, lx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
+        this.inkText(ctx, n.pron, lx, Math.min(padTop + staffH - pronPx / 2, top + noteH + 2 + pronPx / 2));
       }
       ctx.textAlign = 'center';
     }
@@ -731,7 +740,7 @@ export class PitchLaneRenderer {
           ctx.font = `bold ${Math.round(staffH * 0.5)}px system-ui, sans-serif`;
           ctx.fillStyle = colors.accent;
           ctx.globalAlpha = 0.9;
-          ctx.fillText(String(num), nx, padTop + staffH / 2);
+          this.inkText(ctx, String(num), nx, padTop + staffH / 2);
           ctx.globalAlpha = 1;
         }
       }
@@ -769,7 +778,7 @@ export class PitchLaneRenderer {
           color = confBucketColor(it.w.confidence);
         }
         ctx.fillStyle = color;
-        ctx.fillText(it.w.word, xs[i], ty + lyricH * 0.55);
+        this.inkText(ctx, it.w.word, xs[i], ty + lyricH * 0.55);
       });
     }
     ty += lyricH;
@@ -814,7 +823,7 @@ export class PitchLaneRenderer {
         ctx.font = `${Math.max(9, Math.floor(trPx * maxW / tw))}px system-ui, sans-serif`;
       }
       ctx.fillStyle = colors.dim;
-      ctx.fillText(tr, cw / 2, ty + trH * 0.5, maxW);
+      this.inkText(ctx, tr, cw / 2, ty + trH * 0.5, maxW);
     }
 
     // ── 곡 키·BPM 라벨 (좌상단) — 서버 멜로디 분석이 추정한 키
@@ -829,7 +838,7 @@ export class PitchLaneRenderer {
       // 레인이 창 상단에 붙어 있으면(영상·스테이지 없음) 좌상단 미니 버튼과 겹치지
       // 않게 라벨을 오른쪽으로 민다 (강제 레이아웃 방지를 위해 캐시된 판정을 쓴다)
       const labelX = this.cachedLabelNearTop ? 62 : 4;
-      ctx.fillText(parts.join(' · '), labelX, padTop + 7);
+      this.inkText(ctx, parts.join(' · '), labelX, padTop + 7);
       ctx.globalAlpha = 1;
       ctx.textAlign = 'center';
     }
@@ -849,6 +858,37 @@ export class PitchLaneRenderer {
     ctx.lineTo(playheadX, padTop + 6);
     ctx.closePath();
     ctx.fill();
+  }
+
+  /**
+   * 캔버스 글자 그리기 — 외곽선 설정이 켜져 있으면 **채움 전에** 테를 두른다.
+   *
+   * DOM 글자는 overlay.css의 text-shadow 링이 맡지만 캔버스에는 CSS가 닿지 않는다.
+   * 그래서 레인의 «읽는 글자»(가사·노트 음절·계이름·이중표시·미리보기·번역·카운트다운)는
+   * 전부 이 함수를 거친다 — fillText를 직접 부르면 그 글자만 조용히 테 없이 남는다.
+   * 디버그 레인(타이밍 진단)은 일부러 제외한다: 방송용 화면이 아니고, 색으로 정보를 주는
+   * 표시라 테를 두르면 오히려 읽기 어려워진다.
+   *
+   * stroke는 경로 **중앙**에 그려지므로 절반이 글자 안쪽을 먹는다 — 그래서 먼저 두르고
+   * 그 위에 채워 «바깥쪽만 남은» 테를 만든다(CSS 링과 같은 모양). 두께는 글자 크기에
+   * 비례해야 큰 글자에서 실처럼 얇아지지 않는다.
+   */
+  private inkText(
+    ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW?: number,
+  ): void {
+    if (this.opts.textOutline && this.colors) {
+      const px = parseFloat(/([\d.]+)px/.exec(ctx.font)?.[1] ?? '') || 12;
+      ctx.save();
+      ctx.strokeStyle = this.colors.outline;
+      ctx.lineWidth = Math.max(2, px * 0.16);
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      if (maxW === undefined) ctx.strokeText(text, x, y);
+      else ctx.strokeText(text, x, y, maxW);
+      ctx.restore();
+    }
+    if (maxW === undefined) ctx.fillText(text, x, y);
+    else ctx.fillText(text, x, y, maxW);
   }
 
   /**
@@ -1162,8 +1202,11 @@ export class PitchLaneRenderer {
    * 12%가 두 글자 이상 어긋났다. 끝이 꼬리음으로 늘어난 줄일수록 심해서, 노트는 이미
    * 다음 음절인데 발음 줄 채움은 아직 앞 음절에 머무는 "타이밍이 안 맞는 이중 표시"가 됐다.
    *
-   * 세그가 없거나 세그를 이어 붙인 문자열이 표시 문자열과 다르면(표기 불일치) 예전 선형
-   * 보간으로 조용히 되돌아간다 — 어긋난 곡을 억지로 맞추면 엉뚱한 자리에서 채움이 끊긴다.
+   * 세그를 표시 문자열 위에 대응시키지 못하면(segCharOffsets가 null — 아예 다른 텍스트)
+   * 예전 선형 보간으로 조용히 되돌아간다. 어긋난 곡을 억지로 맞추면 엉뚱한 자리에서
+   * 채움이 끊기기 때문이다. 표시 문자열이 세그를 그대로 이어 붙인 것이 아닌 줄(라틴 우세
+   * 줄의 공백 끼움·세그 없는 줄의 원문 표시)까지 폴백으로 떨어뜨리던 예전 판정은
+   * segCharOffsets 주석의 실측 근거대로 고쳤다.
    */
   private renderPronFallback(
     ctx: CanvasRenderingContext2D,
@@ -1181,7 +1224,7 @@ export class PitchLaneRenderer {
     ctx.textBaseline = 'middle';
     const maxW = cw - 16;
     ctx.fillStyle = colors.dim;
-    ctx.fillText(pron, cw / 2, py, maxW);
+    this.inkText(ctx, pron, cw / 2, py, maxW);
 
     const fullW = ctx.measureText(pron).width;
     const textW = Math.min(fullW, maxW);
@@ -1207,7 +1250,7 @@ export class PitchLaneRenderer {
     ctx.rect(x0, py - fontPx, sungW, fontPx * 2);
     ctx.clip();
     ctx.fillStyle = colors.accent;
-    ctx.fillText(pron, cw / 2, py, maxW);
+    this.inkText(ctx, pron, cw / 2, py, maxW);
     ctx.restore();
   }
 
@@ -1239,7 +1282,7 @@ export class PitchLaneRenderer {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = colors.dim;
     ctx.globalAlpha *= 0.55;
-    ctx.fillText(pron, cw / 2, py, cw - 16);
+    this.inkText(ctx, pron, cw / 2, py, cw - 16);
     ctx.restore();
   }
 }
@@ -1330,34 +1373,80 @@ function widenZeroLengthSegs(segs: PronSegment[]): PronSegment[] {
   return out;
 }
 
+/** 세그에는 없고 표시 문자열에만 있는 «사이 글자»로 허용할 것 — 공백·구두점·기호.
+ *  내용 글자가 하나라도 끼어 있으면 그 대응은 믿을 수 없다고 보고 매핑을 포기한다. */
+const SEPARATOR_ONLY = /^[\s\p{P}\p{S}]+$/u;
+
+/**
+ * 각 세그가 **표시 문자열의 어느 문자 구간**인지 대응시킨다(없으면 null).
+ *
+ * 표시 문자열은 세그를 그대로 이어 붙인 것이 아니다 — laneLineText가 라틴 우세 줄에는
+ * 세그 사이에 공백을 끼워 넣고, 발음 세그가 없는 줄에는 아예 원문을 그대로 쓴다.
+ * 그래서 «이어 붙인 문자열 === 표시 문자열»만 인정하던 예전 판정은 그 두 부류를 통째로
+ * 선형 보간으로 떨어뜨렸다(로컬 DB 49곡 2687줄 실측, script=hangul: 16.0% —
+ * 라틴 우세 줄 12.4% + 세그 없는 줄 3.6%, 불일치 사유는 **전부 공백 유무**였다.
+ * romaji·kana·ipa도 12.9~13.1%로 같은 양상). 그 줄들의 채움은 중앙값 2.09자·p90 11.31자·
+ * 최대 43.78자 어긋났고, 같은 시각에 노트가 가리키는 음절과 채움 경계가 가리키는 음절이
+ * 54.0%(라틴)·47.2%(원문 폴백)에서 달랐다. 수리 후 폴백 0%·오차 0.00자(전 표기),
+ * 노트 불일치는 세그 부착 자체의 기준선(4.3%)까지 내려간다.
+ * 재현: node scripts/lane-dual-fill-audit.mjs --script hangul,romaji,kana,ipa [--head]
+ *
+ * 그래서 «이어 붙임 비교»가 아니라 «순서를 지킨 위치 찾기»로 바꾼다. 앞에서부터 각 세그를
+ * 찾되, 사이에 건너뛴 글자가 공백·구두점뿐일 때만 대응을 인정한다 — 내용 글자를 건너뛰면
+ * (세그와 표시 문자열이 애초에 다른 텍스트) null을 돌려주고 호출부가 예전 선형 보간으로
+ * 되돌아간다. 이 «건너뛴 것이 구분자뿐인가» 조건이 안전장치라, indexOf가 엉뚱한 뒤쪽
+ * 일치를 잡아도 그 사이에 내용 글자가 끼므로 그대로 걸러진다.
+ */
+function segCharOffsets(segs: PronSegment[], pron: string): [number, number][] | null {
+  const offs: [number, number][] = [];
+  let cur = 0;
+  for (const s of segs) {
+    if (s.text.length === 0) {
+      offs.push([cur, cur]);
+      continue;
+    }
+    const at = pron.indexOf(s.text, cur);
+    if (at < 0) return null;
+    if (at > cur && !SEPARATOR_ONLY.test(pron.slice(cur, at))) return null;
+    offs.push([at, at + s.text.length]);
+    cur = at + s.text.length;
+  }
+  return offs;
+}
+
 /**
  * 지금 시각이 발음 문자열의 몇 번째 글자에 해당하는가(소수부 = 그 글자 안에서의 진행률).
  * 발음 줄 채움 경계를 음절 타이밍에 맞추는 데 쓴다.
  *
- * 세그가 없거나, 세그를 이어 붙인 문자열이 표시 문자열과 한 글자라도 다르면 null을
- * 돌려준다 — 그런 곡은 세그와 표시 문자열의 글자 대응이 성립하지 않으므로 호출부가
- * 예전 선형 보간으로 되돌아가야 한다(억지로 맞추면 채움이 엉뚱한 자리에서 끊긴다).
+ * 세그가 없거나 세그를 표시 문자열 위에 대응시킬 수 없으면(segCharOffsets가 null) 그대로
+ * null을 돌려준다 — 그런 줄은 호출부가 예전 선형 보간으로 되돌아가야 한다(억지로 맞추면
+ * 채움이 엉뚱한 자리에서 끊긴다).
  */
 function pronCharProgress(
   segs: PronSegment[] | undefined, pron: string, now: number,
 ): number | null {
   if (!segs || segs.length === 0) return null;
-  let concat = '';
-  for (const s of segs) concat += s.text;
-  if (concat !== pron) return null;
+  const offs = segCharOffsets(segs, pron);
+  if (!offs) return null;
   let off = 0;
-  for (const s of segs) {
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const [from, to] = offs[i];
     if (now >= s.end) {
-      off += s.text.length;
+      off = to;
       continue;
     }
-    // 아직 이 음절 전(간주·음절 사이 틈) — 앞 음절까지만 채운 채 기다린다
+    // 아직 이 음절 전(간주·음절 사이 틈) — 앞 음절까지만 채운 채 기다린다.
+    // 여기서 to가 아니라 앞 음절의 끝(off)을 쓰는 것이 핵심이다: 사이에 낀 공백을
+    // 미리 채워 버리면 다음 음절이 시작하기도 전에 채움이 그쪽으로 넘어가 보인다.
     if (now <= s.start) return off;
     const dur = s.end - s.start;
     const frac = dur > 0 ? (now - s.start) / dur : 1;
-    return off + s.text.length * Math.max(0, Math.min(1, frac));
+    return from + (to - from) * Math.max(0, Math.min(1, frac));
   }
-  return off;
+  // 마지막 음절까지 다 불렀다 — 줄 끝의 구두점까지 채운다(예전 «이어 붙임» 판정에서는
+  // 표시 문자열에 세그 밖 글자가 없었으므로 이 값이 곧 전체 길이였다. 같은 결과를 유지한다).
+  return pron.length;
 }
 
 /**
@@ -1494,5 +1583,6 @@ function readPitchColors(win: Window, source: Element): PitchColors {
     dim: pick('--ey-text-dim', 'rgba(241, 241, 242, 0.58)'),
     accent: pick('--ey-accent', '#ffb02e'),
     text: pick('--ey-text', '#f1f1f2'),
+    outline: pick('--ey-outline', 'rgba(0, 0, 0, 0.85)'),
   };
 }

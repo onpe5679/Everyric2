@@ -347,6 +347,15 @@ class Notice(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 언어별 번역 — {"en": {"title": "...", "body": "..."}, "ja": {...}} 모양의 단일 JSON
+    # 컬럼(2026-08-04, 운영자 지시: 다국어화). title/body(위 두 필드)는 뜻이 안 바뀐다 —
+    # 여전히 기본/폴백 언어(한국어)다. 언어를 늘릴 때마다 컬럼을 또 추가하지 않으려고
+    # 언어 코드를 컬럼이 아니라 이 딕셔너리의 키로 둔다 — 스키마 변경은 이번 한 번뿐이다.
+    # nullable=True + 기본 None: 기존 행(마이그레이션 전에 만들어진 공지)은 번역이 없어
+    # 그대로 title/body만 나간다(클라이언트 폴백과 대칭). 어느 언어를 빼먹어도(부분
+    # 번역) 그 언어는 그냥 폴백되므로 완전성 검증은 여기서 안 한다(API 계층 책임도 아님
+    # — 운영자가 값을 넣고 빼는 자유를 서버가 강제로 막을 이유가 없다).
+    translations: Mapped[dict[str, dict[str, str]] | None] = mapped_column(JSON, nullable=True)
 
 
 class SyncView(Base):
