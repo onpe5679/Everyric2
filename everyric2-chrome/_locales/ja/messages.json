@@ -1713,6 +1713,14 @@
   "content_completion_trWord": {
     "message": "翻訳"
   },
+  "content_completion_trOtherLang": {
+    "message": "翻訳は保存されましたが、今見ている言語($P1$)にはありません — 翻訳言語を変えると表示されます",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
   "content_completion_partialTr": {
     "message": "翻訳 $P1$/$P2$行",
     "placeholders": {

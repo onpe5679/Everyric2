@@ -3857,15 +3857,34 @@ function completionVerdict(label: string): { message: string; warning: string | 
   const n = data.lines.length;
   const noPron = data.lines.filter(l => !l.pronunciation).length;
   const noTr = data.lines.filter(l => !l.translation).length;
+  // 번역 "전무"와 "다른 언어로는 이미 있음"을 가른다 — 붙여넣기(tri-line) 경로는
+  // lineMetaLang이 사용자의 현재 번역 언어 설정과 무관하게 고정값(항상 'ko', tri-line.ts의
+  // isKo 판정 자체가 한글 전용이라 그렇다)이라, 사용자가 다른 언어로 보고 있으면 방금 저장한
+  // 번역이 화면엔 안 실려도 서버엔 멀쩡히 있다(availableLangs가 증명 — 2026-08-04 실측
+  // 재현: translationLanguage='en'인데 tri-line 한국어 번역을 붙여넣으면 noTr===n이 되고,
+  // 그런데도 "초기화하면 다시 시도해요"를 권하면 거짓 처방이다 — 초기화해도 lineMetaLang은
+  // 여전히 고정값이라 같은 결과가 재현되고, 공들여 붙여넣은 원문·발음·번역만 날아간다).
+  const trExistsElsewhere = noTr === n
+    && (data.availableLangs?.some(l => l !== settings.translationLanguage) ?? false);
   const missing: string[] = [];
   const partial: string[] = [];
   if (noPron === n) missing.push(t('content.completion.pronWord'));
   else if (noPron > 0) partial.push(t('content.completion.partialPron', [String(n - noPron), String(n)]));
-  if (noTr === n) missing.push(t('content.completion.trWord'));
-  else if (noTr > 0) partial.push(t('content.completion.partialTr', [String(n - noTr), String(n)]));
+  if (noTr === n && !trExistsElsewhere) missing.push(t('content.completion.trWord'));
+  else if (noTr > 0 && !trExistsElsewhere) partial.push(t('content.completion.partialTr', [String(n - noTr), String(n)]));
 
-  if (missing.length === 0 && partial.length === 0) {
+  if (missing.length === 0 && partial.length === 0 && !trExistsElsewhere) {
     return { message: t('content.completion.allReadyMsg', [label]), warning: null };
+  }
+  // 번역이 다른 언어로 이미 저장돼 있을 뿐인 경우 — 파괴적 안내("초기화하면 다시 시도해요")
+  // 대신 언어를 바꿔 보라고만 알린다. missing이 이미 비어 있으면(발음도 다 됐으면) 이대로
+  // 끝, missing에 다른 항목(발음 등)이 남아 있으면 그 경고 문구 뒤에 이 사실을 덧붙인다.
+  if (trExistsElsewhere && missing.length === 0) {
+    const some = [...partial, t('content.completion.trOtherLang', [(data.availableLangs ?? []).join(', ')])].join(' · ');
+    return {
+      message: t('content.completion.partialReadyMsg', [label, some]),
+      warning: null,
+    };
   }
   if (missing.length === 0) {
     const some = partial.join(' · ');
@@ -3875,7 +3894,9 @@ function completionVerdict(label: string): { message: string; warning: string | 
     };
   }
   const what = missing.join('·');
-  const tail = partial.length ? ` (${partial.join(' · ')})` : '';
+  const tailParts = [...partial];
+  if (trExistsElsewhere) tailParts.push(t('content.completion.trOtherLang', [(data.availableLangs ?? []).join(', ')]));
+  const tail = tailParts.length ? ` (${tailParts.join(' · ')})` : '';
   return {
     message: t('content.completion.missingMsg', [label, what, tail]),
     warning: t('content.completion.missingWarning', [what, tail]),

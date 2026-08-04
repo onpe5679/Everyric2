@@ -1713,6 +1713,14 @@
   "content_completion_trWord": {
     "message": "translation"
   },
+  "content_completion_trOtherLang": {
+    "message": "The translation was saved, but not in the language you're viewing ($P1$) — switch translation language to see it",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
   "content_completion_partialTr": {
     "message": "translation $P1$/$P2$ lines",
     "placeholders": {
