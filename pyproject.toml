@@ -130,6 +130,22 @@ all = [
 [project.scripts]
 everyric2 = "everyric2.cli:app"
 
+[tool.hatch.build.targets.sdist]
+# 2026-08-04 — 명시 없이는 hatchling이 리포 루트 전체(git 추적 여부와 무관하게)를 sdist에
+# 쓸어 담는다: 실측 결과 `uv build`가 3.6GB짜리 tar.gz를 만들었고(.venv-owsm·benchmark·
+# everyric2-chrome·everyric2-ae·손상된 db 파일까지 전부 포함), 그래서 sdist 빌드가
+# 로컬에서 거의 멈춘 것처럼 보였다(CI는 클린 체크아웃이라 저 산출물들이 애초에 없어서
+# 안 걸렸다). 이 프로젝트는 파이썬 패키지(everyric2/) 하나가 크롬 확장·AE 플러그인·벤치
+# 산출물·배포 설정과 한 리포에 같이 사는 모노레포라, sdist는 반드시 **허용목록**으로
+# 좁혀야 한다 — 나중에 리포 루트에 새 디렉터리가 생겨도 이 목록에 없으면 자동으로
+# 제외되는 쪽이, 매번 exclude를 추가하는 쪽보다 안전하다.
+include = [
+    "/everyric2",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["everyric2"]
 
