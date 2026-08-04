@@ -52,16 +52,31 @@ export function resolveVideoId(preferred, opts = {}) {
   const db = new DatabaseSync(DB_PATH, { readOnly: true });
   const routeOf = (d) => d?.debug?.routing?.route ?? d?.routing?.route ?? null;
   try {
+    // **버그 실측(2026-08-04 최종 회귀, sheet-scroll-reset/fresh-profile 흔들림 원인)**:
+    // 예전엔 `ORDER BY id DESC`를 썼는데, sync_results.id는 VARCHAR(36) UUID다 — id로
+    // 정렬하면 문자열 사전순일 뿐 시간과 무관하다. 게다가 같은 video_id에 행이 여러 개면
+    // (재생성·force 재생성이 새 행을 추가만 하고 옛 행을 안 지운다 — INSERT 전용) 그
+    // 순서가 뒤섞인 목록에서 옛 행이 조건을 만족하는 것으로 잡혀도, 서버가 실제로 서빙하는
+    // 건 SyncRepository.get_by_video의 `ORDER BY created_at DESC` 첫 행이라 화면엔 다른
+    // 행이 뜬다. 아래를 `created_at DESC`로 바꾸고, video_id별 **최신 한 행만** 남긴 뒤
+    // (created_at DESC 순회이므로 각 video_id의 첫 등장이 곧 최신 행) 그 목록으로만
+    // 조건을 판정한다 — 서버가 보여주는 것과 하네스가 판정하는 것을 같은 행으로 맞춘다.
     const rows = db.prepare(
-      'SELECT video_id, title, timestamps FROM sync_results ORDER BY id DESC',
+      'SELECT video_id, title, timestamps FROM sync_results ORDER BY created_at DESC',
     ).all();
     const parse = (r) => { try { return JSON.parse(r.timestamps); } catch { return null; } };
+
+    const latestByVideo = new Map();
+    for (const r of rows) {
+      if (!latestByVideo.has(r.video_id)) latestByVideo.set(r.video_id, r);
+    }
+    const latestRows = [...latestByVideo.values()];
 
     if (preferred) {
       // **존재만으로는 부족하다** — 조건까지 봐야 한다. 예: U4(타이밍 안내 배너)는 fast/medium
       // 싱크에서만 뜨는데, 기본 곡이 heavy면 «DB에 있으니 그대로»로 통과시키는 순간 그 검사가
       // 원리적으로 성립하지 못한 채 실패한다(2026-08-04 실측으로 잡힌 U4 노후).
-      const hit = rows.find(r => r.video_id === preferred);
+      const hit = latestByVideo.get(preferred);
       if (hit) {
         const d = parse(hit);
         if (qualifies(d, opts)) {
@@ -72,7 +87,7 @@ export function resolveVideoId(preferred, opts = {}) {
         }
       }
     }
-    for (const r of rows) {
+    for (const r of latestRows) {
       const d = parse(r);
       if (!d || !qualifies(d, opts)) continue;
       return {

@@ -35,10 +35,20 @@ const DB_PATH = resolve(__dirname, '../../everyric2.db');
 function pickFreshSong() {
   const db = new DatabaseSync(DB_PATH, { readOnly: true });
   try {
+    // 2026-08-04 최종 회귀에서 잡힌 버그(pick-song.mjs와 동일 원인, 이 파일은 그 헬퍼를
+    // 안 쓰고 조회 로직을 따로 갖고 있어 독립적으로 고쳐야 한다): sync_results.id는
+    // VARCHAR(36) UUID라 `ORDER BY id DESC`는 시간과 무관한 문자열 정렬이었다. 게다가
+    // 같은 video_id에 여러 행이 있으면(재생성이 INSERT만 하고 옛 행을 안 지운다) 옛 행이
+    // 조건(줄 수·발음·번역·tempo)을 만족해도 서버는 최신 행(SyncRepository.get_by_video의
+    // `ORDER BY created_at DESC` 첫 행)을 서빙한다 — 조건 판정과 실제 서빙이 다른 행을
+    // 보면 하네스 전제가 깨진다. `created_at DESC` + video_id별 최신 한 행만으로 고친다.
     const rows = db.prepare(
-      'SELECT video_id, language, title, timestamps FROM sync_results ORDER BY id DESC',
+      'SELECT video_id, language, title, timestamps FROM sync_results ORDER BY created_at DESC',
     ).all();
+    const seen = new Set();
     for (const r of rows) {
+      if (seen.has(r.video_id)) continue; // 이 video_id는 이미 더 최신 행을 봤다 — 건너뛴다
+      seen.add(r.video_id);
       let d;
       try { d = JSON.parse(r.timestamps); } catch { continue; }
       const segs = d.segments ?? [];
