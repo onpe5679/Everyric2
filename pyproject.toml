@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "everyric2"
-version = "0.1.0"
+version = "0.3.0"
 description = "Lyrics synchronization using CTC forced alignment"
 readme = "README.md"
 license = "Apache-2.0"
@@ -55,11 +55,6 @@ dependencies = [
     # 중국어 곡 표기(everyric2.text.zh_reading)용 한자→병음 읽기. 다음자(长江/长大)를
     # 구 사전으로 가르는 부분만 맡고 표기 관례는 저장소가 정한다. 순수 파이썬이다.
     "pypinyin>=0.53.0",
-    # 영어 곡 발음 표기(everyric2.text.en_g2p)용 CMU 발음 사전. 선언이 빠져 있어 깨끗한
-    # 환경에서 uv sync가 건너뛰었고, en_g2p의 import 실패를 worker가 로그만 남기고
-    # 삼켜 **영어곡 발음이 조용히 사라졌다**(릴리스 감사 2026-08-04 — 로컬에 우연히
-    # 깔려 있어 테스트가 통과하고 있었다).
-    "cmudict>=1.0.0",
 ]
 
 [project.optional-dependencies]
