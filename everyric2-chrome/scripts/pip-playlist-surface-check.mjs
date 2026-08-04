@@ -160,19 +160,16 @@ try {
   await pip.setViewportSize({ width: 1200, height: 700 });
   await pip.waitForTimeout(1500);
 
-  const base = await page.evaluate(READ);
-  check(base.pipOpen, '전제: PiP가 열렸다');
-  check(base.main.visible && base.main.rows > 0,
-    '전제: 메인 재생목록이 내용까지 보인다', { visible: base.main.visible, rows: base.main.rows });
-  check(base.pip?.visible && base.pip?.rows > 0,
-    '전제: PiP 재생목록도 내용까지 보인다', { visible: base.pip?.visible, rows: base.pip?.rows });
-
   /**
    * 기대 상태가 될 때까지 폴링한다 — 고정 sleep으로 재면 안 되는 이유가 있다:
    * 목록 데이터는 유튜브 DOM 스크랩이라 곡 전환 직후 빈손일 수 있고, content.ts가
    * 백오프로 몇 번 더 시도한다(PLAYLIST_EMPTY_RETRY_DELAYS_MS). 그 사이에 재면
    * «켜져 있는데 행 0»이 뜨는데, 그건 표면 분리 결함이 아니라 아직 안 채워진 것이다.
    * 마지막 스냅샷을 돌려주므로 실패해도 실제 관측값으로 보고된다.
+   *
+   * 바로 아래 전제 체크도 이 헬퍼를 쓴다 — PiP를 막 연 직후도 같은 백오프 창 안이라
+   * 1회성 조회로 재면 똑같이 거짓 FAIL이 났다(2026-08-04 회귀 게이트 실측 — 이 헬퍼가
+   * 이미 있는데 정작 최초 전제 체크만 안 쓰고 있었다).
    */
   const settle = async (pred, ms = 20000) => {
     const t0 = Date.now();
@@ -187,6 +184,13 @@ try {
   const settleExpect = (expect) => settle(s =>
     s.main.visible === expect.main && (s.pip?.visible ?? false) === expect.pip
     && (!expect.main || s.main.rows > 0) && (!expect.pip || (s.pip?.rows ?? 0) > 0));
+
+  const base = await settleExpect({ main: true, pip: true });
+  check(base.pipOpen, '전제: PiP가 열렸다');
+  check(base.main.visible && base.main.rows > 0,
+    '전제: 메인 재생목록이 내용까지 보인다', { visible: base.main.visible, rows: base.main.rows });
+  check(base.pip?.visible && base.pip?.rows > 0,
+    '전제: PiP 재생목록도 내용까지 보인다', { visible: base.pip?.visible, rows: base.pip?.rows });
 
   /**
    * 한 조작 경로를 눌러 보고 «누른 표면만 바뀌었는가»를 판정한다.
