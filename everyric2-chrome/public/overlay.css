@@ -124,6 +124,22 @@
     0 0 3px var(--ey-outline-soft);
 }
 
+/* **현재 줄만 외곽선이 사라지던 것**(운영자 실사용 제보 2026-08-04): text-shadow는
+   상속되지만 «자식이 자기 값을 가지면» 상속분이 통째로 밀린다. 활성 줄의 이미 부른
+   단어(.ey-line.active .ey-word.sung)에는 하이라이트 글로우가 걸려 있어(아래 583행
+   부근) 그 한 속성이 위 외곽선 링을 대체했다 — 그래서 앞뒤 줄(비활성이라 sung이 없음)은
+   테가 보이는데 정작 지금 부르는 줄만 배경에 먹혔다. 글로우는 정보이므로 없애지 않고
+   **합성**한다(외곽선을 앞에 둬 글자에 바싹 붙이고 글로우를 뒤로). PiP 단축 표시와
+   메인 패널이 같은 구조라 둘 다 잡는다. */
+.ey-panel.ey-text-outline .ey-line.active .ey-word.sung,
+.ey-pip-stage.ey-text-outline .ey-line.active .ey-word.sung {
+  text-shadow:
+    -1px -1px 0 var(--ey-outline), 1px -1px 0 var(--ey-outline),
+    -1px 1px 0 var(--ey-outline), 1px 1px 0 var(--ey-outline),
+    0 0 3px var(--ey-outline-soft),
+    0 0 10px var(--ey-accent-soft);
+}
+
 /* 라이트 테마 변수 — 오버레이 패널과 PiP **문서 루트**가 같은 값을 공유한다.
    PiP는 :root에 걸어야 한다: 레인 캔버스가 getComputedStyle(documentElement)로 색을
    읽으므로(readPitchColors), body에만 걸면 UI만 밝아지고 캔버스는 다크로 남는다.
@@ -1350,8 +1366,17 @@
    바로 «키 컬러 위에서 글자를 읽히게»인데 크로마키와 함께 쓰면 사라지는 모순이었다.
    블랭킷(:root.ey-chroma body.ey-pip *:not(video))보다 클래스가 많아야 이긴다 —
    그래서 같은 앞머리를 붙여 특이도를 올린다. 패널 줄은 Shadow DOM이라 애초에 블랭킷이
-   닿지 않아 여기 필요 없다(실측 확인). */
+   닿지 않아 여기 필요 없다(실측 확인).
+
+   **자손까지 잡아야 한다(`*`).** 상속에 기대면 안 된다: 블랭킷은 `*:not(video)`라
+   글자가 실제로 들어 있는 자식(.ey-word / .ey-line-pron / .ey-line-tr)에 text-shadow:none을
+   **직접** 걸고, 직접 선언은 부모에게서 물려받을 값을 이긴다. 그래서 줄 요소만 예외로
+   빼면 «계산 스타일에는 테가 있는데 화면에는 없는» 상태가 된다 — 단축 표시의 **현재 줄**만
+   그 모양이었다(현재 줄만 공용 렌더러 .ey-line을 품어 자식이 있고, 앞/뒤 줄은 텍스트가
+   직접 들어 있어 멀쩡했다). 픽셀 실측으로 확정: 크로마 3색 × 다크·라이트 6조합 전부에서
+   현재 줄 픽셀차 0, 앞/뒤 줄은 2000+ (2026-08-04 운영자 재제보). */
 :root.ey-chroma body.ey-pip .ey-pip-stage.ey-text-outline .ey-pip-line,
+:root.ey-chroma body.ey-pip .ey-pip-stage.ey-text-outline .ey-pip-line *,
 :root.ey-chroma body.ey-pip .ey-pip-stage.ey-text-outline .ey-line,
 :root.ey-chroma body.ey-pip .ey-attach-lane.ey-text-outline .ey-lane-notice {
   text-shadow:
