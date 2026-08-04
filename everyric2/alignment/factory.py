@@ -32,13 +32,25 @@ class EngineFactory:
 
             engine = SOFAEngine(config)
         elif engine_type == "owsm":
-            from everyric2.alignment.owsm_engine import OwsmEngine
+            # 웜 캐시(2026-08-04) — get_shared_owsm_engine 자체가 server.warm_models를
+            # 보므로(꺼져 있으면 매번 새 인스턴스, 이전과 동일 동작) 여기서 따로 분기할
+            # 필요가 없다. 캐시 접근을 **이 메서드 안에** 둔 이유: worker.py의 잡 실행
+            # 경로가 이 메서드를 직접 부르므로, 여기 하나만 캐시를 타면 그 경로가 자동으로
+            # 혜택을 받는다. 처음엔 worker.py에 별도 디스패처(_get_shared_new_stack_engine)를
+            # 두고 이 메서드를 아예 안 거치게 했는데, tests/test_new_stack_wiring.py 등
+            # 여러 파일이 `EngineFactory.get_engine` **자체**를 몽키패치해 라우팅을
+            # 검증하는 방식이라(routing/refiner 등 18개 테스트) 그 우회가 주입 지점을
+            # 완전히 무력화시켰다(실측 — 전체 스위트 18건 실패로 발견, 2026-08-04). 이
+            # 메서드를 owsm/omniasr 캐시의 유일한 진입점으로 되돌려 기존 테스트 주입
+            # 지점을 그대로 살린다(테스트 수정 0건 — 이 저장소에 이미 있는 "_run_alignment
+            # 시그니처를 테스트 대역 3파일이 미러링한다"는 부담을 더 늘리지 않는 쪽 선택).
+            from everyric2.alignment.owsm_engine import get_shared_owsm_engine
 
-            engine = OwsmEngine(config)
+            engine = get_shared_owsm_engine(config)
         elif engine_type == "omniasr":
-            from everyric2.alignment.omniasr_engine import OmniASREngine
+            from everyric2.alignment.omniasr_engine import get_shared_omniasr_engine
 
-            engine = OmniASREngine(config)
+            engine = get_shared_omniasr_engine(config)
         else:
             raise ValueError(f"Unknown engine type: {engine_type}")
 

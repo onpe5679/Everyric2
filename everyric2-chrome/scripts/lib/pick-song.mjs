@@ -20,40 +20,65 @@ import { dirname, resolve } from 'path';
 
 const DB_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '../../../everyric2.db');
 
+/** 한 싱크 행이 조건을 만족하는가 — 선호값과 대체 후보에 **같은 잣대**를 댄다 */
+function qualifies(parsed, opts) {
+  const { minLines = 20, minFirstStart = 0, needTempo = false, routeIn = null } = opts;
+  const segs = parsed?.segments ?? [];
+  if (segs.length < minLines) return false;
+  if (needTempo && !parsed.tempo) return false;
+  if (minFirstStart > 0 && !(Number(segs[0]?.start) >= minFirstStart)) return false;
+  if (routeIn) {
+    // 분석 깊이는 싱크 메타에 있다(서버 라우팅 판정). 구싱크는 이 메타가 없어 null이고,
+    // 그때는 조건을 만족하지 못한 것으로 본다 — «모르는 값»을 통과시키면 조건이 무의미해진다.
+    const route = parsed?.debug?.routing?.route ?? parsed?.routing?.route ?? null;
+    if (!routeIn.includes(route)) return false;
+  }
+  return true;
+}
+
 /**
- * @param {string} preferred 하네스가 원래 쓰던 videoId (살아 있으면 그대로 쓴다)
+ * @param {string} preferred 하네스가 원래 쓰던 videoId (**조건까지 만족하면** 그대로 쓴다)
  * @param {object} [opts]
  * @param {number} [opts.minLines=20]      최소 줄 수
  * @param {number} [opts.minFirstStart=0]  첫 줄 시작 시각 하한(초) — 카운트다운처럼 «긴 도입»이 필요한 검사용
  * @param {boolean} [opts.needTempo=false] tempo(BPM)가 있어야 하는가 — 레인 마디선 계열
- * @returns {{ videoId: string, source: 'preferred'|'db'|'fallback', title?: string, lines?: number, note: string }}
+ * @param {string[]} [opts.routeIn]        분석 깊이 화이트리스트(예: ['fast','medium'])
+ * @returns {{ videoId: string, source: 'preferred'|'db'|'fallback', title?: string, lines?: number, route?: string|null, note: string }}
  */
 export function resolveVideoId(preferred, opts = {}) {
-  const { minLines = 20, minFirstStart = 0, needTempo = false } = opts;
   if (!existsSync(DB_PATH)) {
     return { videoId: preferred, source: 'fallback', note: `DB 없음(${DB_PATH}) — 선호값 그대로 사용` };
   }
   const db = new DatabaseSync(DB_PATH, { readOnly: true });
+  const routeOf = (d) => d?.debug?.routing?.route ?? d?.routing?.route ?? null;
   try {
-    if (preferred) {
-      const hit = db.prepare('SELECT video_id FROM sync_results WHERE video_id = ? LIMIT 1').all(preferred);
-      if (hit.length > 0) {
-        return { videoId: preferred, source: 'preferred', note: '기본 영상이 DB에 살아 있어 그대로 사용' };
-      }
-    }
     const rows = db.prepare(
       'SELECT video_id, title, timestamps FROM sync_results ORDER BY id DESC',
     ).all();
+    const parse = (r) => { try { return JSON.parse(r.timestamps); } catch { return null; } };
+
+    if (preferred) {
+      // **존재만으로는 부족하다** — 조건까지 봐야 한다. 예: U4(타이밍 안내 배너)는 fast/medium
+      // 싱크에서만 뜨는데, 기본 곡이 heavy면 «DB에 있으니 그대로»로 통과시키는 순간 그 검사가
+      // 원리적으로 성립하지 못한 채 실패한다(2026-08-04 실측으로 잡힌 U4 노후).
+      const hit = rows.find(r => r.video_id === preferred);
+      if (hit) {
+        const d = parse(hit);
+        if (qualifies(d, opts)) {
+          return {
+            videoId: preferred, source: 'preferred', title: hit.title, route: routeOf(d),
+            note: '기본 영상이 조건을 만족해 그대로 사용',
+          };
+        }
+      }
+    }
     for (const r of rows) {
-      let d;
-      try { d = JSON.parse(r.timestamps); } catch { continue; }
-      const segs = d.segments ?? [];
-      if (segs.length < minLines) continue;
-      if (needTempo && !d.tempo) continue;
-      if (minFirstStart > 0 && !(Number(segs[0]?.start) >= minFirstStart)) continue;
+      const d = parse(r);
+      if (!d || !qualifies(d, opts)) continue;
       return {
-        videoId: r.video_id, source: 'db', title: r.title, lines: segs.length,
-        note: `기본 영상(${preferred})이 로컬 DB에 없어 대체를 골랐다`,
+        videoId: r.video_id, source: 'db', title: r.title, lines: (d.segments ?? []).length,
+        route: routeOf(d),
+        note: `기본 영상(${preferred})이 조건에 안 맞아 대체를 골랐다`,
       };
     }
     return { videoId: preferred, source: 'fallback', note: '조건에 맞는 대체 곡이 DB에 없어 선호값 유지' };

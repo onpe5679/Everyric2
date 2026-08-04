@@ -12,6 +12,17 @@ everyric2 중앙서버를 NVIDIA GPU가 있는 리눅스 서버(플랫폼 서버
 전제: systemd 운영 리눅스, NVIDIA 드라이버 설치됨(`nvidia-smi` 동작), nginx 운영 중,
 서브도메인 하나 확보(예: `everyric.example.com` → 서버 IP A레코드).
 
+> **참고(2026-08-04 추가)**: 아래 1~7절은 새 서버에 처음 설치하는 절차(루트 권한,
+> `/opt/everyric2`, 루트 systemd 유닛 `everyric2.service`) 기준이다. 이미 운영 중인
+> 서버에 **동거 배포**하거나 sudo 없이 유저 systemd로 운영하려면
+> `deploy/everyric2-user.service`(API) + `deploy/everyric2-worker-user.service`(GPU
+> 워커)를 대신 쓴다 — 두 파일 머리말에 심링크·활성화 명령이 있다. 이 경우
+> `WorkingDirectory`가 `%h/everyric2`(리포 위치에 맞게 유닛을 drop-in으로 덮어 조정
+> 가능, 유닛 파일 주석 참고)이고 포트도 `.env`의 `EVERYRIC_PORT`로 자유롭게 바꿀 수
+> 있다 — 8000을 다른 서비스가 이미 쓰는 호스트라면 이쪽이다. **이 문서의 §3(systemd
+> 등록) 외 나머지 절차(설치·설정·업데이트·마이그레이션·롤백)는 경로·유닛 이름만 바꾸면
+> 유저 유닛 배포에도 그대로 적용된다** — 별도 문서는 없다.
+
 ## 0. 사전 확인
 
 ```bash
@@ -170,6 +181,25 @@ git pull && uv sync --extra separator && sudo systemctl restart everyric2   # �
   `EVERYRIC_AUDIO_SOURCE_ADDRESS`(멀티 회선) 사용.
 - DB 백업: 서비스 잠깐 멈추고 `everyric2.db` 파일 복사.
 
+### 업데이트가 DB 스키마 변경을 포함할 때
+
+alembic을 안 쓴다 — 새 컬럼은 `init_db()`(`everyric2/server/db/connection.py`)가 **서버
+기동 시점에** `PRAGMA table_info`로 존재를 확인하고 없으면 `ALTER TABLE ... ADD COLUMN`을
+직접 실행한다(멱등, nullable 컬럼만 추가하는 additive 계약 — NOT NULL 추가·컬럼 rename은
+하지 않는다). 즉 **재기동이 곧 마이그레이션 실행**이다 — 아래 순서를 지킨다:
+
+1. **먼저 DB를 백업한다**(`systemctl stop everyric2` → `everyric2.db` 복사 → 다시
+   start, 또는 띄운 채로 `sqlite3 everyric2.db ".backup backup.db"`). 컬럼 추가만이면
+   되돌리기 쉽지만, 같은 배치에 데이터 백필(UPDATE)이 섞이면 되돌리기 번거로울 수 있다 —
+   커밋 로그·릴리스 노트에 "마이그레이션"·"백필" 언급이 있으면 반드시 백업한다.
+2. `git pull && uv sync --extra separator && sudo systemctl restart everyric2`.
+3. 워커를 별도 프로세스(§8) 또는 별도 유닛으로 운영 중이면, **서버가 완전히 뜬 뒤에**
+   워커를 재기동한다 — 서버·워커 버전이 다르면 워커가 잡을 못 받는 안전장치가 있다(§8
+   참고, 순서를 반대로 해도 위험하진 않고 그 안전장치에 걸려 잠깐 잡을 못 받을 뿐이다).
+4. 재기동 후 `.venv/bin/python scripts/verify_deploy.py <서버URL>`을 돌려 확인한다
+   (신규 라우터·스키마 반영·의존성 상태를 한 번에 점검 — 읽기 전용, 기본 실행은 아무것도
+   쓰지 않는다). FAIL이 있으면 그 결과로 롤백 여부를 판단한다(§10).
+
 ## 8. API 전용 서버 + 원격 GPU 워커 (서버 GPU가 바쁠 때 권장)
 
 서버의 GPU가 본 서비스로 바쁘면, 서버는 API+DB+잡 큐만 맡기고 생성 파이프라인은
@@ -212,3 +242,37 @@ uv run everyric2 worker --server https://everyric.example.com --key <워커 키>
 - **원곡 참조 연동(3단계)**: 플랫폼이 `X-API-Key` 헤더로 everyric2 REST를 호출.
   `GET /api/sync/{video_id}`(싱크·linked 조회), SyncLink(원곡 video_id+offset+rate)가
   이미 있어 everyric2 쪽 수정 없이 연계 기능을 만들 수 있다.
+
+## 10. 롤백
+
+기본 원칙: 이 프로젝트는 **API 응답·DB 컬럼을 additive로만 바꾼다**(신규 필드는 옵셔널,
+컬럼은 nullable, 기존 필드 rename·삭제 없음) — 그래서 구버전 코드로 돌아가도 DB 자체를
+되돌릴 필요가 없다. 구코드는 새 컬럼·새 응답 필드를 그냥 모른 채 무시한다.
+
+1. `git log --oneline`으로 되돌릴 커밋(또는 이전 릴리스 태그)을 확인 → `git checkout
+   <커밋/태그>`.
+2. **`uv sync --extra separator`를 다시 돈다** — 되돌아간 시점의 `uv.lock`을 기준으로
+   의존성도 함께 되돌아간다(코드만 되돌리고 sync를 생략하면 새 코드가 기대하던 패키지
+   버전이 그대로 남아 오히려 불일치가 난다).
+3. 워커가 있으면(§8 또는 유저 유닛) 여기서도 순서를 지킨다 — 서버 먼저, 워커는 그 다음.
+4. `sudo systemctl restart everyric2` (+ 워커 유닛).
+5. `.venv/bin/python scripts/verify_deploy.py <서버URL>`로 롤백 후 상태를 확인한다 —
+   되돌린 배치가 추가한 라우터(예: `/api/notices`)가 다시 404로 나오는 것은 **정상**이다
+   (구코드에는 그 라우터가 없다).
+6. DB는 되돌리지 않는다(1단계에서 뜬 백업은 정말 필요할 때만 복원용으로 쓴다) — 새
+   컬럼이 테이블에 남아 있어도 구코드가 그냥 무시하므로 무해하다.
+
+### 이번 배치(1.6.0)에서 롤백이 안전한 근거
+
+- `notices.translations`(nullable, 기존 `title`/`body` 의미 불변 — 폴백 언어로 유지).
+- `/api/limits` 응답의 `next_reset_at`·`link`·`upgrade` 분리는 기존 필드를 그대로 두고
+  필드만 **추가**한다.
+- 위 두 가지와 §7의 발음 의존성 수리(cmudict·pypinyin 락)는 이번 점검(verify_deploy.py
+  실측)으로 직접 확인했다.
+- vocaro 버전 선택·동의어 변경은 **API 응답 스키마를 한 줄도 안 바꾼다**(확인: 두 커밋
+  b940e12·71fb4f0의 변경 범위가 `everyric2/sources/vocaro.py` 파서 내부 로직과 테스트뿐,
+  `everyric2/server/api/vocaro.py` diff 없음). 롤백하면 표 선택이 예전 동작으로 돌아갈
+  뿐이라 계약 파손이 없다.
+- 롤백의 **의도된 부작용**: cmudict·pypinyin 락 수리도 함께 빠지므로, 롤백 후에는 en/zh
+  발음이 다시 kana 단독 근사로 저하된다. 새로운 결함이 아니라 롤백 자체의 결과다 — 롤백
+  후 원인 조사 시 착각하지 않도록 남겨 둔다.

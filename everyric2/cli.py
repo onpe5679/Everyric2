@@ -1059,6 +1059,7 @@ def _worker_submit_result(base: str, key: str, worker_id: str, job_id: str, resu
         json={
             "timestamps": result.timestamps,
             "language": result.language,
+            "engine": result.engine,
             "engine_variant": result.engine_variant,
             "quality_score": result.quality_score,
             "audio_hash": result.audio_hash,

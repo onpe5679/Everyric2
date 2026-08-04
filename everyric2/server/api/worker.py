@@ -382,6 +382,10 @@ class CacheCheckResponse(BaseModel):
 class ResultRequest(BaseModel):
     timestamps: list[dict[str, Any]]
     language: str | None = None
+    # 실제로 정렬을 수행한 엔진("ctc"/"owsm"/"omniasr") — PipelineResult.engine을 그대로
+    # 싣는다(2026-08-04 추가). 구버전 원격 워커는 이 필드를 안 보내므로 기본값 None —
+    # 그 경우 저장 지점(아래 submit_result)이 기존 동작과 같은 기본값("ctc")으로 채운다.
+    engine: str | None = None
     # MMS 강제 폴백 등 엔진 변형 식별자 — 결함 #5, PipelineResult.engine_variant를 그대로 싣는다.
     # 구버전 원격 워커는 이 필드를 안 보내므로 기본값 None(엔진 변형 정보 없음, 기존 동작).
     engine_variant: str | None = None
@@ -681,7 +685,11 @@ async def submit_result(
             lyrics_hash=hash_lyrics(job.lyrics),
             timestamps=request.timestamps,
             language=request.language,
-            engine="ctc",
+            # 2026-08-04까지 하드코딩이던 자리 — 프로덕션은 이 원격 워커 경로가 주 경로라
+            # (위 주석 참고) 이 결함이 실사용자 데이터에 실제로 영향을 준다(MoRef 실측:
+            # 신규 3행 전부 engine='ctc'인데 engine_version은 새 스택 값). 구버전 원격
+            # 워커는 request.engine이 None이라 기존과 같은 "ctc" 기본값으로 떨어진다.
+            engine=request.engine or "ctc",
             engine_variant=request.engine_variant,
             quality_score=request.quality_score,
             audio_hash=request.audio_hash,

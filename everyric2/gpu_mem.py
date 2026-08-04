@@ -81,6 +81,8 @@ def drop_warm_caches() -> None:
 
 def _clearers():
     from everyric2.alignment.ctc_engine import clear_shared_ctc_engine
+    from everyric2.alignment.omniasr_engine import clear_shared_omniasr_engine
+    from everyric2.alignment.owsm_engine import clear_shared_owsm_engine
     from everyric2.audio.separator import clear_shared_separator
     from everyric2.melody.extractor import clear_shared_extractor
 
@@ -88,4 +90,11 @@ def _clearers():
         ("ctc", clear_shared_ctc_engine),
         ("separator", clear_shared_separator),
         ("melody", clear_shared_extractor),
+        # 2026-08-04 추가 — 새 스택(owsm/omniasr) 웜 캐시도 같은 idle 가드 대상이다.
+        # owsm 쪽은 실제 VRAM을 인프로세스로 쥐지 않으므로(owsm_engine.py 모듈 수준
+        # 주석의 한계 설명 참고) 여기서 지워도 회수될 VRAM은 사실상 없지만, 다른 세
+        # 웜 캐시와 같은 관례를 지키고 나중에 상주 서브프로세스로 바뀌었을 때 이 자리가
+        # 이미 배선돼 있게 해 둔다.
+        ("omniasr", clear_shared_omniasr_engine),
+        ("owsm", clear_shared_owsm_engine),
     ]

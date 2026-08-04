@@ -1637,6 +1637,14 @@ class PipelineResult:
     # MMS 강제 폴백 등 엔진 변형 식별자 — None이면 변형 없음(결함 #5, ctc_engine.py의
     # _current_engine_variant를 그대로 옮긴다). SyncRepository.create(engine_variant=...)로 간다.
     engine_variant: str | None = None
+    # 실제로 정렬을 수행한 엔진 타입("ctc"/"owsm"/"omniasr", 각 엔진의 get_engine_type()
+    # 그대로) — None이면 구버전 원격 워커가 이 필드를 안 보낸 경우(구버전 호환, 기본값
+    # "ctc"는 SyncRepository.create 호출부가 채운다). 2026-08-04 이전에는 이 필드가 없어
+    # 저장 시 무조건 "ctc"로 하드코딩됐다 — 새 스택(owsm/omniasr)으로 만든 싱크도 DB에는
+    # 항상 engine='ctc'로 남아 engine_version(예: routed-2mode-lang-1)과 모순됐다(MoRef
+    # 실측). 기존 행은 소급 수정하지 않는다 — 그 시절엔 실제로 어느 엔진이었는지 이 필드로
+    # 복원할 수 없다(엔진 자체가 로그로만 남았을 수 있다).
+    engine: str | None = None
 
 
 class PipelineHooks(Protocol):
@@ -1826,6 +1834,7 @@ async def run_pipeline(job: JobInput, hooks: PipelineHooks) -> PipelineResult | 
         audio_hash=audio_hash,
         extra=_build_extra(result, attribution),
         engine_variant=result.get("engine_variant"),
+        engine=result.get("engine"),
     )
 
 
@@ -1923,7 +1932,13 @@ async def _process_job_inner(job_id: str, job) -> None:
                 lyrics_hash=hash_lyrics(job.lyrics),
                 timestamps=result.timestamps,
                 language=result.language,
-                engine="ctc",
+                # 2026-08-04까지는 여기 "ctc"가 하드코딩돼 있어 새 스택(owsm/omniasr)으로
+                # 만든 싱크도 DB에 항상 engine='ctc'로 남았다(engine_version은 맞는데
+                # engine만 틀려 어드민에서 모순돼 보임 — MoRef 실측). PipelineResult.engine이
+                # 실제로 정렬을 수행한 엔진(각 엔진의 get_engine_type())을 담아 온다 — 혹시
+                # 비어 있으면(이론상 없어야 하지만) 예전 동작과 같은 기본값으로 안전하게
+                # 떨어진다.
+                engine=result.engine or "ctc",
                 engine_variant=result.engine_variant,
                 quality_score=result.quality_score,
                 audio_hash=result.audio_hash,
@@ -4426,6 +4441,10 @@ def _run_fast_stage(
     """
     from everyric2.alignment.factory import EngineFactory
 
+    # 웜 캐시는 EngineFactory.get_engine 안에 있다(2026-08-04) — 여기서 직접 우회하면
+    # tests/test_new_stack_wiring.py 등이 이 정적 메서드를 몽키패치해 라우팅을 검증하는
+    # 주입 지점이 무력화된다(실측: 전체 스위트 18건 실패로 발견, factory.py의 owsm/omniasr
+    # 분기 주석 참고).
     anchor = EngineFactory.get_engine("omniasr", settings.alignment)
     if not anchor.is_available():
         raise RuntimeError(
@@ -4499,6 +4518,8 @@ def _run_deep_stage(
     # 분리가 끝나고 실제 정렬이 시작되는 지점 — 단계명을 기존 어휘로 되돌린다(호출부의
     # "보컬 분리" report 참고, 같은 이유).
     report("전사 정렬")
+    # 웜 캐시는 EngineFactory.get_engine 안에 있다 — 위 _run_fast_stage와 같은 이유로
+    # 여기서 직접 우회하지 않는다.
     anchor = EngineFactory.get_engine(anchor_type, settings.alignment)
     if not anchor.is_available():
         raise RuntimeError(f"{depth} depth anchor ({anchor_type}) not available")
@@ -5026,6 +5047,7 @@ def _finish_new_stack_alignment(
     return {
         "timestamps": timestamps,
         "language": detected_lang,
+        "engine": engine.get_engine_type(),
         "engine_variant": engine_variant,
         "quality_score": quality_score,
         "debug": debug_meta,
@@ -5847,6 +5869,7 @@ def _run_alignment(
         return {
             "timestamps": timestamps,
             "language": detected_lang,
+            "engine": engine.get_engine_type(),
             "engine_variant": engine_variant,
             "quality_score": quality_score,
             "debug": debug_meta,

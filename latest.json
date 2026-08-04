@@ -11,8 +11,8 @@
     "releaseUrl": "https://github.com/onpe5679/Everyric2/releases/tag/engine-v0.1.0"
   },
   "chrome": {
-    "version": "1.5.5",
-    "releaseUrl": "https://github.com/onpe5679/Everyric2/releases/tag/chrome-v1.5.5",
-    "zipUrl": "https://github.com/onpe5679/Everyric2/releases/download/chrome-v1.5.5/Everyric-Chrome-1.5.5.zip"
+    "version": "1.6.0",
+    "releaseUrl": "https://github.com/onpe5679/Everyric2/releases/tag/chrome-v1.6.0",
+    "zipUrl": "https://github.com/onpe5679/Everyric2/releases/download/chrome-v1.6.0/Everyric-Chrome-1.6.0.zip"
   }
 }
