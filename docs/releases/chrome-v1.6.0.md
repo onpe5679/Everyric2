@@ -2,33 +2,26 @@
 
 **[한국어](#한국어)** | **[English](#english)** | **[日本語](#日本語)**
 
-이 릴리스는 1.5.5(7/28, 스토어 심사로 오래 묶여 있었음) 사용자 기준 "그 사이 새로 생긴
-모든 것"을 다룬다. 그래서 신설(NEW) 기능을 맨 앞에 독립 항목으로 두고, 기존 기능이
-크게 좋아진 것과 자잘한 수정은 뒤로 모았다 — 신설이 "개선" 톤에 묻히지 않게.
+1.5.5(2026-07-28) 이후 크롬 확장에 추가·개선·수정된 내용을 정리했다.
 
 ---
 
 ## 한국어
 
-### 스토어 changelog (웹스토어 "변경사항" 칸용)
+### 요약
 
-- **커버 잇기** — 원곡 싱크를 커버·인스트 영상에 그대로 연결해서 볼 수 있어요
-- PIP 창에서 이제 검색·설정·다른 영상 연결까지 메인 화면과 똑같이 다 돼요 (크로마키
-  스트리밍 모드 포함)
-- 영상 위 자막 표시, 다음 영상 정보, 별점·오류 제보, 공지사항·내 기여·남은 횟수 페이지 신설
+- 새로 생겼어요: 영상 위 자막 표시, 다음 영상 정보 모듈, 분석 깊이 올리기 버튼, 별점·
+  오류 제보, 공지사항·내 기여·남은 횟수 페이지, 재생목록 전용 패널, 매칭된 가사 제목 표시
 - 가라오케 레인을 메인 창에서도 켤 수 있고, 음절 표시·발음 타이밍 정확도가 크게 좋아졌어요
-- 분석 깊이 올리기 버튼, 디버그 A/B 비교 등 더 정밀하게 다듬을 수 있는 도구 추가
-- 재생목록 전용 패널, 진행률·남은 시간(ETA) 표시가 더 정직해졌어요
+- PIP가 검색·설정·다른 영상 연결까지 메인 화면과 완전히 같은 기능을 갖췄고, 크로마키
+  스트리밍 모드도 추가됐어요
+- 커버 잇기(다른 영상 싱크 연결) 매칭 정확도 개선, 디버그 패널 A/B 비교 개편
+- 진행률·남은 시간(ETA) 표시가 더 정직해졌어요
 - 커버 영상·동명이곡·롱숏버전 인식 정확도 개선
 - 발음 표시, 재생목록, 안정성·보안 버그 다수 수정
 
 ### 신설
 
-- **커버 잇기(다른 영상 싱크 연결)**: 검색 화면 하단에서 원곡 영상 주소를 넣으면, 커버·
-  인스트 영상에 원곡 싱크를 그대로 연결해 씁니다.
-- **PIP에서 메인과 완전히 같은 기능**: 검색·설정·오프셋 조정·다른 영상 연결까지 PIP 창
-  안에서 전부 됩니다. 재생목록 같은 모듈은 창마다 따로 켜고 끌 수 있습니다. **크로마키
-  스트리밍 모드**(배경 제거 + 글자 외곽선)로 방송 화면에도 바로 쓸 수 있습니다.
 - **가라오케 레인, 메인 창에서도**: 이전엔 PIP 전용이던 피아노롤 레인을 메인 화면에서도
   모듈로 켤 수 있습니다. 좌측 컬럼 배치, 퀵 토글, 타이밍 안내 배너가 함께 생겼습니다.
 - **영상 위 자막 표시 + 다음 영상 정보**: 유튜브 자막처럼 영상 위에 가사(+발음·번역)를
@@ -43,8 +36,6 @@
   관리됩니다).
 - **재생목록 부착 패널**: 전체 재생목록·이전/다음 곡·현재 곡 강조·서버에 싱크가 있는지
   배지까지 한 패널에서 봅니다.
-- **디버그 패널 개편**: 엔진 버전·분석 깊이를 한눈에 보고, 이전 결과와 지금 결과를
-  겹쳐 보는 A/B 비교, 서버에 남은 이전 세대와의 버전 비교까지 가능합니다.
 - **매칭된 가사 제목 표시 + 즉시 제보**: 자동으로 찾은 가사가 어느 곡인지 상단에
   보여주고, 잘못 매칭됐으면 "이 가사가 아니에요"로 바로 제보합니다.
 - 그 외 신설: 설정 화면 범주별 정리 + 검색, 원문/번역이 줄마다 교차된 형식의 수동입력
@@ -52,6 +43,10 @@
 
 ### 크게 좋아진 것
 
+- **PIP, 메인과 완전히 같은 기능으로**: PIP 자체는 예전부터 있었지만 지금까지는 반쪽짜리
+  UI였습니다 — 검색·설정·오프셋 조정·다른 영상 연결이 PIP 창 안에서는 안 됐어요. 이제
+  전부 메인 화면과 똑같이 됩니다. 재생목록 같은 모듈은 창마다 따로 켜고 끌 수 있고,
+  크로마키 스트리밍 모드(배경 제거 + 글자 외곽선)로 방송 화면에도 바로 쓸 수 있습니다.
 - **가라오케 정확도**: 음절이 사라지던 문제를 고쳐 부착률이 87.9%에서 97.4%로 올랐고,
   발음 이중표시가 원문보다 빠르거나 늦게 채워지던 오차를 대폭 줄였습니다(실측 49곡 중
   어긋나던 16%가 0%로). 조용한 구간에서 카운트다운이 잘못 뜨는 오탐도 28.3% 줄었습니다.
@@ -61,6 +56,11 @@
 - **곡 인식 정확도**: 커버 영상·게임/개인 채널에 올라온 보카로 곡 오검출을 줄였고,
   동명이곡·롱/숏 버전 오채택, "AC/DC"처럼 곡명 일부가 다른 단어에 잘못 걸리던 오탐을
   고쳤습니다.
+- **커버 잇기 정확도**: 다른 영상 싱크 연결(커버 잇기) 기능 자체는 예전부터 있었지만,
+  후보를 찾는 방식을 다시 설계했습니다 — 오디오 지문으로 후보를 찾고, 같은 쌍을 반복
+  제출하지 않도록 쿨다운을 걸고, 오탐을 유발하던 신호를 억제해 더 정확한 후보를 냅니다.
+- **디버그 패널 개편**: 엔진 버전·분석 깊이를 한눈에 보고, 이전 결과와 지금 결과를
+  겹쳐 보는 A/B 비교, 서버에 남은 이전 세대와의 버전 비교까지 가능합니다.
 
 ### 고친 것
 
@@ -90,30 +90,23 @@
 
 ## English
 
-### Store changelog (for the Web Store "What's new" field)
+### Summary
 
-- **Link a cover to its original** — connect a cover/instrumental video to the original
-  song's sync and watch it there directly
-- PiP now does everything the main panel does — search, settings, linking another video's
-  sync (plus a chroma-key streaming mode)
-- New: on-video captions, next-up video info, star-rating & issue reports, and a
-  Notices/Contributions/remaining-quota page
+- New: on-video captions, next-up video info module, a depth-upgrade button, star-rating &
+  issue reports, a Notices/Contributions/remaining-quota page, a dedicated playlist panel,
+  and matched-lyrics title display
 - The karaoke lane can now run in the main window too, and syllable/pronunciation timing
   accuracy improved substantially
-- New tools for fine-tuning: a depth-upgrade button and a debug-panel A/B comparison
-- A dedicated playlist panel, and more honest progress/ETA display
+- PiP now does everything the main panel does — search, settings, linking another video's
+  sync — plus a new chroma-key streaming mode
+- Better matching accuracy for linking a cover to its original, and a debug-panel A/B
+  comparison overhaul
+- More honest progress/ETA display
 - Better recognition for cover videos, same-title songs, and long/short versions
 - Numerous fixes to pronunciation display, playlist behavior, stability, and security
 
 ### New
 
-- **Link a cover to its original (link another video's sync)**: enter the original video's
-  URL at the bottom of the search screen to connect a cover or instrumental video straight
-  to the original song's sync.
-- **PiP now does everything the main panel does**: search, settings, offset adjustment, and
-  linking another video's sync all work inside the PiP window. Modules like the playlist can
-  be turned on/off **per window**. A new **chroma-key streaming mode** (background removal +
-  text outline) makes it usable directly in broadcast layouts.
 - **Karaoke lane, now in the main window too**: the piano-roll lane that used to be
   PiP-only can now run as a module in the main panel — with a left-side column, quick
   toggles, and a timing-guide banner.
@@ -130,9 +123,6 @@
   upgrades now run on a budget completely separate from sync generation).
 - **Playlist attachment panel**: the full playlist, previous/next songs, current-song
   highlighting, and server sync-exists badges, all in one panel.
-- **Debug panel overhaul**: see the engine version and analysis depth at a glance, compare
-  the current result against a previous one with an A/B ghost overlay, and compare against
-  older generations still stored on the server.
 - **Matched-lyrics title display + instant report**: the header now shows which song the
   auto-matched lyrics came from, and a "these aren't the right lyrics" button reports it
   immediately.
@@ -142,6 +132,12 @@
 
 ### Significantly improved
 
+- **PiP now does everything the main panel does**: PiP itself isn't new, but until now it
+  was a stripped-down UI — search, settings, offset adjustment, and linking another video's
+  sync didn't work inside the PiP window. Now they all work exactly like the main panel.
+  Modules like the playlist can be turned on/off **per window**, and a new **chroma-key
+  streaming mode** (background removal + text outline) makes it usable directly in
+  broadcast layouts.
 - **Karaoke accuracy**: fixed dropped syllables, raising note-attachment coverage from
   87.9% to 97.4%, and greatly reduced how far the dual pronunciation display could fill
   ahead of or behind the original line (measured across 49 songs: 16% of lines were off,
@@ -152,6 +148,13 @@
 - **Song-detection accuracy**: reduced false detections for cover videos and Vocaloid songs
   on gaming/personal channels, and fixed mismatches from same-title songs, long/short
   versions, and substring false matches (e.g. "AC/DC" matching "AC").
+- **Cover-linking accuracy**: linking a cover/instrumental video to its original isn't a
+  new feature, but candidate-matching was redesigned — it now finds candidates by audio
+  fingerprint, cools down repeated submissions of the same pair, and suppresses signals
+  that used to cause false matches.
+- **Debug panel overhaul**: see the engine version and analysis depth at a glance, compare
+  the current result against a previous one with an A/B ghost overlay, and compare against
+  older generations still stored on the server.
 
 ### Fixed
 
@@ -186,27 +189,22 @@ version disambiguation, translated notices, and English/Chinese pronunciation.
 
 ## 日本語
 
-### ストア changelog(ウェブストアの「変更点」欄用)
+### 概要
 
-- **カバーをリンク** — 原曲の同期をカバー・インスト動画にそのまま接続して見られます
-- PiPでも検索・設定・別動画の同期リンクまでメイン画面と同じように全部できるように
-  (配信向けクロマキーモード込み)
-- 動画上の字幕表示、次の動画情報、星評価・不具合報告、お知らせ・貢献・残り回数ページを新設
+- 新機能: 動画上の字幕表示、次の動画情報モジュール、解析深度アップグレードボタン、
+  星評価・不具合報告、お知らせ・貢献・残り回数ページ、再生リスト専用パネル、
+  マッチした歌詞タイトル表示
 - カラオケレーンがメインウィンドウでも使えるようになり、音節表示・発音タイミングの精度が
   大幅改善
-- 解析深度アップグレードボタン、デバッグA/B比較など、より精密に調整できるツールを追加
-- 再生リスト専用パネル、進行状況・残り時間(ETA)表示がより正直に
+- PiPが検索・設定・別動画の同期リンクまでメイン画面と完全に同じ機能に、配信向け
+  クロマキーモードも追加
+- カバーをリンクするマッチング精度改善、デバッグパネルA/B比較の刷新
+- 進行状況・残り時間(ETA)表示がより正直に
 - カバー動画・同名異曲・ロング/ショート版の認識精度を改善
 - 発音表示・再生リスト・安定性・セキュリティの不具合を多数修正
 
 ### 新機能
 
-- **カバーをリンク(別動画の同期リンク)**: 検索画面下部で原曲動画のURLを入力すると、
-  カバー・インスト動画に原曲の同期をそのまま接続して使えます。
-- **PiPがメインパネルと完全に同じ機能に**: 検索・設定・オフセット調整・別動画の同期
-  リンクまで、すべてPiPウィンドウ内でできます。再生リストなどのモジュールは**ウィンドウ
-  ごとに個別に**オン/オフできます。新設の**クロマキー配信モード**(背景除去+文字の
-  縁取り)で配信レイアウトにそのまま組み込めます。
 - **カラオケレーンがメインウィンドウでも**: これまでPiP専用だったピアノロール式レーンを
   メイン画面でもモジュールとして表示できます。左側カラム配置・クイックトグル・タイミング
   案内バナーも追加されました。
@@ -223,9 +221,6 @@ version disambiguation, translated notices, and English/Chinese pronunciation.
   完全に別予算で管理されます)。
 - **再生リスト添付パネル**: 再生リスト全体・前後の曲・現在の曲のハイライト・サーバー
   同期存在バッジを1つのパネルで確認できます。
-- **デバッグパネル刷新**: エンジンバージョン・解析深度を一目で確認でき、現在の結果と
-  以前の結果を重ねて比較するA/B比較、サーバーに残る過去世代とのバージョン比較も
-  できます。
 - **マッチした歌詞タイトル表示 + 即時報告**: 自動でマッチした歌詞がどの曲のものかを
   上部に表示し、間違っていれば「この歌詞ではありません」でその場で報告できます。
 - その他新機能: 設定画面のカテゴリー別整理+検索、原文/翻訳が行ごとに交互になっている
@@ -233,6 +228,11 @@ version disambiguation, translated notices, and English/Chinese pronunciation.
 
 ### 大幅に改善
 
+- **PiPがメインパネルと完全に同じ機能に**: PiP自体は以前からありましたが、これまでは
+  簡易版のUIでした — 検索・設定・オフセット調整・別動画の同期リンクがPiPウィンドウ内では
+  使えませんでした。今はすべてメイン画面と全く同じように使えます。再生リストなどの
+  モジュールは**ウィンドウごとに個別に**オン/オフでき、新設の**クロマキー配信モード**
+  (背景除去+文字の縁取り)で配信レイアウトにそのまま組み込めます。
 - **カラオケ精度**: 音節が欠落する問題を修正し、ノート付着率が87.9%から97.4%に向上、
   発音の二重表示が原文より先または遅れて塗られるずれを大幅に縮小しました(実測49曲中
   ずれていた16%が0%に)。静かな区間での誤検出カウントダウンも28.3%減少しました。
@@ -242,6 +242,13 @@ version disambiguation, translated notices, and English/Chinese pronunciation.
 - **曲検出精度**: カバー動画やゲーム/個人チャンネルに投稿されたボカロ曲の誤検出を減らし、
   同名異曲・ロング/ショート版の誤選択、"AC/DC"が"AC"に誤マッチするような部分一致の
   誤検出を修正しました。
+- **カバーをリンクする精度**: カバー・インスト動画を原曲に接続する機能自体は以前から
+  ありますが、候補の探し方を作り直しました — 音声指紋で候補を探し、同じ組み合わせの
+  再提出にはクールダウンをかけ、誤マッチの原因になっていた信号を抑制して、より正確な
+  候補を出します。
+- **デバッグパネル刷新**: エンジンバージョン・解析深度を一目で確認でき、現在の結果と
+  以前の結果を重ねて比較するA/B比較、サーバーに残る過去世代とのバージョン比較も
+  できます。
 
 ### 修正
 
