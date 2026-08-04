@@ -162,14 +162,17 @@ try {
   // PiP를 열면 메인 패널이 "패널로 되돌리기" 플레이스홀더로 접히고 헤더의 PiP 아이콘은
   // stateKind!=='synced'라 의도적으로 숨는다(pip-dual-instance-architecture 메모). 헤더
   // 아이콘 재클릭이 아니라 플레이스홀더 자체의 버튼으로 닫아야 실제 UX와 맞는다.
+  // 안내 화면에는 버튼이 **둘**이다(2026-08-04): 일회성 «이번만 패널 보기»(primary)와
+  // 설정을 켜는 «항상 유지»(secondary). 여기서 원하는 것은 일회성 쪽이므로 클래스로
+  // 콕 집는다 — `.ey-state button`은 이제 둘에 걸려 Playwright strict 모드에서 죽는다.
   const placeholder = await page.evaluate(() => {
     const sr = document.getElementById('everyric-root')?.shadowRoot;
-    const btn = sr?.querySelector('.ey-state button');
+    const btn = sr?.querySelector('.ey-state .ey-primary-btn');
     return { present: !!btn, text: btn?.textContent?.trim() ?? '' };
   });
-  check(placeholder.present, '메인 패널이 PiP 플레이스홀더("패널로 되돌리기")로 접힘', placeholder);
+  check(placeholder.present, '메인 패널이 PiP 플레이스홀더(일회성 되돌리기 버튼)로 접힘', placeholder);
   if (placeholder.present) {
-    await page.locator('.ey-state button').click();
+    await page.locator('.ey-state .ey-primary-btn').click();
   } else {
     // pipKeepPanel이 true로 바뀌어 있는 등 플레이스홀더가 없는 경우의 폴백 — 헤더 아이콘이
     // 여전히 보일 것이므로 옛 경로로 닫는다.
