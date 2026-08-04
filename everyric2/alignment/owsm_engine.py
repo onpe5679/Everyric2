@@ -40,11 +40,13 @@ vocab: 5만 유니그램 SentencePiece라 토큰 하나가 가사 글자 여러 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -77,6 +79,8 @@ LANGUAGE_SYMBOLS = {"ko": "<kor>", "ja": "<jpn>", "en": "<eng>", "zh": "<cmn>"}
 DEFAULT_LANGUAGE_SYMBOL = "<nolang>"
 
 WORKER_TIMEOUT_SEC = 3600
+
+logger = logging.getLogger(__name__)
 
 
 def _default_owsm_python() -> Path:
@@ -345,3 +349,53 @@ class OwsmEngine(BaseAlignmentEngine):
     @staticmethod
     def get_engine_type() -> Literal["owsm"]:
         return "owsm"
+
+
+# 웜 캐시 (2026-08-04, ctc_engine.py의 get_shared_ctc_engine과 같은 관례 — EVERYRIC_SERVER_
+# WARM_MODELS로 켜고 끈다). config가 다르면 새로 만든다 — 이 엔진이 self.config에서 실제로
+# 읽는 값은 owsm_python_path(어느 인터프리터를 서브프로세스로 부를지)와 owsm_dtype(정밀도)
+# 뿐이다(__init__·_worker_python·align 본문 확인) — 그래서 그 둘만 키로 삼는다. 나머지
+# AlignmentSettings 필드는 이 엔진의 적재·실행에 영향이 없다.
+#
+# **중요한 한계**: 이 래퍼 인스턴스를 재사용해도 실측된 무거운 적재 비용(MoRef 실측
+# 9.48초)은 줄지 않는다 — align()이 매 호출마다 subprocess.run으로 격리 venv를 새로
+# 띄우고(_run_worker), 그 서브프로세스 **안에서** ESPnet·모델 가중치가 매번 새로
+# 로드된다(위 모듈 docstring "서브프로세스 격리" 참고). 이 래퍼가 인스턴스 수준에서 들고
+# 있는 상태는 self._snapshot(경로 문자열) 하나뿐이라, 캐싱으로 아끼는 비용은 그 경로
+# 탐색뿐이다. 그래도 (a) 다른 세 웜 캐시(ctc·separator·melody)와 같은 관례를 지키고,
+# (b) 나중에 상주 서브프로세스(요청마다 새로 안 띄우는 워커)로 바뀔 때 이 접근자 이름을
+# 그대로 쓸 수 있도록 래퍼 캐싱 자체는 넣어 둔다 — 실제 적재 비용 절감은 이번 변경
+# 범위에 없다(보고 참고).
+_shared_owsm_engines: dict[tuple[str | None, str | None], "OwsmEngine"] = {}
+_shared_owsm_lock = threading.Lock()
+
+
+def _owsm_cache_key(config: AlignmentSettings | None) -> tuple[str | None, str | None]:
+    owsm_python_path = getattr(config, "owsm_python_path", None) if config else None
+    owsm_dtype = getattr(config, "owsm_dtype", None) if config else None
+    return (owsm_python_path, owsm_dtype)
+
+
+def get_shared_owsm_engine(config: AlignmentSettings | None = None) -> "OwsmEngine":
+    """웜 캐시된 OwsmEngine 래퍼를 돌려준다. warm_models가 꺼져 있으면 매번 새 인스턴스
+    (기존 동작). 실제 적재 비용 절감에 대해서는 위 모듈 수준 주석의 한계 설명 참고."""
+    from everyric2.config.settings import get_settings
+
+    if not get_settings().server.warm_models:
+        return OwsmEngine(config)
+    key = _owsm_cache_key(config)
+    with _shared_owsm_lock:
+        engine = _shared_owsm_engines.get(key)
+        if engine is None:
+            engine = OwsmEngine(config)
+            _shared_owsm_engines[key] = engine
+        else:
+            logger.info("warm model reuse: owsm")
+        return engine
+
+
+def clear_shared_owsm_engine() -> None:
+    """웜 캐시 전부 해제(VRAM 가드용) — 다음 요청에서 지연 재생성된다."""
+    global _shared_owsm_engines
+    with _shared_owsm_lock:
+        _shared_owsm_engines = {}

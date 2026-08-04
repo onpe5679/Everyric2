@@ -314,6 +314,12 @@ class _FakeEngine:
     def is_available(self) -> bool:
         return True
 
+    @staticmethod
+    def get_engine_type() -> str:
+        # get_shared_ctc_engine 대역이라 실제 CTCEngine과 같은 값(2026-08-04, worker.py의
+        # 결과 dict "engine" 키가 이 메서드로 채워진다).
+        return "ctc"
+
     def align(self, audio, lyrics, language=None, progress_callback=None):
         from everyric2.inference.prompt import SyncResult, WordSegment
 

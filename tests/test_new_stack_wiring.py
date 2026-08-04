@@ -247,6 +247,11 @@ class _FakeAnchor:
     def is_available(self) -> bool:
         return self._available
 
+    def get_engine_type(self) -> str:
+        # 저장 경로가 sync_results.engine에 실제 엔진 이름을 적으면서 생긴 계약 —
+        # 진짜 엔진은 전부 이 메서드를 갖고 있다(대역도 미러링해야 한다).
+        return "omniasr"
+
     def align(self, audio, lyrics, language=None, progress_callback=None):
         self.align_calls.append({"audio": audio, "lyrics": lyrics, "language": language})
         return self._results

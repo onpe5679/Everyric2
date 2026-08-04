@@ -35,8 +35,10 @@ vocab: 9,812 SentencePiece 조각, 이례적으로 **전부 단일 글자**(한�
 
 from __future__ import annotations
 
+import logging
 import math
 import re
+import threading
 import time
 import unicodedata
 from collections.abc import Callable
@@ -72,6 +74,8 @@ TARGET_SAMPLE_RATE = 16_000
 # 길이를 넘겨 위치 외삽을 시키지 않는다(벤치와 같은 값).
 ALIGN_CHUNK_SEC = 30.0
 ALIGN_CHUNK_OVERLAP_SEC = 5.0
+
+logger = logging.getLogger(__name__)
 
 
 def _read_sentencepiece_pieces(path: Path) -> list[str]:
@@ -569,3 +573,50 @@ class OmniASREngine(BaseAlignmentEngine):
     @staticmethod
     def get_engine_type() -> Literal["omniasr"]:
         return "omniasr"
+
+
+# 웜 캐시 (2026-08-04, ctc_engine.py의 get_shared_ctc_engine과 같은 관례 — EVERYRIC_SERVER_
+# WARM_MODELS로 켜고 끈다). 이 엔진은 owsm과 달리 **인프로세스**라 재사용이 실제로 유효하다
+# — _ensure_model()이 첫 호출 이후 self._model/self._processor를 인스턴스에 그대로 들고
+# 있으므로, 같은 인스턴스를 두 번째 잡부터 재사용하면 실측된 적재 비용(MoRef 4.25초)이 0회로
+# 줄어든다(ctc_engine.py의 _ensure_model_loaded 싱글턴 재사용과 동일한 이득).
+#
+# config 키: is_available()·_ensure_model()·_ensure_vocab() 어디도 self.config를 참조하지
+# 않는다(MODEL_ID/CHECKPOINT_NAME/TOKENIZER_NAME이 모듈 상수, device도 torch.cuda.
+# is_available()로만 정해짐 — grep으로 확인). 즉 지금은 config가 달라도 항상 같은 모델이
+# 로드된다. 그래도 "config 다르면 새로 만든다"는 다른 웜 캐시들과의 안전 계약을 지키려고
+# 딕셔너리 캐시 구조는 그대로 두되(단일 슬롯으로 줄이지 않는다), 지금 실제로 영향을 주는
+# 필드가 없으므로 키는 상수다 — 나중에 config가 이 엔진의 로딩에 영향을 주게 바뀌면
+# _omniasr_cache_key 한 곳만 고치면 된다.
+_shared_omniasr_engines: dict[tuple[()], "OmniASREngine"] = {}
+_shared_omniasr_lock = threading.Lock()
+
+
+def _omniasr_cache_key(config: AlignmentSettings | None) -> tuple[()]:
+    del config  # 지금은 이 엔진의 로딩에 영향을 주는 config 필드가 없다(위 주석 참고)
+    return ()
+
+
+def get_shared_omniasr_engine(config: AlignmentSettings | None = None) -> "OmniASREngine":
+    """웜 캐시된 OmniASREngine을 돌려준다. warm_models가 꺼져 있으면 매번 새 인스턴스
+    (기존 동작)."""
+    from everyric2.config.settings import get_settings
+
+    if not get_settings().server.warm_models:
+        return OmniASREngine(config)
+    key = _omniasr_cache_key(config)
+    with _shared_omniasr_lock:
+        engine = _shared_omniasr_engines.get(key)
+        if engine is None:
+            engine = OmniASREngine(config)
+            _shared_omniasr_engines[key] = engine
+        else:
+            logger.info("warm model reuse: omniasr")
+        return engine
+
+
+def clear_shared_omniasr_engine() -> None:
+    """웜 캐시 전부 해제(VRAM 가드용) — 다음 요청에서 지연 재생성된다."""
+    global _shared_omniasr_engines
+    with _shared_omniasr_lock:
+        _shared_omniasr_engines = {}
