@@ -14,9 +14,6 @@
   "pip_controls_nextTrack": {
     "message": "次の曲"
   },
-  "pip_controls_playlist": {
-    "message": "再生リスト"
-  },
   "pip_controls_mute": {
     "message": "ミュート"
   },
@@ -59,9 +56,6 @@
   "pip_controls_progressSeek": {
     "message": "クリックで移動"
   },
-  "pip_controls_karaokeToggle": {
-    "message": "カラオケ音程レーンのオン/オフ"
-  },
   "pip_controls_videoToggle": {
     "message": "映像表示のオン/オフ"
   },
@@ -85,12 +79,6 @@
   },
   "pip_controls_autoCollapsed": {
     "message": "オンですがウィンドウが狭くたたまれています — 広げると再表示されます"
-  },
-  "pip_controls_panelToggle": {
-    "message": "歌詞検索パネルの開閉"
-  },
-  "pip_controls_laneHeightDrag": {
-    "message": "ドラッグでカラオケレインの高さを調整"
   },
   "pip_controls_videoRatioDrag": {
     "message": "ドラッグで映像/歌詞の比率を調整"
@@ -613,21 +601,6 @@
   },
   "overlay_feedback_catOther": {
     "message": "その他"
-  },
-  "overlay_feedback_commentPh": {
-    "message": "ひとこと（任意）"
-  },
-  "overlay_feedback_send": {
-    "message": "送信"
-  },
-  "overlay_feedback_needRating": {
-    "message": "先に星を選んでください"
-  },
-  "overlay_feedback_thanks": {
-    "message": "ありがとうございます！品質改善に使います"
-  },
-  "overlay_feedback_failed": {
-    "message": "送信失敗 — 後でもう一度お試しください"
   },
   "overlay_matched_label": {
     "message": "見つかった歌詞"
@@ -1242,22 +1215,8 @@
   "overlay_laneNotice_neverTitle": {
     "message": "この案内を今後表示しません（設定から戻せます）"
   },
-  "overlay_settings_resetKaraokeNotice": {
-    "message": "カラオケタイミング案内を再表示"
-  },
-  "overlay_settings_resetKaraokeNoticeTitle": {
-    "message": "「今後表示しない」で消した音節タイミング案内を元に戻します"
-  },
   "content_notice_extensionReloaded": {
     "message": "拡張機能が更新されました — このタブで使い続けるにはページを再読み込みしてください"
-  },
-  "overlay_nextUp_prefix": {
-    "message": "次 ▸ $P1$",
-    "placeholders": {
-      "P1": {
-        "content": "$1"
-      }
-    }
   },
   "overlay_playlist_prev": {
     "message": "前の動画"
@@ -1284,14 +1243,6 @@
   },
   "overlay_playlist_existsTitle": {
     "message": "サーバー同期あり"
-  },
-  "pip_nextUp": {
-    "message": "次 ▸ $P1$",
-    "placeholders": {
-      "P1": {
-        "content": "$1"
-      }
-    }
   },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "音程カーブの明るさ"
@@ -2094,12 +2045,6 @@
   "panels_settings_section_reset": {
     "message": "リセット"
   },
-  "panels_settings_row_captionFontScale": {
-    "message": "動画字幕の文字サイズ"
-  },
-  "panels_settings_row_captionBgOpacity": {
-    "message": "動画字幕の背景の濃さ"
-  },
   "panels_settings_row_mainLaneWidth": {
     "message": "歌詞ウィンドウのレーン幅"
   },
@@ -2367,17 +2312,5 @@
   },
   "panels_settings_row_attachedLaneWidth": {
     "message": "アタッチレーン幅"
-  },
-  "overlay_settings_row_pipLyricsList": {
-    "message": "PiP歌詞リスト — 右側にスクロール一覧を追加"
-  },
-  "overlay_settings_row_pipLyricsListTitle": {
-    "message": "PiPウィンドウの右にスクロール可能な歌詞リストを表示します。オンにするとウィンドウの最大幅が広がります。"
-  },
-  "pip_controls_lyricsListToggle": {
-    "message": "歌詞リスト列の切り替え"
-  },
-  "pip_controls_pronPositionToggle": {
-    "message": "レーン発音行の位置切り替え(オフ/下部/中央)"
   }
 }

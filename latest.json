@@ -6,9 +6,9 @@
     "engineRange": ">=0.1.0 <1.0.0"
   },
   "engine": {
-    "version": "0.1.0",
-    "wheelUrl": "https://github.com/onpe5679/Everyric2/releases/download/engine-v0.1.0/everyric2-0.1.0-py3-none-any.whl",
-    "releaseUrl": "https://github.com/onpe5679/Everyric2/releases/tag/engine-v0.1.0"
+    "version": "0.3.0",
+    "wheelUrl": "https://github.com/onpe5679/Everyric2/releases/download/engine-v0.3.0/everyric2-0.3.0-py3-none-any.whl",
+    "releaseUrl": "https://github.com/onpe5679/Everyric2/releases/tag/engine-v0.3.0"
   },
   "chrome": {
     "version": "1.6.0",

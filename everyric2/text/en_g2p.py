@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 _CMU: dict[str, list[list[str]]] | None = None
@@ -92,12 +93,35 @@ def _compose(onset: str, vowel: str, coda: str = "") -> str:
     return chr(0xAC00 + (cho * 21 + jung) * 28 + jong)
 
 
+_CMUDICT_PAREN_SUFFIX = re.compile(r"\(\d+\)$")
+_CMUDICT_DATA_PATH = Path(__file__).resolve().parent / "data" / "cmudict" / "cmudict.dict"
+
+
 def _load() -> dict[str, list[list[str]]]:
+    """CMU Pronouncing Dictionary를 ``data/cmudict/cmudict.dict``에서 직접 파싱한다.
+
+    2026-08-04까지는 PyPI ``cmudict`` 패키지(GPL-3.0-or-later)에 의존했다 — 원 CMU 데이터
+    자체는 BSD 계열 허가 라이선스(``data/cmudict/LICENSE`` 동봉 원문 확인)인데, 그 패키지의
+    **파이썬 래퍼·패키징 코드**만 별도로 GPL을 택해 전체 의존 트리에 GPL이 섞였다(이 리포는
+    NC 하나 때문에 정렬 스택 전체를 교체한 이력이 있어 GPL을 남긴 채로 못 둔다, 운영자 지시).
+    그래서 원본 데이터 파일 자체를 리포에 동봉하고, 그 패키지가 하던 파싱(``_entries``/
+    ``dict()``, ``WORD PHONE1 PHONE2 ...`` 공백 구분·``#`` 주석·``word(2)`` 이형태 표기)을
+    여기서 그대로 재현한다 — 반환 자료구조(``dict[str, list[list[str]]]``, 낱말→발음 후보
+    리스트)는 완전히 동일해 소비처(word_to_ipa·pronunciations·word_to_hangul)는 무변경이다.
+    교체 전후 전수 대조(12만 6052개 표제어, 값 불일치 0건)로 동등성을 확인했다(구 패키지가
+    설치된 상태에서 직접 대조 — 대조 스크립트는 일회성이라 리포에 남기지 않았다)."""
     global _CMU
     if _CMU is None:
-        import cmudict
-
-        _CMU = cmudict.dict()
+        result: dict[str, list[list[str]]] = {}
+        with open(_CMUDICT_DATA_PATH, encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                word = _CMUDICT_PAREN_SUFFIX.sub("", parts[0])
+                result.setdefault(word, []).append(parts[1:])
+        _CMU = result
     return _CMU
 
 

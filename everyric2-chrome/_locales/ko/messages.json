@@ -14,9 +14,6 @@
   "pip_controls_nextTrack": {
     "message": "다음 곡"
   },
-  "pip_controls_playlist": {
-    "message": "재생목록"
-  },
   "pip_controls_mute": {
     "message": "음소거"
   },
@@ -59,9 +56,6 @@
   "pip_controls_progressSeek": {
     "message": "클릭해서 이동"
   },
-  "pip_controls_karaokeToggle": {
-    "message": "가라오케 음정 바 켜기/끄기"
-  },
   "pip_controls_videoToggle": {
     "message": "영상 함께 표시 켜기/끄기"
   },
@@ -85,12 +79,6 @@
   },
   "pip_controls_autoCollapsed": {
     "message": "켜져 있지만 창이 좁아 접혔어요 — 창을 넓히면 다시 나와요"
-  },
-  "pip_controls_panelToggle": {
-    "message": "가사 찾기 패널 열기/닫기"
-  },
-  "pip_controls_laneHeightDrag": {
-    "message": "드래그해서 가라오케 레인 높이 조절"
   },
   "pip_controls_videoRatioDrag": {
     "message": "드래그해서 영상/가사 비율 조절"
@@ -613,21 +601,6 @@
   },
   "overlay_feedback_catOther": {
     "message": "기타"
-  },
-  "overlay_feedback_commentPh": {
-    "message": "남기고 싶은 말 (선택)"
-  },
-  "overlay_feedback_send": {
-    "message": "보내기"
-  },
-  "overlay_feedback_needRating": {
-    "message": "별점을 먼저 골라 주세요"
-  },
-  "overlay_feedback_thanks": {
-    "message": "고마워요! 품질 개선에 쓸게요"
-  },
-  "overlay_feedback_failed": {
-    "message": "전송 실패 — 잠시 후 다시 시도해 주세요"
   },
   "overlay_matched_label": {
     "message": "찾은 가사"
@@ -1242,22 +1215,8 @@
   "overlay_laneNotice_neverTitle": {
     "message": "이 안내를 다시 띄우지 않아요 (설정에서 되돌릴 수 있어요)"
   },
-  "overlay_settings_resetKaraokeNotice": {
-    "message": "가라오케 타이밍 안내 다시 보기"
-  },
-  "overlay_settings_resetKaraokeNoticeTitle": {
-    "message": "‘다시 보지 않기’로 끈 음절 타이밍 안내를 되살려요"
-  },
   "content_notice_extensionReloaded": {
     "message": "확장 프로그램이 업데이트됐어요 — 이 탭에서 다시 쓰려면 페이지를 새로고침해 주세요"
-  },
-  "overlay_nextUp_prefix": {
-    "message": "다음 ▸ $P1$",
-    "placeholders": {
-      "P1": {
-        "content": "$1"
-      }
-    }
   },
   "overlay_playlist_prev": {
     "message": "이전 영상"
@@ -1284,14 +1243,6 @@
   },
   "overlay_playlist_existsTitle": {
     "message": "서버 싱크 있음"
-  },
-  "pip_nextUp": {
-    "message": "다음 ▸ $P1$",
-    "placeholders": {
-      "P1": {
-        "content": "$1"
-      }
-    }
   },
   "overlay_settings_row_pitchF0Opacity": {
     "message": "음정 곡선 밝기"
@@ -2094,12 +2045,6 @@
   "panels_settings_section_reset": {
     "message": "초기화"
   },
-  "panels_settings_row_captionFontScale": {
-    "message": "영상 자막 글자 크기"
-  },
-  "panels_settings_row_captionBgOpacity": {
-    "message": "영상 자막 배경 진하기"
-  },
   "panels_settings_row_mainLaneWidth": {
     "message": "가사창 레인 너비"
   },
@@ -2367,17 +2312,5 @@
   },
   "panels_settings_row_attachedLaneWidth": {
     "message": "부착 레인 너비"
-  },
-  "overlay_settings_row_pipLyricsList": {
-    "message": "PIP 가사 목록 — 창 오른쪽에 스크롤 목록 추가"
-  },
-  "overlay_settings_row_pipLyricsListTitle": {
-    "message": "PiP 창 오른쪽에 스크롤 가능한 가사 목록을 함께 표시합니다. 켜면 창 최대 폭이 넓어집니다."
-  },
-  "pip_controls_lyricsListToggle": {
-    "message": "가사 목록 컬럼 켜기/끄기"
-  },
-  "pip_controls_pronPositionToggle": {
-    "message": "레인 발음 줄 위치 전환(꺼짐/하단/중앙)"
   }
 }

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "everyric2"
-version = "0.1.0"
+version = "0.3.0"
 description = "Lyrics synchronization using CTC forced alignment"
 readme = "README.md"
 license = "Apache-2.0"
@@ -55,11 +55,6 @@ dependencies = [
     # 중국어 곡 표기(everyric2.text.zh_reading)용 한자→병음 읽기. 다음자(长江/长大)를
     # 구 사전으로 가르는 부분만 맡고 표기 관례는 저장소가 정한다. 순수 파이썬이다.
     "pypinyin>=0.53.0",
-    # 영어 곡 발음 표기(everyric2.text.en_g2p)용 CMU 발음 사전. 선언이 빠져 있어 깨끗한
-    # 환경에서 uv sync가 건너뛰었고, en_g2p의 import 실패를 worker가 로그만 남기고
-    # 삼켜 **영어곡 발음이 조용히 사라졌다**(릴리스 감사 2026-08-04 — 로컬에 우연히
-    # 깔려 있어 테스트가 통과하고 있었다).
-    "cmudict>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -134,6 +129,22 @@ all = [
 
 [project.scripts]
 everyric2 = "everyric2.cli:app"
+
+[tool.hatch.build.targets.sdist]
+# 2026-08-04 — 명시 없이는 hatchling이 리포 루트 전체(git 추적 여부와 무관하게)를 sdist에
+# 쓸어 담는다: 실측 결과 `uv build`가 3.6GB짜리 tar.gz를 만들었고(.venv-owsm·benchmark·
+# everyric2-chrome·everyric2-ae·손상된 db 파일까지 전부 포함), 그래서 sdist 빌드가
+# 로컬에서 거의 멈춘 것처럼 보였다(CI는 클린 체크아웃이라 저 산출물들이 애초에 없어서
+# 안 걸렸다). 이 프로젝트는 파이썬 패키지(everyric2/) 하나가 크롬 확장·AE 플러그인·벤치
+# 산출물·배포 설정과 한 리포에 같이 사는 모노레포라, sdist는 반드시 **허용목록**으로
+# 좁혀야 한다 — 나중에 리포 루트에 새 디렉터리가 생겨도 이 목록에 없으면 자동으로
+# 제외되는 쪽이, 매번 exclude를 추가하는 쪽보다 안전하다.
+include = [
+    "/everyric2",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["everyric2"]
