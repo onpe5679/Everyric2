@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 from everyric2.config.settings import get_settings
 from everyric2.server import media_cache, song_link, title_match
 
+# 앞단(게이트웨이) 쿼터 헤더의 유일한 수신부 — 이름·형식·무제한 표현이 전부 거기 있다.
+# 게이트웨이가 확정되면 이 모듈이 아니라 quota_headers.py를 고친다(docs §6).
+from everyric2.server.api.quota_headers import QuotaLimits, is_ops_actor, resolve_limits
+
 # 리스 회수는 워커 API가 소유한다 (레지스트리가 거기 있다). api/worker는 api/sync를
 # 임포트하지 않으므로 순환이 없다 — 요청마다 함수 내 임포트를 반복하지 않게 최상위로 둔다.
 from everyric2.server.api.worker import reclaim_expired_leases
@@ -41,24 +45,49 @@ logger = logging.getLogger(__name__)
 _HANGUL_RE = re.compile("[가-힣]")
 
 
-# ── GPU를 태우는 경로의 일일 상한 (action_logs 기반, 영상·행위별 24시간) ──────────
+# ── 비싼 행위의 일일 상한 기본값 (action_logs 기반, 이용자·행위별 24시간) ──────────
 #
-# 파괴적 행위(daily_destructive_limit, 기본 2회)와 **같은 기전**을 상한만 달리해 재사용한다.
-# 설정으로 올릴 후보라 값의 근거를 붙여 모듈 상수로 둔다.
+# 파괴적 행위(daily_destructive_limit, 기본 4회 — 초기화+강제 재생성 합산)와 **같은 기전**을
+# 상한만 달리해 재사용한다. 설정으로 올릴 후보라 값의 근거를 붙여 모듈 상수로 둔다.
+#
+# **집계 축은 이용자다**(운영자 결정 2026-08-10, docs/user-quota-spec.md §1). 예전에는
+# (행위, 영상)이라 한 사람이 어떤 영상에서 상한을 다 쓰면 그 영상을 처음 여는 다른 사람이
+# 0회로 시작했다. 아래 상수들의 "하루 N번"은 이제 **한 사람이 전체 영상을 통틀어** N번이다.
+#
+# 🔴 **이 값들은 기본값이다**(같은 문서 §6, 2026-08-10). 앞단(게이트웨이)이 이용자 티어에
+# 맞는 상한을 헤더로 보내면 그 값이 이긴다 — 여기 상수는 앞단 값을 못 받았을 때만 쓰인다
+# (_default_limits → quota_headers.resolve_limits). 티어에 준 값이 이 상수보다 크면
+# 예전에는 작은 쪽이 먼저 걸려 영원히 도달할 수 없었다.
 
 # POST /api/sync/generate — 이 경로에는 한도가 전혀 없었다. 가사를 한 글자만 바꾸면 매번 새
 # lyrics_hash가 되어 캐시·합류를 모두 비켜 새 GPU 잡이 생긴다. 다만 이건 제품의 **주 경로**라
-# 파괴적 행위와 같은 2회로 잡으면 정상 사용이 망가진다: 오탈자 수정, 다른 가사 판본 시도,
+# 파괴적 행위와 같은 수준으로 잡으면 정상 사용이 망가진다: 오탈자 수정, 다른 가사 판본 시도,
 # 실패 후 재시도로 한 영상에 여러 번 생성하는 것은 흔하다. 20회/24h는 그 여유를 크게 남기면서
-# (하루 20번 같은 영상에 새 가사로 생성하는 정상 사용자는 없다) 무한 반복은 잘라낸다.
+# 무한 반복은 잘라낸다.
 # 캐시 히트·진행 중 잡 합류는 GPU를 쓰지 않으므로 세지 않는다 (검사 위치가 잡 생성 직전).
 DAILY_GENERATE_LIMIT = 20
 
-# GET /api/sync/{video_id}/link-candidates — GET 하나가 GPU 잡(영상 2개 다운로드 + demucs ×2
-# + 상관)을 제출한다. 억제가 (video_id, 후보) 쌍 쿨다운뿐이라 같은 영상에서도 후보를 바꿔가며
-# 반복 제출이 가능했다. 같은 영상에서 자동 후보 제출이 하루 3번을 넘을 이유가 없다 — 상위
-# 후보 1건만 제출하고, 그 후보가 쿨다운에 걸려도 다음 후보로 넘어가는 경로는 없다.
-DAILY_LINK_CANDIDATE_LIMIT = 3
+# POST /api/sync/link — 사람이 검색 시트에서 원곡 주소를 넣어 **직접** 연결하는 행위.
+# 확장 배지의 "커버 잇기"가 가리키는 것이 이것이다(docs/user-quota-spec.md §7).
+#
+# 2026-08-10까지 이 자리에 있던 것은 자동 후보 탐색(link-candidates)의 상한이었다. 그건
+# 사용자가 요청한 적도, 실패해도 볼 수도 없는 배경 요청이라 라벨과 내용이 어긋났다 —
+# 라벨이 가리키는 진짜 행위로 교체한다(_dispatch_candidate_followup 주석에 상한 제거 근거).
+#
+# 20회/24h: 이 경로는 GPU를 쓰지 않는다(DB upsert 한 번). 사람이 하루에 스무 곡을 손으로
+# 이어 붙이는 것은 정상 사용의 상한 밖이고, 그 이상은 자동화된 반복이다. generate와 같은
+# 자릿수로 둬 "한 사람이 하루에 손댈 수 있는 곡 수"라는 감각을 한 값으로 맞춘다.
+DAILY_LINK_LIMIT = 20
+
+# 하나의 예산을 나눠 쓰는 파괴적 행위들 — 초기화(reset)와 강제 재생성(regenerate).
+# 예전에는 각자 daily_destructive_limit을 따로 소비해 실제로는 상한의 2배까지 가능했고,
+# 화면에는 둘 중 큰 값 하나(max)만 보여 "한 예산처럼 보이는데 두 예산"이었다
+# (docs/user-quota-spec.md §2). 지금은 두 행위의 **합계**가 하나의 상한을 쓴다.
+#
+# **링크 해제는 여기에 없다**(같은 문서 §2). 링크 해제는 잘못 연결된 링크를 되돌리는 복구
+# 행위라, 한도로 막으면 잘못된 상태가 고쳐지지 않은 채 남는다 — 한도는 비용·가용성을
+# 지키는 수단이지 정확성을 지키는 수단이 아니다.
+DESTRUCTIVE_ACTIONS = ("reset", "regenerate")
 
 # 가사 하한 — 이 줄 수를 못 넘기는 생성 요청은 잡을 만들지 않고 400으로 거절한다.
 #
@@ -90,51 +119,195 @@ def _validate_lyrics(lyrics: str) -> None:
         )
 
 
+# 429 사유에 쓰는 행위별 한국어 이름 — 이용자에게 "무엇의 한도인지"를 알린다.
+# 파괴적 두 행위는 하나의 예산이므로 같은 문구를 쓴다(합산이라는 사실이 사유에 드러난다).
+_ACTION_LABELS = {
+    "generate": "싱크 생성",
+    "upgrade": "정렬 업그레이드",
+    "link": "커버 잇기",
+    "reset": "초기화·강제 재생성",
+    "regenerate": "초기화·강제 재생성",
+}
+
+# 행위 → 예산 버킷. 버킷 이름은 세 곳에서 같은 어휘여야 한다 — GET /api/limits 응답 필드
+# (확장이 그리는 이름), 앞단 한도 헤더의 키(quota_headers.BUCKETS), 그리고 여기.
+_ACTION_BUCKET = {
+    "generate": "generate",
+    "upgrade": "upgrade",
+    "link": "link",
+    "reset": "destructive",
+    "regenerate": "destructive",
+}
+
+# 한 버킷을 **여러 행위가 나눠 쓰는** 경우 그 전체 집합. 검사는 합계로 하고 기록은 실제
+# 행위 이름으로 남긴다 — 어느 행위였는지의 정보를 합산 예산에서도 잃지 않는다.
+_BUCKET_ACTIONS: dict[str, tuple[str, ...]] = {"destructive": DESTRUCTIVE_ACTIONS}
+
+
+def _default_limits() -> dict[str, int | None]:
+    """앞단이 값을 안 줬을 때 내려앉을 **이 서버의** 기본값 — 버킷별(docs §6).
+
+    모듈 상수를 호출 시점에 읽는다(테스트가 상수를 갈아끼워 경계를 재현한다)."""
+    server = get_settings().server
+    return {
+        "generate": DAILY_GENERATE_LIMIT,
+        "link": DAILY_LINK_LIMIT,
+        "upgrade": server.daily_upgrade_limit,
+        "destructive": server.daily_destructive_limit,
+    }
+
+
+def request_limits(quota_header: str | None, *, warn: bool = True) -> QuotaLimits:
+    """이 요청에 집행할 버킷별 상한 — 앞단 값이 있으면 그 값, 없으면 기본값(docs §6).
+
+    앞단 헤더의 이름·형식은 quota_headers.py 한 곳에 갇혀 있다. 여기는 **기본값을 대는
+    자리**일 뿐이라 게이트웨이가 확정돼도 손댈 것이 없다."""
+    return resolve_limits(quota_header, _default_limits(), warn=warn)
+
+
+def _resolve_actor(actor: str | None) -> str:
+    """한도 집행에 쓸 이용자 식별자를 확정한다 — **한도를 강제하는 배포에서만** 부른다.
+
+    값은 게이트웨이가 x-lyric-user 헤더로 넘긴다(발급 키 이용자는 불변 키 ID, 익명
+    이용자는 게이트웨이가 만든 솔트 해시 — docs/user-quota-spec.md §1). 서버는 게이트웨이
+    뒤에만 있어야 하므로, 공개 배포에서 이 헤더가 없는 요청은 정상 경로로 도달할 수 없다.
+
+    **부재·빈 값은 거절한다(fail-closed).** 영상 단위나 공용 이용자로 폴백하면 "한 사람의
+    사용이 다른 사람을 정지시키는" 원래 문제로 그대로 되돌아간다(같은 문서 §1). 통과시키면
+    한도가 아예 없는 우회로가 된다.
+
+    상태 코드는 400이다: 401/403은 "당신의 자격 증명이 없거나 부족하다"는 뜻이라 확장이
+    사용자에게 API 키 입력을 안내하게 되는데, 이 헤더는 사용자가 넣는 값이 아니라 앞단
+    인프라가 붙이는 값이다 — 실제로 잘못된 것은 **요청이 도달한 경로**이므로 잘못된 요청
+    (400)이 정직한 분류다. 어드민도 예외가 아니다: 어드민 면제는 §5에서 "거절만 면제,
+    기록은 남긴다"로 정의되는데, actor가 없으면 기록 자체를 남길 수 없다.
+    """
+    # 문자열이 아닌 값은 없는 것으로 본다 — 라우트 코루틴을 직접 await하는 테스트 하네스가
+    # 안 넘긴 인자에 Header(None) 기본값 객체를 그대로 실어 보낸다(quota_headers 참고).
+    actor_id = actor.strip() if isinstance(actor, str) else ""
+    if not actor_id:
+        raise HTTPException(
+            status_code=400,
+            detail="이용자 식별 정보가 없는 요청이에요. 잠시 후 다시 시도해 주세요.",
+        )
+    return actor_id
+
+
 async def _check_action_limit(
-    session, action: str, video_id: str, api_key: str | None, limit: int
+    session,
+    action: str,
+    video_id: str,
+    actor: str | None,
+    api_key: str | None,
+    quota_header: str | None = None,
+    *,
+    record: bool = True,
 ) -> None:
-    """(action, video_id) 24시간 횟수 상한 — admin_api_key가 설정된 배포에서만.
+    """(action, actor) 24시간 횟수 상한 — admin_api_key가 설정된 배포에서만.
 
-    키가 미설정이면(로컬 사용) 제한 없음. 어드민 키 보유 요청은 통과.
-    통과 시 로그를 남겨 다음 검사에 반영한다. 초과면 429.
+    키가 미설정이면(로컬 사용) 제한 없음 — actor도 요구하지 않는다(기존 동작 유지).
+    설정돼 있으면 actor를 요구하고(_resolve_actor, fail-closed), 초과면 429다.
 
-    **한계(의도적)**: 키가 (행위, 영상)이라 같은 영상의 반복만 막고, 임의의 11자 video_id를
-    바꿔 가며 새 영상으로 부르는 순환은 막지 못한다. 전역 상한으로 바꾸면 한 사용자의 남용이
-    다른 모든 사용자의 정상 생성을 함께 막으므로, 이 층에서는 영상 단위가 옳다 — 순환 남용은
-    상위(요청자 단위 인증·쿼터)에서 다뤄야 한다.
+    **상한값은 앞단이 준다**(docs/user-quota-spec.md §6). quota_header가 그 값을 실어 오고,
+    없으면 이 서버의 기본값으로 내려앉는다(request_limits → quota_headers.resolve_limits가
+    그 사실을 경고로 남긴다 — 조용한 티어 무력화 금지). 검사할 상한은 행위가 속한 **버킷**의
+    값이다(_ACTION_BUCKET).
+
+    **어드민은 거절만 면제받고 사용량은 기록된다**(같은 문서 §5). 예전에는 검사 자체를 조기
+    return해 기록도 안 남아, 소유자 화면에는 실제로 쓴 뒤에도 한도가 항상 만땅으로 보였다
+    (실측 2026-08-10). 지금은 카운트 비교만 건너뛴다. **운영 작업 식별자**(§8, `ops:` 접두)도
+    같은 취급이다 — 대량 인제스트는 원래 상한 밖의 작업이지만 기록은 남는다.
+
+    record=False: 검사만 하고 기록은 호출부가 나중에(_record_action) 남긴다. 실제로 일어난
+    일이 없으면 예산을 소비하지 않아야 하는 경로(초기화 멱등성, 같은 문서 §4)를 위한 것이다.
+
+    **한계(의도적)**: 익명 이용자의 식별자는 게이트웨이가 만든 값이라 그 층의 강도를
+    넘어설 수 없다. 그 대신 이 층은 "누가 봐도 같은 사람"인 반복을 정확히 막는다 — 예전
+    영상 단위 집계는 그조차 못 했다(영상만 바꾸면 예산이 새로 생겼다).
     """
     server = get_settings().server
-    if not server.admin_api_key or limit <= 0 or api_key == server.admin_api_key:
+    if not server.admin_api_key:
         return
+    actor_id = _resolve_actor(actor)
     log_repo = ActionLogRepository(session)
-    if await log_repo.count_recent(action, video_id) >= limit:
-        raise HTTPException(
-            status_code=429,
-            detail=f"이 영상의 {action} 일일 한도({limit}회/24시간)에 도달했어요. 내일 다시 시도해 주세요.",
-        )
-    await log_repo.log(action, video_id)
+    bucket = _ACTION_BUCKET[action]
+    # 무제한(None)은 거절만 건너뛰고 기록은 남긴다 — 어드민과 같은 이유로, 사용량 표시가
+    # 사실과 어긋나면 안 된다. 앞단의 "무제한"도 설정의 `0`(한도 비활성)도 여기서는 같은
+    # None 하나다(quota_headers.QuotaLimits 참고).
+    limit = request_limits(quota_header).get(bucket)
+    exempt = api_key == server.admin_api_key or is_ops_actor(actor_id)
+    if limit is not None and not exempt:
+        used = await log_repo.count_recent(_BUCKET_ACTIONS.get(bucket, (action,)), actor_id)
+        if used >= limit:
+            label = _ACTION_LABELS.get(action, action)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"{label} 일일 한도({limit}회/24시간)에 도달했어요. "
+                    "가장 오래된 기록이 24시간을 지나면 다시 시도할 수 있어요."
+                ),
+            )
+    if record:
+        await log_repo.log(action, video_id, actor_id)
 
 
-async def _check_destructive_limit(session, action: str, video_id: str, api_key: str | None):
-    """파괴적 행위(강제 재생성·초기화) 일일 한도 — daily_destructive_limit(기본 2회/24h)."""
+async def _record_action(
+    session, action: str, video_id: str, actor: str | None, api_key: str | None
+) -> None:
+    """한도 검사를 이미 통과한 행위를 **실제로 일어난 뒤에** 기록한다.
+
+    초기화 멱등성(docs/user-quota-spec.md §4): 지울 것이 없는 초기화는 GPU도 데이터도 건드리지
+    않으므로 예산을 소비하면 안 된다. 그래서 검사(_check_action_limit(record=False))와 기록을
+    분리하고, 실제로 지운 것이 있을 때만 이 함수를 부른다. api_key는 받지만 기록 여부를
+    가르지 않는다 — 어드민도 기록 대상이다(§5).
+    """
+    if not get_settings().server.admin_api_key:
+        return
+    await ActionLogRepository(session).log(action, video_id, _resolve_actor(actor))
+
+
+async def _check_destructive_limit(
+    session,
+    action: str,
+    video_id: str,
+    actor: str | None,
+    api_key: str | None,
+    quota_header: str | None = None,
+    *,
+    record: bool = True,
+):
+    """파괴적 행위 일일 한도 — 초기화와 강제 재생성이 **하나의 합산 예산**을 쓴다
+    (destructive 버킷, 기본 4회/24h — 운영자 결정 2026-08-10, 종전 실질 총량 유지).
+
+    예전에는 두 행위가 각자 상한을 따로 소비해 실제로는 상한의 2배까지 가능했다
+    (docs/user-quota-spec.md §2). 두 행위가 같은 버킷(_ACTION_BUCKET)에 속해 _BUCKET_ACTIONS로
+    함께 세이므로 그 구멍이 닫힌다."""
     await _check_action_limit(
-        session, action, video_id, api_key, get_settings().server.daily_destructive_limit
+        session, action, video_id, actor, api_key, quota_header, record=record
     )
 
 
-async def _check_upgrade_limit(session, video_id: str, api_key: str | None) -> None:
-    """정렬 업그레이드(min_depth, force 없음) 일일 한도 — daily_upgrade_limit(기본 10회/24h).
+async def _check_upgrade_limit(
+    session,
+    video_id: str,
+    actor: str | None,
+    api_key: str | None,
+    quota_header: str | None = None,
+) -> None:
+    """정렬 업그레이드 일일 한도 — upgrade 버킷(기본 daily_upgrade_limit, 10회/24h).
 
     운영자 결정(2026-08-04): "업그레이드도 당연히 생성 쿼터랑은 별개여야지" — 이미 만든
     결과를 더 정밀하게 다시 뽑는 행위(fast→medium→heavy, 최대 2단계)가 새 싱크를 만드는
     generate 예산을 깎으면 안 된다. action 이름을 "generate"가 아니라 "upgrade"로 독립시켜
     ActionLog 집계 자체를 분리한다 — GET /api/limits가 이 이름을 그대로 읽어 upgrade
-    버킷을 낸다(limits.py 참고). 이전(2026-08-04 초판)엔 generate 값을 그대로 복사해
-    노출했으나, 이 분리로 그 항등 계약은 폐기됐다.
+    버킷을 낸다(limits.py 참고).
+
+    **어느 요청이 업그레이드인지는 _is_upgrade_request가 판정한다**(2026-08-10 재분류,
+    docs/user-quota-spec.md §3): 확장의 API 래퍼가 재생성 요청에 force를 무조건 붙이는
+    바람에 이 카운터는 도입 이후 한 번도 기록되지 않았고(실측 2026-08-10 전 기간 0건),
+    업그레이드가 파괴적 예산을 대신 먹고 있었다.
     """
-    await _check_action_limit(
-        session, "upgrade", video_id, api_key, get_settings().server.daily_upgrade_limit
-    )
+    await _check_action_limit(session, "upgrade", video_id, actor, api_key, quota_header)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
@@ -1160,7 +1333,13 @@ async def _lazy_attach_pron_variants(
 
 
 @router.post("/link", response_model=SyncLinkResponse)
-async def create_sync_link(request: SyncLinkRequest, x_api_key: str | None = Header(default=None)):
+async def create_sync_link(
+    request: SyncLinkRequest,
+    x_api_key: str | None = Header(default=None),
+    # 이용자 축 한도의 식별자·상한 — 게이트웨이가 붙인다(_resolve_actor, request_limits)
+    x_lyric_user: str | None = Header(default=None),
+    x_lyric_limits: str | None = Header(default=None),
+):
     """영상 video_id가 source_video_id의 싱크를 offset과 함께 빌려 쓰도록 링크(upsert).
 
     자기 자신 링크는 거부. source에 실제 싱크가 있어야 한다 — source가 그 자체로 링크만
@@ -1170,7 +1349,16 @@ async def create_sync_link(request: SyncLinkRequest, x_api_key: str | None = Hea
     코퍼스에 남을 수 있다(실제 사례 있음). 두 겹으로 완화한다: ① 만들어진 링크는 항상
     verified=False로 기록돼 자동 검증 링크(link-jobs 통과)와 조회 응답에서 구분되고,
     ② manual_link_requires_admin을 켠 배포에서는 어드민 키를 요구한다. 검증된 링크를
-    원하면 POST /api/link-jobs(반주 상관 판정)를 쓴다."""
+    원하면 POST /api/link-jobs(반주 상관 판정)를 쓴다.
+
+    **확장 배지 "커버 잇기"가 세는 것이 이 행위다**(2026-08-10, docs/user-quota-spec.md §7).
+    지금까지 그 배지가 세던 것은 자동 후보 탐색이었다 — 사용자가 요청한 적도, 실패해도
+    볼 수도 없는 배경 요청이라 라벨과 내용이 어긋나 있었다. 반대로 사용자가 "커버 잇기"라고
+    생각하는 이 경로에는 한도 검사도 기록도 전혀 없었다.
+
+    검사 위치는 **실제로 링크가 만들어지기 직전**이다 — 자기 링크·소스 없음으로 거절되는
+    요청은 아무것도 만들지 않으므로 예산을 먹으면 안 된다(생성 경로의 "GPU를 태우는 분기
+    직전에만 센다"와 같은 규율)."""
     if request.video_id == request.source_video_id:
         raise HTTPException(status_code=400, detail="Cannot link a video to itself")
 
@@ -1191,6 +1379,9 @@ async def create_sync_link(request: SyncLinkRequest, x_api_key: str | None = Hea
                 status_code=400,
                 detail=f"Source video {request.source_video_id} has no sync to link",
             )
+        await _check_action_limit(
+            session, "link", request.video_id, x_lyric_user, x_api_key, x_lyric_limits
+        )
         link_repo = SyncLinkRepository(session)
         link = await link_repo.upsert(
             request.video_id,
@@ -1315,7 +1506,9 @@ FOLLOWUP_LINK_VALIDATE = "link_validate"
 
 
 async def _dispatch_candidate_followup(
-    session, video_id: str, candidate_video_id: str, api_key: str | None = None
+    session,
+    video_id: str,
+    candidate_video_id: str,
 ) -> tuple[str, str, str | None]:
     """후보를 확정한 뒤 **무엇을 제출할지** 결정하는 단일 교체 지점. (kind, status, job_id) 반환.
 
@@ -1331,12 +1524,24 @@ async def _dispatch_candidate_followup(
       - 같은 (영상, 후보) 쌍의 재제출 억제를 반드시 자체적으로 유지할 것 — 진행 중이면
         pending, 최근에 끝난 이력이 있으면 cooldown. 이게 없으면 사용자가 같은 영상을
         열 때마다 GPU가 다시 돈다(현재 쿨다운 기준: link_retry_cooldown_days).
-      - 실제 제출 직전에 영상 단위 일일 상한(_check_action_limit)을 통과할 것 — 쌍 쿨다운은
-        후보를 바꾸면 비켜 가므로, GET 하나가 GPU 잡을 만드는 이 경로에는 쌍과 무관한
-        상한이 한 겹 더 필요하다. 초과는 429다(확장은 이 조회의 실패를 조용히 무시한다 —
-        content.ts probeLinkCandidates: `if (!data) return;`).
       - kind는 클라이언트가 진행 상태를 어느 API로 폴링할지 가르는 값이므로, 새 종류를
         도입하면 그 종류의 조회 경로도 함께 알려야 한다.
+
+    **횟수 상한이 없는 이유**(2026-08-10, docs/user-quota-spec.md §7): 이 경로의 비용은
+    횟수가 아니라 **구조**가 막는다 — `link_require_cached_pair`(기본 on)가 커버·원곡 양쪽이
+    미디어 캐시에 있을 때만 잡을 만들고, `link_cache_only`(기본 on)가 캐시 미스에서 yt-dlp
+    폴백을 금지한다. 실측(2026-08-10): 유튜브 접촉 0회, 검증 잡 전체 하루 2~3건.
+    예전에 있던 횟수 상한은 사용자가 요청한 적도 없고 실패해도 볼 수 없는 배경 요청을
+    사람의 예산에서 깎았고(확장은 이 조회의 실패를 조용히 무시한다 — content.ts
+    probeLinkCandidates: `if (!data) return;`), 그 소진이 "커버 잇기" 배지로 보였다.
+
+    🔴 **그 구조적 게이트를 끄는 것은 비용 상한을 없애는 결정과 같다**(같은 문서 §7).
+    `link_require_cached_pair` 또는 `link_cache_only`를 off로 돌리려면 그때 횟수 상한을
+    다시 논해야 한다 — 둘 중 하나라도 꺼지면 이 GET 하나가 다운로드 2회를 부를 수 있고,
+    그때는 이 함수에 상한을 되돌려야 한다.
+
+    기록도 남기지 않는다: 집행에 쓰이지 않는 값을 이용자 축으로 쌓는 것은 "한도 집행에
+    필요한 최소 범위"(같은 문서 §1 개인정보 원칙)를 넘는다.
     """
     server = get_settings().server
     repo = LinkJobRepository(session)
@@ -1349,10 +1554,8 @@ async def _dispatch_candidate_followup(
     )
     if recent:
         return FOLLOWUP_LINK_VALIDATE, "cooldown", recent.id
-    # 억제(pending/cooldown)를 모두 통과해 실제로 GPU 잡을 만드는 지점 — 여기서만 센다
-    await _check_action_limit(
-        session, "link_candidates", video_id, api_key, DAILY_LINK_CANDIDATE_LIMIT
-    )
+    # 억제(pending/cooldown)를 모두 통과해 실제로 GPU 잡을 만드는 지점. 횟수 상한은 여기
+    # 없다 — 위 독스트링의 "횟수 상한이 없는 이유" 참고(구조적 게이트가 비용을 담당한다).
     link_job = await repo.create(video_id, candidate_video_id)
     return FOLLOWUP_LINK_VALIDATE, "submitted", link_job.id
 
@@ -1362,7 +1565,10 @@ async def find_link_candidates(
     video_id: str,
     title: Annotated[str, Query(min_length=1, max_length=256)],
     artist: Annotated[str | None, Query(max_length=128)] = None,
-    x_api_key: str | None = Header(default=None),
+    # 이용자 축 한도 헤더(x-lyric-user / x-lyric-limits)를 받지 않는다 — 이 경로는
+    # 2026-08-10부터 어떤 예산도 소비하지 않는다(docs/user-quota-spec.md §7,
+    # _dispatch_candidate_followup의 "횟수 상한이 없는 이유"). 받아 두고 안 쓰면 다음
+    # 사람이 "여기도 세고 있나 보다"로 읽는다.
 ):
     """이 영상과 같은 곡일 만한 코퍼스 영상을 제목으로 찾고, 최상위 후보 1건에 대해
     후속 작업을 자동 제출한다 (무엇을 제출할지는 _dispatch_candidate_followup이 정한다 —
@@ -1375,9 +1581,12 @@ async def find_link_candidates(
 
     자기 싱크가 있거나 이미 링크가 있으면 후보 없이 즉시 반환한다. 같은 쌍을 최근
     link_retry_cooldown_days 안에 이미 시도했으면 재제출하지 않는다 — 사용자가 같은 영상을
-    반복해 열 때마다 GPU를 다시 태우는 남용 경로를 막는다. 쌍 쿨다운은 후보를 바꾸면 비켜
-    가므로 실제 제출에는 영상 단위 일일 상한(DAILY_LINK_CANDIDATE_LIMIT)이 한 겹 더 걸린다
-    (초과 시 429)."""
+    반복해 열 때마다 GPU를 다시 태우는 남용 경로를 막는다.
+
+    **횟수 상한은 없다**(2026-08-10, docs/user-quota-spec.md §7): 이 요청은 사용자가 낸
+    것이 아니라 확장이 배경으로 내는 것이라 사람의 예산에서 깎을 근거가 없고, 비용은
+    (d)의 캐시 게이트가 구조적으로 막는다. 근거와 "그 게이트를 끄면 상한이 사라진다"는
+    조건은 _dispatch_candidate_followup 독스트링에 있다."""
     _validate_video_id(video_id)
     server = get_settings().server
 
@@ -1471,7 +1680,7 @@ async def find_link_candidates(
         # (e) 최상위 후보 1건만 제출한다 (여러 후보 순차 재시도는 넣지 않는다).
         # 무엇을 제출할지는 _dispatch_candidate_followup 한 곳에서만 정해진다
         kind, status, job_id = await _dispatch_candidate_followup(
-            session, video_id, candidates[0].video_id, x_api_key
+            session, video_id, candidates[0].video_id
         )
         return LinkCandidatesResponse(
             video_id=video_id,
@@ -1855,16 +2064,30 @@ async def save_translation_layer(video_id: str, request: SaveTranslationLayerReq
 
 
 @router.delete("/{video_id}")
-async def reset_video_syncs(video_id: str, x_api_key: str | None = Header(default=None)):
+async def reset_video_syncs(
+    video_id: str,
+    x_api_key: str | None = Header(default=None),
+    x_lyric_user: str | None = Header(default=None),
+    x_lyric_limits: str | None = Header(default=None),
+):
     """이 영상의 서버 싱크를 전부 삭제(초기화) — 잘못 붙여넣은 가사 등에서 새로 시작.
 
     이 영상이 소유자이거나 소스인 링크도 함께 제거한다 ("/link/{video_id}"가 먼저
-    선언돼 있어 링크 삭제 경로와 충돌하지 않는다). 공개 배포에선 일일 한도 적용."""
+    선언돼 있어 링크 삭제 경로와 충돌하지 않는다). 공개 배포에선 파괴적 행위 합산 예산
+    (초기화+강제 재생성)이 걸린다.
+
+    **멱등하다**(docs/user-quota-spec.md §4): 응답이 유실돼 클라이언트가 재시도하면 지울
+    것은 이미 없어 아무 일도 일어나지 않는데 예산만 줄었다. 검사는 삭제 전에 하되(초과한
+    요청은 지우지도 못하게 막아야 한다) **기록은 실제로 지운 것이 있을 때만** 남긴다."""
     _validate_video_id(video_id)
     async with get_session() as session:
-        await _check_destructive_limit(session, "reset", video_id, x_api_key)
+        await _check_destructive_limit(
+            session, "reset", video_id, x_lyric_user, x_api_key, x_lyric_limits, record=False
+        )
         removed_syncs = await SyncRepository(session).delete_by_video(video_id)
         removed_links = await SyncLinkRepository(session).delete_involving(video_id)
+        if removed_syncs or removed_links:
+            await _record_action(session, "reset", video_id, x_lyric_user, x_api_key)
         return {
             "video_id": video_id,
             "removed_syncs": removed_syncs,
@@ -1877,6 +2100,8 @@ async def generate_sync(
     request: GenerateRequest,
     background_tasks: BackgroundTasks,
     x_api_key: str | None = Header(default=None),
+    x_lyric_user: str | None = Header(default=None),
+    x_lyric_limits: str | None = Header(default=None),
 ):
     """가사로 싱크 생성 잡을 만든다 (기존 싱크가 있으면 즉시 completed).
 
@@ -1950,7 +2175,7 @@ async def generate_sync(
         # 여기부터가 실제로 GPU를 태우는 유일한 분기 — 한도 검사는 이 지점이어야 한다
         # (위의 캐시 히트·합류에서 예산을 먹으면 정상 사용이 헛되게 소모된다)
         await _check_action_limit(
-            session, "generate", request.video_id, x_api_key, DAILY_GENERATE_LIMIT
+            session, "generate", request.video_id, x_lyric_user, x_api_key, x_lyric_limits
         )
         job = await job_repo.create(
             video_id=request.video_id,
@@ -2309,6 +2534,8 @@ async def generate_sync_from_caption(
     request: GenerateFromCaptionRequest,
     background_tasks: BackgroundTasks,
     x_api_key: str | None = Header(default=None),
+    x_lyric_user: str | None = Header(default=None),
+    x_lyric_limits: str | None = Header(default=None),
 ):
     """video_id만으로 유튜브 자막을 조달해 싱크 생성 잡을 만든다.
 
@@ -2371,6 +2598,12 @@ async def generate_sync_from_caption(
         pipeline,
         # 어드민 키는 이 경로에서도 일일 생성 상한을 면제받아야 한다 (같은 검사를 재사용)
         x_api_key,
+        # 이용자 축 한도도 같은 검사를 그대로 탄다 — 자막 경로만 예산을 비켜 가면
+        # "가사 붙여넣기 대신 자막으로 부르면 무제한"이 된다
+        x_lyric_user,
+        # 앞단이 준 상한도 함께 넘긴다 — 안 넘기면 이 경로만 서버 기본값으로 집행돼
+        # 티어 차등이 자막 경로에서만 사라진다(§6)
+        x_lyric_limits,
     )
     if base.status != "completed":
         # completed는 같은 자막 가사의 싱크를 그대로 재사용한 경우다 — job_id가 잡이 아니라
@@ -2477,11 +2710,44 @@ def _get_lyrics_preview(timestamps: dict) -> str:
     return " / ".join(texts)[:100]
 
 
+def _is_upgrade_request(request: "RegenerateRequest", latest_syncs: list) -> bool:
+    """이 재생성 요청이 **정렬 업그레이드**인가(파괴적 재생성이 아니라).
+
+    배경(docs/user-quota-spec.md §3): 확장의 API 래퍼가 재생성 요청에 force를 **무조건**
+    붙인다. 서버가 force만 보고 파괴적 행위로 판정하는 바람에, 확장에서 그 경로를 부르는
+    유일한 버튼인 "정렬 깊이 올리기"가 파괴적 예산을 먹었고 업그레이드 카운터는 도입 이후
+    한 번도 기록되지 않았다(실측 2026-08-10 전 기간 0건).
+
+    판정 세 갈래:
+      ① min_depth가 있으면 업그레이드다 — force 유무와 무관하다(래퍼가 붙인 force는 요청의
+         의도가 아니다).
+      ② force인데 min_depth가 없고, 그 영상의 **최신 싱크가 스탬프 이전 세대**
+         (engine_version IS NULL)면 업그레이드다 — 구세대 싱크용 업그레이드 버튼은 깊이
+         인자 없이 호출하므로 ①에 걸리지 않는다.
+      ③ 그 외 force는 파괴적 재생성이다.
+
+    ②가 그 버튼보다 **넓다는 것은 인정된 결정**이다(운영자 2026-08-10): 같은 형태의 직접
+    API 호출도 업그레이드로 분류된다. 확장에는 강제 재생성 UI가 없어 일반 이용자는 그 경로를
+    탈 수 없고, 오분류가 나도 요청은 시킨 대로 수행되며 달라지는 것은 어느 예산이 줄어드는가
+    뿐이다. 게다가 구세대 싱크는 한 번 업그레이드되면 스탬프가 찍혀 조건에서 빠지므로 이
+    느슨함은 시간이 지나면 사라진다.
+
+    latest_syncs는 호출부가 이미 (레거시 ko 백필 판정을 위해) 읽어 둔 최신순 목록이다 —
+    같은 것을 다시 읽지 않는다."""
+    if request.min_depth:
+        return True
+    if not request.force:
+        return False
+    return bool(latest_syncs) and latest_syncs[0].engine_version is None
+
+
 @router.post("/regenerate", response_model=GenerateResponse)
 async def regenerate_sync(
     request: RegenerateRequest,
     background_tasks: BackgroundTasks,
     x_api_key: str | None = Header(default=None),
+    x_lyric_user: str | None = Header(default=None),
+    x_lyric_limits: str | None = Header(default=None),
 ):
     from everyric2.server.worker import LINE_META_WAIT_SEC
 
@@ -2513,14 +2779,13 @@ async def regenerate_sync(
                 latest_timestamps.get("attribution"),
             )
 
-        if request.force:
-            # 강제 재생성은 GPU 수십 초를 태우는 파괴적 행위 — 공개 배포에선 일일 한도 적용
-            await _check_destructive_limit(session, "regenerate", request.video_id, x_api_key)
+        # **한도 검사는 여기 없다** — 아래 두 조기 반환(캐시 히트·활성 잡 합류)을 지난
+        # 뒤에야 GPU를 태우기 때문이다. 예전에는 force 검사가 이 위치(합류 판정 앞)라
+        # 이미 도는 잡에 합류하는 재시도(버튼 연타)도 파괴적 예산을 깎았다
+        # (docs/user-quota-spec.md §3).
         if not request.force and not request.min_depth:
             # min_depth(깊이 하한) 요청은 같은 가사의 기존 싱크가 **있어야** 성립하는
             # 재분석이다 — 이 조기 반환에 걸리면 아무 일도 안 일어나므로 건너뛴다.
-            # (한도는 아래 비force 경로에서 min_depth 유무로 갈라 upgrade/generate 각자
-            # 센다 — 2026-08-04 분리, _check_upgrade_limit 독스트링 참고.)
             existing = await sync_repo.get_by_video_and_hash(request.video_id, lyrics_hash_value)
             if existing:
                 if request.line_meta or request.attribution:
@@ -2554,18 +2819,29 @@ async def regenerate_sync(
                 estimated_time=15,
                 line_meta_wait_sec=wait_sec,
             )
-        if not request.force:
-            if request.min_depth:
-                # 정렬 업그레이드는 generate와 별개 예산(운영자 결정 2026-08-04) —
-                # _check_upgrade_limit 독스트링 참고.
-                await _check_upgrade_limit(session, request.video_id, x_api_key)
-            else:
-                # force는 위에서 이미 훨씬 엄격한 파괴적 한도(기본 2회/24h)를 통과했다 —
-                # 여기서 또 세면 한 번의 재생성이 두 예산을 먹는다. 비force 재생성은 GPU
-                # 소비가 /generate와 같으므로 같은 상한을 쓴다.
-                await _check_action_limit(
-                    session, "generate", request.video_id, x_api_key, DAILY_GENERATE_LIMIT
-                )
+        # ── 여기서부터 실제로 GPU를 태운다 — 한도는 이 지점에서 한 번만 센다 ──
+        # 어느 예산을 쓰는지는 세 갈래 판정이 정한다(_is_upgrade_request 독스트링).
+        # 한 요청은 반드시 **하나의** 예산만 소비한다.
+        if _is_upgrade_request(request, latest_syncs):
+            # 정렬 업그레이드는 generate·파괴적 예산과 별개(운영자 결정 2026-08-04·08-10)
+            await _check_upgrade_limit(
+                session, request.video_id, x_lyric_user, x_api_key, x_lyric_limits
+            )
+        elif request.force:
+            # 강제 재생성은 GPU 수십 초를 태우는 파괴적 행위 — 초기화와 합산 예산을 쓴다
+            await _check_destructive_limit(
+                session, "regenerate", request.video_id, x_lyric_user, x_api_key, x_lyric_limits
+            )
+        else:
+            # 비force·비업그레이드 재생성은 GPU 소비가 /generate와 같으므로 같은 상한을 쓴다
+            await _check_action_limit(
+                session,
+                "generate",
+                request.video_id,
+                x_lyric_user,
+                x_api_key,
+                x_lyric_limits,
+            )
         job = await job_repo.create(
             video_id=request.video_id,
             lyrics=request.lyrics,

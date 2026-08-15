@@ -1246,23 +1246,44 @@ class ServerSettings(BaseSettings):
     )
     admin_api_key: str = Field(
         default="",
-        description="Admin API key (X-API-Key). When set, destructive actions "
-        "(force regenerate, sync reset) from other callers are rate-limited; "
-        "requests presenting this key bypass the limit. Empty = no limits (local use).",
+        description="Admin API key (X-API-Key). When set, GPU-spending actions from other "
+        "callers are rate-limited PER USER; requests presenting this key are exempt from "
+        "rejection (but still recorded — docs/user-quota-spec.md section 5). "
+        "Empty = no limits (local use).\n"
+        "PRECONDITION (changed 2026-08-10, same doc section 1): setting this key puts the "
+        "server in a mode that REQUIRES an upstream layer to supply the caller's identity "
+        "header. Without it every rate-limited request is rejected with 400 — that is "
+        "fail-closed by design, because falling back to a per-video or shared identity is "
+        "exactly the bug this mode exists to fix. The header contract is defined in "
+        "server/api/quota_headers.py; scripts that call this server directly must present "
+        "an ops identifier (same doc section 8).",
     )
     daily_destructive_limit: int = Field(
-        default=2,
-        description="Max force-regenerations/resets per video per 24h for non-admin "
-        "callers (only enforced when admin_api_key is set). 0 disables the limit.",
+        default=4,
+        description="FALLBACK max destructive actions per USER per 24h for non-admin callers "
+        "(only enforced when admin_api_key is set). The gateway sends the caller's tier limit "
+        "in a header and THAT wins; this value is used only when no header arrives (operator "
+        "decision 2026-08-10, docs/user-quota-spec.md section 6 — the reception point is "
+        "server/api/quota_headers.py, and falling back is logged as a warning because it "
+        "neutralises tiering). 0 disables the limit. Force-regeneration and "
+        "sync reset share this ONE budget (operator decision 2026-08-10, "
+        "docs/user-quota-spec.md section 2): they used to have independent per-video "
+        "counters of 2 each, so the real total was 4 while the extension showed max(2,2)=2. "
+        "The default is 4 to preserve that effective total while making it a single honest "
+        "number. Unlinking is deliberately NOT counted — it is a recovery action.",
     )
     daily_upgrade_limit: int = Field(
         default=10,
-        description="Max depth-upgrade re-analyses (min_depth, non-force) per video per 24h "
-        "for non-admin callers (only enforced when admin_api_key is set). 0 disables the "
-        "limit. Separate from daily_destructive_limit/generate's own limit (operator "
-        "decision 2026-08-04: raising analysis depth on an existing sync isn't the same "
-        "spend as creating a new one). Default sized for a song walking fast->medium->heavy "
-        "(2 upgrade steps) a few times over the window, not for bulk re-analysis.",
+        description="FALLBACK max depth-upgrade re-analyses per USER per 24h for non-admin "
+        "callers (only enforced when admin_api_key is set; the gateway's header wins when "
+        "present — see daily_destructive_limit). 0 disables the limit. Separate from "
+        "daily_destructive_limit/generate's own limit (operator decision 2026-08-04: raising "
+        "analysis depth on an existing sync isn't the same spend as creating a new one). "
+        "Which requests count as an upgrade is decided by sync._is_upgrade_request "
+        "(reclassified 2026-08-10 — the extension's API wrapper always sets force, so this "
+        "counter had never once been recorded). Default sized for a song walking "
+        "fast->medium->heavy (2 upgrade steps) a few times over the window, not for bulk "
+        "re-analysis.",
     )
     worker_key: str = Field(
         default="",

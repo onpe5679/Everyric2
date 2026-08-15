@@ -114,6 +114,25 @@ async def init_db():
             }
             if notice_cols and "translations" not in notice_cols:
                 await conn.execute(text("ALTER TABLE notices ADD COLUMN translations JSON"))
+            # 일일 한도의 집계 축을 영상 → 이용자로 옮긴다(2026-08-10, docs/user-quota-spec.md
+            # §1). 기존 행은 actor=NULL로 남고 이용자별 집계에서 자동으로 빠진다(models.py
+            # ActionLog.actor 독스트링 — 사후 복원할 근거가 없다).
+            action_cols = {
+                row[1] for row in await conn.execute(text("PRAGMA table_info(action_logs)"))
+            }
+            if action_cols and "actor" not in action_cols:
+                await conn.execute(text("ALTER TABLE action_logs ADD COLUMN actor VARCHAR(64)"))
+            # 인덱스는 컬럼과 따로 만든다 — create_all은 **이미 있는 테이블**에는 컬럼도
+            # 인덱스도 추가하지 않으므로(이 함수 전체의 전제), 기존 DB에는 이 CREATE가
+            # 유일한 경로다. IF NOT EXISTS라 신규 DB(create_all이 이미 만든 경우)와 재실행
+            # 모두에서 멱등하다.
+            if action_cols:
+                await conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_action_logs_actor_action_created "
+                        "ON action_logs (actor, action, created_at)"
+                    )
+                )
         # 서버가 죽으며 남긴 좀비 잡(pending/processing) 정리 — 방치하면 같은 영상의
         # 생성 요청이 죽은 잡에 합류해 영구 "전사 중"에 갇힌다
         from sqlalchemy import text as _text

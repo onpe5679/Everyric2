@@ -28,6 +28,20 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+# 이용자 식별자 헤더의 이름과 운영 작업 식별자는 서버와 **같은 상수**를 써야 한다
+# (docs/user-quota-spec.md §8) — 문자열을 복사하면 서버에서 이름이 바뀌었을 때 이 스크립트만
+# 조용히 "식별자 없음"으로 400을 맞는다. quota_headers는 stdlib 외 의존이 없어(그 파일의
+# "의존성 없음이 계약이다" 참고) 이 가벼운 스크립트가 들여와도 서버 스택을 끌고 오지 않는다.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from everyric2.server.api.quota_headers import (  # noqa: E402
+    ACTOR_HEADER,
+    OPS_ACTOR_VERIFY_DEPLOY,
+)
 
 DEFAULT_SERVER = "https://everyric.moref.co"
 DEFAULT_EN_VIDEO_ID = "M7VSEZOQIlg"
@@ -38,14 +52,25 @@ FAKE_LYRICS = "deploy gate check line one\ndeploy gate check line two"
 
 
 def _http(
-    server: str, path: str, *, method: str = "GET", payload: dict | None = None, timeout: float = 15.0
+    server: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: dict | None = None,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int | None, object]:
-    """읽기/쓰기 공용 최소 HTTP 클라이언트. 반환은 (status, parsed_json_or_raw_or_error)."""
+    """읽기/쓰기 공용 최소 HTTP 클라이언트. 반환은 (status, parsed_json_or_raw_or_error).
+
+    headers는 **X-API-Key를 위한 것이 아니다** — 이 스크립트는 키를 아예 다루지 않는다
+    (모듈 docstring). 이용자 축 한도의 운영 식별자(§8)처럼 키가 아닌 헤더에만 쓴다."""
     url = server.rstrip("/") + path
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", "application/json")
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
     # Cloudflare가 /api/* 경로에서 urllib 기본 UA("Python-urllib/x.y")를 봇으로 보고
     # 403(error code 1010)으로 차단한다(2026-08-04 실측 — curl 기본 UA는 통과, 같은 curl에
     # python UA를 실어도 막힘 — 우리 앱 로직과 무관한 WAF 규칙임을 재현 확인). 우리
@@ -97,21 +122,56 @@ def check_health(server: str) -> None:
 
 # ── ② GET /api/limits/{video_id} ────────────────────────────────────────
 def check_limits(server: str, video_id: str) -> tuple[int | None, dict | None]:
-    """②를 검사하면서 (status, body)를 **그대로 반환**한다 — ④가 이 응답 하나로 "이 배포가
-    api_key를 요구하는가"까지 같이 판별한다(별도 GET을 또 안 보낸다, main.py 미들웨어가
-    server.api_key 설정 여부로 /api 전체에 일괄 적용하므로 아무 /api GET이나 대표값이다)."""
+    """②를 검사하면서 **맨 처음 무헤더 호출의** (status, body)를 반환한다 — ④가 그 하나로
+    "이 배포가 api_key를 요구하는가"까지 같이 판별한다(별도 GET을 또 안 보낸다, main.py
+    미들웨어가 server.api_key 설정 여부로 /api 전체에 일괄 적용하므로 아무 /api GET이나
+    대표값이다).
+
+    2026-08-10부터 두 번 부른다(docs/user-quota-spec.md §1·§8):
+
+      A) 이용자 식별자 **없이** — 한도를 강제하는 배포라면 400이어야 한다. 그 400 자체가
+         fail-closed가 살아 있다는 증거다(예전에는 이 호출이 200이었고, 그게 곧 "이용자
+         축 한도가 아직 배포 안 됨"을 뜻한다).
+      B) **운영 작업 식별자**로 다시 — 스키마·버킷 독립성은 통과한 응답에서만 볼 수 있다.
+         앞단을 우회하는 스크립트가 사람 식별자를 빌려 쓰면 통계가 오염되므로 전용 이름을
+         쓴다(§8). 이 경로는 조회라 기록을 남기지 않는다.
+
+    🔴 B의 응답은 **면제 이용자의 응답**이라 enforced=False다(§5·§8) — 그 값으로 "이 배포가
+    한도를 강제하는가"를 읽으면 안 된다. 그 답은 A의 상태코드다(400=강제, 200=미강제)."""
     status, body = _http(server, f"/api/limits/{video_id}")
     if status == 404:
         _report("② /api/limits/{video_id}", "PENDING", "404 — 아직 배포 전(라우터 없음, 정상)")
         return status, body if isinstance(body, dict) else None
+    if status == 400:
+        # 이용자 축 한도가 살아 있다 — 스키마는 운영 식별자를 붙여 다시 본다.
+        status2, body2 = _http(
+            server,
+            f"/api/limits/{video_id}",
+            headers={ACTOR_HEADER: OPS_ACTOR_VERIFY_DEPLOY},
+        )
+        if status2 != 200 or not isinstance(body2, dict):
+            _report(
+                "② /api/limits/{video_id}",
+                "FAIL",
+                f"식별자 없이는 400(정상)인데 운영 식별자로도 실패: status={status2} body={body2}",
+            )
+            return status, None
+        _check_limits_schema(body2, note="fail-closed 확인(식별자 없는 호출은 400)")
+        return status, body2
     if status != 200 or not isinstance(body, dict):
         _report("② /api/limits/{video_id}", "FAIL", f"status={status} body={body}")
         return status, body if isinstance(body, dict) else None
+    _check_limits_schema(body, note="식별자 없이 200 — 이 배포는 한도를 강제하지 않는다")
+    return status, body
+
+
+def _check_limits_schema(body: dict, *, note: str) -> None:
+    """응답 스키마와 버킷 독립성 — 두 호출 형태(무헤더 200 / 운영 식별자 200)가 공유한다."""
     required = {"enforced", "generate", "link", "upgrade", "destructive", "window_hours"}
     missing = required - set(body.keys())
     if missing:
         _report("② /api/limits/{video_id}", "FAIL", f"스키마 필드 누락: {missing}")
-        return status, body
+        return
     gen_limit = (body.get("generate") or {}).get("limit")
     up_limit = (body.get("upgrade") or {}).get("limit")
     independent = gen_limit is not None and up_limit is not None and gen_limit != up_limit
@@ -121,13 +181,12 @@ def check_limits(server: str, video_id: str) -> tuple[int | None, dict | None]:
             "FAIL",
             f"upgrade가 generate와 독립적이지 않음(같은 limit 값) — generate.limit={gen_limit} upgrade.limit={up_limit}",
         )
-        return status, body
+        return
     _report(
         "② /api/limits/{video_id}",
         "PASS",
-        f"스키마 OK, enforced={body.get('enforced')}, generate.limit={gen_limit} upgrade.limit={up_limit}(독립 확인)",
+        f"스키마 OK, generate.limit={gen_limit} upgrade.limit={up_limit}(독립 확인) — {note}",
     )
-    return status, body
 
 
 # ── ③ GET /api/notices ──────────────────────────────────────────────────
@@ -168,10 +227,14 @@ def _deployment_requires_key(limits_status: int | None) -> str:
     처음부터 해당이 안 된다. main.py 미들웨어가 server.api_key 설정 여부로 /api 전체에
     키 요구를 일괄 적용하므로, 키 없이 보낸 GET 하나(여기서는 ②의 응답 재사용)의
     상태코드가 그대로 "이 배포가 키를 요구하는가"의 답이다: 401이면 요구, 200이면 공개.
-    404/네트워크 오류 등은 이 특정 라우트 문제일 뿐 키 요구 여부와 무관해 "unknown"이다."""
+    404/네트워크 오류 등은 이 특정 라우트 문제일 뿐 키 요구 여부와 무관해 "unknown"이다.
+
+    2026-08-10: 400도 "open"이다. 이용자 축 한도(docs/user-quota-spec.md §1)가 배포되면
+    식별자 없는 호출이 400으로 거절되는데, **그 400은 미들웨어를 이미 통과했다는 뜻**이라
+    api_key를 요구하지 않는 배포라는 증거다(요구했다면 라우트에 닿기 전 401이었다)."""
     if limits_status == 401:
         return "required"
-    if limits_status == 200:
+    if limits_status in (200, 400):
         return "open"
     return "unknown"
 
@@ -194,12 +257,18 @@ def check_api_key_bypass(server: str, limits_status: int | None, limits_body: di
     사람 몫이다)."""
     requirement = _deployment_requires_key(limits_status)
     if requirement == "open":
-        enforced = (limits_body or {}).get("enforced")
+        # 🔴 한도 강제 여부는 **응답 본문의 enforced로 읽지 않는다**: ②의 두 번째 호출은
+        # 운영 식별자로 보냈고, 면제 이용자의 응답은 정의상 enforced=False다(§5·§8).
+        # 답은 무헤더 호출의 상태코드다 — 400이면 이용자 축 한도가 살아 있다는 뜻이다.
+        quota = (
+            "이용자 축 한도 강제 중(식별자 없는 호출이 400 — fail-closed 확인)"
+            if limits_status == 400
+            else "한도 미강제(admin_api_key 미설정 — 완전 무제한)"
+        )
         _report(
             "④ X-API-Key 우회 차단",
             "SKIP",
-            f"공개 배포(api_key 미설정): 키 검사 항목 해당 없음. 쿼터 enforced={enforced}로 통제 중"
-            + ("(admin_api_key 설정됨)" if enforced else "(admin_api_key도 미설정 — 완전 무제한)"),
+            f"공개 배포(api_key 미설정): 키 검사 항목 해당 없음. {quota}",
         )
         return
     if requirement == "unknown":
