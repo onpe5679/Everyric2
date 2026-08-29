@@ -1,6 +1,6 @@
-"""배포 후(그리고 배포 전 기준선) 검증 — 체크리스트를 문서로만 두면 사람이 빠뜨린다.
+"""배포 후(그리고 명시적 배포 전 기준선) 검증 — 체크리스트를 문서로만 두면 사람이 빠뜨린다.
 
-이번 배치(1.6.0)의 docs/releases/chrome-v1.6.0.md "배포 후 검증 체크리스트"를 그대로
+이번 배치(Engine 1.0.0 / Chrome 1.6.1)의 배포 후 검증 체크리스트를
 스크립트 하나로 묶는다. 기본 실행은 **전부 읽기 전용**(쓰기·생성 없음) — ④ X-API-Key
 우회 차단의 실제 회귀 검사(보호된 쓰기 엔드포인트를 키 없이 호출)는 --check-auth를
 명시해야만 돈다(아래 ④ 설명 참고, 2026-08-04 오탐 사고 이후 수정).
@@ -8,6 +8,8 @@
 실행:
     .venv/Scripts/python.exe scripts/verify_deploy.py [서버URL]
     (서버URL 생략 시 프로드 기본값 https://everyric.moref.co)
+    배포 전 구버전 기준선은 --baseline으로만 허용한다. 기본은 현재 checkout의
+    package version과 adaptive 엔진을 요구해, 재기동이 안 된 구서비스를 PASS로 오인하지 않는다.
     --check-auth 를 추가하면 ④에서 실제 쓰기 호출까지 시도한다(이 배포가 애초에
     api_key를 요구하는 배포일 때만 — 공개 배포면 이 플래그를 줘도 SKIP).
 
@@ -38,6 +40,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from everyric2 import __version__  # noqa: E402
 from everyric2.server.api.quota_headers import (  # noqa: E402
     ACTOR_HEADER,
     OPS_ACTOR_VERIFY_DEPLOY,
@@ -108,9 +111,28 @@ def _report(label: str, status: str, detail: str = "") -> None:
 
 
 # ── ① /health ────────────────────────────────────────────────────────────
-def check_health(server: str) -> None:
+def check_health(
+    server: str,
+    *,
+    expected_version: str,
+    expected_engine: str,
+    baseline: bool = False,
+) -> None:
     status, body = _http(server, "/health")
     if status == 200 and isinstance(body, dict) and body.get("status") == "healthy":
+        mismatches: list[str] = []
+        if body.get("version") != expected_version:
+            mismatches.append(f"version={body.get('version')} (expected {expected_version})")
+        if body.get("engine") != expected_engine:
+            mismatches.append(f"engine={body.get('engine')} (expected {expected_engine})")
+        if mismatches:
+            _report(
+                "① /health",
+                "PENDING" if baseline else "FAIL",
+                "; ".join(mismatches)
+                + (" — 배포 전 기준선" if baseline else " — 새 코드가 실제 기동하지 않음"),
+            )
+            return
         _report(
             "① /health",
             "PASS",
@@ -407,6 +429,21 @@ def main() -> None:
     parser.add_argument("--en-video-id", default=None, help="⑤용 en 실싱크 video_id(기본: 환경변수 또는 내장 기본값)")
     parser.add_argument("--zh-video-id", default=None, help="⑤용 zh 실싱크 video_id(기본: 환경변수, 없으면 SKIP)")
     parser.add_argument(
+        "--expected-version",
+        default=__version__,
+        help=f"①에서 요구할 서버 버전(기본: 현재 checkout {__version__})",
+    )
+    parser.add_argument(
+        "--expected-engine",
+        default="adaptive",
+        help="①에서 요구할 공개 엔진명(기본: adaptive)",
+    )
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help="배포 전 기준선 모드: version/engine 불일치를 FAIL 대신 PENDING으로 기록",
+    )
+    parser.add_argument(
         "--check-auth", action="store_true",
         help="④에서 실제 쓰기 호출(POST /api/sync/generate, 키 없이)까지 시도한다. "
              "이 배포가 api_key를 요구할 때만 의미 있고, 공개 배포면 이 플래그를 줘도 SKIP된다. 기본은 꺼짐.",
@@ -419,7 +456,12 @@ def main() -> None:
     zh_id = args.zh_video_id or os.environ.get("EVERYRIC_ZH_VIDEO_ID") or None
 
     print(f"대상 서버: {args.server}\n")
-    check_health(args.server)
+    check_health(
+        args.server,
+        expected_version=args.expected_version,
+        expected_engine=args.expected_engine,
+        baseline=args.baseline,
+    )
     limits_status, limits_body = check_limits(args.server, en_id)
     check_notices(args.server)
     # SKIP은 중단 사유가 아니다 — ⑤·⑥까지 항상 마저 돈다(2026-08-04 수정). 진짜 우회가
