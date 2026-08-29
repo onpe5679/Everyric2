@@ -557,6 +557,58 @@ class TestRunDeepStage:
                 "heavy",
             )
 
+    def test_refiner_uses_alignment_referee_settings_and_preserves_debug(
+        self, monkeypatch
+    ):
+        from everyric2.alignment.refine_window import RefinedLine
+
+        anchor = _FakeAnchor([SyncResult(text="行く", start_time=0.0, end_time=0.5)])
+        refiner_engine = _RecordingEngine(object())
+
+        def fake_get_engine(engine_type, config=None):
+            return anchor if engine_type == "owsm" else refiner_engine
+
+        captured = {}
+
+        def fake_refine(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+            return [
+                RefinedLine(
+                    start=0.0,
+                    end=0.5,
+                    pron={"hangul": "유쿠"},
+                    referee={
+                        "default": "이쿠",
+                        "chosen": "유쿠",
+                        "margin": 0.123,
+                        "gain": 0.2,
+                        "scores": [["cand#1", 0.2]],
+                    },
+                    refined=True,
+                )
+            ]
+
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
+        monkeypatch.setattr("everyric2.alignment.refine_window.refine_lines", fake_refine)
+        sep = _FakeSepResult(_silence(0.5), _silence(0.5))
+        stack = worker._run_deep_stage(
+            _silence(0.5),
+            sep,
+            [LyricLine(text="行く", line_number=1)],
+            "ja",
+            _settings(
+                two_pass_enabled=True,
+                pron_referee=False,
+                pron_referee_margin=0.123,
+            ),
+            lambda s: None,
+            "heavy",
+        )
+
+        assert captured["config"].referee is False
+        assert captured["config"].referee_margin == 0.123
+        assert stack.pron_data[0]["referee"]["chosen"] == "유쿠"
+
 
 # ---------------------------------------------------------------------------
 # _run_deep_stage — 라인별 2패스 fallback_reason이 조용히 버려지지 않는지

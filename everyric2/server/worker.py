@@ -4636,7 +4636,10 @@ def _run_deep_stage(
                 bridged,
                 vocals_path,
                 language=language or "en",
-                config=TwoPassRefineConfig(),
+                config=TwoPassRefineConfig(
+                    referee=settings.alignment.pron_referee,
+                    referee_margin=settings.alignment.pron_referee_margin,
+                ),
             )
         finally:
             if stems_dir is not None:
@@ -4662,6 +4665,8 @@ def _run_deep_stage(
                 entry["pron_segs"] = {
                     key: [_pron_seg_to_wire(s) for s in segs] for key, segs in rl.pron_segs.items()
                 }
+            if rl.referee is not None:
+                entry["referee"] = dict(rl.referee)
             if entry:
                 pron_data[i] = entry
             elif rl.fallback_reason:
@@ -5041,6 +5046,8 @@ def _finish_new_stack_alignment(
         if pd.get("pron_segs"):
             seg["pron_segs"] = pd["pron_segs"]
         debug: dict[str, Any] = {}
+        if pd.get("referee"):
+            debug["referee"] = dict(pd["referee"])
         if vad_regions is not None:
             dur = max(0.001, r.end_time - r.start_time)
             vocal = sum(
