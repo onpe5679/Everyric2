@@ -69,6 +69,17 @@ _NOISE_TOKEN_RE = re.compile(
 T = TypeVar("T")
 
 
+def identity_key(title: str) -> str:
+    """곡 식별용 보수적 키 — 대소문자·전각·공백만 흡수하고 기호는 보존한다.
+
+    :func:`normalize_title`은 검색 후보를 넓히는 용도라 모든 기호를 버린다. 그 키를 자동
+    채택에도 쓰면 ``S.C.R.E.A.M``과 ``SCREAM``처럼 기호 자체가 제목인 서로 다른 곡을
+    같은 것으로 만든다. 자동 채택 경로는 이 키로 **정확 일치**할 때만 같은 제목으로 본다.
+    """
+    normalized = unicodedata.normalize("NFKC", title).casefold()
+    return "".join(ch for ch in normalized if not ch.isspace())
+
+
 def normalize_title(title: str) -> str:
     """NFKC 정규화 + 소문자 + 영숫자/한글/가나/한자만 남기기 (공백·기호 전부 제거)."""
     t = unicodedata.normalize("NFKC", title.lower())
@@ -99,36 +110,48 @@ def _is_pure_noise(raw: str) -> bool:
     return not normalize_title(strip_noise_tokens(raw))
 
 
-def candidate_queries(title: str, drop_noise: bool = False) -> list[str]:
-    """풀 제목에서 곡명 후보를 정규화 형태로 생성.
+def candidate_titles(title: str, drop_noise: bool = False) -> list[str]:
+    """풀 제목에서 곡명 후보의 원문 형태를 생성.
 
     순서: 원문 → feat 제거 → 괄호 세그먼트 제거 → (drop_noise면 잡토큰 제거 변형) →
     각 변형의 구분자 조각(왼쪽 우선). 괄호 제거 변형을 조각보다 먼저 두어
     «【가수】곡명» 류에서 가수명이 곡명보다 먼저 매칭되는 오탐을 막는다.
 
-    반환 순서가 곧 우선순위다 — 호출부는 앞쪽 후보의 매칭을 더 신뢰한다.
-    drop_noise 기본값 False는 곡 인덱스 매칭의 기존 동작을 그대로 보존한다.
+    정규화 전 원문을 보존하는 이유는 자동 채택 경로가 :func:`identity_key`로 기호까지
+    비교해야 하기 때문이다. 중복 판정만 기존 :func:`normalize_title`을 써 후보 순서와
+    개수는 예전 ``candidate_queries``와 동일하게 유지한다.
     """
     seen: set[str] = set()
     out: list[str] = []
 
-    def add(raw: str) -> None:
+    def add(raw: str, *, allow_single: bool = False) -> None:
         q = normalize_title(raw)
-        if len(q) >= 2 and q not in seen and not (drop_noise and _is_pure_noise(raw)):
+        if (
+            len(q) >= (1 if allow_single else 2)
+            and q not in seen
+            and not (drop_noise and _is_pure_noise(raw))
+        ):
             seen.add(q)
-            out.append(q)
+            out.append(raw.strip())
 
     stripped = _BRACKETED_RE.sub(" ", title)
     variants = [title, _FEAT_RE.sub("", title), stripped, _FEAT_RE.sub("", stripped)]
     if drop_noise:
         variants = variants + [strip_noise_tokens(v) for v in variants]
     for v in variants:
-        add(v)
+        # 한 글자 곡(M·S·U 등)은 **질의 전체 또는 그 잡표기 제거판**일 때만 허용한다.
+        # 아래 구분자 조각 한 글자가 후보로 살아나는 것은 여전히 막는다.
+        add(v, allow_single=True)
     for v in variants:
         for part in _TITLE_SPLIT_RE.split(v):
             add(part)
             add(_FEAT_RE.sub("", part))
     return out
+
+
+def candidate_queries(title: str, drop_noise: bool = False) -> list[str]:
+    """풀 제목에서 곡명 후보를 기존의 영숫자 정규화 형태로 생성."""
+    return [normalize_title(candidate) for candidate in candidate_titles(title, drop_noise)]
 
 
 def _score_query_lists(qa: list[str], qb: list[str]) -> tuple[float, int] | None:

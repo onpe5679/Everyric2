@@ -279,11 +279,14 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       const server = await getServerConfig();
       // hint = 정리 전 영상 제목 — 다중 버전 페이지(원곡/리믹스)에서 맞는 표를 고른다
       const hint = message.payload.hint ?? message.payload.title;
-      const matched = await vocaroMatch(server, message.payload.title);
+      const matched = await vocaroMatch(server, message.payload.title, undefined, message.payload);
       if (matched?.found && matched.slug) {
         const page = await fetchSongPage(server, matched.slug, hint);
         if (page) return { data: page };
       }
+      // identity 계약을 아는 신서버가 모호/미발견으로 판정했다면 느슨한 구형 클라이언트
+      // 인덱스로 다시 살려내지 않는다. index_empty와 구서버(버전 필드 없음)만 폴백한다.
+      if (matched?.matcher_version && matched.status !== 'index_empty') return { data: null };
       // 서버가 미발견이거나 페이지를 못 읽은 경우에만 클라 경로 — 초성 인덱스가 답할 수
       // 있는 제목(한글·라틴·숫자 시작)에서만 결과가 나온다
       return { data: await vocaroLookup(server, message.payload.title, hint) };
@@ -293,11 +296,13 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     case 'VOCARO_MATCH': {
       const server = await getServerConfig();
       return call('vocaro_match_failed', sink =>
-        vocaroMatch(server, message.payload.title, sink, message.payload.hint));
+        vocaroMatch(server, message.payload.title, sink, message.payload));
     }
 
     case 'MIRAHEZE_LOOKUP': {
-      return { data: await mirahezeLookup(message.payload.title) };
+      return {
+        data: await mirahezeLookup(message.payload.title, message.payload.titleCandidates),
+      };
     }
 
     case 'SYNC_LINK': {
@@ -376,6 +381,7 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       const server = await getServerConfig();
       return call('sync_feedback_failed', sink => submitFeedback(server, {
         video_id: message.payload.videoId,
+        sync_id: message.payload.syncId,
         rating: message.payload.rating,
         category: message.payload.category,
         comment: message.payload.comment,
@@ -459,7 +465,11 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
     case 'GENERATE_FROM_CAPTION': {
       const server = await getServerConfig();
       return call('generate_from_caption_unavailable', sink =>
-        generateSyncFromCaption(server, message.payload.videoId, sink));
+        generateSyncFromCaption(server, {
+          video_id: message.payload.videoId,
+          title: message.payload.title,
+          artist: message.payload.artist,
+        }, sink));
     }
 
     default:
@@ -481,7 +491,12 @@ async function fetchLyricsChain(
   // 탐색이 영원히 빈손이다.
   const sync = await lookupSync(
     await getServerConfig(), song.videoId,
-    { title: song.title, artist: song.artist, lang: song.lang }, sink,
+    {
+      title: song.title,
+      artist: song.artist,
+      lang: song.lang,
+      titleEvidence: song.titleEvidence,
+    }, sink,
   );
   // 서버에 저장된 영상별 사용자 오프셋 — 싱크가 없어도(found=false) 내려온다
   const userOffset = sync?.user_offset ?? undefined;
@@ -493,6 +508,7 @@ async function fetchLyricsChain(
         synced: true,
         lines,
         plainText: lines.map(l => l.text).join('\n'),
+        syncId: sync.sync_id ?? undefined,
         // 서버가 사람 번역(위키 병합분)을 내려줬으면 기계번역으로 덮어쓰지 않는다
         humanTranslated: lines.some(l => l.translation),
         // lang 파라미터를 준 조회에만 의미가 있다 — 구서버·미지정이면 undefined로 남아
@@ -569,7 +585,10 @@ function lrclibToLyricsData(track: LRCLibTrack): LyricsData | null {
 async function searchCandidates(query: { title: string; artist: string; duration: number }): Promise<SearchCandidate[]> {
   const [tracks, wikiMatch] = await Promise.all([
     searchTracksLrclib(query),
-    vocaroMatch(await getServerConfig(), query.title),
+    vocaroMatch(await getServerConfig(), query.title, undefined, {
+      artist: query.artist,
+      matchMode: 'search',
+    }),
   ]);
 
   const candidates: SearchCandidate[] = [];

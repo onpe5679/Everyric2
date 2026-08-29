@@ -1,4 +1,4 @@
-import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LimitsResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, NoticesResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SourceAttribution, SyncListItem, SyncPreviousVersion, SyncVersionDetail, SyncVersionsResponse, TranslateResult, ViewStatsResponse } from '../types';
+import type { ApiFailure, EveryricSyncResponse, GenerateResponse, JobStatusResponse, LimitsResponse, LineMeta, LinkCandidatesResponse, LinkJobStatusResponse, NoticesResponse, SaveTranslationLayerResponse, ServerLogEntry, ServerStatus, SongMatchPayload, SourceAttribution, SyncListItem, SyncPreviousVersion, SyncVersionDetail, SyncVersionsResponse, TranslateResult, ViewStatsResponse } from '../types';
 import { affectsServerStatus, failureKindFromStatus, failureToStatus, maskPath, maskSecret, okStatus } from './server-status';
 import { localPermissionBlock, normalizeLoopbackUrl } from './host-permissions';
 
@@ -188,7 +188,12 @@ async function request<T>(
 export function lookupSync(
   server: ServerConfig,
   videoId: string,
-  song?: { title?: string | null; artist?: string | null; lang?: string },
+  song?: {
+    title?: string | null;
+    artist?: string | null;
+    lang?: string;
+    titleEvidence?: 'channel_reversed';
+  },
   sink?: FailureSink,
 ): Promise<EveryricSyncResponse | null> {
   const params = new URLSearchParams();
@@ -196,6 +201,7 @@ export function lookupSync(
   const artist = clip(song?.artist, ARTIST_MAX);
   if (title) params.set('title', title);
   if (artist) params.set('artist', artist);
+  if (song?.titleEvidence) params.set('title_evidence', song.titleEvidence);
   // lang 없이 조회하면 서버 응답은 기존과 필드 단위로 동일해야 한다 — 값이 없을 때만 생략
   if (song?.lang) params.set('lang', song.lang);
   const query = params.size > 0 ? `?${params.toString()}` : '';
@@ -213,6 +219,7 @@ export function submitFeedback(
   server: ServerConfig,
   payload: {
     video_id: string; rating: number; category?: string; comment?: string;
+    sync_id?: string | null;
     depth?: 'fast' | 'medium' | 'heavy';
   },
   sink?: FailureSink,
@@ -589,12 +596,18 @@ export function attachLineMeta(
 }
 
 export function generateSyncFromCaption(
-  server: ServerConfig, videoId: string, sink?: FailureSink,
+  server: ServerConfig,
+  payload: { video_id: string; title?: string; artist?: string },
+  sink?: FailureSink,
 ): Promise<GenerateResponse | null> {
   return request<GenerateResponse>(server, '/api/sync/generate-from-caption', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ video_id: videoId }),
+    body: JSON.stringify({
+      ...payload,
+      title: clip(payload.title, TITLE_MAX),
+      artist: clip(payload.artist, ARTIST_MAX),
+    }),
   }, 15000, sink);
 }
 
@@ -645,6 +658,14 @@ export interface VocaroMatchResponse {
   page_url?: string | null;
   ko?: string | null;
   ja?: string | null;
+  status?: 'matched' | 'ambiguous' | 'not_found' | 'index_empty' | string | null;
+  reason?: string | null;
+  matcher_version?: string | null;
+  candidate_count?: number;
+  matched_query?: string | null;
+  evidence_source?: 'client' | 'song_index' | 'youtube_oembed' | 'manual_search' | string | null;
+  resolved_title?: string | null;
+  resolved_channel?: string | null;
 }
 
 /** 일본어 원제 등 클라이언트 독음 인덱스로 못 찾는 제목을 서버 원제 인덱스에 묻는다.
@@ -652,14 +673,27 @@ export interface VocaroMatchResponse {
  *  미스로 곡이 자막 폴백으로 생성되면 vocaroRef가 영영 비어 위키 발음·번역을 잃었다
  *  (실측: 踊っチャイナ). 매칭은 곡 로드당 1회라 넉넉해도 비용이 없다.
  *
- *  hint(원 영상 제목)는 배선만 미리 받아 둔다(감사 C8d) — 서버 /api/vocaro/match가 아직
- *  hint를 받지 않으므로 쿼리에는 싣지 않는다. 다중 버전 페이지 선택은 이 매칭이 반환한
- *  slug로 이어지는 vocaroPage 호출의 hint가 실제로 담당한다. */
+ *  원본 제목·채널·후보 순서를 additive query로 함께 보낸다. 구버전 서버는 모르는 query를
+ *  무시하므로 기존 자체 호스팅과도 호환된다. */
 export function vocaroMatch(
-  server: ServerConfig, title: string, sink?: FailureSink, _hint?: string,
+  server: ServerConfig, title: string, sink?: FailureSink, evidence?: Partial<SongMatchPayload>,
 ): Promise<VocaroMatchResponse | null> {
+  const params = new URLSearchParams({ title });
+  for (const candidate of evidence?.titleCandidates?.slice(0, 4) ?? []) {
+    if (candidate.trim()) params.append('candidate', candidate);
+  }
+  const scalar: [string, string | undefined][] = [
+    ['raw_title', evidence?.rawTitle ?? evidence?.hint],
+    ['artist', evidence?.artist],
+    ['channel', evidence?.channel],
+    ['video_id', evidence?.videoId],
+  ];
+  for (const [key, value] of scalar) {
+    if (value?.trim()) params.set(key, value);
+  }
+  if (evidence?.matchMode) params.set('mode', evidence.matchMode);
   return request<VocaroMatchResponse>(
-    server, `/api/vocaro/match?title=${encodeURIComponent(title)}`, undefined, 6000, sink,
+    server, `/api/vocaro/match?${params.toString()}`, undefined, 6000, sink,
   );
 }
 

@@ -153,7 +153,7 @@ def test_strip_noise_tokens_removes_katakana_and_korean_cover_conjugations():
         assert title_match.normalize_title(title_match.strip_noise_tokens(raw)) == kept
 
 
-def test_ㅣ_separator_isolates_the_song_name_from_trailing_decoration():
+def test_hangul_vertical_separator_isolates_the_song_name_from_trailing_decoration():
     # 실측: 「【MV】 로키 (ROKI) ㅣ한국어 Coverㅣ【레볼루션 하트】」— ㅣ가 구분자가 아니면
     # "로키"가 뒤 장식과 통째로 붙어 다른 후보와 절대 매칭되지 않는다(길이비가 항상 낮다).
     candidates = title_match.candidate_queries(
@@ -602,6 +602,24 @@ def test_get_sync_never_overwrites_existing_title():
     asyncio.run(body())
 
 
+def test_get_sync_repairs_existing_title_only_with_channel_reversed_evidence():
+    async def body():
+        async with _env() as sm:
+            await _seed_sync(sm, SOURCE, title="Patterns ft. @rino", artist="POLARIS")
+            await get_sync(
+                SOURCE,
+                title="POLARIS",
+                artist="Patterns",
+                title_evidence="channel_reversed",
+            )
+            async with sm() as s:
+                row = (await SyncRepository(s).get_by_video(SOURCE))[0]
+                assert row.title == "POLARIS"
+                assert row.artist == "Patterns"
+
+    asyncio.run(body())
+
+
 def test_get_sync_backfill_targets_hash_matched_row():
     async def body():
         async with _env() as sm:
@@ -626,6 +644,27 @@ def test_get_sync_does_not_stamp_cover_title_onto_linked_source():
             async with sm() as s:
                 row = (await SyncRepository(s).get_by_video(SOURCE))[0]
                 assert row.title is None  # 커버 제목이 원곡 행에 새겨지면 안 된다
+
+    asyncio.run(body())
+
+
+def test_get_sync_does_not_repair_linked_source_with_cover_evidence():
+    async def body():
+        async with _env() as sm:
+            await _seed_sync(sm, SOURCE, title="원곡 제목", artist="원곡 아티스트")
+            async with sm() as s:
+                await SyncLinkRepository(s).upsert(COVER, SOURCE, 2.0, verified=True)
+                await s.commit()
+            await get_sync(
+                COVER,
+                title="커버 제목",
+                artist="커버 채널",
+                title_evidence="channel_reversed",
+            )
+            async with sm() as s:
+                row = (await SyncRepository(s).get_by_video(SOURCE))[0]
+                assert row.title == "원곡 제목"
+                assert row.artist == "원곡 아티스트"
 
     asyncio.run(body())
 

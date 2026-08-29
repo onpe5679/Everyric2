@@ -1,10 +1,30 @@
 export interface SongInfo {
   title: string;
   artist: string | null;
+  /** 실제 업로드 채널 — 제목 문자열에서 추정한 artist와 분리해 제목 좌우 방향 판정에 쓴다 */
+  channel?: string | null;
   videoId: string;
   duration: number;
   /** 정리 전 영상 제목 — 버전 판별(리믹스 등)·검색 시트의 "원본으로" 복귀에 쓴다 */
   rawTitle?: string;
+  /** 채널 단서까지 반영한 곡명 가설. 앞쪽일수록 강하며 서버·직접 위키 조회가 함께 쓴다. */
+  titleCandidates?: string[];
+  /** 채널이 기존 title 쪽과 일치해 하이픈 방향을 뒤집은 강한 교정 근거 */
+  titleEvidence?: 'channel_reversed';
+}
+
+/** 곡 인덱스/위키 매칭에 쓰는 손실 없는 영상 식별 단서. 모든 필드는 additive다. */
+export interface SongMatchPayload {
+  title: string;
+  /** 과거 호출부의 다중 버전 페이지 힌트 이름을 유지한다. 값은 rawTitle과 같다. */
+  hint?: string;
+  rawTitle?: string;
+  artist?: string;
+  channel?: string;
+  videoId?: string;
+  titleCandidates?: string[];
+  /** 수동 검색 시트만 느슨한 후보 검색을 허용한다. 자동 채택 경로에서는 보내지 않는다. */
+  matchMode?: 'search';
 }
 
 /** 가라오케 음정 바용 노트 — 서버(FCPE)가 음절 구간을 반음 양자화한 결과 */
@@ -96,6 +116,8 @@ export interface LyricsData {
   synced: boolean;
   lines: LyricLine[];
   plainText: string;
+  /** 화면에 실제로 표시 중인 sync_results.id — 피드백을 최신 행이 아닌 이 세대에 귀속한다 */
+  syncId?: string;
   /** 사람이 단 번역(위키 등)이 병합돼 있음 — 기계번역으로 덮어쓰지 않는다 */
   humanTranslated?: boolean;
   /** 곡 단위 정렬 진단 (everyric 소스만) */
@@ -901,7 +923,7 @@ export type BgRequest =
   /** 정렬 품질 별점 + 오류 제보 (수집 전용).
    *  depth는 **제보 대상 싱크가 어느 깊이로 만들어졌는지** — 같은 곡이라도 깊이마다 결과가
    *  다르므로 이게 없으면 별점 분포를 깊이별로 가를 수 없다(구버전 서버는 무시한다). */
-  | { type: 'SYNC_FEEDBACK'; payload: { videoId: string; rating: number; category?: string; comment?: string; depth?: 'fast' | 'medium' | 'heavy' } }
+  | { type: 'SYNC_FEEDBACK'; payload: { videoId: string; syncId?: string | null; rating: number; category?: string; comment?: string; depth?: 'fast' | 'medium' | 'heavy' } }
   | { type: 'JOB_STATUS'; payload: { jobId: string } }
   | { type: 'JOB_CANCEL'; payload: { jobId: string } }
   | { type: 'NOTIFY'; payload: { id?: string; title: string; message: string } }
@@ -913,13 +935,10 @@ export type BgRequest =
    *  있는 **확장 페이지**에서만 되므로 content script는 여기까지만 할 수 있다.
    *  (service worker에서 request()를 부르면 제스처 컨텍스트가 없어 실패한다.) */
   | { type: 'OPEN_OPTIONS' }
-  | { type: 'VOCARO_LOOKUP'; payload: { title: string; hint?: string } }
+  | { type: 'VOCARO_LOOKUP'; payload: SongMatchPayload }
   /** 서버 원제 인덱스에 제목 하나를 묻는다(가사 본문 없이 slug/표기만) — 일본어 원제처럼
    *  클라이언트 초성 인덱스가 구조적으로 못 찾는 제목의 유일한 경로다. */
-  // hint(원 영상 제목)는 서버 /api/vocaro/match가 아직 안 받는다 — background/
-  // everyric-api.vocaroMatch까지는 배선을 관통시키되 쿼리에는 안 싣는다(감사 C8d,
-  // 장래 서버 지원 대비 plumbing). 실제 hint 사용처는 뒤이은 VOCARO_PAGE 호출이다.
-  | { type: 'VOCARO_MATCH'; payload: { title: string; hint?: string } }
+  | { type: 'VOCARO_MATCH'; payload: SongMatchPayload }
   | { type: 'VOCARO_PAGE'; payload: { slug: string; hint?: string } }
   /** 서버 공지 목록 — 없는 서버(404)면 조용히 기능만 꺼진다 */
   | { type: 'NOTICES_GET' }
@@ -927,9 +946,9 @@ export type BgRequest =
   | { type: 'LIMITS_GET'; payload: { videoId: string } }
   /** 여러 영상의 조회 수 한 번에 (최대 100건) — 기여 이력 화면이 쓴다 */
   | { type: 'STATS_VIEWS'; payload: { videoIds: string[] } }
-  | { type: 'MIRAHEZE_LOOKUP'; payload: { title: string } }
+  | { type: 'MIRAHEZE_LOOKUP'; payload: SongMatchPayload }
   | { type: 'YT_CAPTION_TEXT'; payload: { videoId: string; lang: string; auto: boolean } }
-  | { type: 'GENERATE_FROM_CAPTION'; payload: { videoId: string } }
+  | { type: 'GENERATE_FROM_CAPTION'; payload: { videoId: string; title?: string; artist?: string } }
   /** 자막·위키 채택 번역을 서버 레이어로 저장 — fire-and-forget(호출부가 실패를 무시한다).
    *  origin은 그 번역이 어디서 왔는지: 사람 origin(caption·wiki·manual)은 다른 사람
    *  origin이 못 덮지만 llm 위 승격은 허용된다(서버 규칙, 클라이언트는 몰라도 된다). */

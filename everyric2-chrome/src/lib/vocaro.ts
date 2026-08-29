@@ -68,7 +68,9 @@ export async function vocaroLookup(
   const guessed = guessSlug(trimmed);
   if (guessed) {
     const page = await fetchSongPage(server, guessed, variantHint);
-    if (page) return page;
+    // 슬러그 추측 성공은 곡 식별 성공이 아니다. 페이지 제목이 실제 질의와 기호까지 같은
+    // 경우만 채택해 ``S.C.R.E.A.M``과 ``SCREAM`` 같은 충돌을 막는다.
+    if (page && identityKey(page.pageTitle) === identityKey(trimmed)) return page;
   }
 
   // 2) 제목 첫 글자에 해당하는 '수록곡 일람' 인덱스에서 제목 매칭
@@ -160,20 +162,17 @@ function normalizeTitle(t: string): string {
   return t.toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
+function identityKey(t: string): string {
+  return t.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+}
+
 function findMatch(entries: IndexEntry[], title: string): IndexEntry | null {
-  const q = normalizeTitle(title);
-  if (q.length < 2) return null;
-  const exact = entries.find(e => normalizeTitle(e.title) === q);
-  if (exact) return exact;
-  // 포함 매칭 — 길이 비율 조건으로 짧은 제목의 우연한 포함을 걸러낸다
-  const partial = entries
-    .map(e => ({ e, n: normalizeTitle(e.title) }))
-    .filter(({ n }) =>
-      n.length >= 2
-      && (q.includes(n) || n.includes(q))
-      && Math.min(q.length, n.length) / Math.max(q.length, n.length) >= 0.5)
-    .sort((a, b) => b.n.length - a.n.length)[0];
-  return partial?.e ?? null;
+  if (normalizeTitle(title).length < 2) return null;
+  const key = identityKey(title);
+  const exact = entries.filter(e => identityKey(e.title) === key);
+  // 동명이곡과 부분 제목은 제목 하나로 가를 수 없다. 신서버 identity 매처가 artist/channel
+  // 단서로 판정하며, 구서버 폴백에서는 임의 첫 항목보다 미발견이 안전하다.
+  return exact.length === 1 ? exact[0] : null;
 }
 
 // ── 곡 페이지 조회 ─────────────────────────────────────────────

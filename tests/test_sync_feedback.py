@@ -5,13 +5,14 @@ connection.async_session을 몽키패치하고 라우트 코루틴을 직접 awa
 
 여기서 못박는 계약:
   ① 싱크가 없어도 받는다(sync_id=None) — "싱크가 안 만들어져요" 류 제보도 유효하다.
-  ② 싱크가 있으면 제출 시점의 최신 싱크 sync_id·engine_version을 함께 새긴다 —
-     세대별 품질 집계의 재료(재생성되면 같은 영상도 다른 세대).
+  ② 신클라이언트가 표시 중인 sync_id를 보내면 재생성이 끼어도 그 세대에 귀속한다.
+     필드가 없는 구클라이언트만 제출 시점 최신 싱크로 폴백한다.
   ③ rating은 1~5 밖이면 요청 스키마에서 거부된다. category도 정해진 어휘만.
 """
 
 import asyncio
 import contextlib
+from datetime import datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -22,7 +23,7 @@ from sqlalchemy.pool import StaticPool
 from everyric2.server.api.sync import FeedbackRequest, submit_feedback
 from everyric2.server.db import connection as db_conn
 from everyric2.server.db.models import Base, SyncFeedback
-from everyric2.server.db.repository import SyncRepository
+from everyric2.server.db.repository import SyncLinkRepository, SyncRepository
 
 VIDEO = "FEEDFEEDFB1"
 
@@ -88,6 +89,139 @@ def test_feedback_stamps_latest_sync_generation():
     asyncio.run(body())
 
 
+def test_feedback_targets_the_displayed_generation_not_the_new_latest():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                shown = await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="shown",
+                    timestamps=[{"text": "가", "start": 0.0, "end": 1.0}],
+                    engine_version="shown-engine",
+                    extra={"debug": {"routing": {"route": "fast"}}},
+                )
+                shown.created_at = datetime(2026, 8, 29, 12, 0, 0)
+                latest = await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="latest",
+                    timestamps=[{"text": "나", "start": 0.0, "end": 1.0}],
+                    engine_version="latest-engine",
+                    extra={"debug": {"routing": {"route": "heavy"}}},
+                )
+                latest.created_at = shown.created_at + timedelta(seconds=1)
+                await s.commit()
+            await submit_feedback(
+                FeedbackRequest(
+                    video_id=VIDEO,
+                    sync_id=shown.id,
+                    rating=1,
+                    depth="heavy",  # 서버가 표시 세대의 실제 fast로 교정해야 한다
+                )
+            )
+            async with sm() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.sync_id == shown.id
+                assert row.sync_id != latest.id
+                assert row.engine_version == "shown-engine"
+                assert row.depth == "fast"
+
+    asyncio.run(body())
+
+
+def test_explicit_null_sync_id_does_not_fall_back_to_latest():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="latest",
+                    timestamps=[{"text": "가", "start": 0.0, "end": 1.0}],
+                )
+                await s.commit()
+            await submit_feedback(FeedbackRequest(video_id=VIDEO, sync_id=None, rating=2))
+            async with sm() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.sync_id is None
+                assert row.engine_version is None
+
+    asyncio.run(body())
+
+
+def test_unknown_sync_id_does_not_fall_back_to_latest():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="latest",
+                    timestamps=[{"text": "가", "start": 0.0, "end": 1.0}],
+                )
+                await s.commit()
+            await submit_feedback(
+                FeedbackRequest(
+                    video_id=VIDEO,
+                    sync_id="00000000-0000-0000-0000-000000000000",
+                    rating=2,
+                )
+            )
+            async with sm() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.sync_id is None
+                assert row.engine_version is None
+
+    asyncio.run(body())
+
+
+def test_sync_id_from_an_unrelated_video_is_not_attributed():
+    other_video = "OTHERVIDEO1"
+
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                unrelated = await SyncRepository(s).create(
+                    video_id=other_video,
+                    lyrics_hash="other",
+                    timestamps=[{"text": "가", "start": 0.0, "end": 1.0}],
+                )
+                await s.commit()
+            await submit_feedback(
+                FeedbackRequest(video_id=VIDEO, sync_id=unrelated.id, rating=2)
+            )
+            async with sm() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.sync_id is None
+                assert row.engine_version is None
+
+    asyncio.run(body())
+
+
+def test_linked_video_feedback_can_target_the_displayed_source_generation():
+    source_video = "SOURCEVID01"
+
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                source = await SyncRepository(s).create(
+                    video_id=source_video,
+                    lyrics_hash="source",
+                    timestamps=[{"text": "가", "start": 0.0, "end": 1.0}],
+                    engine_version="source-engine",
+                    extra={"debug": {"routing": {"route": "medium"}}},
+                )
+                await SyncLinkRepository(s).upsert(VIDEO, source_video, offset_sec=0.5)
+                await s.commit()
+            await submit_feedback(
+                FeedbackRequest(video_id=VIDEO, sync_id=source.id, rating=3, depth="fast")
+            )
+            async with sm() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.sync_id == source.id
+                assert row.engine_version == "source-engine"
+                assert row.depth == "medium"
+
+    asyncio.run(body())
+
+
 def test_rating_and_category_are_schema_validated():
     with pytest.raises(ValidationError):
         FeedbackRequest(video_id=VIDEO, rating=0)
@@ -121,6 +255,26 @@ def test_depth_is_stored_when_the_client_sends_it():
             async with sm() as s:
                 row = (await s.execute(select(SyncFeedback))).scalars().one()
                 assert row.depth == "heavy"
+
+    asyncio.run(body())
+
+
+def test_legacy_request_depth_is_not_overwritten_by_the_new_latest_row():
+    async def body():
+        async with _env() as sm:
+            async with sm() as s:
+                await SyncRepository(s).create(
+                    video_id=VIDEO,
+                    lyrics_hash="latest",
+                    timestamps=[{"text": "가", "start": 0.0, "end": 1.0}],
+                    extra={"debug": {"routing": {"route": "heavy"}}},
+                )
+                await s.commit()
+            # 구형 확장: depth는 알지만 sync_id 필드는 아직 없다.
+            await submit_feedback(FeedbackRequest(video_id=VIDEO, rating=1, depth="fast"))
+            async with sm() as s:
+                row = (await s.execute(select(SyncFeedback))).scalars().one()
+                assert row.depth == "fast"
 
     asyncio.run(body())
 

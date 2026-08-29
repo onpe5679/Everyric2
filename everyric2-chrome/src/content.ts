@@ -42,6 +42,7 @@ import type {
   ServerStatus,
   Settings,
   SongInfo,
+  SongMatchPayload,
   SourceAttribution,
   SyncListItem,
   SyncPreviousVersion,
@@ -52,6 +53,19 @@ import { affectsServerStatus, failureToStatus, okStatus, serverKnownBad, statusL
 import { resolveTheme } from './lib/theme';
 import type { SourceResult } from './lib/sources';
 import type { VocaroLine, VocaroResult } from './lib/vocaro';
+
+function songMatchPayload(song: SongInfo, title = song.title): SongMatchPayload {
+  const sameDetectedTitle = title === song.title;
+  return {
+    title,
+    hint: sameDetectedTitle ? song.rawTitle : undefined,
+    rawTitle: sameDetectedTitle ? song.rawTitle : undefined,
+    artist: sameDetectedTitle ? song.artist ?? undefined : undefined,
+    channel: sameDetectedTitle ? song.channel ?? undefined : undefined,
+    videoId: song.videoId,
+    titleCandidates: sameDetectedTitle ? song.titleCandidates : undefined,
+  };
+}
 
 let settings: Settings;
 let cssText = '';
@@ -760,7 +774,15 @@ function overlayCallbacks(): OverlayCallbacks {
       const res = await sendToBackground<{ ok: boolean }>({
         // 어느 깊이로 만든 싱크에 대한 평가인지 함께 — 같은 곡도 깊이마다 결과가 달라서,
         // 이게 없으면 별점이 "이 곡" 평가로만 남아 깊이별 품질을 가를 수 없다
-        type: 'SYNC_FEEDBACK', payload: { videoId, rating, category, comment, depth: currentSyncDepth() },
+        type: 'SYNC_FEEDBACK',
+        payload: {
+          videoId,
+          syncId: currentData?.source === 'everyric' ? currentData.syncId ?? null : null,
+          rating,
+          category,
+          comment,
+          depth: currentSyncDepth(),
+        },
       });
       return Boolean(res.data?.ok);
     },
@@ -778,9 +800,11 @@ function overlayCallbacks(): OverlayCallbacks {
         type: 'SYNC_FEEDBACK',
         payload: {
           videoId,
+          syncId: currentData?.source === 'everyric' ? currentData.syncId ?? null : null,
           rating: 1,
           category: 'lyrics',
           comment: `[오매칭] matched=${matched} url=${url}`,
+          depth: currentSyncDepth(),
         },
       });
       showNotice(t('content.wrongLyrics.thanks'), 6000);
@@ -1431,10 +1455,9 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<bool
       // 재매칭을 한 번 시도해 스스로 치유한다.
       vocaroRematchTried.add(videoId);
       const m = await sendToBackground<{ found: boolean; slug?: string | null } | null>({
-        // hint(rawTitle)는 서버 /api/vocaro/match가 아직 안 받는다 — vocaroMatch에는
-        // 배선만 관통시키고(장래 지원 대비) 쿼리에는 안 싣는다. 이 재매칭이 만든 slug로
-        // 곧바로 이어지는 VOCARO_PAGE 조회가 실제 hint 사용처다(아래).
-        type: 'VOCARO_MATCH', payload: { title: currentSong.title, hint: currentSong.rawTitle },
+        // rawTitle·채널·후보 방향을 함께 보내야 서버가 정리된 제목 하나로 추측하지 않는다.
+        // 같은 rawTitle은 뒤이은 VOCARO_PAGE의 다중 버전 표 선택에도 hint로 재사용한다.
+        type: 'VOCARO_MATCH', payload: songMatchPayload(currentSong),
       });
       if (videoId !== currentVideoId) return false;
       if (m.data?.found && m.data.slug) {
@@ -1660,7 +1683,7 @@ async function fetchWikiMatch(
   const wikiShortName = lang === 'en' ? t('overlay.source.miraheze') : t('overlay.source.vocaro');
   if (lang === 'en') {
     const res = await sendToBackground<SourceResult | null>({
-      type: 'MIRAHEZE_LOOKUP', payload: { title: currentSong.title },
+      type: 'MIRAHEZE_LOOKUP', payload: songMatchPayload(currentSong),
     });
     if (videoId !== currentVideoId) return null;
     wikiLines = res.data?.lines ?? null;
@@ -1668,7 +1691,7 @@ async function fetchWikiMatch(
   } else {
     const res = await sendToBackground<VocaroResult | null>({
       type: 'VOCARO_LOOKUP',
-      payload: { title: currentSong.title, hint: currentSong.rawTitle },
+      payload: songMatchPayload(currentSong),
     });
     if (videoId !== currentVideoId) return null;
     wikiLines = res.data?.lines ?? null;
@@ -2581,7 +2604,7 @@ async function lookupWikiSources(
         type: 'VOCARO_LOOKUP',
         // hint: 검색어가 아니라 영상의 정리 전 제목 — 다중 버전 페이지의 표 선택은
         // "이 영상이 어느 버전인가"의 문제라 사용자가 좁힌 검색어와 무관하다
-        payload: { title, hint: currentSong?.rawTitle },
+        payload: currentSong ? songMatchPayload(currentSong, title) : { title },
       });
       if (seq !== searchSeq || videoId !== currentVideoId) return { stale: true };
       if (vocaro.data && vocaro.data.lines.length > 0) {
@@ -2590,7 +2613,7 @@ async function lookupWikiSources(
     } else {
       const miraheze = await sendToBackground<SourceResult | null>({
         type: 'MIRAHEZE_LOOKUP',
-        payload: { title },
+        payload: currentSong ? songMatchPayload(currentSong, title) : { title },
       });
       if (seq !== searchSeq || videoId !== currentVideoId) return { stale: true };
       if (miraheze.data && miraheze.data.lines.length > 0) {
@@ -3165,7 +3188,7 @@ function bindMirrorRefresh(video: HTMLVideoElement): void {
 }
 
 /**
- * 곡 제목·아티스트만 다시 읽는다 — **조회도 잡도 건드리지 않는다.**
+ * 곡 제목·아티스트를 다시 읽는다. 자동 감지 정본이 실제로 바뀌면 조회도 한 번 다시 한다.
  *
  * 왜 필요한가: detectSong()은 navigator.mediaSession.metadata를 우선하는데 **광고 중에는
  * 그것이 광고 메타**다. 그 순간 검색이 돌면 광고 제목이 currentSong에 굳고, checkCurrentPage는
@@ -3173,10 +3196,10 @@ function bindMirrorRefresh(video: HTMLVideoElement): void {
  * 제목이 광고("홈키파홈매트… — Henkel Consumer Brand Korea", "29 Halmeoni 16x9 15s")로
  * 남았다(가사는 정상 92줄이었다: 조회는 videoId로 하므로 제목과 무관하다).
  *
- * 왜 **다시 조회하지 않는가**: 같은 영상에서 searchLyrics를 새로 발사하면 searchSeq가 올라
- * 진행 중인 검색 응답이 버려지고, 서버 요청도 공짜가 아니다. 반면 제목은 갱신 가치가 크다 —
- * 화면 표시뿐 아니라 생성·재생성 때 **싱크에 새겨져 커버 매칭의 유일한 단서**가 되므로,
- * 광고 제목이 저장되면 그 곡의 후보 탐색이 영구히 어긋난다.
+ * 채널 DOM이 제목보다 늦게 갱신될 수 있다. 그때 channel_reversed 판정이 바뀌었는데 화면 제목만
+ * 고치고 위키 조회를 그대로 두면 이미 채택한 오가사가 남는다. 자동 감지 곡의 title/artist가
+ * 바뀐 경우에만 기존 검색을 취소하고 새 정본으로 한 번 재조회한다. 수동 검색 override는
+ * rawTitle이 없어 이 자동 재조회 대상이 아니다.
  *
  * duration은 덮지 않는다: 광고 중 읽으면 광고 길이(15초 등)라, 이미 가진 본편 길이를
  * 그것으로 갈아치우면 LRCLIB 후보 매칭이 망가진다.
@@ -3186,13 +3209,21 @@ function refreshSongTitle(): void {
   if (!videoId || videoId !== getCurrentVideoId()) return; // 이동 중이면 새 조회가 알아서 읽는다
   const info = detectSong();
   if (!info?.title || info.videoId !== videoId) return;
+  const previous = currentSong;
   if (
-    currentSong
-    && info.title === currentSong.title
-    && (info.artist ?? '') === (currentSong.artist ?? '')
+    previous
+    && info.title === previous.title
+    && (info.artist ?? '') === (previous.artist ?? '')
+    && (info.channel ?? '') === (previous.channel ?? '')
+    && (info.titleCandidates ?? []).join('\u0000') === (previous.titleCandidates ?? []).join('\u0000')
   ) return; // 바뀐 게 없으면 아무것도 하지 않는다
+  const identityChanged = Boolean(
+    previous?.rawTitle
+    && (info.title !== previous.title || (info.artist ?? '') !== (previous.artist ?? '')),
+  );
   currentSong = { ...info, duration: currentSong?.duration || info.duration };
   broadcast('setSong', currentSong);
+  if (identityChanged) void searchLyrics();
 }
 
 async function waitForVideo(maxRetries = 10, delayMs = 500): Promise<HTMLVideoElement | null> {
@@ -3348,7 +3379,12 @@ async function handleGenerate(lyricsText: string, attributionName?: string): Pro
 
     const res = fromCaption
       ? await sendToBackground<GenerateResponse>({
-        type: 'GENERATE_FROM_CAPTION', payload: { videoId },
+        type: 'GENERATE_FROM_CAPTION',
+        payload: {
+          videoId,
+          title: currentSong?.title,
+          artist: currentSong?.artist ?? undefined,
+        },
       })
       : await sendToBackground<GenerateResponse>({
         type: 'GENERATE_SYNC',
@@ -3481,7 +3517,7 @@ async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
     if (fromWiki && currentSong) {
       if (data.attribution?.sourceId === 'miraheze') {
         const wiki = await sendToBackground<SourceResult | null>({
-          type: 'MIRAHEZE_LOOKUP', payload: { title: currentSong.title },
+          type: 'MIRAHEZE_LOOKUP', payload: songMatchPayload(currentSong),
         });
         // miraheze 발음은 로마자다 — 서버 독음(ko) 정렬 입력에 로마자를 넣으면 정렬이
         // 붕괴한다(라틴 정렬 실측) — pronunciation은 절대 싣지 않는다, 번역만 넘긴다.
@@ -3492,7 +3528,7 @@ async function handleRegenerate(minDepth?: 'medium' | 'heavy'): Promise<void> {
       } else {
         const wiki = await sendToBackground<VocaroResult | null>({
           type: 'VOCARO_LOOKUP',
-          payload: { title: currentSong.title, hint: currentSong.rawTitle },
+          payload: songMatchPayload(currentSong),
         });
         lineMeta = (wiki.data?.lines ?? [])
           .filter(l => l.pronunciation || l.translation)

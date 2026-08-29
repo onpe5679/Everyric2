@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import mkstemp
+from typing import Literal
 
 import requests
 
@@ -55,6 +56,21 @@ class SongEntry:
     ja: str | None = None
 
 
+@dataclass(frozen=True)
+class MatchDecision:
+    """자동 채택 가능한 곡 식별 판정.
+
+    ``entry``가 없는 이유를 ``ambiguous``와 ``not_found``로 구분해, 클라이언트가 모호한
+    결과를 느슨한 로컬 폴백으로 다시 살려내지 않게 한다.
+    """
+
+    status: Literal["matched", "ambiguous", "not_found", "index_empty"]
+    reason: str
+    entry: SongEntry | None = None
+    candidate_count: int = 0
+    matched_query: str | None = None
+
+
 # ── 모듈 전역 캐시 (프로세스 메모리) ─────────────────────────────
 _state_lock = threading.Lock()
 _building = False
@@ -68,8 +84,8 @@ _SESSION.headers.update({"User-Agent": "everyric2-vocaro-index/1.0 (lyrics sync 
 # ── 공개 API ──────────────────────────────────────────────────────
 
 # 제목 정규화·후보 생성 규칙은 링크 후보 탐색(api/sync)과 공유한다 — title_match 단일 출처.
-_candidate_queries = title_match.candidate_queries
 _normalize_title = title_match.normalize_title
+_identity_key = title_match.identity_key
 
 
 # 잘 알려진 보컬로이드/음성합성 보컬명 — 유튜브 영상 제목의 "곡명 / 보컬명" 관례에서
@@ -108,109 +124,182 @@ def _is_vocal_only_fragment(q: str, full_norm: str) -> bool:
     return q in _KNOWN_VOCAL_KEYS and q != full_norm
 
 
-def match(title: str) -> SongEntry | None:
-    """제목(원제 또는 한국어 독음 어느 쪽이든)으로 위키 곡 항목을 찾는다.
+def _entry_identity_keys(entry: SongEntry) -> set[str]:
+    return {
+        _identity_key(field)
+        for field in (entry.ja, entry.ko, entry.slug.replace("-", " "))
+        if field and _identity_key(field)
+    }
 
-    유튜브 풀 제목("熱異常 - いよわ feat.初音ミク" 등)도 구분자 분해 후보로 재시도한다.
-    ① 후보 순서대로 정규화 정확 일치, ② 후보 순서대로 상호 포함 + 길이비 >= 0.5
-    (vocaro.ts findMatch와 동일 기준). 인덱스가 아직 구축되지 않았으면 None.
+
+def _disambiguate_exact_hits(
+    hits: list[SongEntry],
+    *,
+    artist: str | None,
+    channel: str | None,
+    context: list[str],
+) -> SongEntry | None:
+    """동명이곡을 프로듀서/채널 단서로 하나까지 좁힌다. 동점은 임의 채택하지 않는다."""
+    hints = [_normalize_title(value) for value in (artist, channel, *context) if value]
+    # IA·U·M 같은 1~2자 보컬/아티스트 표기는 긴 슬러그 안에 우연히 너무 자주 나타난다.
+    # 동명이곡 자동 선택 근거로는 3자 이상만 쓴다. 짧은 단서는 선택하지 않고 ambiguous가 안전하다.
+    hints = [hint for hint in hints if len(hint) >= 3]
+    if not hints:
+        return None
+
+    scored: list[tuple[int, SongEntry]] = []
+    for entry in hits:
+        hay = _normalize_title(
+            " ".join(x for x in (entry.ko or "", entry.ja or "", entry.slug.replace("-", " ")))
+        )
+        scored.append((sum(1 for hint in hints if hint in hay), entry))
+    best_score = max(score for score, _ in scored)
+    best = [entry for score, entry in scored if score == best_score and score > 0]
+    return best[0] if len(best) == 1 else None
+
+
+def _strict_candidates(title: str) -> list[str]:
+    """잡표기 변형은 허용하되 후보끼리의 실제 비교에서는 기호를 보존한다."""
+    candidates = title_match.candidate_titles(title, drop_noise=True)
+    # ``artist - title``은 유튜브의 가장 흔한 하이픈 관례다. 구형 클라이언트가 아직 분해 전
+    # 제목을 보내는 경우 오른쪽을 먼저 보지 않으면 아티스트명과 같은 제목의 다른 곡이 먼저
+    # 잡힌다. 채널 근거로 반대 방향이 확인된 신클라이언트는 title_candidates로 순서를 준다.
+    split = re.search(r"\s(?:-|–|—)\s", title)
+    if split:
+        right = title[split.end() :].strip()
+        preferred = title_match.candidate_titles(right, drop_noise=True)
+        candidates = [*preferred, *candidates]
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = _identity_key(candidate)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(candidate)
+    return out
+
+
+def match_with_evidence(
+    title: str,
+    *,
+    title_candidates: list[str] | None = None,
+    raw_title: str | None = None,
+    artist: str | None = None,
+    channel: str | None = None,
+) -> MatchDecision:
+    """제목과 보존된 영상 단서로 자동 채택 가능한 항목만 반환한다.
+
+    기존 포함 매칭은 검색 후보를 보여주는 데는 유용하지만, 가사를 자동 채택하는 자리에서는
+    ``STARGAZERS → StargazeR``·``ワンダー → スチールワンダー`` 같은 오답을 만든다.
+    여기서는 후보 변형과 인덱스 필드가 기호까지 정확히 같을 때만 채택한다. Chrome이 채널
+    근거로 제목 방향을 뒤집은 경우 ``title_candidates``의 순서가 그 근거의 우선순위다.
     """
     _ensure_loaded()
     entries = _cache or []
     if not entries:
-        return None
+        return MatchDecision(status="index_empty", reason="index_empty")
 
-    queries = _candidate_queries(title)
-    if not queries:
-        return None
+    roots: list[str] = []
+    for value in [*(title_candidates or []), title]:
+        value = value.strip()
+        if value and value not in roots:
+            roots.append(value)
 
-    # 포함 매칭의 아티스트 토큰 가드 재료이자(기존) 보컬명 가드 재료(신규) — 풀 쿼리
-    # 정규화본. 이 위치로 옮겼다 — 두 매칭 단계(정확 일치·포함) 모두 이 값이 필요하다.
+    candidate_groups = [_strict_candidates(root) for root in roots]
+
+    # 새 클라이언트는 방향이 검증된 후보를 보낸다. 구 클라이언트의 raw_title은 기본 제목이
+    # 미스일 때만 보조하되, 이미 artist/channel로 식별된 조각은 곡명 후보에서 제외한다.
+    # raw 후보는 여기서 한 번만 분해한다 — 다시 root로 넣으면 full 제목을 재분해하는 과정에서
+    # 제외했던 아티스트 조각이 되살아난다.
+    if raw_title:
+        excluded = {_identity_key(value) for value in (artist, channel) if value}
+        raw_candidates = [
+            value
+            for value in _strict_candidates(raw_title)
+            if _identity_key(value) not in excluded
+        ]
+        if raw_candidates:
+            candidate_groups.append(raw_candidates)
+
     full_norm = _normalize_title(title)
-
-    for q in queries:
-        if _is_vocal_only_fragment(q, full_norm):
-            # 쿼리 속 보컬명(初音ミク 등)이 위키의 다른 곡 제목과 우연히 같다 — 쿼리에
-            # 남은 다른 토큰(depresso. 등)이 진짜 찾는 곡이다. _KNOWN_VOCAL_KEYS 문서 참고.
-            continue
-        hits: list[SongEntry] = []
-        for entry in entries:
-            # 슬러그가 3순위 별칭인 이유(2026-08-03 실측): 인덱스는 ko/ja 제목만 갖는데
-            # 영상 제목이 영문 전사("Candy Cookie Chocolate")인 곡은 어느 쪽에도 안
-            # 걸린다 — 위키 슬러그(candy-cookie-chocolate)가 바로 그 영문 전사다.
-            for field in (entry.ja, entry.ko, entry.slug.replace("-", " ")):
-                if field and _normalize_title(field) == q:
-                    hits.append(entry)
-                    break
-        if not hits:
-            continue
-        if len(hits) == 1:
-            return hits[0]
-        # 동명이곡(2026-08-03 실측: シンデレラ가 ZIG판/DECO*27판 둘) — 제목만으로는 못
-        # 가르므로 풀 쿼리의 **다른** 후보 토큰(아티스트 등)이 항목의 ko/ja/슬러그에
-        # 나타나는 수로 가른다. 전부 0이면 기존처럼 인덱스 순서 첫 항목(결정론 유지).
-        def _artist_bonus(entry: SongEntry) -> int:
-            hay = _normalize_title(
-                " ".join(x for x in (entry.ko or "", entry.ja or "", entry.slug.replace("-", " ")))
+    for root_index, candidates in enumerate(candidate_groups):
+        for candidate in candidates:
+            normalized = _normalize_title(candidate)
+            if _is_vocal_only_fragment(normalized, full_norm):
+                continue
+            key = _identity_key(candidate)
+            if not key:
+                continue
+            hits = [entry for entry in entries if key in _entry_identity_keys(entry)]
+            if not hits:
+                continue
+            if len(hits) == 1:
+                reason = "exact_title" if root_index == 0 else "evidence_title"
+                return MatchDecision(
+                    status="matched",
+                    reason=reason,
+                    entry=hits[0],
+                    candidate_count=1,
+                    matched_query=candidate,
+                )
+            context = [value for value in candidates if value != candidate]
+            chosen = _disambiguate_exact_hits(
+                hits,
+                artist=artist,
+                channel=channel,
+                context=context,
             )
-            return sum(
-                1
-                for other in queries
-                if other != q and len(other) >= 3 and other in hay
+            if chosen is not None:
+                return MatchDecision(
+                    status="matched",
+                    reason="identity_disambiguated",
+                    entry=chosen,
+                    candidate_count=len(hits),
+                    matched_query=candidate,
+                )
+            return MatchDecision(
+                status="ambiguous",
+                reason="duplicate_title",
+                candidate_count=len(hits),
+                matched_query=candidate,
             )
 
-        return max(hits, key=_artist_bonus)
+    return MatchDecision(status="not_found", reason="no_exact_title")
 
-    # full_norm은 위에서 이미 계산했다(정확 일치 패스의 보컬명 가드와 공유) — q ⊂ n
-    # 방향에서 n의 나머지(제목부)가 풀 쿼리 어디에도 없으면, 겹친 것은 아티스트 이름뿐
-    # 이라는 뜻이다(아래 아티스트 토큰 가드).
-    for q in queries:
-        if _is_vocal_only_fragment(q, full_norm):
-            continue
-        best: tuple[int, SongEntry] | None = None
-        for entry in entries:
-            # 슬러그 별칭은 **정확 일치 패스에만** 둔다. 포함 매칭에 넣으면 동명이곡
-            # 넘버링 슬러그(melt-2 → "melt2")가 rest="2"(2자 미만)로 아티스트 토큰
-            # 가드를 그냥 통과해 오탐 표면이 넓어진다(엣지 감사 #8). 장식 제목
-            # ("… (Official MV)")은 candidate_queries가 괄호를 벗긴 후보를 이미
-            # 만들므로 정확 일치 패스가 잡는다.
-            for field in (entry.ja, entry.ko):
-                if not field:
-                    continue
-                n = _normalize_title(field)
-                if len(n) < 2:
-                    continue
-                if _is_vocal_only_fragment(n, full_norm):
-                    # q 자체가 아니라 **항목 필드**가 보컬명뿐인 경우 — 쿼리가 그 보컬명을
-                    # 포함하는 더 긴 문자열(q == full_norm, 위쪽 q 레벨 가드는 안 걸림)이면
-                    # 여기서 걸린다("어떤곡 / 鏡音リン" 같은 실측 2호, 2026-08-03).
-                    continue
-                ratio = min(len(q), len(n)) / max(len(q), len(n))
-                if not ((q in n or n in q) and ratio >= 0.5):
-                    continue
-                if n in q and n != q and ratio <= 0.5:
-                    # 역방향 오매핑(2026-08-03 실측 2호): 3글자 곡 "Dec."이 아티스트
-                    # 후보 "deco27" **안에** 포함(비율 정확히 0.5)돼 붙었다. 항목 제목이
-                    # 후보의 절반 이하만 덮는 포함은 우연 일치가 지배한다 — 이 방향은
-                    # 엄격 초과만 허용한다(정확 일치는 ① 패스가 이미 잡는다).
-                    continue
-                if q in n and n != q and q != full_norm:
-                    # 실측 오매핑(2026-08-03): 쿼리 "DECO*27 - ダミーロマンス feat…"의
-                    # 아티스트 후보 "deco27"이 인덱스 ko 필드 "신데렐라/DECO*27"에
-                    # 포함돼 **다른 곡**에 붙었다. q가 다구획 쿼리의 부분 후보일 때
-                    # (q != full_norm — 사용자가 친 문자열 전체가 아닐 때), 포함
-                    # 매칭이 정당하려면 n에서 q를 뺀 나머지(그 항목의 실제 제목부)가
-                    # 풀 쿼리 안에도 있어야 한다 — 없다면 겹친 건 공유 토큰(아티스트)
-                    # 뿐이므로 기각한다. 쿼리 전체가 위키 제목의 부분 문자열인 경우
-                    # (q == full_norm)는 기존처럼 정당한 부분 제목 검색이다.
-                    rest = n.replace(q, "", 1)
-                    if len(rest) >= 2 and rest not in full_norm:
-                        continue
-                if best is None or len(n) > best[0]:
-                    best = (len(n), entry)
-        if best:
-            return best[1]
-    return None
+
+def match(title: str) -> SongEntry | None:
+    """제목 하나로 자동 채택해도 안전한 위키 곡 항목을 찾는다.
+
+    상세 판정이 필요한 API는 :func:`match_with_evidence`를 직접 사용한다.
+    """
+    return match_with_evidence(title).entry
+
+
+def search_match(title: str) -> SongEntry | None:
+    """사용자가 후보 목록에서 직접 고르는 수동 검색용 느슨한 상위 후보.
+
+    자동 채택의 :func:`match_with_evidence`와 의도적으로 분리한다. 포함/잡표기 유사도는
+    여기서만 허용되며, 결과는 Chrome 검색 시트에 후보로 보일 뿐 자동 가사로 채택되지 않는다.
+    """
+    _ensure_loaded()
+    entries = _cache or []
+    ranked = title_match.rank_matches(
+        title,
+        [
+            (
+                entry,
+                " / ".join(
+                    value
+                    for value in (entry.ja, entry.ko, entry.slug.replace("-", " "))
+                    if value
+                ),
+            )
+            for entry in entries
+        ],
+        min_score=0.5,
+        limit=1,
+    )
+    return ranked[0][0] if ranked else None
 
 
 def index_status() -> dict:

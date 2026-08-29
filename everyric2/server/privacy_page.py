@@ -17,7 +17,7 @@
 """
 
 # 마지막 갱신일. 내용을 고치면 **반드시** 함께 올려라 — 방침은 날짜가 사실의 일부다.
-PRIVACY_UPDATED = "2026-07-26"
+PRIVACY_UPDATED = "2026-08-29"
 
 PRIVACY_HTML = """<!doctype html>
 <html lang="ko">
@@ -89,6 +89,7 @@ Everyric은 YouTube/YouTube Music에서 재생 중인 곡의 시간 동기화 �
 <tr><th>보내는 것</th><th>왜</th></tr>
 <tr><td>YouTube 영상 ID</td><td>어떤 영상의 싱크 가사를 조회·생성할지 지정</td></tr>
 <tr><td>곡 제목·아티스트명<br>(각 최대 256자·128자로 자름)</td><td>서버가 곡을 식별하고 같은 곡의 기존 싱크를 찾는 데 사용</td></tr>
+<tr><td>원본 영상 제목·채널명·제목 후보<br>(위키 매칭 시)</td><td>제목의 곡명/아티스트 방향을 검증하고 오매칭을 피하기 위해 사용</td></tr>
 <tr><td><strong>가사 텍스트 전문</strong><br>(자동으로 찾은 것 또는 이용자가 붙여넣은 것)</td><td>음성 정렬로 시간 동기화를 생성할 때 필요. 이 확장의 핵심 기능이 가사와 오디오를 맞추는 것이므로 가사 본문 없이는 동작할 수 없습니다</td></tr>
 <tr><td>발음 표기·번역 메타데이터</td><td>가사 위키 등에서 가져온 사람이 쓴 발음·번역을 서버에 함께 저장해 다음 이용자가 재사용할 수 있게</td></tr>
 <tr><td>번역할 텍스트와 목표 언어</td><td>&ldquo;가사 번역 표시&rdquo;를 켰을 때만</td></tr>
@@ -141,7 +142,9 @@ Everyric은 YouTube/YouTube Music에서 재생 중인 곡의 시간 동기화 �
 <h3>YouTube / YouTube Music 페이지</h3>
 <p>
 확장이 이 페이지들로 별도 데이터를 보내지 않습니다. 페이지에서 현재 재생 중인 곡의
-제목·아티스트·영상 ID를 <strong>읽기만</strong> 합니다(위 서버 요청에 쓰기 위해).
+제목·아티스트·채널명·영상 ID를 <strong>읽기만</strong> 합니다(위 서버 요청에 쓰기 위해).
+Everyric 서버는 위키 제목 매칭이 모호하거나 실패했을 때 그 영상 ID로 YouTube의 공개
+oEmbed 제목·채널 메타데이터를 조회할 수 있습니다.
 YouTube 자체가 페이지 방문으로 수집하는 정보는 이 확장과 무관하며 Google의 정책 영역입니다.
 </p>
 
@@ -249,6 +252,7 @@ backend server and to public lyrics databases. Everything sent is listed below.
 <tr><th>Sent</th><th>Why</th></tr>
 <tr><td>YouTube video ID</td><td>Identifies which video's synced lyrics to fetch or generate</td></tr>
 <tr><td>Song title / artist<br>(truncated to 256 / 128 chars)</td><td>Lets the server identify the song and find an existing sync for it</td></tr>
+<tr><td>Original video title, channel name and title candidates<br>(during wiki matching)</td><td>Verifies which side of a video title is the song and avoids adopting a different song</td></tr>
 <tr><td><strong>Full lyrics text</strong><br>(auto-found or pasted by the user)</td><td>Required to generate the time-sync by audio alignment. The core function of this extension is matching lyrics to audio, so it cannot work without the lyrics body</td></tr>
 <tr><td>Pronunciation / translation metadata</td><td>Stores human-written pronunciation and translation (e.g. from a lyrics wiki) alongside the sync so the next user can reuse it</td></tr>
 <tr><td>Text to translate and target language</td><td>Only when &ldquo;show translation&rdquo; is enabled</td></tr>
@@ -303,7 +307,9 @@ page path the extension computes itself.
 <h3>YouTube / YouTube Music pages</h3>
 <p>
 The extension sends no separate data to these pages. It only <strong>reads</strong> the currently
-playing song's title, artist and video ID from the page (to use in the server requests above).
+playing song's title, artist, channel name and video ID from the page (to use in the server requests above).
+When wiki title matching is ambiguous or fails, the Everyric server may use that video ID to request
+public title/channel metadata from YouTube's oEmbed endpoint.
 What YouTube itself collects from a page visit is unrelated to this extension and is covered by
 Google's policies.
 </p>

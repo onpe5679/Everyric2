@@ -623,14 +623,14 @@ class FeedbackRequest(BaseModel):
     영향을 주지 않는다."""
 
     video_id: str = Field(pattern=_VIDEO_ID_PATTERN)
+    # 화면에 실제로 떠 있던 sync_results.id. 필드 자체가 없으면 구형 클라이언트라 최신 행으로
+    # 폴백하고, 명시적 null이면 위키/LRCLIB 등 서버 싱크가 아닌 화면을 평가한 것으로 본다.
+    sync_id: str | None = Field(default=None, max_length=36)
     rating: int = Field(ge=1, le=5)
     category: str | None = Field(default=None, pattern="^(timing|pronunciation|lyrics|other)$")
     comment: str | None = Field(default=None, max_length=1000)
-    # 제출 시점 화면에 떠 있던 싱크의 분석 깊이(fast/medium/heavy) — 확장이 조회 응답의
-    # debug.routing.route(또는 진행 중이었다면 job의 depth 배지)를 그대로 실어 보낸다.
-    # 서버가 sync_id로 역산하지 않는 이유: 제출 시점과 조회 시점 사이에 재생성이 끼면
-    # latest sync가 바뀌어 사용자가 실제로 본 세대와 어긋난다 — 확인 UI 쪽이 아는 값이
-    # 더 정확하다. additive — 안 싣는 구버전 확장은 None.
+    # 제출 시점 화면에 떠 있던 싱크의 분석 깊이(fast/medium/heavy). sync_id가 유효하면 서버가
+    # 그 행에서 다시 확인하고, 행이 없거나 구세대라 깊이를 모를 때만 이 값을 쓴다.
     depth: str | None = Field(default=None, pattern="^(fast|medium|heavy)$")
 
 
@@ -1739,6 +1739,9 @@ async def get_sync(
     lyrics_hash: str | None = None,
     title: Annotated[str | None, Query(max_length=256)] = None,
     artist: Annotated[str | None, Query(max_length=128)] = None,
+    title_evidence: Annotated[
+        str | None, Query(pattern="^channel_reversed$")
+    ] = None,
     lang: Annotated[str | None, Query(max_length=8)] = None,
     # 기본값을 둔 이유: `BackgroundTasks | None = None`은 FastAPI가 이 타입을 더 이상
     # "시스템이 주입하는 특수 의존성"으로 인식하지 못하게 만들어 라우트 등록 자체가
@@ -1754,10 +1757,9 @@ async def get_sync(
 ):
     """이 영상의 싱크를 조회한다. 자기 싱크 > 링크로 빌려온 싱크 순.
 
-    title/artist는 선택적 기회적 백필용이다 — 이 영상 '자기' 싱크의 title이 비어 있을 때만
-    조용히 채운다(기존 값은 절대 덮어쓰지 않는다). 재생성 없이 기존 코퍼스에 제목이 쌓여
-    커버 링크 후보 탐색이 동작하게 만드는 경로다. 링크로 빌려온 싱크는 소유자가 다른 영상
-    (원곡)이라 커버의 제목이 원곡 행에 새겨지지 않도록 백필하지 않는다.
+    title/artist는 선택적 기회적 백필용이다. 기본은 빈 값만 채우고, title_evidence가
+    channel_reversed일 때만 과거의 뒤집힌 자동 메타데이터를 교정한다. 링크로 빌려온 싱크는
+    소유자가 다른 영상(원곡)이라 커버 제목을 원곡 행에 새기지 않는다.
 
     lang은 선택이다 — 주면 세그먼트 translation을 그 언어의 TranslationLayer로 맞춰
     치환하고 응답의 translation_lang에 실제 반영된 언어를 담는다(규칙은
@@ -1775,7 +1777,12 @@ async def get_sync(
         if lyrics_hash:
             result = await repo.get_by_video_and_hash(video_id, lyrics_hash)
             if result:
-                await repo.set_title_if_missing(result, title, artist)
+                await repo.set_title_if_missing(
+                    result,
+                    title,
+                    artist,
+                    overwrite=title_evidence == "channel_reversed",
+                )
                 await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(result, result.timestamps)
                 resp.user_offset = user_offset
@@ -1787,7 +1794,12 @@ async def get_sync(
         else:
             results = await repo.get_by_video(video_id)
             if results:
-                await repo.set_title_if_missing(results[0], title, artist)
+                await repo.set_title_if_missing(
+                    results[0],
+                    title,
+                    artist,
+                    overwrite=title_evidence == "channel_reversed",
+                )
                 await _bump_sync_views(session, video_id)
                 resp = _build_sync_response(results[0], results[0].timestamps)
                 resp.user_offset = user_offset
@@ -1953,21 +1965,47 @@ async def get_sync_version_detail(video_id: str, result_id: str):
 async def submit_feedback(request: FeedbackRequest):
     """정렬 품질 별점(1~5) + 선택 오류 제보 수집 (확장 별점 UI, 2026-08-03).
 
-    제출 시점의 최신 싱크 sync_id·engine_version을 함께 새겨 세대별 품질 집계의 재료로
-    남긴다(재생성되면 같은 영상도 다른 세대). 싱크가 없어도 받는다(sync_id=None) —
-    "싱크가 안 만들어져요" 류 제보도 유효하다. 수집 전용이라 응답은 ok 하나뿐."""
+    신클라이언트가 화면에 실제로 떠 있던 ``sync_id``를 보내면 그 세대에 귀속한다. 필드가
+    없는 구클라이언트만 제출 시점 최신 행으로 폴백한다. 명시적 null·삭제된 세대·무관한
+    세대는 피드백 자체는 받되 sync_id=None으로 남겨 오귀속하지 않는다."""
     async with get_session() as session:
-        syncs = await SyncRepository(session).get_by_video(request.video_id)
-        latest = syncs[0] if syncs else None
+        repo = SyncRepository(session)
+        attributed = None
+        sync_id_supplied = "sync_id" in request.model_fields_set
+        if sync_id_supplied:
+            if request.sync_id:
+                candidate = await repo.get_by_id(request.sync_id)
+                if candidate is not None and candidate.video_id == request.video_id:
+                    attributed = candidate
+                elif candidate is not None:
+                    # 링크 화면은 source 영상의 실제 싱크를 시프트해 보여준다. 현재 링크가 그
+                    # source를 가리킬 때만 타 영상 행 귀속을 허용한다.
+                    link = await SyncLinkRepository(session).get(request.video_id)
+                    if link is not None and link.source_video_id == candidate.video_id:
+                        attributed = candidate
+        else:
+            syncs = await repo.get_by_video(request.video_id)
+            attributed = syncs[0] if syncs else None
+
+        derived_depth = _depth_of(attributed) if attributed is not None else None
+        # sync_id가 정확하면 행 메타가 정본이다. 필드가 없는 구형 클라이언트는 사용자가 본
+        # 화면 depth를 이미 보내고 있었으므로 최신 행의 depth로 덮지 않는다.
+        feedback_depth = (
+            derived_depth or request.depth
+            if sync_id_supplied and attributed is not None
+            else request.depth or derived_depth
+        )
         session.add(
             SyncFeedback(
                 video_id=request.video_id,
-                sync_id=latest.id if latest else None,
+                sync_id=attributed.id if attributed else None,
                 rating=request.rating,
                 category=request.category,
                 comment=request.comment,
-                engine_version=getattr(latest, "engine_version", None) if latest else None,
-                depth=request.depth,
+                engine_version=(
+                    getattr(attributed, "engine_version", None) if attributed else None
+                ),
+                depth=feedback_depth,
             )
         )
         # 커밋은 get_session 컨텍스트가 수행한다 (이 모듈의 다른 쓰기 경로와 동일)

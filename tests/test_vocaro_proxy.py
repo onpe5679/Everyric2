@@ -12,7 +12,12 @@ from everyric2.config.settings import get_settings
 from everyric2.server import vocaro_index as vi
 from everyric2.server.api import vocaro as vocaro_api
 from everyric2.server.api.vocaro import match_title, reindex, status
-from everyric2.server.vocaro_index import SongEntry
+from everyric2.server.services.video_identity import VideoIdentity
+from everyric2.server.vocaro_index import MatchDecision, SongEntry
+
+
+def _matched(entry: SongEntry) -> MatchDecision:
+    return MatchDecision(status="matched", reason="exact_title", entry=entry, candidate_count=1)
 
 
 def _set_url(url: str) -> None:
@@ -24,7 +29,11 @@ def _set_url(url: str) -> None:
 
 def test_match_uses_local_index_when_url_unset(monkeypatch):
     # song_index_url 기본값("")이면 로컬 match()로 슬러그를 답하고 page_url은 BASE_URL 기반
-    monkeypatch.setattr(vocaro_api, "match", lambda title: SongEntry(slug="roki", ko="로키", ja="ロキ"))
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: _matched(SongEntry(slug="roki", ko="로키", ja="ロキ")),
+    )
     resp = asyncio.run(match_title(BackgroundTasks(), title="ロキ"))
     assert resp.found is True
     assert resp.slug == "roki"
@@ -60,6 +69,256 @@ def test_match_proxies_upstream_and_maps_1to1(monkeypatch):
     assert resp.ko == "로키" and resp.ja == "ロキ"
 
 
+def test_match_forwards_additive_identity_evidence(monkeypatch):
+    _set_url("http://idx.test")
+    captured = {}
+
+    def fake_get(path, params=None):
+        captured["params"] = params
+        return {"found": True, "slug": "polaris", "ja": "POLARIS"}
+
+    monkeypatch.setattr(vocaro_api, "_upstream_get", fake_get)
+    resp = asyncio.run(
+        match_title(
+            BackgroundTasks(),
+            title="Patterns ft. @rino",
+            candidate=["POLARIS"],
+            raw_title="POLARIS - Patterns ft. @rino",
+            artist="POLARIS",
+            channel="Patterns",
+            video_id="bEV_tH_yrIc",
+        )
+    )
+    assert resp.found is True
+    assert resp.slug == "polaris"
+    assert captured["params"] == {
+        "title": "Patterns ft. @rino",
+        "candidate": ["POLARIS"],
+        "raw_title": "POLARIS - Patterns ft. @rino",
+        "artist": "POLARIS",
+        "channel": "Patterns",
+        "video_id": "bEV_tH_yrIc",
+    }
+
+
+def test_legacy_upstream_cannot_override_channel_backed_candidate(monkeypatch):
+    _set_url("http://idx.test")
+    monkeypatch.setattr(
+        vocaro_api,
+        "_upstream_get",
+        lambda path, params=None: {"found": True, "slug": "patterns", "ja": "Patterns"},
+    )
+    local = SongEntry(slug="polaris", ko="POLARIS", ja="POLARIS")
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: _matched(local),
+    )
+    resp = asyncio.run(
+        match_title(
+            BackgroundTasks(),
+            title="Patterns ft. @rino",
+            candidate=["POLARIS"],
+            raw_title="POLARIS - Patterns ft. @rino",
+            artist="POLARIS",
+            channel="Patterns",
+        )
+    )
+    assert resp.found is True
+    assert resp.slug == "polaris"
+    assert resp.matcher_version == "identity-1"
+
+
+def test_loose_legacy_upstream_hit_is_rejected(monkeypatch):
+    _set_url("http://idx.test")
+    monkeypatch.setattr(
+        vocaro_api,
+        "_upstream_get",
+        lambda path, params=None: {"found": True, "slug": "scream", "ja": "SCREAM"},
+    )
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(status="not_found", reason="no_exact_title"),
+    )
+    resp = asyncio.run(match_title(BackgroundTasks(), title="S.C.R.E.A.M"))
+    assert resp.found is False
+    assert resp.status == "not_found"
+    assert resp.matcher_version == "identity-1"
+
+
+def test_upstream_found_without_slug_cannot_escape_response_invariant(monkeypatch):
+    _set_url("http://idx.test")
+    monkeypatch.setattr(
+        vocaro_api,
+        "_upstream_get",
+        lambda path, params=None: {"found": True, "ja": "ロキ"},
+    )
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(status="not_found", reason="no_exact_title"),
+    )
+    resp = asyncio.run(match_title(BackgroundTasks(), title="ロキ"))
+    assert resp.found is False
+    assert resp.slug is None
+
+
+def test_upstream_found_with_nonmatched_status_is_rejected(monkeypatch):
+    _set_url("http://idx.test")
+    monkeypatch.setattr(
+        vocaro_api,
+        "_upstream_get",
+        lambda path, params=None: {
+            "found": True,
+            "status": "ambiguous",
+            "slug": "roki",
+            "ja": "ロキ",
+        },
+    )
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(status="ambiguous", reason="duplicate_title"),
+    )
+    resp = asyncio.run(match_title(BackgroundTasks(), title="ロキ"))
+    assert resp.found is False
+    assert resp.status == "ambiguous"
+
+
+def test_non_object_upstream_payload_falls_back_without_500(monkeypatch):
+    _set_url("http://idx.test")
+    monkeypatch.setattr(vocaro_api, "_upstream_get", lambda path, params=None: ["bad"])
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(status="not_found", reason="no_exact_title"),
+    )
+    resp = asyncio.run(match_title(BackgroundTasks(), title="없는곡"))
+    assert resp.found is False
+    assert resp.status == "not_found"
+
+
+def test_malformed_optional_upstream_fields_are_sanitized(monkeypatch):
+    _set_url("http://idx.test")
+    monkeypatch.setattr(
+        vocaro_api,
+        "_upstream_get",
+        lambda path, params=None: {
+            "found": True,
+            "slug": "roki",
+            "ja": "ロキ",
+            "ko": ["bad"],
+            "candidate_count": "not-a-number",
+        },
+    )
+    resp = asyncio.run(match_title(BackgroundTasks(), title="ロキ"))
+    assert resp.found is True
+    assert resp.ko is None
+    assert resp.candidate_count == 1
+
+
+def test_video_id_recovers_identity_after_client_title_miss(monkeypatch):
+    _set_url("")
+    recovered = SongEntry(slug="polaris", ko="POLARIS", ja="POLARIS")
+
+    def fake_match(title, **kwargs):
+        if (kwargs.get("title_candidates") or [None])[0] == "POLARIS":
+            return _matched(recovered)
+        return MatchDecision(status="not_found", reason="no_exact_title")
+
+    monkeypatch.setattr(vocaro_api, "match_with_evidence", fake_match)
+    monkeypatch.setattr(
+        vocaro_api,
+        "fetch_video_identity",
+        lambda video_id: VideoIdentity(
+            title="POLARIS - Patterns ft. @rino",
+            channel="Patterns",
+        ),
+    )
+    resp = asyncio.run(
+        match_title(
+            BackgroundTasks(),
+            title="Patterns ft. @rino",
+            video_id="bEV_tH_yrIc",
+        )
+    )
+    assert resp.found is True
+    assert resp.slug == "polaris"
+    assert resp.evidence_source == "youtube_oembed"
+    assert resp.reason == "video_id_exact_title"
+    assert resp.resolved_title == "POLARIS - Patterns ft. @rino"
+    assert resp.resolved_channel == "Patterns"
+
+
+def test_video_id_lookup_is_skipped_when_client_evidence_already_matches(monkeypatch):
+    _set_url("")
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: _matched(SongEntry(slug="roki", ko="로키", ja="ロキ")),
+    )
+    monkeypatch.setattr(
+        vocaro_api,
+        "fetch_video_identity",
+        lambda video_id: (_ for _ in ()).throw(AssertionError("unneeded metadata fetch")),
+    )
+    resp = asyncio.run(
+        match_title(BackgroundTasks(), title="ロキ", video_id="bEV_tH_yrIc")
+    )
+    assert resp.found is True
+    assert resp.evidence_source == "client"
+
+
+def test_video_id_recovery_is_visible_even_when_wiki_has_no_entry(monkeypatch):
+    _set_url("")
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(status="not_found", reason="no_exact_title"),
+    )
+    monkeypatch.setattr(
+        vocaro_api,
+        "fetch_video_identity",
+        lambda video_id: VideoIdentity(
+            title="POLARIS - Patterns ft. @rino",
+            channel="Patterns",
+        ),
+    )
+    resp = asyncio.run(
+        match_title(
+            BackgroundTasks(),
+            title="Patterns ft. @rino",
+            video_id="bEV_tH_yrIc",
+        )
+    )
+    assert resp.found is False
+    assert resp.evidence_source == "youtube_oembed"
+    assert resp.resolved_title == "POLARIS - Patterns ft. @rino"
+    assert resp.resolved_channel == "Patterns"
+
+
+def test_manual_search_mode_restores_fuzzy_candidate_without_auto_adoption(monkeypatch):
+    _set_url("")
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(status="not_found", reason="no_exact_title"),
+    )
+    monkeypatch.setattr(
+        vocaro_api,
+        "search_match",
+        lambda title: SongEntry(slug="long-song", ko="긴 제목의 노래 입니다", ja=None),
+    )
+    resp = asyncio.run(
+        match_title(BackgroundTasks(), title="노래 입니다", mode="search")
+    )
+    assert resp.found is True
+    assert resp.slug == "long-song"
+    assert resp.reason == "manual_search_fuzzy"
+    assert resp.evidence_source == "manual_search"
+
+
 def test_match_upstream_not_found_passthrough(monkeypatch):
     _set_url("http://idx.test")
     monkeypatch.setattr(vocaro_api, "_upstream_get", lambda path, params=None: {"found": False})
@@ -77,11 +336,16 @@ def test_match_upstream_error_falls_back_to_local(monkeypatch):
         raise RuntimeError("timeout")
 
     monkeypatch.setattr(vocaro_api, "_upstream_get", boom)
-    monkeypatch.setattr(vocaro_api, "match", lambda title: None)
+    monkeypatch.setattr(
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(status="not_found", reason="no_exact_title"),
+    )
     monkeypatch.setattr(vocaro_api, "index_status", lambda: {"total": 6550})
     resp = asyncio.run(match_title(BackgroundTasks(), title="x"))
     assert resp.found is False
-    assert resp.status is None
+    assert resp.status == "not_found"
+    assert resp.reason == "no_exact_title"
 
 
 def test_reindex_upstream_mode_no_build_kick(monkeypatch):

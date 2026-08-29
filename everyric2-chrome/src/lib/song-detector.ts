@@ -107,6 +107,49 @@ export function splitArtistTitle(title: string): { title: string; artist: string
   return { title, artist: null };
 }
 
+function evidenceKey(value: string): string {
+  return value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function withoutFeat(value: string): string {
+  return value.replace(/(?:^|\s)(?:feat|ft)\.?\s*\S.*$/i, '').trim();
+}
+
+/**
+ * 하이픈 제목의 좌우 방향은 문자열만으로 확정할 수 없다. 업로드 채널이 현재 title 쪽과
+ * 일치하고 artist 쪽과는 다르면 기존 분해가 뒤집힌 것으로 보고 반대편을 1순위 후보로
+ * 보존한다(실측: ``POLARIS - Patterns ft. @rino`` / 채널 ``Patterns``).
+ */
+export function identityTitleCandidates(
+  title: string, artist: string | null, channel: string | null,
+): string[] {
+  if (!artist || !channel) return [title];
+  const channelKey = evidenceKey(channel.replace(/ - Topic$/i, ''));
+  const titleKey = evidenceKey(withoutFeat(title));
+  const artistKey = evidenceKey(artist);
+  if (channelKey && channelKey === titleKey && channelKey !== artistKey) return [artist];
+  return [title];
+}
+
+/** 채널 근거로 방향이 뒤집힌 경우 표시·LRCLIB·DB 백필까지 같은 정본을 쓰게 한다. */
+export function resolveSongIdentity(
+  title: string, artist: string | null, channel: string | null,
+): {
+  title: string;
+  artist: string | null;
+  titleCandidates: string[];
+  titleEvidence?: 'channel_reversed';
+} {
+  const titleCandidates = identityTitleCandidates(title, artist, channel);
+  const reversed = titleCandidates[0] !== title;
+  return {
+    title: titleCandidates[0],
+    artist: reversed ? channel : artist,
+    titleCandidates,
+    titleEvidence: reversed ? 'channel_reversed' : undefined,
+  };
+}
+
 export function detectSong(): SongInfo | null {
   const videoId = getCurrentVideoId();
   if (!videoId) return null;
@@ -114,6 +157,7 @@ export function detectSong(): SongInfo | null {
   const rawDuration = getVideoElement()?.duration ?? 0;
   const duration = Number.isFinite(rawDuration) ? Math.round(rawDuration) : 0;
 
+  const domChannel = textOf('#owner #channel-name a').replace(/ - Topic$/i, '').trim() || null;
   const meta = navigator.mediaSession?.metadata;
   if (meta?.title) {
     // DOM 폴백 경로(아래)와 같은 분해를 거친다 — 예전엔 이 경로만 cleanTitle만 태우고
@@ -121,12 +165,17 @@ export function detectSong(): SongInfo | null {
     // 채널명, 실제 가수가 아닐 수 있다 — 커버 영상에서 특히 그렇다)를 그대로 썼다(실사고:
     // PrXtrTgMDEg). 제목에서 뽑히면 그게 우선이고, meta.artist는 못 뽑았을 때만 폴백이다.
     const split = splitArtistTitle(cleanTitle(meta.title));
+    const artist = split.artist ?? (meta.artist || null);
+    const identity = resolveSongIdentity(split.title, artist, domChannel);
     return {
-      title: split.title,
-      artist: split.artist ?? (meta.artist || null),
+      title: identity.title,
+      artist: identity.artist,
+      channel: domChannel,
       videoId,
       duration,
       rawTitle: meta.title,
+      titleCandidates: identity.titleCandidates,
+      titleEvidence: identity.titleEvidence,
     };
   }
 
@@ -135,7 +184,18 @@ export function detectSong(): SongInfo | null {
     if (title) {
       const byline = textOf('ytmusic-player-bar .byline');
       const artist = byline.split('•')[0]?.trim() || null;
-      return { title: cleanTitle(title), artist, videoId, duration, rawTitle: title };
+      const cleaned = cleanTitle(title);
+      const identity = resolveSongIdentity(cleaned, artist, artist);
+      return {
+        title: identity.title,
+        artist: identity.artist,
+        channel: artist,
+        videoId,
+        duration,
+        rawTitle: title,
+        titleCandidates: identity.titleCandidates,
+        titleEvidence: identity.titleEvidence,
+      };
     }
   }
 
@@ -144,13 +204,18 @@ export function detectSong(): SongInfo | null {
     || document.title.replace(/ - YouTube$/, '').trim();
   if (!rawTitle || rawTitle === 'YouTube') return null;
 
-  const channel = textOf('#owner #channel-name a').replace(/ - Topic$/i, '').trim() || null;
+  const channel = domChannel;
   const split = splitArtistTitle(cleanTitle(rawTitle));
+  const artist = split.artist ?? channel;
+  const identity = resolveSongIdentity(split.title, artist, channel);
   return {
-    title: split.title,
-    artist: split.artist ?? channel,
+    title: identity.title,
+    artist: identity.artist,
+    channel,
     videoId,
     duration,
     rawTitle,
+    titleCandidates: identity.titleCandidates,
+    titleEvidence: identity.titleEvidence,
   };
 }

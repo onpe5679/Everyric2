@@ -11,12 +11,25 @@
 import asyncio
 import logging
 import re
+from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Query
 from pydantic import BaseModel
 
 from everyric2.config.settings import get_settings
-from everyric2.server.vocaro_index import BASE_URL, build_index, index_status, is_building, match
+from everyric2.server import title_match
+from everyric2.server.services.video_identity import (
+    fetch_video_identity,
+    ordered_title_candidates,
+)
+from everyric2.server.vocaro_index import (
+    BASE_URL,
+    build_index,
+    index_status,
+    is_building,
+    match_with_evidence,
+    search_match,
+)
 from everyric2.sources import vocaro as vocaro_source
 
 logger = logging.getLogger(__name__)
@@ -25,6 +38,8 @@ router = APIRouter(prefix="/api/vocaro", tags=["vocaro"])
 
 # 업스트림 곡 인덱스 요청 타임아웃(초) — 확장 매칭은 대화형이라 짧게 잡고 실패 시 미발견 폴백
 _UPSTREAM_TIMEOUT_SEC = 3.0
+MATCHER_VERSION = "identity-1"
+_VIDEO_ID_LOOKUP_SEMAPHORE = asyncio.Semaphore(4)
 
 
 class VocaroMatchResponse(BaseModel):
@@ -34,6 +49,13 @@ class VocaroMatchResponse(BaseModel):
     ko: str | None = None
     ja: str | None = None
     status: str | None = None
+    reason: str | None = None
+    matcher_version: str = MATCHER_VERSION
+    candidate_count: int = 0
+    matched_query: str | None = None
+    evidence_source: str | None = None
+    resolved_title: str | None = None
+    resolved_channel: str | None = None
 
 
 class VocaroReindexResponse(BaseModel):
@@ -70,45 +92,223 @@ def _upstream_get(path: str, params: dict | None = None) -> dict:
     return resp.json()
 
 
+def _title_roots(title: str, candidates: list[str] | None) -> list[str]:
+    roots: list[str] = []
+    for value in [*(candidates or []), title]:
+        value = value.strip()
+        if value and value not in roots:
+            roots.append(value)
+    return roots[:4]
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _positive_int(value: object, default: int = 1) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _upstream_result_matches_title(data: dict, roots: list[str]) -> bool:
+    """구형 업스트림의 ``found=true``를 기호 보존 정확 일치로 다시 검증한다.
+
+    외부 songindex가 아직 느슨한 매처여도 ``S.C.R.E.A.M → SCREAM`` 같은 결과가 이 서버를
+    통과하지 않게 하는 호환 경계다. ja/ko가 없으면 슬러그의 하이픈을 공백으로 본 별칭까지
+    검증하되, 포함 일치는 허용하지 않는다.
+    """
+    fields = [data.get("ja"), data.get("ko")]
+    slug = data.get("slug")
+    if isinstance(slug, str):
+        fields.append(slug.replace("-", " "))
+    field_keys = {
+        title_match.identity_key(field)
+        for field in fields
+        if isinstance(field, str) and title_match.identity_key(field)
+    }
+    # 후보 순서는 채널 근거가 확정한 우선순위다. 구형 업스트림이 원래 title만 보고 2순위
+    # 결과를 돌려도 여기서 받아들이지 않고, 로컬 identity 매처가 1순위부터 다시 판정한다.
+    preferred_roots = roots[:1]
+    return any(
+        title_match.identity_key(candidate) in field_keys
+        for root in preferred_roots
+        for candidate in title_match.candidate_titles(root, drop_noise=True)
+    )
+
+
 @router.get("/match", response_model=VocaroMatchResponse)
-async def match_title(background_tasks: BackgroundTasks, title: str = Query(..., min_length=1)):
+async def match_title(
+    background_tasks: BackgroundTasks,
+    title: Annotated[str, Query(min_length=1, max_length=256)],
+    candidate: Annotated[list[str] | None, Query(max_length=256)] = None,
+    raw_title: Annotated[str | None, Query(max_length=300)] = None,
+    artist: Annotated[str | None, Query(max_length=128)] = None,
+    channel: Annotated[str | None, Query(max_length=128)] = None,
+    video_id: Annotated[
+        str | None, Query(pattern=r"^[A-Za-z0-9_-]{11}$")
+    ] = None,
+    mode: Annotated[str | None, Query(pattern="^search$")] = None,
+):
+    roots = _title_roots(title, candidate)
+    upstream_params: dict[str, object] = {"title": title}
+    if candidate:
+        upstream_params["candidate"] = candidate[:4]
+    for key, value in (
+        ("raw_title", raw_title),
+        ("artist", artist),
+        ("channel", channel),
+        ("video_id", video_id),
+        ("mode", mode),
+    ):
+        if value:
+            upstream_params[key] = value
+
     # 업스트림 모드: 외부 곡 인덱스를 1차로 묻되, **미발견·오류는 확정이 아니다** — 로컬
     # 크롤 인덱스(6,550곡)로 폴백한다. 실측(2026-07-29, iTKM_3mdBsM «ホロウ»): 업스트림
     # 인덱스는 로컬보다 훨씬 작아, 미발견을 그대로 돌려주면 로컬이 찾을 수 있는 곡까지
     # 못 찾은 것으로 확정돼 확장이 자막 폴백(오검출 ASR·번역 자막)으로 밀려난다.
     if _song_index_url():
         try:
-            data = await asyncio.to_thread(_upstream_get, "/match", {"title": title})
+            data = await asyncio.to_thread(_upstream_get, "/match", upstream_params)
         except Exception as e:
             logger.info("외부 곡 인덱스 매칭 실패 — 로컬 인덱스로 폴백: %s", e)
             data = None
-        if data and data.get("found"):
+        if data is not None and not isinstance(data, dict):
+            logger.info("외부 곡 인덱스 응답이 객체가 아님 — 로컬 인덱스로 폴백")
+            data = None
+        if (
+            data
+            and data.get("found")
+            and data.get("status") in (None, "matched")
+            and isinstance(data.get("slug"), str)
+            and data["slug"].strip()
+            and _upstream_result_matches_title(data, roots)
+        ):
             return VocaroMatchResponse(
                 found=True,
                 slug=data.get("slug"),
-                page_url=data.get("page_url"),
-                ko=data.get("ko"),
-                ja=data.get("ja"),
-                status=data.get("status"),
+                page_url=_optional_string(data.get("page_url")),
+                ko=_optional_string(data.get("ko")),
+                ja=_optional_string(data.get("ja")),
+                status="matched",
+                reason=_optional_string(data.get("reason")) or "upstream_exact_title",
+                matcher_version=(
+                    _optional_string(data.get("matcher_version"))
+                    or "upstream-legacy-validated"
+                ),
+                candidate_count=_positive_int(data.get("candidate_count")),
+                matched_query=_optional_string(data.get("matched_query")),
+                evidence_source="song_index",
             )
+        if data and data.get("found"):
+            logger.info("외부 곡 인덱스의 느슨한 제목 매칭을 기각: %s", title)
 
-    result = match(title)
-    if result:
+    decision = await asyncio.to_thread(
+        match_with_evidence,
+        title,
+        title_candidates=roots,
+        raw_title=raw_title,
+        artist=artist,
+        channel=channel,
+    )
+    decision_source = "client"
+    resolved_title: str | None = None
+    resolved_channel: str | None = None
+    if decision.status == "not_found" and mode == "search":
+        manual = await asyncio.to_thread(search_match, title)
+        if manual is not None:
+            return VocaroMatchResponse(
+                found=True,
+                slug=manual.slug,
+                page_url=f"{BASE_URL}/{manual.slug}",
+                ko=manual.ko,
+                ja=manual.ja,
+                status="matched",
+                reason="manual_search_fuzzy",
+                candidate_count=1,
+                evidence_source="manual_search",
+            )
+    if decision.entry is None and mode is None and video_id:
+        try:
+            async with _VIDEO_ID_LOOKUP_SEMAPHORE:
+                identity = await asyncio.wait_for(
+                    asyncio.to_thread(fetch_video_identity, video_id),
+                    timeout=2.5,
+                )
+        except TimeoutError:
+            identity = None
+        if identity is not None:
+            resolved_title = identity.title
+            resolved_channel = identity.channel
+            metadata_roots = ordered_title_candidates(identity)
+            metadata_decision = await asyncio.to_thread(
+                match_with_evidence,
+                metadata_roots[0],
+                title_candidates=metadata_roots,
+                raw_title=identity.title,
+                artist=identity.channel,
+                channel=identity.channel,
+            )
+            if metadata_decision.entry is not None:
+                result = metadata_decision.entry
+                return VocaroMatchResponse(
+                    found=True,
+                    slug=result.slug,
+                    page_url=f"{BASE_URL}/{result.slug}",
+                    ko=result.ko,
+                    ja=result.ja,
+                    status="matched",
+                    reason=f"video_id_{metadata_decision.reason}",
+                    candidate_count=metadata_decision.candidate_count,
+                    matched_query=metadata_decision.matched_query,
+                    evidence_source="youtube_oembed",
+                    resolved_title=resolved_title,
+                    resolved_channel=resolved_channel,
+                )
+            decision = metadata_decision
+            decision_source = "youtube_oembed"
+    if decision.entry:
+        result = decision.entry
         return VocaroMatchResponse(
             found=True,
             slug=result.slug,
             page_url=f"{BASE_URL}/{result.slug}",
             ko=result.ko,
             ja=result.ja,
+            status=decision.status,
+            reason=decision.reason,
+            candidate_count=decision.candidate_count,
+            matched_query=decision.matched_query,
+            evidence_source=decision_source,
+            resolved_title=resolved_title,
+            resolved_channel=resolved_channel,
         )
 
-    if index_status()["total"] == 0:
+    if decision.status == "index_empty":
         # 인덱스가 아직 없으면 매칭 실패와 함께 백그라운드 빌드를 킥한다 (중복 킥은 락으로 방지)
         if not is_building():
             background_tasks.add_task(build_index)
-        return VocaroMatchResponse(found=False, status="index_empty")
+        return VocaroMatchResponse(
+            found=False,
+            status="index_empty",
+            reason=decision.reason,
+            evidence_source=decision_source,
+            resolved_title=resolved_title,
+            resolved_channel=resolved_channel,
+        )
 
-    return VocaroMatchResponse(found=False)
+    return VocaroMatchResponse(
+        found=False,
+        status=decision.status,
+        reason=decision.reason,
+        candidate_count=decision.candidate_count,
+        matched_query=decision.matched_query,
+        evidence_source=decision_source,
+        resolved_title=resolved_title,
+        resolved_channel=resolved_channel,
+    )
 
 
 # ── 위키 페이지 프록시 (확장 1.5.5+) ─────────────────────────────
@@ -121,7 +321,7 @@ async def match_title(background_tasks: BackgroundTasks, title: str = Query(...,
 
 #: 곡 슬러그 — 번역자가 손으로 짓는 소문자·숫자·하이픈. 인덱스 href 규칙('#'·':' 제외)과
 #: 확장 guessSlug가 만드는 값의 합집합만 허용한다.
-_PAGE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,199}$")
+_PAGE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,199}$")
 #: 수록곡 일람 페이지명 — allsongs-{a..z} | allsongs-h{1..14}(한글 초성) | num | symbols
 _INDEX_PAGE_RE = re.compile(r"^allsongs-(?:[a-z]|h(?:1[0-4]|[1-9])|num|symbols)$")
 
@@ -152,7 +352,7 @@ class VocaroIndexResponse(BaseModel):
 
 @router.get("/page", response_model=VocaroPageResponse)
 async def song_page(
-    slug: str = Query(..., min_length=2, max_length=200),
+    slug: str = Query(..., min_length=1, max_length=200),
     hint: str | None = Query(None, max_length=300),
 ):
     """슬러그로 곡 페이지를 받아 파싱해 준다 — 원문/발음/번역 줄 목록 + 출처.

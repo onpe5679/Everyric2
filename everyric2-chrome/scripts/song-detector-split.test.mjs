@@ -23,7 +23,7 @@ const outDir = mkdtempSync(join(tmpdir(), 'song-detector-'));
 const outFile = join(outDir, 'song-detector.mjs');
 writeFileSync(outFile, result.outputFiles[0].text);
 const mod = await import('file://' + outFile.replace(/\\/g, '/'));
-const { cleanTitle, splitArtistTitle } = mod;
+const { cleanTitle, identityTitleCandidates, resolveSongIdentity, splitArtistTitle } = mod;
 
 let failed = false;
 function check(ok, label, detail) {
@@ -187,6 +187,33 @@ for (const c of cases) {
   }
   check(got.artist === c.expectArtist, `${c.label} — artist`, { raw: c.raw, got: got.artist, want: c.expectArtist });
 }
+
+const reversed = detect('POLARIS - Patterns ft. @rino');
+check(
+  JSON.stringify(identityTitleCandidates(reversed.title, reversed.artist, 'Patterns'))
+    === JSON.stringify(['POLARIS']),
+  '채널이 오른쪽과 일치하면 하이픈 반대 방향 곡명 가설을 보존',
+  identityTitleCandidates(reversed.title, reversed.artist, 'Patterns'),
+);
+check(
+  JSON.stringify(identityTitleCandidates('Blueming', 'IU', 'IU')) === JSON.stringify(['Blueming']),
+  '표준 artist-title은 기존 곡명 하나만 유지',
+  identityTitleCandidates('Blueming', 'IU', 'IU'),
+);
+check(
+  JSON.stringify(identityTitleCandidates(reversed.title, reversed.artist, null))
+    === JSON.stringify(['Patterns ft. @rino']),
+  '채널 근거가 없으면 임의로 방향을 뒤집지 않음',
+  identityTitleCandidates(reversed.title, reversed.artist, null),
+);
+const resolved = resolveSongIdentity(reversed.title, reversed.artist, 'Patterns');
+check(
+  resolved.title === 'POLARIS'
+    && resolved.artist === 'Patterns'
+    && resolved.titleEvidence === 'channel_reversed',
+  '채널 근거가 강한 반대 방향은 표시·저장 정본도 함께 교정',
+  resolved,
+);
 
 console.log(failed ? '\nSONG-DETECTOR SPLIT TEST: FAIL' : '\nSONG-DETECTOR SPLIT TEST: PASS');
 process.exitCode = failed ? 1 : 0;

@@ -116,5 +116,38 @@ useScenario(
 const redirected = await mirahezeLookup('Wonder');
 check(redirected === null, 'canonical parse title is revalidated', redirected?.pageTitle);
 
+// 동명이곡 접두가 둘 이상이면 검색 순위 첫 항목을 자동 채택하지 않는다.
+useScenario(
+  {
+    Scream: [
+      { pageid: 1, title: 'Scream/Naoki' },
+      { pageid: 2, title: 'Scream/Umetora' },
+    ],
+  },
+  {
+    1: { title: 'Scream/Naoki', html: LYRICS_HTML },
+    2: { title: 'Scream/Umetora', html: LYRICS_HTML },
+  },
+);
+const ambiguous = await mirahezeLookup('Scream');
+check(ambiguous === null, 'ambiguous prefix titles fail closed', ambiguous?.pageTitle);
+check(parseRequests === 2, 'ambiguous lyric pages are both inspected before rejection', parseRequests);
+
+// 제목 접두가 같은 앨범/목록 페이지는 가사 표가 없으므로 진짜 곡을 모호하게 만들지 않는다.
+useScenario(
+  {
+    ロキ: [
+      { pageid: 1, title: 'ロキ (Roki) Album' },
+      { pageid: 2, title: 'ロキ (Roki)' },
+    ],
+  },
+  {
+    1: { title: 'ロキ (Roki) Album', html: '<div>album page</div>' },
+    2: { title: 'ロキ (Roki)', html: LYRICS_HTML },
+  },
+);
+const songNotAlbum = await mirahezeLookup('ロキ');
+check(songNotAlbum?.pageTitle === 'ロキ (Roki)', 'non-lyric album does not create false ambiguity', songNotAlbum?.pageTitle);
+
 console.log(failed ? '\nMIRAHEZE TITLE MATCH TEST: FAIL' : '\nMIRAHEZE TITLE MATCH TEST: PASS');
 process.exitCode = failed ? 1 : 0;

@@ -43,10 +43,11 @@ def test_match_exact_korean_title_ignores_case_and_spaces():
     assert result.slug == "isolation-ward"
 
 
-def test_match_partial_inclusion_within_length_ratio():
+def test_match_rejects_partial_inclusion_for_automatic_adoption():
     _set_entries([SongEntry(slug="song", ko="긴 제목의 노래 입니다", ja=None)])
-    # 쿼리가 등록된 제목에 포함되고 길이 비율이 0.5 이상이면 매칭된다
-    result = vi.match("노래 입니다")
+    # 검색 후보에는 쓸 수 있어도 자동 가사 채택은 정확 제목만 허용한다.
+    assert vi.match("노래 입니다") is None
+    result = vi.search_match("노래 입니다")
     assert result is not None
     assert result.slug == "song"
 
@@ -57,9 +58,16 @@ def test_match_rejects_partial_overlap_below_length_ratio():
     assert vi.match("노래") is None
 
 
-def test_match_query_too_short_returns_none():
+def test_match_exact_one_character_title_is_supported():
     _set_entries([SongEntry(slug="a", ko="a", ja=None)])
-    assert vi.match("a") is None
+    result = vi.match("a")
+    assert result is not None
+    assert result.slug == "a"
+
+
+def test_one_character_fragment_inside_a_full_title_is_not_a_candidate():
+    _set_entries([SongEntry(slug="m", ko="M", ja="M")])
+    assert vi.match("Artist - Unknown Song / M") is None
 
 
 def test_match_returns_none_when_nothing_matches():
@@ -154,13 +162,9 @@ def test_full_title_of_the_actual_song_still_matches():
     assert result.slug == "cinderella-deco-27"
 
 
-def test_whole_query_as_partial_title_is_still_a_legitimate_match():
-    # 가드는 부분 후보(q != 풀 쿼리)에만 적용된다 — 쿼리 전체가 위키 제목의 부분
-    # 문자열인 기존 정당 케이스는 그대로 살아 있어야 한다.
+def test_whole_query_as_partial_title_is_not_auto_adopted():
     _set_entries([SongEntry(slug="song", ko="긴 제목의 노래 입니다", ja=None)])
-    result = vi.match("노래 입니다")
-    assert result is not None
-    assert result.slug == "song"
+    assert vi.match("노래 입니다") is None
 
 
 def test_short_entry_title_inside_artist_token_is_rejected():
@@ -190,14 +194,67 @@ def test_same_title_different_artist_is_disambiguated_by_query_artist_token():
     assert result.slug == "cinderella-deco-27"
 
 
-def test_same_title_without_artist_hint_keeps_deterministic_first_entry():
+def test_same_title_without_artist_hint_is_ambiguous():
     _set_entries([
         SongEntry(slug="cinderella-zig", ko="신데렐라/ZIG", ja="シンデレラ"),
         SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ"),
     ])
-    result = vi.match("シンデレラ")
-    assert result is not None
-    assert result.slug == "cinderella-zig"  # 힌트 없으면 기존 순서 유지(결정론)
+    decision = vi.match_with_evidence("シンデレラ")
+    assert decision.entry is None
+    assert decision.status == "ambiguous"
+    assert decision.candidate_count == 2
+
+
+def test_short_artist_token_cannot_disambiguate_by_slug_substring():
+    _set_entries([
+        SongEntry(slug="piano-version", ko="동명곡/A", ja="同名曲"),
+        SongEntry(slug="other-version", ko="동명곡/B", ja="同名曲"),
+    ])
+    decision = vi.match_with_evidence("同名曲", artist="IA")
+    assert decision.entry is None
+    assert decision.status == "ambiguous"
+
+
+def test_punctuation_is_part_of_identity_for_automatic_match():
+    _set_entries([SongEntry(slug="scream", ko="SCREAM", ja="SCREAM")])
+    decision = vi.match_with_evidence("S.C.R.E.A.M")
+    assert decision.entry is None
+    assert decision.status == "not_found"
+
+
+@pytest.mark.parametrize("query", ["STARGAZERS", "ワンダー"])
+def test_near_prefix_is_not_a_title_match(query):
+    _set_entries([
+        SongEntry(slug="stargazer", ko="StargazeR", ja="StargazeR"),
+        SongEntry(slug="steel-wonder", ko="스틸 원더", ja="スチールワンダー"),
+    ])
+    assert vi.match(query) is None
+
+
+def test_ordered_client_title_candidate_can_recover_reversed_hyphen():
+    _set_entries([SongEntry(slug="polaris", ko="POLARIS", ja="POLARIS")])
+    decision = vi.match_with_evidence(
+        "Patterns ft. @rino",
+        title_candidates=["POLARIS"],
+        raw_title="POLARIS - Patterns ft. @rino",
+        artist="POLARIS",
+        channel="Patterns",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "polaris"
+    assert decision.reason == "exact_title"
+
+
+def test_raw_title_fallback_does_not_reintroduce_known_artist_as_song():
+    _set_entries([SongEntry(slug="deco-27-song", ko="DECO*27", ja="DECO*27")])
+    decision = vi.match_with_evidence(
+        "ダミーロマンス feat. 初音ミク",
+        raw_title="DECO*27 - ダミーロマンス feat. 初音ミク",
+        artist="DECO*27",
+        channel="DECO*27",
+    )
+    assert decision.entry is None
+    assert decision.status == "not_found"
 
 
 # ── 슬러그 영문 별칭 (2026-08-03 실측: candy-cookie-chocolate) ──

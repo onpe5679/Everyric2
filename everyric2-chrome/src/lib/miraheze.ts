@@ -56,32 +56,41 @@ interface SearchHit {
  * 있을 때만 채택한다. 하나라도 어긋나면 다음 후보로 넘어가며, 검증되지 않은 검색
  * 1위로는 절대 물러나지 않는다.
  */
-export async function mirahezeLookup(title: string): Promise<SourceResult | null> {
+export async function mirahezeLookup(
+  title: string, preferredTitles?: string[],
+): Promise<SourceResult | null> {
   const trimmed = title.trim();
   if (!trimmed) return null;
 
-  const candidates = titleCandidates(trimmed);
+  const roots = [...(preferredTitles ?? []), trimmed]
+    .map(value => value.trim())
+    .filter((value, index, all) => value && all.indexOf(value) === index)
+    .slice(0, 4);
+  const candidates = roots
+    .flatMap(root => titleCandidates(root))
+    .filter((value, index, all) => all.indexOf(value) === index)
+    .slice(0, 6);
   for (const candidate of candidates) {
-    const hit = await searchTopHit(candidate);
-    if (!hit) continue;
-
-    const page = await fetchParsedPage(hit.pageid);
-    if (!page || !titleMatchesCandidate(candidate, page.title)) continue;
-
-    const parsed = parseLyricsTable(page.html);
-    if (!parsed || parsed.lines.length === 0) continue; // 이 후보의 채택 페이지엔 가사 표가 없다 — 다음 후보로
-
-    return {
-      sourceId: 'miraheze',
-      // MediaWiki 문서 URL은 공백→'_'만 치환하고 나머지(괄호·'*'·'/' 등)는 그대로 남긴다
-      // (encodeURI가 그 규칙과 일치 — encodeURIComponent를 쓰면 '/'까지 %2F로 깨진다).
-      pageUrl: `${BASE}/wiki/${encodeURI(page.title.replace(/ /g, '_'))}`,
-      pageTitle: page.title,
-      lines: parsed.lines,
-      pronLang: 'romaji',
-      translationLang: parsed.hasTranslation ? 'en' : undefined,
-      license: LICENSE,
-    };
+    const hits = await searchTitleHits(candidate);
+    const valid: SourceResult[] = [];
+    for (const hit of hits) {
+      const page = await fetchParsedPage(hit.pageid);
+      if (!page || !titleMatchesCandidate(candidate, page.title)) continue;
+      const parsed = parseLyricsTable(page.html);
+      if (!parsed || parsed.lines.length === 0) continue;
+      valid.push({
+        sourceId: 'miraheze',
+        // MediaWiki 문서 URL은 공백→'_'만 치환하고 나머지는 그대로 남긴다.
+        pageUrl: `${BASE}/wiki/${encodeURI(page.title.replace(/ /g, '_'))}`,
+        pageTitle: page.title,
+        lines: parsed.lines,
+        pronLang: 'romaji',
+        translationLang: parsed.hasTranslation ? 'en' : undefined,
+        license: LICENSE,
+      });
+      if (valid.length > 1) break; // 실제 가사 페이지가 둘이면 제목만으로는 못 가른다
+    }
+    if (valid.length === 1) return valid[0];
   }
   return null;
 }
@@ -161,7 +170,7 @@ const SEARCH_LIMIT = 10;
  * 정규화 접두 일치 히트가 없으면 null(다음 후보로 넘어가라는 신호). 검색 순위는
  * 같은 곡임을 증명하지 않으므로 마지막 후보에서도 최상위 결과로 폴백하지 않는다.
  */
-async function searchTopHit(title: string): Promise<SearchHit | null> {
+async function searchTitleHits(title: string): Promise<SearchHit[]> {
   const params = new URLSearchParams({
     action: 'query',
     list: 'search',
@@ -172,10 +181,7 @@ async function searchTopHit(title: string): Promise<SearchHit | null> {
   });
   const data = await getJSON<{ query?: { search?: SearchHit[] } }>(`${API}?${params}`);
   const hits = data?.query?.search ?? [];
-  if (hits.length === 0) return null;
-  const titleMatch = hits.find(h => titleMatchesCandidate(title, h.title));
-  if (titleMatch) return { pageid: titleMatch.pageid, title: titleMatch.title };
-  return null;
+  return hits.filter(h => titleMatchesCandidate(title, h.title));
 }
 
 async function fetchParsedPage(pageid: number): Promise<{ title: string; html: string } | null> {

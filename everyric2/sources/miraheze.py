@@ -217,8 +217,8 @@ def _fetcher() -> WikiFetcher:
     return _default_fetcher
 
 
-def _search_top_hit(title: str, fetcher: WikiFetcher) -> tuple[int, str] | None:
-    """(pageid, 제목). 정규화 접두 검증을 통과한 첫 검색 결과만 돌려준다."""
+def _search_hits(title: str, fetcher: WikiFetcher) -> list[tuple[int, str]]:
+    """정규화 접두 검증을 통과한 ``[(pageid, 제목), ...]``."""
     query = urlencode(
         {
             "action": "query",
@@ -231,12 +231,13 @@ def _search_top_hit(title: str, fetcher: WikiFetcher) -> tuple[int, str] | None:
     data = fetcher.get_json(f"{API_URL}?{query}")
     hits = ((data or {}).get("query") or {}).get("search") or []
     if not hits:
-        return None
-    for hit in hits:
-        hit_title = hit.get("title") or ""
-        if page_title_matches_candidate(title, hit_title):
-            return int(hit["pageid"]), hit_title
-    return None
+        return []
+    matches = [
+        hit
+        for hit in hits
+        if page_title_matches_candidate(title, hit.get("title") or "")
+    ]
+    return [(int(hit["pageid"]), hit.get("title") or "") for hit in matches]
 
 
 def _fetch_parsed_page(pageid: int, fetcher: WikiFetcher) -> tuple[str, str] | None:
@@ -284,24 +285,28 @@ def lookup(title: str, fetcher: WikiFetcher | None = None) -> MirahezeSong | Non
 
     candidates = title_candidates(trimmed)
     for candidate in candidates:
-        hit = _search_top_hit(candidate, fetch)
-        if hit is None:
-            continue
-        pageid, _search_title = hit
-        fetched = _fetch_parsed_page(pageid, fetch)
-        if fetched is None:
-            continue
-        page_title, page_html = fetched
-        if not page_title_matches_candidate(candidate, page_title):
-            continue
-        parsed = parse_lyrics_table(page_html)
-        if parsed is None or not parsed[0]:
-            continue  # 이 후보의 채택 페이지엔 가사 표가 없다 — 다음 후보로
-        lines, has_translation = parsed
-        return MirahezeSong(
-            page_title=page_title,
-            url=wiki_url(page_title),
-            lines=lines,
-            has_translation=has_translation,
-        )
+        valid: list[MirahezeSong] = []
+        for pageid, _search_title in _search_hits(candidate, fetch):
+            fetched = _fetch_parsed_page(pageid, fetch)
+            if fetched is None:
+                continue
+            page_title, page_html = fetched
+            if not page_title_matches_candidate(candidate, page_title):
+                continue
+            parsed = parse_lyrics_table(page_html)
+            if parsed is None or not parsed[0]:
+                continue
+            lines, has_translation = parsed
+            valid.append(
+                MirahezeSong(
+                    page_title=page_title,
+                    url=wiki_url(page_title),
+                    lines=lines,
+                    has_translation=has_translation,
+                )
+            )
+            if len(valid) > 1:
+                break
+        if len(valid) == 1:
+            return valid[0]
     return None

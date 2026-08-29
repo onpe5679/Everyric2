@@ -158,11 +158,13 @@ engine_version`. 확장 디버그 패널의 「이전 세대와 비교」가 소
 
 ### `POST /api/sync/feedback` — 정렬 품질 별점·오류 제보 (수집 전용)
 ```jsonc
-{ "video_id": "...", "rating": 4,             // 1~5 필수
+{ "video_id": "...", "sync_id": "uuid",      // 표시 중인 세대; 비서버 가사는 null
+  "rating": 4,                                  // 1~5 필수
   "category": "timing",                        // 선택: timing|pronunciation|lyrics|other
   "comment": "후렴이 밀려요" }                  // 선택, ≤1000자
 ```
-응답 `{"ok": true}`. 제출 시점의 최신 싱크 sync_id·engine_version이 서버에 함께 남는다.
+응답 `{"ok": true}`. `sync_id`가 있으면 그 표시 세대의 engine_version/depth에 귀속하고,
+필드가 없는 구버전 클라이언트만 제출 시점 최신 싱크로 폴백한다.
 
 ## 참고 구현
 

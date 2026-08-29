@@ -299,6 +299,37 @@ def test_lookup_preserves_verified_real_prefix_matches(query, page_title):
     assert song.page_title == page_title
 
 
+def test_lookup_rejects_multiple_verified_prefix_titles_as_ambiguous():
+    fetcher = _StubFetcher(
+        search_hits={
+            "Scream": [_hit(1, "Scream/Naoki"), _hit(2, "Scream/Umetora")],
+        },
+        pages={
+            1: _fixture("miraheze_lyrics_3col.html"),
+            2: _fixture("miraheze_lyrics_3col.html"),
+        },
+    )
+
+    assert miraheze.lookup("Scream", fetcher) is None
+    assert sum("action=parse" in url for url in fetcher.urls) == 2
+
+
+def test_non_lyric_album_page_does_not_make_the_song_ambiguous():
+    fetcher = _StubFetcher(
+        search_hits={
+            "ロキ": [_hit(1, "ロキ (Roki) Album"), _hit(2, "ロキ (Roki)")],
+        },
+        pages={
+            1: "<div>album page</div>",
+            2: _fixture("miraheze_lyrics_3col.html"),
+        },
+    )
+
+    song = miraheze.lookup("ロキ", fetcher)
+    assert song is not None
+    assert song.page_title == "ロキ (Roki)"
+
+
 def test_lookup_revalidates_the_canonical_title_returned_by_parse():
     """검색 히트가 맞아도 pageid가 다른 정규 제목으로 해석되면 채택하지 않는다."""
     fetcher = _StubFetcher(

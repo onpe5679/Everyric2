@@ -200,17 +200,27 @@ class SyncRepository:
         return rows
 
     async def set_title_if_missing(
-        self, sync_result: SyncResult, title: str | None, artist: str | None = None
+        self,
+        sync_result: SyncResult,
+        title: str | None,
+        artist: str | None = None,
+        *,
+        overwrite: bool = False,
     ) -> bool:
-        """title이 비어 있을 때만 조용히 채운다 (기존 값은 절대 덮어쓰지 않는다).
+        """title이 비어 있을 때 채운다. 검증된 식별 근거만 ``overwrite=True``를 쓴다.
 
-        기회적 백필용 — 조회 요청이 제목을 실어 보내면 재생성 없이 기존 코퍼스에 제목이
-        쌓인다. 채웠으면 True."""
-        if not title or sync_result.title:
+        기본 경로는 기존 값을 절대 덮지 않는다. Chrome이 채널 일치로 하이픈 방향을 검증한
+        경우에만 API가 overwrite를 켜 과거의 뒤집힌 자동 메타데이터를 제한 교정한다.
+        바뀌었으면 True."""
+        if not title or (sync_result.title and not overwrite):
             return False
-        sync_result.title = title.strip()[:256]
-        if artist and not sync_result.artist:
-            sync_result.artist = artist.strip()[:128]
+        new_title = title.strip()[:256]
+        new_artist = artist.strip()[:128] if artist else sync_result.artist
+        if sync_result.title == new_title and sync_result.artist == new_artist:
+            return False
+        sync_result.title = new_title
+        if artist and (overwrite or not sync_result.artist):
+            sync_result.artist = new_artist
         await self.session.flush()
         return True
 

@@ -50,9 +50,26 @@ def test_page_rejects_bad_slug_before_fetch(monkeypatch):
         raise AssertionError("검증 실패 슬러그로 위키 조회가 나가면 안 된다")
 
     monkeypatch.setattr(vocaro_api.vocaro_source, "fetch_song", _boom)
-    for bad in ("../etc/passwd", "UPPER", "a", "한글", "roki/extra", "system:join"):
+    for bad in ("../etc/passwd", "UPPER", "한글", "roki/extra", "system:join"):
         resp = asyncio.run(song_page(slug=bad))
         assert resp.found is False, bad
+
+
+def test_page_allows_real_one_character_slug(monkeypatch):
+    one = VocaroSong(
+        slug="a",
+        page_url="http://vocaro.wikidot.com/a",
+        page_title="A",
+        lines=[SourceLine(text="한 글자 슬러그 곡")],
+    )
+    monkeypatch.setattr(
+        vocaro_api.vocaro_source,
+        "fetch_song",
+        lambda slug, fetcher=None, hint=None: one if slug == "a" else None,
+    )
+    resp = asyncio.run(song_page(slug="a"))
+    assert resp.found is True
+    assert resp.slug == "a"
 
 
 def test_page_fetch_failure_is_found_false(monkeypatch):
@@ -140,12 +157,19 @@ def test_match_falls_back_to_local_index_when_upstream_misses(monkeypatch):
     밀려났다. 업스트림 미발견·오류는 로컬 매칭으로 이어져야 한다."""
     from fastapi import BackgroundTasks
 
-    from everyric2.server.vocaro_index import SongEntry
+    from everyric2.server.vocaro_index import MatchDecision, SongEntry
 
     monkeypatch.setattr(vocaro_api, "_song_index_url", lambda: "http://upstream.test")
     monkeypatch.setattr(vocaro_api, "_upstream_get", lambda path, params=None: {"found": False})
     monkeypatch.setattr(
-        vocaro_api, "match", lambda title: SongEntry(slug="hollow", ko="홀로우", ja="ホロウ")
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(
+            status="matched",
+            reason="exact_title",
+            entry=SongEntry(slug="hollow", ko="홀로우", ja="ホロウ"),
+            candidate_count=1,
+        ),
     )
     resp = asyncio.run(vocaro_api.match_title(BackgroundTasks(), title="ホロウ"))
     assert resp.found is True
@@ -155,7 +179,7 @@ def test_match_falls_back_to_local_index_when_upstream_misses(monkeypatch):
 def test_match_upstream_error_also_falls_back_to_local(monkeypatch):
     from fastapi import BackgroundTasks
 
-    from everyric2.server.vocaro_index import SongEntry
+    from everyric2.server.vocaro_index import MatchDecision, SongEntry
 
     monkeypatch.setattr(vocaro_api, "_song_index_url", lambda: "http://upstream.test")
 
@@ -164,7 +188,14 @@ def test_match_upstream_error_also_falls_back_to_local(monkeypatch):
 
     monkeypatch.setattr(vocaro_api, "_upstream_get", _boom)
     monkeypatch.setattr(
-        vocaro_api, "match", lambda title: SongEntry(slug="hollow", ko="홀로우", ja="ホロウ")
+        vocaro_api,
+        "match_with_evidence",
+        lambda title, **kwargs: MatchDecision(
+            status="matched",
+            reason="exact_title",
+            entry=SongEntry(slug="hollow", ko="홀로우", ja="ホロウ"),
+            candidate_count=1,
+        ),
     )
     resp = asyncio.run(vocaro_api.match_title(BackgroundTasks(), title="ホロウ"))
     assert resp.found is True
@@ -182,8 +213,10 @@ def test_match_upstream_hit_short_circuits_local(monkeypatch):
     )
     monkeypatch.setattr(
         vocaro_api,
-        "match",
-        lambda title: (_ for _ in ()).throw(AssertionError("업스트림 히트인데 로컬 조회")),
+        "match_with_evidence",
+        lambda title, **kwargs: (_ for _ in ()).throw(
+            AssertionError("업스트림 히트인데 로컬 조회")
+        ),
     )
     resp = asyncio.run(vocaro_api.match_title(BackgroundTasks(), title="上流曲"))
     assert resp.found is True
