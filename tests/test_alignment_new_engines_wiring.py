@@ -1,11 +1,6 @@
-"""OWSM-CTC v4 1B / omniASR-CTC-300M 엔진의 배선 검증 — 등록·선택·기본값.
+"""Adaptive 공개 엔진과 내부 OWSM/omniASR 앵커의 배선 계약을 검증한다.
 
-2026-08-03 배선 전환(everyric2/server/worker.py::_run_new_stack_alignment,
-tests/test_new_stack_wiring.py) 이전에는 이 엔진들이 ``EngineFactory``에 등록만 되고
-``AlignmentSettings.engine`` 기본값은 "ctc"로 남아 있었다. 배선이 실제로 태워진 지금은
-기본값이 "owsm"(새 스택 켜짐의 동의어 — 언어별 실제 앵커는 owsm/omniasr로 갈린다,
-AlignmentSettings.engine 필드 docstring 참고)이다 — 구스택(ctc 등)은 명시적으로 골라야
-나온다(``EVERYRIC_ALIGNMENT_ENGINE=ctc``). 이 스위트는 그 경계를 못박는다.
+사용자가 선택하는 엔진은 ``adaptive`` 하나이고, 앵커 선택은 라우터의 내부 구현이다.
 """
 
 from __future__ import annotations

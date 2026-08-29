@@ -42,7 +42,7 @@
 
 ### ④ 서버
 
-기본 서버 주소는 `https://everyric.moref.co`이며 **API 키를 입력할 필요가 없습니다** — 설정의 키 칸은 비워 두세요. 가사 조회는 무제한이고, 새 싱크 생성만 하루 20건으로 제한됩니다(커버 잇기 3건·분석 깊이 올리기 10건은 별도 예산). 남은 횟수는 패널에서 바로 확인할 수 있습니다.
+기본 서버 주소는 `https://everyric.moref.co`이며 **API 키를 입력할 필요가 없습니다** — 설정의 키 칸은 비워 두세요. 가사 조회는 무제한이고, 새 싱크 생성과 커버 잇기는 각각 하루 20건, 분석 깊이 올리기는 10건으로 제한됩니다. 남은 횟수는 패널에서 바로 확인할 수 있습니다.
 직접 서버를 구동하고 싶다면 아래 [자체 호스팅](#자체-호스팅-개발자용) 절을 참고하세요.
 개인정보처리방침: <https://everyric.moref.co/privacy>
 
@@ -70,7 +70,7 @@ To see translations, open the panel's settings (⚙), turn on **Show translation
 
 ### ④ Server
 
-The default server is `https://everyric.moref.co` and **no API key is required** — leave the key field empty. Lookups are unlimited; generating a new sync is capped at 20 per day (linking a cover and raising analysis depth have their own separate budgets: 3 and 10). The panel shows how many you have left.
+The default server is `https://everyric.moref.co` and **no API key is required** — leave the key field empty. Lookups are unlimited; generating a sync and linking a cover are each capped at 20 per day, while raising analysis depth is capped at 10. The panel shows how many you have left.
 Want to run your own server instead? See [Self-Hosting](#self-hosting-for-developers) below.
 Privacy policy: <https://everyric.moref.co/privacy>
 
@@ -98,7 +98,7 @@ YouTubeで曲の動画を開くと、歌詞パネルが自動で表示されま�
 
 ### ④ サーバー
 
-デフォルトのサーバーは`https://everyric.moref.co`で、**APIキーの入力は不要です** — 設定のキー欄は空のままにしてください。歌詞の検索は無制限、新規同期の生成のみ1日20件までです(カバーのリンクは3件、解析の深さアップは10件と、それぞれ別枠)。残り回数はパネルで確認できます。
+デフォルトのサーバーは`https://everyric.moref.co`で、**APIキーの入力は不要です** — 設定のキー欄は空のままにしてください。歌詞の検索は無制限、新規同期の生成とカバーのリンクはそれぞれ1日20件、解析の深さアップは10件までです。残り回数はパネルで確認できます。
 自分でサーバーを立てたい場合は、下記の[セルフホスティング](#セルフホスティング-開発者向け)を参照してください。
 プライバシーポリシー: <https://everyric.moref.co/privacy>
 
@@ -174,10 +174,9 @@ uv run uvicorn everyric2.server.main:app --port 8000   # 기본 127.0.0.1(로컬
 | `--extra separator` 의존성 + BS-PolarFormer 체크포인트 | medium/heavy의 보컬 분리 | medium/heavy로 올라가는 곡만 실패 |
 | OWSM 격리 환경(`.venv-owsm`) | heavy 깊이 앵커 | heavy 곡만 실패 |
 
-**fast 깊이(대부분의 곡)는 위 자산이 없어도 정상 동작합니다.** 조용히 낮은 품질로 떨어지는
-대신 명시적으로 실패하도록 설계했습니다 — 자산 준비 절차는 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)를
-참고하세요. 구 스택으로 임시 운영하려면
-`EVERYRIC_ALIGNMENT_ENGINE=ctc` + `EVERYRIC_AUDIO_SEPARATOR_BACKEND=htdemucs`를 씁니다.
+**fast 깊이(대부분의 곡)는 위 자산을 실제로 사용하지 않지만**, 로컬 브리지는
+전체 Adaptive 런타임이 준비된 뒤에만 정렬을 시작합니다. 자산 준비 절차는
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md)를 참고하세요. 배포 런타임은 구 엔진으로 폴백하지 않습니다.
 
 번역을 쓰려면 API 키 하나를 설정합니다 (없으면 무료 웹 번역으로 폴백). **발음 표기는 규칙
 기반이라 키가 없어도 그대로 동작합니다** — 예전에는 LLM이 독음까지 만들었지만 지금은 서버의
@@ -198,9 +197,10 @@ export NVIDIA_API_KEY=nvapi-...   # 또는 저장소 루트에 nvapi.txt (gitign
 > 통과합니다 — 즉 CORS는 노출된 서버를 지켜주지 않습니다.
 >
 > 공개 배포에는 추가로 `EVERYRIC_SERVER_ADMIN_API_KEY`와
-> `EVERYRIC_SERVER_DAILY_DESTRUCTIVE_LIMIT`(기본 2)를 함께 설정하는 것을 권장합니다 —
-> 강제 재생성·싱크 초기화 같은 파괴적 행위를 영상당 하루 한도로 제한하고, 어드민 키
-> 보유자만 무제한으로 둘 수 있습니다.
+> `EVERYRIC_SERVER_DAILY_DESTRUCTIVE_LIMIT`(기본 4)를 함께 설정하는 것을 권장합니다. 공개
+> 배포에서는 앞단이 `X-Lyric-User`와 `X-Lyric-Limits` 헤더를 제공해야 하며, 파괴적
+> 예산은 강제 재생성과 싱크 초기화를 합쳐 이용자당 24시간 4회입니다. 어드민은
+> 거절에서 면제되지만 사용량은 기록됩니다.
 
 ### 2. Chrome 확장을 소스에서 빌드
 
@@ -252,8 +252,8 @@ npm install && npm run build
 
 | 변수 | 기본 | 설명 |
 |---|---|---|
-| `EVERYRIC_ALIGNMENT_ENGINE` | owsm | 정렬 엔진. `owsm`/`omniasr`은 **새 앵커 스택을 켜는 스위치**로, 실제로 어느 모델이 도는지는 요청마다 깊이 라우팅이 정합니다. `ctc`/`nemo`/`sofa`는 구 스택 |
-| `EVERYRIC_AUDIO_SEPARATOR_BACKEND` | bs-polarformer-fp16 | 보컬 분리 백엔드 (`htdemucs`는 구 스택 전용 — 새 앵커와 섞으면 기동 시 실패) |
+| `EVERYRIC_ALIGNMENT_ENGINE` | adaptive | 공개 정렬 엔진. 내부 라우터가 요청마다 omniASR/OWSM과 fast/medium/heavy 깊이를 선택 |
+| `EVERYRIC_AUDIO_SEPARATOR_BACKEND` | bs-polarformer-fp16 | medium/heavy에서 사용하는 보컬 분리 백엔드 |
 | `EVERYRIC_ALIGNMENT_USE_PRONUNCIATION` | true | 독음(ko) 정렬 경로 (발음 커버리지 ≥90%일 때) |
 | `EVERYRIC_ALIGNMENT_ALIGN_ON_VOCALS` | true | 보컬 스템으로 정렬 (false면 원본 믹스로 정렬) |
 | `EVERYRIC_ALIGNMENT_STAR_GUARD_SPLICE` | true | star-swallow 가드 발동 시 전곡 폴백 대신 간주 전 ko + 간주 후 원문 정렬 스플라이스 |
@@ -264,9 +264,9 @@ npm install && npm run build
 | `EVERYRIC_AUDIO_SOURCE_ADDRESS` | - | 다운로드 회선 바인딩 (403 스로틀 우회) |
 | `EVERYRIC_SERVER_API_KEY` | - | 설정 시 모든 `/api` 요청에 `X-API-Key` 헤더 요구 (`/health` 제외). 공인망 노출 시 필수 |
 | `EVERYRIC_SERVER_MAX_JOB_AUDIO_SEC` | 1800 | 싱크 생성 허용 최대 오디오 길이(초). 초과 영상은 다운로드 직후 친절히 실패 (0=무제한) |
-| `EVERYRIC_SERVER_ADMIN_API_KEY` | - | 설정 시 파괴적 행위(재생성·초기화)에 일일 한도 적용, 이 키는 면제 |
-| `EVERYRIC_SERVER_DAILY_DESTRUCTIVE_LIMIT` | 2 | 비어드민의 영상당 24시간 한도 |
-| `EVERYRIC_SERVER_DAILY_UPGRADE_LIMIT` | 10 | 분석 깊이 올리기의 영상당 24시간 한도 (생성·초기화 한도와 별도 예산) |
+| `EVERYRIC_SERVER_ADMIN_API_KEY` | - | 설정 시 이용자 식별 헤더를 필수로 하고 GPU 비용 행위에 이용자별 한도 적용; 어드민은 거절만 면제 |
+| `EVERYRIC_SERVER_DAILY_DESTRUCTIVE_LIMIT` | 4 | 강제 재생성+싱크 초기화 합산 예산의 이용자당 24시간 폴백값 |
+| `EVERYRIC_SERVER_DAILY_UPGRADE_LIMIT` | 10 | 분석 깊이 올리기의 이용자당 24시간 폴백값 |
 
 공개 배포 시 권장 설정은 위의 [보안 경고](#자체-호스팅-개발자용) 참고.
 

@@ -4329,9 +4329,8 @@ def _separate_stems_required(audio: Any, settings: Any) -> Any:
             f"medium/heavy depth requires audio.separator_backend="
             f"{settings.audio.separator_backend!r} but it is not available (missing model "
             "assets or CUDA — see everyric2/audio/polarformer_separator.py require_available "
-            "for specifics). Provision the assets, or select a legacy engine explicitly "
-            "(EVERYRIC_ALIGNMENT_ENGINE=ctc) instead of silently degrading to an unseparated "
-            "mix under the new-stack label."
+            "for specifics). Provision or repair the adaptive runtime assets instead of "
+            "silently degrading to an unseparated mix."
         )
     return separator.separate(audio, use_gpu=torch.cuda.is_available())
 
@@ -4444,8 +4443,7 @@ def _run_fast_stage(
         raise RuntimeError(
             "omniasr fast-path anchor not available — this is the mandatory first stage for "
             "every new-stack request (scripts/bench_adapters/routed.py fast_aligner); "
-            "provision the model, or select a legacy engine explicitly "
-            "(EVERYRIC_ALIGNMENT_ENGINE=ctc) instead of silently degrading."
+            "provision or repair the adaptive runtime instead of silently degrading."
         )
     results = anchor.align(audio, lyric_lines, language=language)
     return _NewStackResult(
