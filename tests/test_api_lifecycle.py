@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -61,6 +61,10 @@ SOURCE_TITLE = "熱異常 / いよわ feat.初音ミク"
 COVER_TITLE = "熱異常 歌ってみた【足立レイ】"
 # 하한(MIN_LYRICS_LINES)을 넉넉히 넘는 정상 가사
 LYRICS = "첫 줄\n두 번째 줄"
+# 게이트웨이가 x-lyric-user로 넘기는 이용자 식별자 — 한도를 강제하는 배포에서는 필수다
+# (없으면 400, fail-closed). 집계 축이 이용자로 바뀌었으므로 한도를 다루는 테스트는
+# 반드시 이 값을 실어 보낸다.
+ACTOR = "user-lifecycle-a"
 
 
 @contextlib.asynccontextmanager
@@ -462,11 +466,15 @@ def test_generate_daily_limit_counts_only_new_jobs_and_exempts_admin():
             sync_api.DAILY_GENERATE_LIMIT = 1
             try:
                 first = await generate_sync(
-                    GenerateRequest(video_id=VIDEO, lyrics=LYRICS), BackgroundTasks()
+                    GenerateRequest(video_id=VIDEO, lyrics=LYRICS),
+                    BackgroundTasks(),
+                    x_lyric_user=ACTOR,
                 )
                 # 같은 가사 재요청 = 진행 중 잡 합류 → GPU를 쓰지 않으므로 한도와 무관
                 joined = await generate_sync(
-                    GenerateRequest(video_id=VIDEO, lyrics=LYRICS), BackgroundTasks()
+                    GenerateRequest(video_id=VIDEO, lyrics=LYRICS),
+                    BackgroundTasks(),
+                    x_lyric_user=ACTOR,
                 )
                 assert joined.job_id == first.job_id
                 assert await _count_jobs(sm) == 1
@@ -476,6 +484,7 @@ def test_generate_daily_limit_counts_only_new_jobs_and_exempts_admin():
                     await generate_sync(
                         GenerateRequest(video_id=VIDEO, lyrics=LYRICS + "\n세 번째 줄"),
                         BackgroundTasks(),
+                        x_lyric_user=ACTOR,
                     )
                 assert exc.value.status_code == 429
                 assert await _count_jobs(sm) == 1
@@ -485,6 +494,7 @@ def test_generate_daily_limit_counts_only_new_jobs_and_exempts_admin():
                     GenerateRequest(video_id=VIDEO, lyrics=LYRICS + "\n네 번째 줄"),
                     BackgroundTasks(),
                     x_api_key="admin-secret",
+                    x_lyric_user=ACTOR,
                 )
                 assert await _count_jobs(sm) == 2
             finally:
@@ -528,14 +538,15 @@ def test_regenerate_with_min_depth_consumes_upgrade_not_generate():
             resp = await regenerate_sync(
                 RegenerateRequest(video_id=VIDEO, lyrics=LYRICS, min_depth="heavy"),
                 BackgroundTasks(),
+                x_lyric_user=ACTOR,
             )
             assert resp.status == "processing"
             assert await _count_jobs(sm) == 1
 
             async with sm() as s:
                 repo = ActionLogRepository(s)
-                assert await repo.count_recent("upgrade", VIDEO) == 1
-                assert await repo.count_recent("generate", VIDEO) == 0
+                assert await repo.count_recent("upgrade", ACTOR) == 1
+                assert await repo.count_recent("generate", ACTOR) == 0
 
     asyncio.run(body())
 
@@ -547,14 +558,16 @@ def test_regenerate_without_min_depth_still_consumes_generate():
     async def body():
         async with _env(admin_api_key="admin-secret", local_worker=False) as sm:
             resp = await regenerate_sync(
-                RegenerateRequest(video_id=VIDEO, lyrics=LYRICS), BackgroundTasks()
+                RegenerateRequest(video_id=VIDEO, lyrics=LYRICS),
+                BackgroundTasks(),
+                x_lyric_user=ACTOR,
             )
             assert resp.status == "processing"
 
             async with sm() as s:
                 repo = ActionLogRepository(s)
-                assert await repo.count_recent("generate", VIDEO) == 1
-                assert await repo.count_recent("upgrade", VIDEO) == 0
+                assert await repo.count_recent("generate", ACTOR) == 1
+                assert await repo.count_recent("upgrade", ACTOR) == 0
 
     asyncio.run(body())
 
@@ -572,6 +585,7 @@ def test_regenerate_with_min_depth_hits_429_when_upgrade_limit_exceeded():
                     video_id=VIDEO, lyrics=LYRICS, min_depth="medium"
                 ),
                 BackgroundTasks(),
+                x_lyric_user=ACTOR,
             )
             with pytest.raises(HTTPException) as exc:
                 await regenerate_sync(
@@ -579,14 +593,15 @@ def test_regenerate_with_min_depth_hits_429_when_upgrade_limit_exceeded():
                         video_id=VIDEO, lyrics=LYRICS + "\n두 번째 시도", min_depth="heavy"
                     ),
                     BackgroundTasks(),
+                    x_lyric_user=ACTOR,
                 )
             assert exc.value.status_code == 429
             assert await _count_jobs(sm) == 1
 
             async with sm() as s:
                 repo = ActionLogRepository(s)
-                assert await repo.count_recent("upgrade", VIDEO) == 1  # 두 번째는 거절돼 안 늘어남
-                assert await repo.count_recent("generate", VIDEO) == 0  # generate는 전혀 안 건드림
+                assert await repo.count_recent("upgrade", ACTOR) == 1  # 두 번째는 거절돼 안 늘어남
+                assert await repo.count_recent("generate", ACTOR) == 0  # generate는 전혀 안 건드림
 
     asyncio.run(body())
 
@@ -608,61 +623,68 @@ async def _count_link_jobs(sm) -> int:
         return len((await s.execute(select(LinkJob))).scalars().all())
 
 
-def test_link_candidates_daily_limit_caps_gpu_submissions():
-    """GET 하나가 GPU 잡(영상 2개 다운로드 + demucs ×2 + 상관)을 제출한다. 억제가
-    (영상, 후보) 쌍 쿨다운뿐이면 쿨다운을 비켜 가는 반복 제출이 가능하다 — 쌍과 무관한
-    영상 단위 상한이 한 겹 더 필요하다."""
+def test_link_candidates_is_not_capped_by_a_count():
+    """자동 후보 탐색에는 **횟수 상한이 없다**(2026-08-10, docs/user-quota-spec.md §7).
+
+    예전에는 영상·이용자 단위 횟수 상한이 걸려 있었다. 그건 사용자가 요청한 적도 없고
+    실패해도 볼 수 없는 배경 요청을 사람의 예산에서 깎았고, 그 소진이 확장 배지 "커버
+    잇기"로 보였다 — 라벨과 내용이 어긋났다. 비용은 캐시 게이트(link_require_cached_pair·
+    link_cache_only)가 구조로 막는다.
+
+    쌍 쿨다운을 끄고(link_retry_cooldown_days=0) 끝난 잡을 계속 비켜 가며 반복해도 429가
+    나지 않고, action_logs에도 아무것도 쌓이지 않는 것을 못박는다(집행에 안 쓰이는 값을
+    이용자 축으로 쌓지 않는다 — 같은 문서 §1 개인정보 원칙)."""
 
     async def body():
         # link_retry_cooldown_days=0 → 쌍 쿨다운 비활성(그 억제를 비켜 간 상황을 재현)
-        async with _env(
-            admin_api_key="admin-secret", link_retry_cooldown_days=0
-        ) as sm:
+        async with _env(admin_api_key="admin-secret", link_retry_cooldown_days=0) as sm:
             await _seed_titled_sync(sm, SOURCE, SOURCE_TITLE)
-            prev = sync_api.DAILY_LINK_CANDIDATE_LIMIT
-            sync_api.DAILY_LINK_CANDIDATE_LIMIT = 1
-            try:
-                first = await find_link_candidates(COVER, title=COVER_TITLE)
-                assert first.status == "submitted"
+            for i in range(5):
+                resp = await find_link_candidates(COVER, title=COVER_TITLE)
+                assert resp.status == "submitted", f"{i}번째에서 막혔다: {resp.status}"
                 # 그 잡이 끝난 것으로 만든다 (get_active_pair의 pending 억제를 비켜 간다)
                 async with sm() as s:
-                    await LinkJobRepository(s).mark_done(first.job_id, False, 0.0, 0.1)
+                    await LinkJobRepository(s).mark_done(resp.job_id, False, 0.0, 0.1)
                     await s.commit()
-
-                with pytest.raises(HTTPException) as exc:
-                    await find_link_candidates(COVER, title=COVER_TITLE)
-                assert exc.value.status_code == 429
-                assert await _count_link_jobs(sm) == 1
-
-                # 어드민 키는 면제된다
-                admin = await find_link_candidates(
-                    COVER, title=COVER_TITLE, x_api_key="admin-secret"
-                )
-                assert admin.status == "submitted"
-                assert await _count_link_jobs(sm) == 2
-            finally:
-                sync_api.DAILY_LINK_CANDIDATE_LIMIT = prev
+            assert await _count_link_jobs(sm) == 5
+            async with sm() as s:
+                logged = (
+                    await s.execute(text("SELECT COUNT(*) FROM action_logs"))
+                ).scalar_one()
+            assert logged == 0  # 기록도 남기지 않는다
 
     asyncio.run(body())
 
 
-def test_link_candidates_no_op_paths_do_not_consume_budget():
-    """has_sync·none 등 GPU를 쓰지 않는 응답은 예산을 먹지 않는다."""
+def test_link_candidates_needs_no_user_identifier():
+    """이 경로는 어떤 예산도 소비하지 않으므로 이용자 식별자를 요구하지 않는다.
+
+    소비 경로는 식별자 부재를 400으로 거절하지만(§1 fail-closed), 배경 요청까지 거절하면
+    확장이 조용히 삼키는 조회가 영구히 실패한다 — 막을 예산이 없는데 거절만 남는다."""
 
     async def body():
         async with _env(admin_api_key="admin-secret") as sm:
-            prev = sync_api.DAILY_LINK_CANDIDATE_LIMIT
-            sync_api.DAILY_LINK_CANDIDATE_LIMIT = 1
-            try:
-                # 코퍼스에 후보가 없다 → none (제출 없음)
-                for _ in range(3):
-                    resp = await find_link_candidates(COVER, title=COVER_TITLE)
-                    assert resp.status == "none"
-                # 예산이 남아 있으므로 후보가 생기면 여전히 제출된다
-                await _seed_titled_sync(sm, SOURCE, SOURCE_TITLE)
-                assert (await find_link_candidates(COVER, title=COVER_TITLE)).status == "submitted"
-            finally:
-                sync_api.DAILY_LINK_CANDIDATE_LIMIT = prev
+            await _seed_titled_sync(sm, SOURCE, SOURCE_TITLE)
+            resp = await find_link_candidates(COVER, title=COVER_TITLE)
+            assert resp.status == "submitted"
+
+    asyncio.run(body())
+
+
+def test_link_candidates_no_op_paths_create_no_jobs():
+    """has_sync·none 등 GPU를 쓰지 않는 응답은 잡을 만들지 않는다."""
+
+    async def body():
+        async with _env(admin_api_key="admin-secret") as sm:
+            # 코퍼스에 후보가 없다 → none (제출 없음)
+            for _ in range(3):
+                resp = await find_link_candidates(COVER, title=COVER_TITLE)
+                assert resp.status == "none"
+            assert await _count_link_jobs(sm) == 0
+            # 후보가 생기면 제출된다
+            await _seed_titled_sync(sm, SOURCE, SOURCE_TITLE)
+            assert (await find_link_candidates(COVER, title=COVER_TITLE)).status == "submitted"
+            assert await _count_link_jobs(sm) == 1
 
     asyncio.run(body())
 

@@ -338,7 +338,24 @@ def test_user_offset_roundtrip():
 
 
 def test_destructive_daily_limit_with_admin_bypass():
+    """파괴적 한도는 이용자 축이다 — 같은 actor의 두 번째 초기화가 429, 어드민은 통과.
+
+    2026-08-10: 예산을 실제로 소비하려면 **지운 것이 있어야** 하므로(멱등성, §4) 매번
+    싱크를 다시 심는다. 예전에는 빈 초기화도 예산을 먹어 아무것도 안 지우는 재시도가
+    한도를 깎았다."""
     from everyric2.config.settings import get_settings
+
+    actor = "user-reset-a"
+
+    async def _reseed():
+        async with db_conn.async_session() as s:
+            await SyncRepository(s).create(
+                video_id="SRCSRCSRC01",
+                lyrics_hash="h1",
+                timestamps=SOURCE_SEGMENTS,
+                engine="ctc",
+            )
+            await s.commit()
 
     async def body():
         async with _env():
@@ -348,12 +365,18 @@ def test_destructive_daily_limit_with_admin_bypass():
             object.__setattr__(server, "daily_destructive_limit", 1)
             try:
                 # 비어드민: 1회 허용, 2회째 429
-                await reset_video_syncs("SRCSRCSRC01", x_api_key=None)
+                res = await reset_video_syncs("SRCSRCSRC01", x_api_key=None, x_lyric_user=actor)
+                assert res["removed_syncs"] == 1  # 실제로 지웠으니 예산을 소비했다
+                await _reseed()
                 with pytest.raises(HTTPException) as exc:
-                    await reset_video_syncs("SRCSRCSRC01", x_api_key="wrong")
+                    await reset_video_syncs(
+                        "SRCSRCSRC01", x_api_key="wrong", x_lyric_user=actor
+                    )
                 assert exc.value.status_code == 429
                 # 어드민 키는 한도 없이 통과
-                await reset_video_syncs("SRCSRCSRC01", x_api_key="admin-secret")
+                await reset_video_syncs(
+                    "SRCSRCSRC01", x_api_key="admin-secret", x_lyric_user=actor
+                )
             finally:
                 object.__setattr__(server, "admin_api_key", orig_key)
                 object.__setattr__(server, "daily_destructive_limit", orig_limit)

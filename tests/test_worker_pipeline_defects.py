@@ -644,9 +644,15 @@ class TestEgressBoundary:
         def proxy_egress(ydl_opts, egress):
             ydl_opts["proxy"] = egress
 
+        dl_mod.reset_egress_cooldowns()
         monkeypatch.setattr(dl_mod, "_apply_egress", proxy_egress)
-        monkeypatch.setenv(dl_mod.EGRESS_ENV, "http://127.0.0.1:3128,http://127.0.0.1:3129")
+        targets = "http://127.0.0.1:3128,http://127.0.0.1:3129"
+        monkeypatch.setenv(dl_mod.EGRESS_ENV, targets)
         dl = _downloader(monkeypatch, tmp_path)
+        url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+        # 시작 출구는 URL이 정한다(egress_order) — 여기서 검증할 계약은 "값이 전부 proxy로
+        # 실린다"이지 어느 출구가 먼저냐가 아니다.
+        order = dl_mod.egress_order(url, dl_mod.parse_egress_targets(targets))
 
         seen: list[dict] = []
 
@@ -654,20 +660,17 @@ class TestEgressBoundary:
             opts: dict = {}
             dl._add_network_options(opts, egress)
             seen.append(opts)
-            if egress == "http://127.0.0.1:3128":
+            if egress == order[0]:
                 raise _fail("HTTP Error 403: Forbidden")
             return dl_mod.DownloadResult(
                 audio_path=tmp_path / "a.wav", title="t", duration=1.0, url=url
             )
 
         monkeypatch.setattr(dl, "_download_once", fake_once)
-        dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
+        dl.download(url)
 
-        # 두 출구를 순서대로 시도했고, 값은 전부 proxy로 실렸다 (source_address는 하나도 없다)
-        assert seen == [
-            {"proxy": "http://127.0.0.1:3128"},
-            {"proxy": "http://127.0.0.1:3129"},
-        ]
+        # 두 출구를 순회했고, 값은 전부 proxy로 실렸다 (source_address는 하나도 없다)
+        assert seen == [{"proxy": order[0]}, {"proxy": order[1]}]
 
 
 class TestEgressRotation:
@@ -692,13 +695,38 @@ class TestEgressRotation:
 
         assert egress_retryable(_fail(text)) is retryable
 
-    def _rotating(self, monkeypatch, tmp_path, targets: str, failures: dict):
-        """출구별로 실패를 지정하고 시도 순서를 기록하는 다운로더."""
-        from everyric2.audio.downloader import EGRESS_ENV, DownloadResult
+    #: 아래 테스트들이 공유하는 URL. 시작 출구는 이 URL의 crc32가 정하므로(egress_order)
+    #: "첫 번째로 시도되는 출구"를 리터럴로 적을 수 없다 — `_first`로 물어서 쓴다.
+    URL = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
 
+    @staticmethod
+    def _order(targets: str, url: str | None = None) -> list[str]:
+        """이 URL에서 실제로 시도될 출구 순서 — 구현과 같은 함수로 계산한다."""
+        from everyric2.audio.downloader import egress_order, parse_egress_targets
+
+        return egress_order(url or TestEgressRotation.URL, parse_egress_targets(targets))
+
+    def _rotating(self, monkeypatch, tmp_path, targets: str, failures: dict):
+        """출구별로 실패를 지정하고 시도 순서를 기록하는 다운로더.
+
+        ``failures``의 키로 문자열 ``"first"``를 주면 **이 URL에서 첫 번째로 시도되는 출구**가
+        실패한다 — 시작 출구가 URL에 따라 달라지므로 리터럴 IP로는 표현할 수 없다.
+        """
+        from everyric2.audio.downloader import (
+            EGRESS_ENV,
+            DownloadResult,
+            reset_egress_cooldowns,
+        )
+
+        # 쿨다운은 프로세스 지역 상태다 — 테스트 간 누출을 막는다.
+        reset_egress_cooldowns()
         monkeypatch.setenv(EGRESS_ENV, targets)
         dl = _downloader(monkeypatch, tmp_path)
         tried: list[str | None] = []
+
+        if "first" in failures:
+            order = self._order(targets)
+            failures = {order[0]: failures["first"]} if order else {}
 
         def fake_once(url, output_dir, filename, egress):
             tried.append(egress)
@@ -712,23 +740,83 @@ class TestEgressRotation:
         return dl, tried
 
     def test_403_moves_to_the_next_target(self, monkeypatch, tmp_path):
+        targets = "10.0.0.1,10.0.0.2"
         dl, tried = self._rotating(
-            monkeypatch, tmp_path, "10.0.0.1,10.0.0.2", {"10.0.0.1": "HTTP Error 403: Forbidden"}
+            monkeypatch, tmp_path, targets, {"first": "HTTP Error 403: Forbidden"}
         )
-        result = dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
-        assert tried == ["10.0.0.1", "10.0.0.2"]  # 순서대로, 두 번째에서 성공
+        # ⚠ 순서는 **다운로드 이전에** 확정해 둔다 — 403이 쿨다운을 남기므로 사후에 다시
+        #   계산하면 그 쿨다운이 반영된 다른 순서가 나온다(이 테스트를 처음 쓸 때 실제로 걸렸다).
+        order = self._order(targets)
+        result = dl.download(self.URL)
+        # 시작점은 URL이 정한다 — 검증할 계약은 "정해진 순서를 따라 다음 출구로 넘어간다"다.
+        assert tried == order[:2]
         assert result.title == "t"
+
+    def test_starts_are_spread_across_targets(self, monkeypatch, tmp_path):
+        """**이 작업의 본 결함** — 항상 0번부터 돌아 첫 회선이 모든 첫 접촉을 받았다.
+
+        실측(2026-07-30): 다운로드 실패 91건 중 85건이 한 회선에 몰렸다. 회선이 여러 개여도
+        평판은 한 곳만 태우는 구조였다. 여러 URL의 시작 출구가 실제로 갈라지는지 본다.
+        """
+        from everyric2.audio.downloader import (
+            egress_order,
+            parse_egress_targets,
+            reset_egress_cooldowns,
+        )
+
+        reset_egress_cooldowns()
+        targets = parse_egress_targets("10.0.0.1,10.0.0.2,10.0.0.3")
+        starts = {
+            egress_order(f"https://www.youtube.com/watch?v=vid{i:08d}", targets)[0]
+            for i in range(60)
+        }
+        assert starts == set(targets), f"시작 출구가 갈라지지 않았다: {starts}"
+
+    def test_order_is_a_permutation_not_a_filter(self, monkeypatch, tmp_path):
+        """회전·쿨다운이 출구를 잃거나 중복시키면 가용성이 조용히 깎인다."""
+        from everyric2.audio.downloader import (
+            egress_order,
+            mark_egress_cooling,
+            parse_egress_targets,
+            reset_egress_cooldowns,
+        )
+
+        reset_egress_cooldowns()
+        targets = parse_egress_targets("10.0.0.1,10.0.0.2,10.0.0.3")
+        mark_egress_cooling("10.0.0.2")
+        for i in range(30):
+            order = egress_order(f"https://x/{i}", targets)
+            assert sorted(order) == sorted(targets)  # 빠짐도 중복도 없다
+            assert order[-1] == "10.0.0.2"  # 쿨다운 중인 출구는 맨 뒤
+
+    def test_cooling_target_is_not_hit_first_next_time(self, monkeypatch, tmp_path):
+        """403을 낸 회선을 다음 잡이 다시 첫 접촉으로 두들기면 분산의 의미가 없다."""
+        targets = "10.0.0.1,10.0.0.2"
+        dl, tried = self._rotating(
+            monkeypatch, tmp_path, targets, {"first": "HTTP Error 403: Forbidden"}
+        )
+        burnt = self._order(targets)[0]
+        dl.download(self.URL)  # burnt가 403 → 쿨다운 등재
+
+        tried.clear()
+        dl.download(self.URL)  # 같은 URL이라 회전 시작점은 같지만 쿨다운이 뒤로 보낸다
+        assert tried[0] != burnt
+
+        # 가용성 보존은 **순서에 남아 있는가**로 본다 — 시도 목록으로 보면 안 된다.
+        # 첫 출구가 성공하면 루프는 거기서 멈추므로 burnt가 시도되지 않는 것이 정상이다.
+        assert burnt in self._order(targets)
+        assert self._order(targets)[-1] == burnt  # 다만 맨 뒤로 밀렸다
 
     def test_deleted_video_stops_immediately(self, monkeypatch, tmp_path):
         """삭제된 영상 하나를 출구 여러 개로 두들기지 않는다 — 접촉만 배수로 늘어난다."""
         from everyric2.audio.downloader import VideoUnavailableError
 
         dl, tried = self._rotating(
-            monkeypatch, tmp_path, "10.0.0.1,10.0.0.2,10.0.0.3", {"10.0.0.1": "Video unavailable"}
+            monkeypatch, tmp_path, "10.0.0.1,10.0.0.2,10.0.0.3", {"first": "Video unavailable"}
         )
         with pytest.raises(VideoUnavailableError):
-            dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
-        assert tried == ["10.0.0.1"]  # 나머지 출구는 건드리지 않았다
+            dl.download(self.URL)
+        assert len(tried) == 1  # 나머지 출구는 건드리지 않았다
 
     def test_age_restricted_stops_immediately(self, monkeypatch, tmp_path):
         """쿠키 문제는 출구를 바꿔도 로그인이 생기지 않는다."""
@@ -738,25 +826,28 @@ class TestEgressRotation:
             monkeypatch,
             tmp_path,
             "10.0.0.1,10.0.0.2",
-            {"10.0.0.1": "This video is age-restricted"},
+            {"first": "This video is age-restricted"},
         )
         with pytest.raises(DownloadError):
-            dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
-        assert tried == ["10.0.0.1"]
+            dl.download(self.URL)
+        assert len(tried) == 1
 
     def test_one_pass_only_and_all_failed_is_said_in_the_message(self, monkeypatch, tmp_path):
         """무한 루프 금지 — 목록을 한 바퀴만. 전부 실패는 문구로 알린다(운영자 요청 ④)."""
         from everyric2.audio.downloader import DownloadError
 
+        targets = "10.0.0.1,10.0.0.2,10.0.0.3"
         dl, tried = self._rotating(
             monkeypatch,
             tmp_path,
-            "10.0.0.1,10.0.0.2,10.0.0.3",
+            targets,
             {a: "HTTP Error 403: Forbidden" for a in ("10.0.0.1", "10.0.0.2", "10.0.0.3")},
         )
         with pytest.raises(DownloadError) as e:
-            dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
-        assert tried == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]  # 정확히 한 바퀴
+            dl.download(self.URL)
+        # 정확히 한 바퀴 — 순서는 URL이 정하지만 "전부 한 번씩"은 불변이다
+        assert sorted(tried) == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+        assert len(tried) == 3
         assert "3개 전부 실패" in str(e.value)
         assert e.value.code == "throttled"  # 분류는 보존된다
 
@@ -766,45 +857,54 @@ class TestEgressRotation:
             monkeypatch, tmp_path, "10.0.0.1", {"10.0.0.1": "HTTP Error 403: Forbidden"}
         )
         with pytest.raises(Exception) as e:
-            dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
+            dl.download(self.URL)
         assert tried == ["10.0.0.1"]
         assert "전부 실패" not in str(e.value)
         assert "403" in str(e.value)
 
     def test_no_target_configured_tries_exactly_once(self, monkeypatch, tmp_path):
         dl, tried = self._rotating(monkeypatch, tmp_path, "", {})
-        dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
+        dl.download(self.URL)
         assert tried == [None]  # 출구 지정 없이 기본 경로 1회
 
     def test_successful_target_is_logged(self, monkeypatch, tmp_path, caplog):
         """관측이 없으면 폴백이 실제로 도는지 알 수 없다 (운영자 요청 ③)."""
+        targets = "10.0.0.1,10.0.0.2"
         dl, _ = self._rotating(
-            monkeypatch, tmp_path, "10.0.0.1,10.0.0.2", {"10.0.0.1": "HTTP Error 403: Forbidden"}
+            monkeypatch, tmp_path, targets, {"first": "HTTP Error 403: Forbidden"}
         )
+        order = self._order(targets)  # 다운로드 이전에 확정 (403이 쿨다운을 남긴다)
         with caplog.at_level(logging.INFO, logger="everyric2.audio.downloader"):
-            dl.download("https://www.youtube.com/watch?v=aaaaaaaaaaa")
+            dl.download(self.URL)
         # 실패한 출구와 실패 종류, 성공한 출구가 모두 남는다
-        assert "10.0.0.1" in caplog.text
+        assert order[0] in caplog.text
         assert "code=throttled" in caplog.text
-        assert "성공 (egress=10.0.0.2" in caplog.text
+        assert f"성공 (egress={order[1]}" in caplog.text
 
     def test_video_info_rotates_too(self, monkeypatch, tmp_path):
         """링크 검증 경로(get_video_info)도 같은 단일 장애점에 걸려 있었다."""
-        from everyric2.audio.downloader import EGRESS_ENV, VideoInfo
+        from everyric2.audio.downloader import (
+            EGRESS_ENV,
+            VideoInfo,
+            reset_egress_cooldowns,
+        )
 
-        monkeypatch.setenv(EGRESS_ENV, "10.0.0.1,10.0.0.2")
+        reset_egress_cooldowns()
+        targets = "10.0.0.1,10.0.0.2"
+        monkeypatch.setenv(EGRESS_ENV, targets)
         dl = _downloader(monkeypatch, tmp_path)
+        order = self._order(targets)
         tried: list[str | None] = []
 
         def fake_once(url, egress):
             tried.append(egress)
-            if egress == "10.0.0.1":
+            if egress == order[0]:
                 raise _fail("HTTP Error 403: Forbidden")
             return VideoInfo(title="t", duration=1.0, url=url)
 
         monkeypatch.setattr(dl, "_extract_info_once", fake_once)
-        assert dl.get_video_info("https://www.youtube.com/watch?v=aaaaaaaaaaa").title == "t"
-        assert tried == ["10.0.0.1", "10.0.0.2"]
+        assert dl.get_video_info(self.URL).title == "t"
+        assert tried == order[:2]
 
 
 # ── opus 우선 다운로드: 산출물 발견 + 디코드 구제 ──────────────────────

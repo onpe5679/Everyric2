@@ -59,6 +59,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from everyric2.server import title_match  # noqa: E402
+from everyric2.server.api.quota_headers import (  # noqa: E402
+    ACTOR_HEADER,
+    OPS_ACTOR_BULK_INGEST,
+)
 from everyric2.server.services import youtube_captions as yc  # noqa: E402
 from everyric2.sources import miraheze, vocaro  # noqa: E402
 from everyric2.sources.base import ASCII_LB, ASCII_RB, WikiFetcher  # noqa: E402
@@ -773,6 +777,12 @@ class ApiClient:
     """서버 API 클라이언트. 로컬 파이프라인을 직접 부르지 않고 배포된 경로를 태운다.
 
     키는 이 배포가 모든 ``/api``에 요구하므로 조회에도 싣는다 (verify_regen.py와 같은 관례).
+
+    **운영 작업 식별자를 함께 싣는다** (docs/user-quota-spec.md §8): 이 스크립트는 앞단
+    게이트웨이를 우회해 서버를 직접 부르므로, 이용자 식별자가 없으면 §1의 fail-closed에
+    걸려 400이다. 사람과 구분되는 고유 식별자(``ops:bulk_ingest``)를 써서 ① 통계가 사람
+    예산에 섞이지 않고 ② 상한은 면제받되 **기록은 남는다**. 🔴 "어드민 키면 식별자 없이
+    통과"로 풀지 않는다 — 그것은 면제라서 기록이 없는 상태를 운영 작업에 되살리는 것이다.
     """
 
     def __init__(self, base_url: str, api_key: str | None, timeout_sec: float = 60.0) -> None:
@@ -785,6 +795,7 @@ class ApiClient:
             self.base_url + path, method="POST" if payload is not None else "GET"
         )
         req.add_header("Content-Type", "application/json")
+        req.add_header(ACTOR_HEADER, OPS_ACTOR_BULK_INGEST)
         if self.api_key:
             req.add_header("x-api-key", self.api_key)
         body = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None

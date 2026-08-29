@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     Text,
@@ -151,14 +152,34 @@ class VideoOffset(Base):
 
 
 class ActionLog(Base):
-    """파괴적 행위(강제 재생성·초기화) 기록 — 일일 한도 검사용 (공개 배포 대비)."""
+    """GPU를 태우는 행위(생성·잇기 후보·업그레이드·초기화·강제 재생성) 기록 — 일일 한도
+    검사용.
+
+    **집계 축은 이용자다**(운영자 결정 2026-08-10, docs/user-quota-spec.md §1). 예전에는
+    (action, video_id)로 셌기 때문에 한 사람이 어떤 영상에서 상한을 다 쓰면 그 영상을
+    처음 여는 다른 사람이 0회로 시작했다 — 공개 서비스에서 성립하지 않는 구조다. 지금은
+    (action, actor)로 세고 video_id는 "무엇에 대한 행위였나"의 맥락으로만 남는다.
+    """
 
     __tablename__ = "action_logs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     action: Mapped[str] = mapped_column(String(16), index=True)
     video_id: Mapped[str] = mapped_column(String(32), index=True)
+    # 이용자 식별자 — 게이트웨이가 x-lyric-user 헤더로 넘긴 값(발급 키 이용자는 불변 키
+    # ID, 익명 이용자는 게이트웨이가 만든 솔트 해시). **nullable인 이유는 이행 때문이다**:
+    # 이 열이 생기기 전 행은 누가 했는지 복원할 근거가 없다. 비운 채로 남기고 이용자별
+    # 집계에서 제외한다(SQL에서 NULL은 어떤 actor 값과도 같지 않으므로 count 쿼리가
+    # 자동으로 걸러낸다) — 공용 이용자로 채워 넣으면 위 docstring의 문제를 재현한다.
+    actor: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # 모든 한도 조회가 (actor, action, created_at >= since) 형태다 — 그 순서의 복합 인덱스가
+    # 그대로 검색 조건을 덮는다. 기존 단일 인덱스(action/video_id)는 다른 조회(운영 점검)를
+    # 위해 그대로 둔다.
+    __table_args__ = (
+        Index("ix_action_logs_actor_action_created", "actor", "action", "created_at"),
+    )
 
 
 class SyncFeedback(Base):

@@ -3,6 +3,10 @@
 venv/
 env/
 .env
+# .env 백업본도 같은 비밀값을 담는다 — `.env`만 무시하면 백업이 추적 대상으로 남아
+# `git add -A` 한 번에 커밋된다(실제로 .env.bak-* 4개가 untracked로 노출돼 있었다).
+.env.bak*
+.env.*.bak
 
 # Python
 __pycache__/
@@ -113,6 +117,10 @@ everyric2-ae/artifacts/
 everyric2-ae/node_modules/
 *.db-shm
 *.db-wal
+# `*.db` 는 `everyric2.db.bak-<타임스탬프>` 를 못 잡는다 — 확장자가 이름 끝이 아니다.
+# 위 `.env.bak*` 과 완전히 같은 부류의 구멍이고, 실제로 백업 14개(323MB)가 untracked 로
+# 남아 `git add -A` 한 번이면 통째로 들어갈 상태였다(2026-08-16 발견).
+*.db.bak*
 
 # 모델 교체 벤치 (2026-07-30) — 가사·오디오·스템·정렬 결과는 절대 커밋 금지.
 # `benchmark/`가 아니라 `benchmark/*`인 이유: 디렉터리 자체를 무시하면 git이 그 안으로
@@ -120,3 +128,7 @@ everyric2-ae/node_modules/
 benchmark/*
 !benchmark/HARNESS_SPEC.md
 !benchmark/REPORT.md
+
+# 같은 성격의 두 번째 벤치 디렉터리 — 위 `benchmark/` 와 **다른 경로**라 따로 막는다.
+# 이름이 비슷해 이미 막혀 있다고 오해하기 쉬운데 457MB 가 그대로 노출돼 있었다(2026-08-16).
+bench/

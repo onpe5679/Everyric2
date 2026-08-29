@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -536,38 +537,66 @@ class VideoOffsetRepository:
 
 
 class ActionLogRepository:
-    """파괴적 행위 로그 — 영상·행위별 최근 24시간 횟수로 일일 한도를 검사한다."""
+    """GPU를 태우는 행위 로그 — **이용자·행위별** 최근 24시간 횟수로 일일 한도를 검사한다.
+
+    집계 축은 영상이 아니라 이용자다(운영자 결정 2026-08-10, docs/user-quota-spec.md §1 —
+    models.py ActionLog docstring에 배경). video_id는 계속 기록하지만 집계 조건에서는
+    빠졌다: 같은 사람이 다른 영상으로 옮겨도 같은 개인 예산을 이어 쓴다.
+    """
 
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def log(self, action: str, video_id: str) -> None:
-        self.session.add(ActionLog(action=action, video_id=video_id))
+    async def log(self, action: str, video_id: str, actor: str | None = None) -> None:
+        self.session.add(ActionLog(action=action, video_id=video_id, actor=actor))
         await self.session.flush()
 
-    async def count_recent(self, action: str, video_id: str, hours: int = 24) -> int:
+    @staticmethod
+    def _actions(action: str | Sequence[str]) -> tuple[str, ...]:
+        """단일 행위 이름과 여러 행위(합산 예산)를 같은 조건으로 다룬다 — 초기화+강제
+        재생성처럼 **하나의 예산을 나눠 쓰는** 행위들은 한 번의 조회로 합쳐 세야 한다."""
+        return (action,) if isinstance(action, str) else tuple(action)
+
+    async def count_recent(
+        self, action: str | Sequence[str], actor: str | None, hours: int = 24
+    ) -> int:
+        """이 이용자가 창(hours) 안에 이 행위(들)를 쓴 횟수.
+
+        actor가 비어 있으면 0이다 — actor=NULL 행(집계 축 전환 이전 기록)을 "누군가의
+        사용량"으로 세지 않겠다는 결정을 **여기서 기계적으로** 지킨다. 호출부가 실수로
+        None을 넘겨도 옛 기록이 되살아나 남의 예산을 깎는 일이 없다."""
+        if not actor:
+            return 0
         since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
         result = await self.session.execute(
             select(func.count())
             .select_from(ActionLog)
             .where(
-                ActionLog.action == action,
-                ActionLog.video_id == video_id,
+                ActionLog.action.in_(self._actions(action)),
+                ActionLog.actor == actor,
                 ActionLog.created_at >= since,
             )
         )
         return int(result.scalar_one())
 
-    async def oldest_recent(self, action: str, video_id: str, hours: int = 24) -> datetime | None:
+    async def oldest_recent(
+        self, action: str | Sequence[str], actor: str | None, hours: int = 24
+    ) -> datetime | None:
         """count_recent와 같은 창(hours) 안에서 가장 오래된 기록의 created_at — 그 기록이
-        창 밖으로 나가는 시각(+hours)이 이 (action, video_id) 카운트가 다음으로 줄어드는
+        창 밖으로 나가는 시각(+hours)이 이 (action들, actor) 카운트가 다음으로 줄어드는
         진짜 순간이다(GET /api/limits의 next_reset_at 산출용). 창 안에 기록이 없으면
-        None — count_recent가 0을 주는 경우와 정확히 짝을 이룬다."""
+        None — count_recent가 0을 주는 경우와 정확히 짝을 이룬다.
+
+        여러 행위를 합산하는 예산(초기화+강제 재생성)에서도 **가장 이른 한 건**이 정답이다:
+        합계는 어느 한 건만 창을 벗어나도 줄어든다(행위별 독립 집계를 max()로 합쳐 보여주던
+        시절의 '동률이면 더 늦은 쪽' 규칙은 합산 예산에서는 성립하지 않는다)."""
+        if not actor:
+            return None
         since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
         result = await self.session.execute(
             select(func.min(ActionLog.created_at)).where(
-                ActionLog.action == action,
-                ActionLog.video_id == video_id,
+                ActionLog.action.in_(self._actions(action)),
+                ActionLog.actor == actor,
                 ActionLog.created_at >= since,
             )
         )

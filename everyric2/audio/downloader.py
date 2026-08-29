@@ -4,6 +4,9 @@ import logging
 import re
 import shutil
 import subprocess
+import time
+import zlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -279,15 +282,24 @@ LEGACY_ADDRESSES_ENV = "EVERYRIC_AUDIO_SOURCE_ADDRESSES"
 def _apply_egress(ydl_opts: dict[str, Any], egress: str) -> None:
     """**egress 값을 yt-dlp 옵션에 적용하는 유일한 지점** — 전환은 이 함수만 바꾼다.
 
-    오늘: 값은 로컬 바인딩 IP라 ``source_address``로 넣는다.
-    나중: 회선별 로컬 프록시로 옮기면 ``ydl_opts["proxy"] = egress`` 한 줄로 끝난다
-          (yt-dlp가 ``--proxy``를 그대로 지원한다). 목록 순회·재시도 판정·로깅은 egress를
-          불투명 문자열로만 다루므로 그때 손댈 곳이 없다.
+    스킴이 있으면 **프록시**, 없으면 **로컬 바인딩 IP**다. 두 형식을 모두 받는다.
 
-    **값의 형태를 검증하지 않는다** — IPv4 정규식 같은 것을 넣으면 프록시 URL이 들어올 때
-    깨진다. 주소인지 URL인지는 호스트가 아는 지식이고 앱이 알 필요가 없다(계층 분할).
+    왜 프록시로 옮겼나(2026-08-02 사고). 바인딩 IP는 DHCP가 준 **파생값**이라 리스 갱신마다
+    바뀐다(실측: 리스 78분, 3일 간격 두 번 변경). 그 값이 env·DB 원장·``ip rule``·문서 네
+    곳에 복사돼 있어서, 한 번 바뀌면 네 곳이 동시에 거짓이 되고 바인드는 ``EAI_ADDRFAMILY``로
+    조용히 실패했다 — 12시간 동안 잡 실패율 59.8%. **주소가 전부 바뀌는 날에는 모든 회선이
+    동시에 죽는다.**
+
+    프록시 형식(``http://127.0.0.1:3131``)은 **우리가 정한 고정 이름**이라 절대 안 바뀐다.
+    실제 공인 IP는 프록시가 연결 시점에 인터페이스에서 읽으므로 어디에도 저장되지 않는다.
+
+    **값의 형태를 그 이상 검증하지 않는다** — IPv4 정규식 같은 것을 넣으면 다른 형식이
+    들어올 때 깨진다. 주소인지 URL인지는 호스트가 아는 지식이다(계층 분할).
     """
-    ydl_opts["source_address"] = egress
+    if "://" in egress:
+        ydl_opts["proxy"] = egress
+    else:
+        ydl_opts["source_address"] = egress
 
 
 def parse_egress_targets(raw: str | None) -> list[str]:
@@ -372,6 +384,106 @@ def _classified_error(cause: BaseException, url: str, fallback_prefix: str) -> D
 def egress_retryable(error: BaseException) -> bool:
     """이 실패에 **다른 출구로 재시도할 값어치**가 있는가 (_EGRESS_RETRYABLE_CODES 근거)."""
     return getattr(error, "code", "unknown") in _EGRESS_RETRYABLE_CODES
+
+
+# ── 출구 순회 ────────────────────────────────────────────────────────────────
+#
+# 왜 순회가 필요한가(실측 2026-07-30): 목록을 **항상 0번부터** 돌았기 때문에 첫 회선이
+# 모든 요청의 첫 접촉을 받았다. 7일치 다운로드 실패 91건 중 85건이 그 한 회선(59.8.243.210)에
+# 몰렸다. 목록에 회선이 여러 개 있어도 평판은 한 곳만 태우는 구조였다 — 폴백은 있었지만
+# 분산은 없었다.
+#
+# 시작점을 **URL의 crc32로 정한다**(프로세스 공유 상태 없음). 이유:
+#   · 회선 수로 나눈 잉여가 고르게 퍼져 요청이 회선 수만큼 나뉜다.
+#   · 결정적이다 — 같은 영상은 항상 같은 회선에서 시작한다. 재시도가 회선을 옮겨 다니며
+#     접촉을 배수로 늘리지 않고, 로그를 보고 재현할 수 있다.
+#   · 카운터를 프로세스에 두면 워커 재시작마다 0으로 돌아가 다시 첫 회선에 쏠린다.
+#
+# 평판을 태운 회선(403·봇 판정)은 **쿨다운 동안 순서의 맨 뒤로** 보낸다. 한 바퀴만 돈다는
+# 계약은 유지하므로(뒤로 밀리되 목록에서 빠지지는 않는다) 다른 회선이 다 죽었을 때는 여전히
+# 시도한다 — 가용성을 깎지 않는다.
+EGRESS_COOLDOWN_SECONDS = 300
+
+#: 다운로드 경로의 ``what`` 라벨. 결과 보고 대상을 이 경로로만 한정하는 데 쓴다
+#: (영상 정보 조회·자막은 다운로드 회계의 분모가 아니다).
+_DOWNLOAD_LABEL = "오디오 다운로드"
+
+#: 평판 계열 실패만 쿨다운 대상. network는 회선 평판이 아니라 순간 장애다.
+_COOLDOWN_CODES = frozenset({"throttled", "bot_check"})
+
+_egress_cooldown_until: dict[str, float] = {}
+
+
+def reset_egress_cooldowns() -> None:
+    """쿨다운 상태 초기화 (테스트·운영자 수동 개입용)."""
+    _egress_cooldown_until.clear()
+
+
+def mark_egress_cooling(target: str, now: float | None = None) -> None:
+    """이 출구가 평판 계열 실패를 냈다 — 쿨다운 동안 순서 뒤로 보낸다."""
+    _egress_cooldown_until[target] = (now or time.time()) + EGRESS_COOLDOWN_SECONDS
+
+
+def cooling_egress(now: float | None = None) -> dict[str, float]:
+    """지금 쿨다운 중인 출구 → 남은 초. 관측용(운영 표면이 읽는다)."""
+    at = now or time.time()
+    return {t: round(u - at, 1) for t, u in _egress_cooldown_until.items() if u > at}
+
+
+def _report_egress_outcome(
+    what: str,
+    video_id: str | None,
+    target: str | None,
+    *,
+    outcome: str,
+    code: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """출구별 결과를 캐시 계약 상대에게 보고한다 — 실패도 성공도.
+
+    성공을 함께 보고하는 이유: 실패만 보내면 분모가 없어 "이 회선의 차단률"을 말할 수 없다.
+    상대는 지금까지 성공을 뺄셈으로 **추론**하고 있었다(회선 폴백이 있었던 성공만 로그에
+    남으므로 첫 시도 성공은 흔적이 없다).
+
+    ``audio``가 ``server``를 import하지 않도록 지연 import한다. 보고 자체가 완전
+    fire-and-forget이므로 여기서도 예외를 삼킨다.
+    """
+    if what != _DOWNLOAD_LABEL:
+        # 메타데이터·자막 조회는 다운로드 회계의 분모가 아니다 — 섞으면 건수가 부풀어
+        # "다운로드 몇 번 했나"라는 질문에 거짓으로 답한다.
+        return
+    try:
+        from everyric2.server.media_cache import report_download_event
+
+        report_download_event(
+            outcome=outcome,
+            video_id=video_id,
+            code=code,
+            egress=target,
+            detail=detail,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("결과 보고 생략: %s", e)
+
+
+def egress_order(
+    url: str, targets: Sequence[str | None], now: float | None = None
+) -> list[str | None]:
+    """이 URL에 대해 출구를 시도할 순서.
+
+    ``url``의 crc32로 시작점을 잡아 한 바퀴 회전시키고, 쿨다운 중인 출구를 **안정적으로**
+    맨 뒤로 보낸다(회전 순서는 그룹 안에서 보존된다). 목록 길이는 바뀌지 않는다 — 어떤
+    출구도 순서에서 빠지거나 두 번 들어가지 않는다.
+    """
+    if len(targets) <= 1:
+        return list(targets)
+    start = zlib.crc32(url.encode("utf-8", "replace")) % len(targets)
+    rotated = [*targets[start:], *targets[:start]]
+    at = now or time.time()
+    cooling = {t for t, until in _egress_cooldown_until.items() if until > at}
+    warm = [t for t in rotated if t not in cooling]
+    cold = [t for t in rotated if t in cooling]
+    return warm + cold
 
 
 def _probe_decodable(path: Path) -> bool:
@@ -477,11 +589,16 @@ class YouTubeDownloader:
     ) -> None:
         """다운로드가 나갈 출구(egress)를 옵션에 적용한다 — 적용 자체는 _apply_egress가 한다.
 
-        ``egress``를 주면 그 값으로, 안 주면 설정된 **첫 출구**로 적용한다. 인자를 생략하는
-        호출부(server/services/youtube_captions.ydl_opts)의 기존 동작을 그대로 유지하기 위한
-        기본값이다 — 그 경로는 순회를 하지 않는다.
+        ``egress``를 주면 그 값으로, 안 주면 **쿨다운 중이 아닌 첫 출구**로 적용한다. 인자를
+        생략하는 호출부(server/services/youtube_captions.ydl_opts)는 URL 맥락이 없어 회전은
+        못 하지만, 방금 403을 낸 회선을 계속 두들기지 않는 것만으로도 의미가 있다. 쿨다운이
+        비어 있으면 종전과 똑같이 첫 출구다(기존 동작 보존).
         """
-        target = egress or next(iter(self._egress_targets()), None)
+        targets = self._egress_targets()
+        cooling = cooling_egress()
+        target = egress or next(
+            (t for t in targets if t not in cooling), next(iter(targets), None)
+        )
         if target:
             _apply_egress(ydl_opts, target)
 
@@ -510,12 +627,17 @@ class YouTubeDownloader:
     def _with_egress_fallback(self, what: str, url: str, attempt):
         """출구를 **한 바퀴만** 순회하며 ``attempt(egress)``를 시도한다.
 
+        시작 출구는 ``egress_order``가 정한다 — 항상 0번부터 돌면 첫 회선이 모든 첫 접촉을
+        받아 평판을 혼자 태운다(실측: 실패 91건 중 85건이 한 회선). 쿨다운 중인 출구는 뒤로
+        밀리지만 목록에서 빠지지는 않는다.
+
         출구 탓일 수 있는 실패(_EGRESS_RETRYABLE_CODES)만 다음 출구로 넘어가고, 영상 탓인
         실패는 즉시 올린다. 성공/실패한 출구를 로그에 남긴다 — 관측이 없으면 폴백이 실제로
         도는지 알 수 없다(운영자 요청 ③). 전부 실패하면 마지막 실패를 올리되 "egress N개 전부
         실패"를 문구에 덧붙여 운영자가 출구 문제임을 알 수 있게 한다(요청 ④).
         """
-        targets: list[str | None] = list(self._egress_targets()) or [None]
+        targets: list[str | None] = egress_order(url, self._egress_targets() or [None])
+        video_id = self.extract_video_id(url)
         last: BaseException | None = None
         for i, target in enumerate(targets):
             try:
@@ -523,17 +645,34 @@ class YouTubeDownloader:
             except DownloadError as e:
                 last = e
                 remaining = len(targets) - i - 1
+                code = getattr(e, "code", "unknown")
+                # 평판 계열 실패는 쿨다운에 기록한다 — 다음 잡이 같은 회선을 첫 접촉으로
+                # 다시 두들기면 분산의 의미가 없다(403은 분당 2~3건씩 뭉쳐서 온다).
+                if target and code in _COOLDOWN_CODES:
+                    mark_egress_cooling(target)
+                _report_egress_outcome(
+                    what,
+                    video_id,
+                    target,
+                    outcome="failed",
+                    code=code,
+                    detail=(getattr(e, "cause_text", None) or str(e))[:500],
+                )
                 logger.warning(
                     "%s 실패 (egress=%s, code=%s, 남은 egress %d개): %s",
                     what,
                     target or "기본 경로",
-                    getattr(e, "code", "unknown"),
+                    code,
                     remaining,
                     getattr(e, "cause_text", None) or str(e),
                 )
                 if not egress_retryable(e) or remaining == 0:
                     break
                 continue
+            # 성공도 보고한다 — 실패만 보내면 분모가 없어 "이 회선의 차단률"을 말할 수 없다.
+            # 로그는 폴백이 돌았을 때만 남기지만(i>0), 보고는 **첫 시도 성공도** 보낸다.
+            # 그 구멍이 정확히 상대가 성공을 뺄셈으로 추론해야 했던 이유다.
+            _report_egress_outcome(what, video_id, target, outcome="ok")
             if i > 0 or target:
                 logger.info("%s 성공 (egress=%s, %d번째 시도)", what, target or "기본 경로", i + 1)
             return result

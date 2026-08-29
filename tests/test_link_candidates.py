@@ -693,10 +693,13 @@ def test_manual_link_admin_gate_rejects_without_key():
                     SyncLinkRequest(video_id=COVER, source_video_id=SOURCE, offset_sec=0.0)
                 )
             assert e.value.status_code == 403
-            # 어드민 키를 제시하면 통과한다
+            # 어드민 키를 제시하면 통과한다. 한도를 강제하는 배포라 이용자 식별자도
+            # 필요하다 — 수동 잇기는 2026-08-10부터 이용자 축 예산을 쓰는 경로다
+            # (docs/user-quota-spec.md §7). 어드민이라 거절은 면제, 기록은 남는다.
             link = await create_sync_link(
                 SyncLinkRequest(video_id=COVER, source_video_id=SOURCE, offset_sec=0.0),
                 x_api_key="adminkey",
+                x_lyric_user="user-link-gate",
             )
             assert link.verified is False
 

@@ -25,12 +25,18 @@ import time
 import urllib.request
 from pathlib import Path
 
+from everyric2.server.api.quota_headers import ACTOR_HEADER, OPS_ACTOR_VERIFY_REGEN
+
 BASE = "http://127.0.0.1:8300"
 
 
 def _api(path: str, payload: dict | None = None, key: str | None = None) -> dict:
     req = urllib.request.Request(BASE + path, method="POST" if payload is not None else "GET")
     req.add_header("Content-Type", "application/json")
+    # 앞단 게이트웨이를 우회해 직접 부르므로 **운영 작업 식별자**를 싣는다
+    # (docs/user-quota-spec.md §8). 없으면 §1의 fail-closed에 걸려 400이고, 사람 식별자를
+    # 빌려 쓰면 그 사람의 예산·통계가 검증 실행으로 오염된다. 상한은 면제, 기록은 남는다.
+    req.add_header(ACTOR_HEADER, OPS_ACTOR_VERIFY_REGEN)
     if key:
         req.add_header("x-api-key", key)
     data = json.dumps(payload).encode() if payload is not None else None
