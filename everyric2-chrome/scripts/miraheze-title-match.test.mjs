@@ -66,12 +66,16 @@ function useScenario(searchHits, pages) {
 
 // 순수 제목 계약: 표기 정규화는 하되 일반 문자가 이어진 부분열은 거절한다.
 for (const [candidate, pageTitle, expected] of [
-  ['Ｒｏｋｉ', 'roki (song)', true],
+  ['Ｒｏｋｉ', 'roki (song)', false],
   ['ロキ', 'ロキ (Roki)', true],
   ['フラジール', 'フラジール/nulut', true],
   ['Wonder', 'Wonderland', false],
   ['Wonder', 'Tenshi', false],
   ['Whole Blue World', 'トコヨトキヨ (Tokoyo Tokiyo)', false],
+  ['Fate', 'Fate (.Type.L)', false],
+  ['Fate', 'Fate (Remix)', false],
+  ['Fate', 'Fate Live', false],
+  ['曲', '曲 (Remix)', false],
 ]) {
   check(
     titleMatchesCandidate(candidate, pageTitle) === expected,
@@ -131,7 +135,7 @@ useScenario(
 );
 const ambiguous = await mirahezeLookup('Scream');
 check(ambiguous === null, 'ambiguous prefix titles fail closed', ambiguous?.pageTitle);
-check(parseRequests === 2, 'ambiguous lyric pages are both inspected before rejection', parseRequests);
+check(parseRequests === 0, 'producer evidence 없는 동명이곡은 parse 전 거절', parseRequests);
 
 // 제목 접두가 같은 앨범/목록 페이지는 가사 표가 없으므로 진짜 곡을 모호하게 만들지 않는다.
 useScenario(
@@ -148,6 +152,93 @@ useScenario(
 );
 const songNotAlbum = await mirahezeLookup('ロキ');
 check(songNotAlbum?.pageTitle === 'ロキ (Roki)', 'non-lyric album does not create false ambiguity', songNotAlbum?.pageTitle);
+
+// 검색 상위 10개에 동명이곡이 하나만 보여도 /producer가 영상 artist/channel과 다르면 거절한다.
+useScenario(
+  { Scream: [{ pageid: 1, title: 'Scream/Umetora' }] },
+  { 1: { title: 'Scream/Umetora', html: LYRICS_HTML } },
+);
+const wrongProducer = await mirahezeLookup(
+  'Scream', ['Scream'], { artist: 'Naoki', channel: 'Naoki' },
+);
+check(wrongProducer === null, 'single wrong producer page is rejected', wrongProducer?.pageTitle);
+check(parseRequests === 0, 'producer mismatch is rejected before parse', parseRequests);
+
+useScenario(
+  { Scream: [{ pageid: 2, title: 'Scream/Naoki' }] },
+  { 2: { title: 'Scream/Naoki', html: LYRICS_HTML } },
+);
+const rightProducer = await mirahezeLookup(
+  'Scream', ['Scream'], { artist: 'Naoki', channel: 'Naoki' },
+);
+check(rightProducer?.pageTitle === 'Scream/Naoki', 'matching producer page remains available', rightProducer?.pageTitle);
+
+// 의미 있는 괄호·증거 없는 구분자 조각은 다른 실곡으로 자동 낙하하지 않는다.
+useScenario(
+  { Fate: [{ pageid: 3, title: 'Fate' }] },
+  { 3: { title: 'Fate', html: LYRICS_HTML } },
+);
+const fateFragment = await mirahezeLookup(
+  'Fate (.Type.L)', ['Fate (.Type.L)'], { artist: 'Unrelated', channel: 'Unrelated' },
+);
+check(fateFragment === null, 'meaningful parenthesis is not destructively stripped', fateFragment?.pageTitle);
+check(parseRequests === 0, 'Fate fragment is rejected before parse', parseRequests);
+
+useScenario(
+  { 'Track A': [{ pageid: 4, title: 'Track A' }] },
+  { 4: { title: 'Track A', html: LYRICS_HTML } },
+);
+const slashFragment = await mirahezeLookup(
+  'Track A / Track B', ['Track A / Track B'], { artist: 'Other', channel: 'Other' },
+);
+check(slashFragment === null, 'uncorroborated slash fragment is not auto adopted', slashFragment?.pageTitle);
+check(parseRequests === 0, 'uncorroborated slash fragment is rejected before parse', parseRequests);
+
+for (const tail of ['Piano Version', 'Maria', 'Sunflower']) {
+  useScenario(
+    { Fate: [{ pageid: 41, title: 'Fate' }] },
+    { 41: { title: 'Fate', html: LYRICS_HTML } },
+  );
+  const vocalSubstring = await mirahezeLookup(
+    `Fate / ${tail}`, [`Fate / ${tail}`], { artist: 'Other', channel: 'Other' },
+  );
+  check(vocalSubstring === null, `vocal name substring does not corroborate ${tail}`, vocalSubstring?.pageTitle);
+}
+
+useScenario(
+  { Fate: [{ pageid: 42, title: 'Fate' }] },
+  { 42: { title: 'Fate', html: LYRICS_HTML } },
+);
+const producerSubstring = await mirahezeLookup(
+  'Fate / Eleven', ['Fate / Eleven'], { artist: 'Eve', channel: 'Eve' },
+);
+check(producerSubstring === null, 'producer Eve is not a substring match for Eleven', producerSubstring?.pageTitle);
+
+useScenario(
+  { シアンブルー: [{ pageid: 5, title: 'シアンブルー (Cyan Blue)' }] },
+  { 5: { title: 'シアンブルー (Cyan Blue)', html: LYRICS_HTML } },
+);
+const corroboratedHead = await mirahezeLookup(
+  'シアンブルー / ポリスピカデリー feat. 初音ミク',
+  ['シアンブルー / ポリスピカデリー feat. 初音ミク'],
+  { artist: 'Hatsune Miku', channel: 'Hatsune Miku' },
+);
+check(corroboratedHead?.pageTitle === 'シアンブルー (Cyan Blue)', 'corroborated producer keeps safe head extraction', corroboratedHead?.pageTitle);
+
+useScenario(
+  { シアンブルー: [{ pageid: 6, title: 'シアンブルー/ポリスピカデリー' }] },
+  { 6: { title: 'シアンブルー/ポリスピカデリー', html: LYRICS_HTML } },
+);
+const rawProducerEvidence = await mirahezeLookup(
+  'シアンブルー / ポリスピカデリー feat. 初音ミク',
+  ['シアンブルー / ポリスピカデリー feat. 初音ミク'],
+  {
+    artist: 'Hatsune Miku',
+    channel: 'Hatsune Miku',
+    rawTitle: 'シアンブルー / ポリスピカデリー feat. 初音ミク',
+  },
+);
+check(rawProducerEvidence?.pageTitle === 'シアンブルー/ポリスピカデリー', 'raw title producer validates slash producer page', rawProducerEvidence?.pageTitle);
 
 console.log(failed ? '\nMIRAHEZE TITLE MATCH TEST: FAIL' : '\nMIRAHEZE TITLE MATCH TEST: PASS');
 process.exitCode = failed ? 1 : 0;

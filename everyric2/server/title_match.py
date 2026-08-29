@@ -121,6 +121,12 @@ def candidate_titles(title: str, drop_noise: bool = False) -> list[str]:
     비교해야 하기 때문이다. 중복 판정만 기존 :func:`normalize_title`을 써 후보 순서와
     개수는 예전 ``candidate_queries``와 동일하게 유지한다.
     """
+    trimmed_title = title.strip()
+    # 기호 자체가 곡명인 항목(?, ✿, ∞, ______ 등)은 영숫자 정규화가 빈 문자열이다.
+    # 질의 전체일 때만 원문을 보존한다. 구분자에서 잘린 기호 조각은 아래 add가 계속 거른다.
+    if trimmed_title and not normalize_title(trimmed_title) and identity_key(trimmed_title):
+        return [trimmed_title]
+
     seen: set[str] = set()
     out: list[str] = []
 
@@ -151,7 +157,11 @@ def candidate_titles(title: str, drop_noise: bool = False) -> list[str]:
 
 def candidate_queries(title: str, drop_noise: bool = False) -> list[str]:
     """풀 제목에서 곡명 후보를 기존의 영숫자 정규화 형태로 생성."""
-    return [normalize_title(candidate) for candidate in candidate_titles(title, drop_noise)]
+    return [
+        normalized
+        for candidate in candidate_titles(title, drop_noise)
+        if (normalized := normalize_title(candidate))
+    ]
 
 
 def _score_query_lists(qa: list[str], qb: list[str]) -> tuple[float, int] | None:

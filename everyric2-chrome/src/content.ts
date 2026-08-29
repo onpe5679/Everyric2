@@ -52,7 +52,13 @@ import type {
 import { affectsServerStatus, failureToStatus, okStatus, serverKnownBad, statusLine, unknownStatus } from './lib/server-status';
 import { resolveTheme } from './lib/theme';
 import type { SourceResult } from './lib/sources';
-import type { VocaroLine, VocaroResult } from './lib/vocaro';
+import {
+  cachedVocaroSlug,
+  makeVocaroRef,
+  vocaroCacheIdentityKey,
+  type VocaroLine,
+  type VocaroResult,
+} from './lib/vocaro';
 
 function songMatchPayload(song: SongInfo, title = song.title): SongMatchPayload {
   const sameDetectedTitle = title === song.title;
@@ -65,6 +71,11 @@ function songMatchPayload(song: SongInfo, title = song.title): SongMatchPayload 
     videoId: song.videoId,
     titleCandidates: sameDetectedTitle ? song.titleCandidates : undefined,
   };
+}
+
+function songIdentityKey(song: SongInfo | null): string {
+  if (!song) return '';
+  return vocaroCacheIdentityKey(songMatchPayload(song));
 }
 
 let settings: Settings;
@@ -82,7 +93,7 @@ let currentVideoId: string | null = null;
 let currentSong: SongInfo | null = null;
 let currentData: LyricsData | null = null;
 let currentSourceUrl: string | null = null; // 보카로 위키 출처 페이지 (CC BY 출처 표기용)
-let lastVocaro: { videoId: string; lines: VocaroLine[] } | null = null; // 싱크 생성 후 발음/번역 재병합용
+let lastVocaro: { videoId: string; titleKey: string; lines: VocaroLine[] } | null = null;
 /**
  * 싱크 초기화 직전의 가사 — 초기화는 **타이밍을 버리는 것**이고 원문을 버리는 것이 아니다.
  *
@@ -1434,14 +1445,26 @@ function lineConfSummary(): {
 const vocaroRematchTried = new Set<string>();
 
 async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<boolean> {
-  let lines: VocaroLine[] | null = lastVocaro?.videoId === videoId ? lastVocaro.lines : null;
+  const titleKey = videoId === currentVideoId ? songIdentityKey(currentSong) : '';
+  let lines: VocaroLine[] | null = lastVocaro?.videoId === videoId
+    && lastVocaro.titleKey === titleKey
+    ? lastVocaro.lines
+    : null;
   if (!lines) {
     let slug: string | null = null;
+    let cachedRef = false;
+    const storageKey = `vocaroRef:${videoId}`;
     try {
-      const stored = await chrome.storage.local.get(`vocaroRef:${videoId}`);
-      // 구버전은 슬러그 문자열만 저장했다 — 새 형식({slug, t})과 둘 다 읽는다
-      const raw = stored[`vocaroRef:${videoId}`] as string | { slug?: string } | undefined;
-      slug = typeof raw === 'string' ? raw : raw?.slug ?? null;
+      const stored = await chrome.storage.local.get(storageKey);
+      const raw = stored[storageKey] as unknown;
+      const trustedSlug = cachedVocaroSlug(raw, titleKey);
+      if (trustedSlug) {
+        slug = trustedSlug;
+        cachedRef = true;
+      } else if (raw !== undefined) {
+        // 구버전 문자열/{slug,t}와 다른 곡 정체성에서 만든 ref는 자동 채택하지 않는다.
+        await chrome.storage.local.remove(storageKey);
+      }
     } catch { /* storage 실패 → 병합 생략 */ }
     // 재매칭으로 새로 얻은 슬러그 — VOCARO_PAGE가 실제 줄을 돌려준 뒤에야 storage에
     // 영구 저장한다(감사 C8d). 미리 저장하면 이 슬러그가 실은 빈손이었을 때도
@@ -1473,11 +1496,21 @@ async function enrichFromVocaro(videoId: string, data: LyricsData): Promise<bool
       type: 'VOCARO_PAGE', payload: { slug, hint },
     });
     lines = res.data?.lines ?? null;
+    if (!lines && cachedRef) {
+      // 죽었거나 잘못된 캐시는 제거한 뒤 신 identity 매처로 세션당 한 번만 자가치유한다.
+      try {
+        await chrome.storage.local.remove(storageKey);
+        vocaroRematchTried.delete(videoId);
+        return enrichFromVocaro(videoId, data);
+      } catch { /* 제거 실패 시 재귀하지 않아 같은 ref 무한 반복을 막는다 */ }
+    }
     if (lines) {
-      lastVocaro = { videoId, lines };
+      lastVocaro = { videoId, titleKey, lines };
       if (rematchedSlug) {
         try {
-          await chrome.storage.local.set({ [`vocaroRef:${videoId}`]: { slug: rematchedSlug, t: Date.now() } });
+          await chrome.storage.local.set({
+            [storageKey]: makeVocaroRef(rematchedSlug, titleKey),
+          });
         } catch { /* 저장 실패해도 이번 병합은 진행 — 세션 내 캐시로도 동작 */ }
       }
     }
@@ -2410,6 +2443,10 @@ async function searchLyrics(queryOverride?: { title: string; artist: string }): 
     applyLyricsData(null);
     return;
   }
+  if (songIdentityKey(currentSong) !== songIdentityKey(song)) {
+    lastVocaro = null;
+    vocaroRematchTried.delete(videoId);
+  }
   currentSong = song;
   broadcast('setSong', song);
 
@@ -2511,10 +2548,13 @@ function adoptVocaroResult(videoId: string, vocaro: VocaroResult): LyricsData {
   currentSourceUrl = vocaro.pageUrl;
   // 이 곡의 위키 페이지를 기억 — 싱크 생성 뒤에도 발음/번역을 다시 입힐 수 있게.
   // 타임스탬프를 함께 저장해 오래 안 본 영상부터 정리할 수 있게 한다
-  lastVocaro = { videoId, lines: vocaro.lines };
+  const titleKey = songIdentityKey(currentSong);
+  lastVocaro = { videoId, titleKey, lines: vocaro.lines };
   try {
     void chrome.storage.local
-      .set({ [`vocaroRef:${videoId}`]: { slug: vocaro.slug, t: Date.now() } })
+      .set({
+        [`vocaroRef:${videoId}`]: makeVocaroRef(vocaro.slug, titleKey),
+      })
       .then(() => pruneVocaroRefs());
   } catch { /* 저장 실패는 무시 — 세션 내 캐시로도 동작 */ }
   return {
@@ -3197,8 +3237,8 @@ function bindMirrorRefresh(video: HTMLVideoElement): void {
  * 남았다(가사는 정상 92줄이었다: 조회는 videoId로 하므로 제목과 무관하다).
  *
  * 채널 DOM이 제목보다 늦게 갱신될 수 있다. 그때 channel_reversed 판정이 바뀌었는데 화면 제목만
- * 고치고 위키 조회를 그대로 두면 이미 채택한 오가사가 남는다. 자동 감지 곡의 title/artist가
- * 바뀐 경우에만 기존 검색을 취소하고 새 정본으로 한 번 재조회한다. 수동 검색 override는
+ * 고치고 위키 조회를 그대로 두면 이미 채택한 오가사가 남는다. 자동 감지 곡의 제목·아티스트·
+ * 채널·후보 중 하나라도 바뀐 경우 기존 검색을 취소하고 새 정본으로 한 번 재조회한다. 수동 검색 override는
  * rawTitle이 없어 이 자동 재조회 대상이 아니다.
  *
  * duration은 덮지 않는다: 광고 중 읽으면 광고 길이(15초 등)라, 이미 가진 본편 길이를
@@ -3213,17 +3253,28 @@ function refreshSongTitle(): void {
   if (
     previous
     && info.title === previous.title
+    && (info.rawTitle ?? '') === (previous.rawTitle ?? '')
     && (info.artist ?? '') === (previous.artist ?? '')
     && (info.channel ?? '') === (previous.channel ?? '')
     && (info.titleCandidates ?? []).join('\u0000') === (previous.titleCandidates ?? []).join('\u0000')
   ) return; // 바뀐 게 없으면 아무것도 하지 않는다
   const identityChanged = Boolean(
     previous?.rawTitle
-    && (info.title !== previous.title || (info.artist ?? '') !== (previous.artist ?? '')),
+    && (
+      info.title !== previous.title
+      || (info.rawTitle ?? '') !== (previous.rawTitle ?? '')
+      || (info.artist ?? '') !== (previous.artist ?? '')
+      || (info.channel ?? '') !== (previous.channel ?? '')
+      || (info.titleCandidates ?? []).join('\u0000') !== (previous.titleCandidates ?? []).join('\u0000')
+    ),
   );
   currentSong = { ...info, duration: currentSong?.duration || info.duration };
   broadcast('setSong', currentSong);
-  if (identityChanged) void searchLyrics();
+  if (identityChanged) {
+    lastVocaro = null;
+    vocaroRematchTried.delete(videoId);
+    void searchLyrics();
+  }
 }
 
 async function waitForVideo(maxRetries = 10, delayMs = 500): Promise<HTMLVideoElement | null> {

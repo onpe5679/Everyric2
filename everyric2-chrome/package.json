@@ -1,12 +1,12 @@
 {
   "name": "everyric2-chrome",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "license": "Apache-2.0",
   "description": "Display time-synced lyrics for any song on YouTube",
   "type": "module",
   "scripts": {
     "dev": "vite build --watch --mode development",
-    "test": "node scripts/miraheze-title-match.test.mjs && node scripts/song-detector-split.test.mjs && node scripts/feedback-sync-id.test.mjs",
+    "test": "node scripts/miraheze-title-match.test.mjs && node scripts/song-detector-split.test.mjs && node scripts/feedback-sync-id.test.mjs && node scripts/vocaro-compat.test.mjs",
     "build": "npm test && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit"
   },

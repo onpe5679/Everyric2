@@ -70,6 +70,18 @@ def test_one_character_fragment_inside_a_full_title_is_not_a_candidate():
     assert vi.match("Artist - Unknown Song / M") is None
 
 
+@pytest.mark.parametrize(
+    ("title", "slug"),
+    [("?", "question-mark"), ("✿", "flower-no-title"), ("∞", "infinity")],
+)
+def test_symbol_only_whole_title_matches_exactly(title, slug):
+    _set_entries([SongEntry(slug=slug, ko=title, ja=title)])
+    result = vi.match(title)
+    assert result is not None
+    assert result.slug == slug
+    assert vi.match(f"Artist - {title}") is None
+
+
 def test_match_returns_none_when_nothing_matches():
     _set_entries([SongEntry(slug="roki", ko="로키", ja="ロキ")])
     assert vi.match("전혀 다른 제목") is None
@@ -154,12 +166,19 @@ def test_artist_token_does_not_match_a_different_song_by_the_same_artist():
     assert vi.match("DECO*27 - ダミーロマンス feat. 初音ミク") is None
 
 
-def test_full_title_of_the_actual_song_still_matches():
-    # 같은 인덱스 항목이라도 진짜 그 곡의 풀 제목은 여전히 붙는다(ja 정확 일치 경로)
+def test_full_title_of_the_actual_song_matches_with_client_identity_evidence():
     _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
-    result = vi.match("DECO*27 - シンデレラ feat. 初音ミク")
-    assert result is not None
-    assert result.slug == "cinderella-deco-27"
+    full = "DECO*27 - シンデレラ feat. 初音ミク"
+    assert vi.match(full) is None  # 제목 하나뿐인 구클라이언트는 짧은 조각으로 자동 낙하하지 않는다
+    decision = vi.match_with_evidence(
+        "シンデレラ",
+        title_candidates=["シンデレラ"],
+        raw_title=full,
+        artist="DECO*27",
+        channel="DECO*27",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "cinderella-deco-27"
 
 
 def test_whole_query_as_partial_title_is_not_auto_adopted():
@@ -175,11 +194,16 @@ def test_short_entry_title_inside_artist_token_is_rejected():
 
 
 def test_entry_title_covering_most_of_a_segment_still_matches():
-    # 정당한 역방향 포함(세그 후보 "シンデレラmv" 안의 "シンデレラ", 비율 5/7 > 0.5)은 유지
     _set_entries([SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ")])
-    result = vi.match("DECO*27 - シンデレラ MV")
-    assert result is not None
-    assert result.slug == "cinderella-deco-27"
+    decision = vi.match_with_evidence(
+        "シンデレラ",
+        title_candidates=["シンデレラ"],
+        raw_title="DECO*27 - シンデレラ MV",
+        artist="DECO*27",
+        channel="DECO*27",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "cinderella-deco-27"
 
 
 def test_same_title_different_artist_is_disambiguated_by_query_artist_token():
@@ -189,9 +213,14 @@ def test_same_title_different_artist_is_disambiguated_by_query_artist_token():
         SongEntry(slug="cinderella-zig", ko="신데렐라/ZIG", ja="シンデレラ"),
         SongEntry(slug="cinderella-deco-27", ko="신데렐라/DECO*27", ja="シンデレラ"),
     ])
-    result = vi.match("DECO*27 - シンデレラ feat. 初音ミク")
-    assert result is not None
-    assert result.slug == "cinderella-deco-27"
+    decision = vi.match_with_evidence(
+        "シンデレラ",
+        raw_title="DECO*27 - シンデレラ feat. 初音ミク",
+        artist="DECO*27",
+        channel="DECO*27",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "cinderella-deco-27"
 
 
 def test_same_title_without_artist_hint_is_ambiguous():
@@ -220,6 +249,108 @@ def test_punctuation_is_part_of_identity_for_automatic_match():
     decision = vi.match_with_evidence("S.C.R.E.A.M")
     assert decision.entry is None
     assert decision.status == "not_found"
+
+
+def test_punctuation_confusable_requires_artist_or_channel_evidence():
+    _set_entries([
+        SongEntry(slug="mayday-aqu3ra", ko="메이데이/Aqu3ra", ja="メーデー"),
+        SongEntry(slug="mayday-ayarisu", ko="메이데이!/Ayarisu", ja="メーデー！"),
+    ])
+    assert vi.match_with_evidence("メーデー").status == "ambiguous"
+    conflict = vi.match_with_evidence("メーデー", artist="Ayarisu", channel="Ayarisu")
+    assert conflict.status == "ambiguous"
+    assert conflict.entry is None
+    decision = vi.match_with_evidence("メーデー", artist="Aqu3ra", channel="Aqu3ra")
+    assert decision.entry is not None
+    assert decision.entry.slug == "mayday-aqu3ra"
+    assert decision.reason == "confusable_disambiguated"
+
+
+def test_plural_confusable_requires_artist_or_channel_evidence():
+    _set_entries([
+        SongEntry(slug="color", ko="COLOR/ProducerA", ja="COLOR"),
+        SongEntry(slug="colors-onuma", ko="COLORs/Onuma", ja="COLORs"),
+    ])
+    assert vi.match_with_evidence("COLORs").status == "ambiguous"
+    conflict = vi.match_with_evidence("COLORs", artist="ProducerA", channel="ProducerA")
+    assert conflict.status == "ambiguous"
+    assert conflict.entry is None
+    decision = vi.match_with_evidence("COLORs", artist="Onuma", channel="Onuma")
+    assert decision.entry is not None
+    assert decision.entry.slug == "colors-onuma"
+
+
+def test_raw_vocal_corroboration_does_not_strip_meaningful_parentheses():
+    _set_entries([
+        SongEntry(slug="fate", ko="Fate", ja="Fate"),
+        SongEntry(slug="fate-type-l", ko="Fate (.Type.L)", ja="Fate (.Type.L)"),
+    ])
+    decision = vi.match_with_evidence(
+        "Fate (.Type.L) / Hatsune Miku",
+        raw_title="Fate (.Type.L) / Hatsune Miku",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "fate-type-l"
+
+
+def test_one_corroborated_fragment_does_not_open_three_part_title():
+    _set_entries([SongEntry(slug="roki", ko="로키", ja="ロキ")])
+    decision = vi.match_with_evidence(
+        "Unknown Song / Hatsune Miku / ロキ",
+        raw_title="Unknown Song / Hatsune Miku / ロキ",
+    )
+    assert decision.status == "not_found"
+    assert decision.entry is None
+
+
+def test_three_part_title_opens_only_one_non_evidence_song_fragment():
+    _set_entries([SongEntry(slug="roki", ko="로키", ja="ロキ")])
+    decision = vi.match_with_evidence(
+        "ロキ / Producer / Hatsune Miku",
+        raw_title="ロキ / Producer / Hatsune Miku",
+        artist="Producer",
+        channel="Producer",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "roki"
+
+
+def test_explicit_feat_vocal_corroborates_cross_script_producer_title():
+    _set_entries([SongEntry(slug="cyan-blue", ko="시안 블루", ja="シアンブルー")])
+    raw = "シアンブルー / ポリスピカデリー feat. 初音ミク"
+    decision = vi.match_with_evidence(
+        raw,
+        raw_title=raw,
+        artist="Hatsune Miku",
+        channel="Hatsune Miku",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "cyan-blue"
+
+
+def test_parenthetical_roman_alias_requires_same_entry_alias():
+    _set_entries([
+        SongEntry(slug="roki", ko="로키", ja="ロキ"),
+        SongEntry(slug="song", ko="Song", ja="Song"),
+    ])
+    assert vi.match("ロキ (Roki)").slug == "roki"
+    assert vi.match("Song (Remix)") is None
+    assert vi.match("Cover Me") is None
+
+
+def test_punctuation_only_emoticon_parenthesis_is_title_identity():
+    title = "今日も最悪だったね(^_-)-☆"
+    _set_entries([SongEntry(slug="worst-again", ko=title, ja=title)])
+    decision = vi.match_with_evidence(f"【MV】 {title} (Official MV)")
+    assert decision.entry is not None
+    assert decision.entry.slug == "worst-again"
+
+
+def test_decorated_whole_title_can_legitimately_be_a_known_vocal_name():
+    _set_entries([SongEntry(slug="hatsune-miku-song", ko="初音ミク", ja="初音ミク")])
+    decision = vi.match_with_evidence("【MV】 初音ミク (Official MV)")
+    assert decision.entry is not None
+    assert decision.entry.slug == "hatsune-miku-song"
 
 
 @pytest.mark.parametrize("query", ["STARGAZERS", "ワンダー"])
@@ -265,9 +396,13 @@ def test_english_transliterated_title_matches_via_slug_alias():
     _set_entries([
         SongEntry(slug="candy-cookie-chocolate", ko="캔디 쿠키 초콜릿", ja="キャンディークッキーチョコレート"),
     ])
-    result = vi.match("Candy Cookie Chocolate / Hatsune Miku")
-    assert result is not None
-    assert result.slug == "candy-cookie-chocolate"
+    decision = vi.match_with_evidence(
+        "Candy Cookie Chocolate",
+        raw_title="Candy Cookie Chocolate / Hatsune Miku",
+        artist="Hatsune Miku",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "candy-cookie-chocolate"
 
 
 def test_decorated_english_title_resolves_via_candidate_decomposition():
@@ -324,9 +459,14 @@ def test_whole_query_being_just_the_vocal_name_is_a_legitimate_search():
 def test_vocal_name_guard_does_not_affect_unrelated_matches():
     # 보컬명이 쿼리에 아예 없으면 가드가 개입할 이유가 없다 — 기존 동작 그대로.
     _set_entries([SongEntry(slug="roki", ko="로키", ja="ロキ")])
-    result = vi.match("ロキ / 초저녁")
-    assert result is not None
-    assert result.slug == "roki"
+    decision = vi.match_with_evidence(
+        "ロキ",
+        raw_title="ロキ / 초저녁",
+        artist="초저녁",
+        channel="초저녁",
+    )
+    assert decision.entry is not None
+    assert decision.entry.slug == "roki"
 
 
 def test_multiple_known_vocal_names_are_all_guarded():

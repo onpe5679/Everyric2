@@ -11,6 +11,7 @@ import asyncio
 
 from everyric2.server.api import vocaro as vocaro_api
 from everyric2.server.api.vocaro import index_listing, song_page
+from everyric2.server.vocaro_index import MatchDecision
 from everyric2.sources.base import SourceLine
 from everyric2.sources.vocaro import VocaroSong, parse_index_entries
 
@@ -202,21 +203,24 @@ def test_match_upstream_error_also_falls_back_to_local(monkeypatch):
     assert resp.slug == "hollow"
 
 
-def test_match_upstream_hit_short_circuits_local(monkeypatch):
+def test_match_upstream_hit_is_cross_checked_with_local_identity(monkeypatch):
     from fastapi import BackgroundTasks
 
     monkeypatch.setattr(vocaro_api, "_song_index_url", lambda: "http://upstream.test")
     monkeypatch.setattr(
         vocaro_api,
         "_upstream_get",
-        lambda path, params=None: {"found": True, "slug": "up-slug", "ja": "上流曲"},
+        lambda path, params=None: {
+            "found": True,
+            "slug": "up-slug",
+            "ja": "上流曲",
+            "matcher_version": "identity-1",
+        },
     )
     monkeypatch.setattr(
         vocaro_api,
         "match_with_evidence",
-        lambda title, **kwargs: (_ for _ in ()).throw(
-            AssertionError("업스트림 히트인데 로컬 조회")
-        ),
+        lambda title, **kwargs: MatchDecision(status="not_found", reason="no_exact_title"),
     )
     resp = asyncio.run(vocaro_api.match_title(BackgroundTasks(), title="上流曲"))
     assert resp.found is True

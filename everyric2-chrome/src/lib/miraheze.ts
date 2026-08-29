@@ -48,6 +48,12 @@ interface SearchHit {
   title: string;
 }
 
+interface MirahezeEvidence {
+  artist?: string;
+  channel?: string;
+  rawTitle?: string;
+}
+
 /**
  * 제목으로 곡 페이지를 찾아 가사(원문+로마자+[영어 번역])를 반환. 못 찾으면 null.
  *
@@ -57,7 +63,9 @@ interface SearchHit {
  * 1위로는 절대 물러나지 않는다.
  */
 export async function mirahezeLookup(
-  title: string, preferredTitles?: string[],
+  title: string,
+  preferredTitles?: string[],
+  evidence?: MirahezeEvidence,
 ): Promise<SourceResult | null> {
   const trimmed = title.trim();
   if (!trimmed) return null;
@@ -67,15 +75,17 @@ export async function mirahezeLookup(
     .filter((value, index, all) => value && all.indexOf(value) === index)
     .slice(0, 4);
   const candidates = roots
-    .flatMap(root => titleCandidates(root))
+    .flatMap(root => titleCandidates(root, evidence))
     .filter((value, index, all) => all.indexOf(value) === index)
     .slice(0, 6);
   for (const candidate of candidates) {
     const hits = await searchTitleHits(candidate);
     const valid: SourceResult[] = [];
     for (const hit of hits) {
+      if (!producerMatchesEvidence(hit.title, evidence, candidate)) continue;
       const page = await fetchParsedPage(hit.pageid);
       if (!page || !titleMatchesCandidate(candidate, page.title)) continue;
+      if (!producerMatchesEvidence(page.title, evidence, candidate)) continue;
       const parsed = parseLyricsTable(page.html);
       if (!parsed || parsed.lines.length === 0) continue;
       valid.push({
@@ -95,27 +105,85 @@ export async function mirahezeLookup(
   return null;
 }
 
+function producerMatchesEvidence(
+  pageTitle: string,
+  evidence?: MirahezeEvidence,
+  candidate?: string,
+): boolean {
+  if (!pageTitle.includes('/')) return true;
+  const suffix = pageTitle.slice(pageTitle.lastIndexOf('/') + 1).trim();
+  const producerKey = normalizeIdentityToken(suffix);
+  const rawParts = (evidence?.rawTitle ?? '')
+    .split(/\s*[/／|｜ㅣ]\s*|\s[-–—]\s/)
+    .flatMap(part => [part, part.replace(SAFE_FEAT_SUFFIX, '').trim()]);
+  const candidateKey = normalizeIdentityToken(candidate ?? '');
+  const hints = [evidence?.artist, evidence?.channel, ...rawParts]
+    .map(value => normalizeIdentityToken(value ?? ''))
+    .filter(value => (
+      value.length >= 3
+      && value !== candidateKey
+      && !_KNOWN_VOCALS.has(value)
+    ));
+  if (!producerKey || hints.length === 0) return false;
+  return hints.includes(producerKey);
+}
+
+function normalizeIdentityToken(value: string): string {
+  return value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
 // ── 검색어 후보 생성 ─────────────────────────────────────────
 
 // 대표 구분자 — 유튜브 보카로 관례상 곡명 다음에 아티스트·가수 표기가 붙는 자리.
 // feat./ft.는 대소문자·마침표 유무를 가리지 않는다(feat, Feat., FT 등). \b로 낱말
 // 경계를 요구해 "soft" 같은 낱말 속 "ft"를 오매칭하지 않는다.
 const _TITLE_SEPARATOR_RE = /\/|｜|\||\s-\s|〜|\bfeat\.?|\bft\.?/i;
+const SAFE_FEAT_SUFFIX = /(?:^|\s)(?:feat|ft)\.?\s*\S.*$/i;
 
-// 【】·[]·()·（）로 감싼 장식(MV·Official Music Video 등) 한 덩어리.
-const _DECORATION_RE = /[【[（(][^】\]）)]*[】\]）)]/g;
+const _BRACKET_RE = /【([^】]*)】|\[([^\]]*)\]|（([^）]*)）|\(([^)]*)\)/g;
+const _SAFE_NOISE_RE = /^(?:official(?:\s+(?:music|lyric)\s*video|\s+audio|\s+mv)?|music\s*video|lyrics?|audio|mv|pv|hd|hq|4k|1080p|720p|cover|カバー|커버)$/i;
+const _KNOWN_VOCALS = new Set([
+  '初音ミク', 'hatsunemiku', '鏡音リン', 'kagaminerin', '鏡音レン', 'kagaminelen',
+  '巡音ルカ', 'megurineluka', 'gumi', 'ia', 'kaito', 'meiko', '重音テト', 'kasaneteto',
+  '可不', 'kafu', 'flower', 'vflower', '歌愛ユキ', 'kaaiyuki',
+].map(normalizeIdentityToken));
 
 /** 구분자 **앞** 조각(=곡명) — 구분자가 없거나 맨 앞에 있으면(짐작할 곡명이 없으면) null. */
-function _stripBeforeSeparator(raw: string): string | null {
+function _stripBeforeSeparator(
+  raw: string,
+  evidence?: MirahezeEvidence,
+): string | null {
   const m = _TITLE_SEPARATOR_RE.exec(raw);
   if (!m || m.index === 0) return null;
   const head = raw.slice(0, m.index).trim();
-  return head || null;
+  const tail = raw.slice(m.index + m[0].length).trim();
+  if (!head || !tail) return null;
+  const tailKey = normalizeIdentityToken(tail);
+  const tailKeys = new Set([
+    tailKey,
+    normalizeIdentityToken(tail.replace(SAFE_FEAT_SUFFIX, '').trim()),
+  ]);
+  const hints = [evidence?.artist, evidence?.channel]
+    .map(value => normalizeIdentityToken(value ?? ''))
+    .filter(value => value.length >= 3);
+  const featVocal = tail.match(/(?:^|\s)(?:feat|ft)\.?\s*(.+)$/i)?.[1];
+  const featVocalKey = normalizeIdentityToken(featVocal ?? '');
+  const corroborated = hints.some(hint => tailKeys.has(hint))
+    || _KNOWN_VOCALS.has(tailKey)
+    || _KNOWN_VOCALS.has(featVocalKey);
+  return corroborated ? head : null;
 }
 
 /** 장식 구간을 제거한 판 — 장식이 없어 원문과 같으면(바뀐 게 없으면) null. */
 function _stripDecorations(raw: string): string | null {
-  const cleaned = raw.replace(_DECORATION_RE, ' ').replace(/\s+/g, ' ').trim();
+  const cleaned = raw.replace(
+    _BRACKET_RE,
+    (whole, corner?: string, square?: string, wide?: string, round?: string) => {
+      const content = [corner, square, wide, round]
+        .find(value => value !== undefined)?.trim() ?? '';
+      return _SAFE_NOISE_RE.test(content) ? ' ' : whole;
+    },
+  ).replace(/\s+/g, ' ').trim();
   return cleaned && cleaned !== raw ? cleaned : null;
 }
 
@@ -126,13 +194,16 @@ function _stripDecorations(raw: string): string | null {
  * 실사용 사고(위 파일 머리말 참조): 유튜브 원제를 그대로 검색하면 부가 정보(아티스트·
  * feat.·장식)가 전문검색의 관련도를 흐려 진짜 곡 페이지가 상위 10위 밖으로 밀린다.
  */
-export function titleCandidates(raw: string): string[] {
+export function titleCandidates(
+  raw: string,
+  evidence?: MirahezeEvidence,
+): string[] {
   const trimmed = raw.trim();
   const out: string[] = [];
   const add = (v: string | null): void => {
     if (v && !out.includes(v)) out.push(v);
   };
-  add(_stripBeforeSeparator(trimmed));
+  add(_stripBeforeSeparator(trimmed, evidence));
   add(_stripDecorations(trimmed));
   add(trimmed);
   return out.slice(0, 3);
@@ -153,7 +224,18 @@ export function titleMatchesCandidate(candidate: string, pageTitle: string): boo
   if (!candidateNorm || !pageNorm) return false;
   if (pageNorm === candidateNorm) return true;
   if (!pageNorm.startsWith(candidateNorm)) return false;
-  return ' (/'.includes(pageNorm[candidateNorm.length]);
+  const suffix = pageNorm.slice(candidateNorm.length);
+  if (suffix.startsWith('/')) return true; // `/producer`는 별도 exact evidence로 다시 검증한다
+  const romanAlias = suffix.match(/^ \(([^()]*)\)(?:\/.+)?$/);
+  if (!romanAlias || !/[^\x00-\x7F]/.test(candidateNorm)) return false;
+  // 일본어 원제 뒤 로마자/영문 별칭만 허용한다. 버전·리믹스 표기는 다른 곡 정체성이다.
+  const alias = normalizeIdentityToken(romanAlias[1]);
+  const aliasLabel = romanAlias[1].normalize('NFKC').toLowerCase();
+  const versionToken = /(?:^|[\s._-])(?:remix|mix|live|cover|acoustic|version|ver|edit|type|long|short|20\d{2})(?:$|[\s._-])/i;
+  return Boolean(
+    alias
+    && !versionToken.test(aliasLabel),
+  );
 }
 
 // ── 검색 ──────────────────────────────────────────────────────

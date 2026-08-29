@@ -661,11 +661,20 @@ export interface VocaroMatchResponse {
   status?: 'matched' | 'ambiguous' | 'not_found' | 'index_empty' | string | null;
   reason?: string | null;
   matcher_version?: string | null;
+  upstream_matcher_version?: string | null;
   candidate_count?: number;
   matched_query?: string | null;
   evidence_source?: 'client' | 'song_index' | 'youtube_oembed' | 'manual_search' | string | null;
   resolved_title?: string | null;
   resolved_channel?: string | null;
+  candidates?: {
+    slug: string;
+    page_url: string;
+    ko?: string | null;
+    ja?: string | null;
+    producer?: string | null;
+    score: number;
+  }[];
 }
 
 /** 일본어 원제 등 클라이언트 독음 인덱스로 못 찾는 제목을 서버 원제 인덱스에 묻는다.

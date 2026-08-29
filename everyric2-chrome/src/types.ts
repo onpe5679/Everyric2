@@ -871,7 +871,7 @@ export interface PanelGeometry {
 /** 수동 검색에서 사용자가 직접 고를 수 있는 후보 (소스별) */
 export type SearchCandidate =
   | { source: 'lrclib'; id: number; title: string; artist: string; duration: number; synced: boolean }
-  | { source: 'vocaro'; slug: string; title: string; url: string };
+  | { source: 'vocaro'; slug: string; title: string; artist?: string; url: string };
 
 /** 자막 한 줄 (타이밍 포함) — 싱크 가사로 바로 표시하는 데 쓴다.
  *  트랙 **목록**은 클라이언트가 워치 페이지에서 직접 읽는다(lib/yt-captions.ts).

@@ -581,7 +581,7 @@ export function renderCandidateList(
   const fmt = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
   listEl.replaceChildren(...candidates.map(c => {
     const isWiki = c.source === 'vocaro';
-    const label = isWiki ? c.title : `${c.title}${c.artist ? ' — ' + c.artist : ''}`;
+    const label = `${c.title}${c.artist ? ' — ' + c.artist : ''}`;
     const meta = isWiki
       ? t('panels.results.pronTranslationMeta')
       : `${c.synced ? t('panels.results.syncedMeta') : t('panels.results.plainMeta')}${c.duration > 0 ? ` · ${fmt(c.duration)}` : ''}`;

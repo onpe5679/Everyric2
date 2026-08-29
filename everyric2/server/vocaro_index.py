@@ -76,6 +76,8 @@ _state_lock = threading.Lock()
 _building = False
 _cache: list[SongEntry] | None = None
 _built_at: str | None = None
+_confusable_source: list[SongEntry] | None = None
+_confusable_by_key: dict[str, list[SongEntry]] = {}
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "everyric2-vocaro-index/1.0 (lyrics sync helper)"})
@@ -132,6 +134,46 @@ def _entry_identity_keys(entry: SongEntry) -> set[str]:
     }
 
 
+def _confusable_entries(entries: list[SongEntry], key: str) -> list[SongEntry]:
+    """기호 제거/영문 단복수 한 글자 차이로 다른 실재 제목이 되는 항목군."""
+    global _confusable_by_key, _confusable_source
+    if _confusable_source is not entries:
+        identity_entries: dict[str, dict[str, SongEntry]] = {}
+        loose_groups: dict[tuple[str, str], set[str]] = {}
+        for entry in entries:
+            for field in (entry.ja, entry.ko, entry.slug.replace("-", " ")):
+                if not field:
+                    continue
+                identity = _identity_key(field)
+                loose = _normalize_title(field)
+                if not identity or not loose:
+                    continue
+                identity_entries.setdefault(identity, {})[entry.slug] = entry
+                loose_groups.setdefault(("punct", loose), set()).add(identity)
+                if loose.isascii() and loose.isalnum():
+                    plural_family = loose[:-1] if loose.endswith("s") and len(loose) > 1 else loose
+                    loose_groups.setdefault(("plural", plural_family), set()).add(identity)
+
+        built: dict[str, dict[str, SongEntry]] = {}
+        for identities in loose_groups.values():
+            slugs = {
+                slug
+                for identity in identities
+                for slug in identity_entries.get(identity, {})
+            }
+            if len(identities) < 2 or len(slugs) < 2:
+                continue
+            for identity in identities:
+                bucket = built.setdefault(identity, {})
+                for other in identities:
+                    bucket.update(identity_entries.get(other, {}))
+        _confusable_by_key = {
+            identity: list(by_slug.values()) for identity, by_slug in built.items()
+        }
+        _confusable_source = entries
+    return _confusable_by_key.get(key, [])
+
+
 def _disambiguate_exact_hits(
     hits: list[SongEntry],
     *,
@@ -149,34 +191,122 @@ def _disambiguate_exact_hits(
 
     scored: list[tuple[int, SongEntry]] = []
     for entry in hits:
-        hay = _normalize_title(
-            " ".join(x for x in (entry.ko or "", entry.ja or "", entry.slug.replace("-", " ")))
-        )
-        scored.append((sum(1 for hint in hints if hint in hay), entry))
+        producer_keys = {
+            _normalize_title(value.rsplit("/", 1)[1])
+            for value in (entry.ko, entry.ja)
+            if value and "/" in value and value.rsplit("/", 1)[1].strip()
+        }
+        # 전체 제목/slug의 부분문자열은 `Eve`→`Eleven...` 같은 우연 일치를 만든다.
+        # 위키가 명시한 `/producer` suffix와 정확히 같은 단서만 동명이곡 선택에 쓴다.
+        scored.append((sum(1 for hint in hints if hint in producer_keys), entry))
     best_score = max(score for score, _ in scored)
     best = [entry for score, entry in scored if score == best_score and score > 0]
     return best[0] if len(best) == 1 else None
 
 
-def _strict_candidates(title: str) -> list[str]:
-    """잡표기 변형은 허용하되 후보끼리의 실제 비교에서는 기호를 보존한다."""
-    candidates = title_match.candidate_titles(title, drop_noise=True)
-    # ``artist - title``은 유튜브의 가장 흔한 하이픈 관례다. 구형 클라이언트가 아직 분해 전
-    # 제목을 보내는 경우 오른쪽을 먼저 보지 않으면 아티스트명과 같은 제목의 다른 곡이 먼저
-    # 잡힌다. 채널 근거로 반대 방향이 확인된 신클라이언트는 title_candidates로 순서를 준다.
-    split = re.search(r"\s(?:-|–|—)\s", title)
-    if split:
-        right = title[split.end() :].strip()
-        preferred = title_match.candidate_titles(right, drop_noise=True)
-        candidates = [*preferred, *candidates]
+_FEAT_SUFFIX_RE = re.compile(r"(?:^|\s)(?:feat|ft)\.?\s*\S.*$", re.IGNORECASE)
+_FEAT_VOCAL_RE = re.compile(r"(?:^|\s)(?:feat|ft)\.?\s*(\S.*)$", re.IGNORECASE)
+_SAFE_ROMAN_ALIAS_RE = re.compile(r"^(.+?)\s*[（(]([A-Za-z0-9 '\-–—]+)[）)]\s*$")
+_BRACKET_GROUP_RE = re.compile(
+    r"【(?P<corner>[^】]*)】|\[(?P<square>[^\]]*)\]|（(?P<wide>[^）]*)）|\((?P<round>[^)]*)\)"
+)
+_RAW_SPLIT_RE = re.compile(r"\s*[/／|｜ㅣ–—―~〜]\s*|\s+-\s+")
+
+
+def _dedupe_candidates(candidates: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
         key = _identity_key(candidate)
         if key and key not in seen:
             seen.add(key)
-            out.append(candidate)
+            out.append(candidate.strip())
     return out
+
+
+def _strip_safe_bracket_noise(title: str) -> str:
+    """잡표기/알려진 보컬 괄호만 제거하고 버전·부제 괄호는 보존한다."""
+
+    def replace(match: re.Match[str]) -> str:
+        content = next((group for group in match.groups() if group is not None), "")
+        key = _normalize_title(content)
+        leftover = _normalize_title(title_match.strip_noise_tokens(content))
+        # `(^_-)-☆` 같은 표정 기호는 정규화가 비어도 제목의 일부다. 실제 잡토큰이
+        # 제거되어 원래 영숫자 key가 사라진 경우와 빈 괄호만 걷는다.
+        is_noise = (not content.strip()) or (bool(key) and not leftover)
+        return " " if (is_noise or key in _KNOWN_VOCAL_KEYS) else match.group(0)
+
+    return _BRACKET_GROUP_RE.sub(replace, title)
+
+
+def strong_candidates(title: str) -> list[str]:
+    """제목 전체를 보존한 채 제거 근거가 명확한 잡표기만 걷은 후보."""
+    trimmed = title.strip()
+    no_feat = _FEAT_SUFFIX_RE.sub("", trimmed).strip()
+    no_noise = _strip_safe_bracket_noise(trimmed).strip()
+    candidates = [trimmed, no_feat, no_noise, _FEAT_SUFFIX_RE.sub("", no_noise).strip()]
+    return _dedupe_candidates([candidate for candidate in candidates if candidate])
+
+
+def corroborated_raw_candidates(
+    raw_title: str,
+    *,
+    artist: str | None,
+    channel: str | None,
+) -> list[str]:
+    """반대편 조각이 실제 artist/channel/보컬일 때만 raw 구분자 조각을 연다."""
+    candidates = strong_candidates(raw_title)
+    evidence = {_normalize_title(value) for value in (artist, channel) if value}
+    parts = [part.strip() for part in _RAW_SPLIT_RE.split(raw_title) if part.strip()]
+    part_keys = [
+        {_normalize_title(value) for value in strong_candidates(part)}
+        for part in parts
+    ]
+    corroborated = {
+        index
+        for index, keys in enumerate(part_keys)
+        if any(key in evidence or key in _KNOWN_VOCAL_KEYS for key in keys)
+        or (
+            (feat_match := _FEAT_VOCAL_RE.search(parts[index])) is not None
+            and _normalize_title(feat_match.group(1)) in _KNOWN_VOCAL_KEYS
+        )
+    }
+    # 셋 이상 조각에서 한 보컬명만 확인됐다고 나머지 전부를 곡명으로 열면
+    # `Unknown / Hatsune Miku / ロキ`가 실제 다른 곡 ロキ로 떨어진다. 증거가 아닌 조각이
+    # 정확히 하나일 때만 그 한 조각을 곡명으로 연다(`Song / Producer / Miku`는 유지).
+    uncorroborated = set(range(len(parts))) - corroborated
+    if corroborated and len(uncorroborated) == 1:
+        for index, part in enumerate(parts):
+            if index not in uncorroborated:
+                continue
+            for candidate in strong_candidates(part):
+                normalized = _normalize_title(candidate)
+                # M/S/U 같은 한 글자 조각은 반대편 증거가 있어도 임의 곡명으로 채택하지 않는다.
+                if len(normalized) >= 2 or (not normalized and _identity_key(candidate)):
+                    candidates.append(candidate)
+    return _dedupe_candidates(candidates)
+
+
+def _parenthetical_alias_hits(title: str, entries: list[SongEntry]) -> tuple[str, list[SongEntry]] | None:
+    """`원제 (Roman)`의 Roman이 같은 항목의 실제 별칭일 때만 괄호를 제거한다."""
+    match = _SAFE_ROMAN_ALIAS_RE.match(title.strip())
+    if not match:
+        return None
+    base = match.group(1).strip()
+    alias = _normalize_title(match.group(2))
+    base_key = _identity_key(base)
+    hits = [
+        entry
+        for entry in entries
+        if base_key in _entry_identity_keys(entry)
+        and alias
+        in {
+            _normalize_title(field)
+            for field in (entry.ja, entry.ko, entry.slug.replace("-", " "))
+            if field
+        }
+    ]
+    return (base, hits) if hits else None
 
 
 def match_with_evidence(
@@ -205,28 +335,34 @@ def match_with_evidence(
         if value and value not in roots:
             roots.append(value)
 
-    candidate_groups = [_strict_candidates(root) for root in roots]
+    # title/title_candidates는 이미 Chrome이 곡명으로 정리한 값이다. 자동 경로에서 다시 임의로
+    # 괄호·구분자를 잘라 짧은 다른 곡으로 내려가지 않는다.
+    candidate_groups = [strong_candidates(root) for root in roots]
 
     # 새 클라이언트는 방향이 검증된 후보를 보낸다. 구 클라이언트의 raw_title은 기본 제목이
     # 미스일 때만 보조하되, 이미 artist/channel로 식별된 조각은 곡명 후보에서 제외한다.
     # raw 후보는 여기서 한 번만 분해한다 — 다시 root로 넣으면 full 제목을 재분해하는 과정에서
     # 제외했던 아티스트 조각이 되살아난다.
     if raw_title:
-        excluded = {_identity_key(value) for value in (artist, channel) if value}
+        excluded = {_normalize_title(value) for value in (artist, channel) if value}
+        source_candidates = corroborated_raw_candidates(
+            raw_title,
+            artist=artist,
+            channel=channel,
+        )
         raw_candidates = [
             value
-            for value in _strict_candidates(raw_title)
-            if _identity_key(value) not in excluded
+            for value in source_candidates
+            if _normalize_title(value) not in excluded
+            and not _is_vocal_only_fragment(
+                _normalize_title(value), _normalize_title(raw_title)
+            )
         ]
         if raw_candidates:
             candidate_groups.append(raw_candidates)
 
-    full_norm = _normalize_title(title)
     for root_index, candidates in enumerate(candidate_groups):
         for candidate in candidates:
-            normalized = _normalize_title(candidate)
-            if _is_vocal_only_fragment(normalized, full_norm):
-                continue
             key = _identity_key(candidate)
             if not key:
                 continue
@@ -234,7 +370,36 @@ def match_with_evidence(
             if not hits:
                 continue
             if len(hits) == 1:
-                reason = "exact_title" if root_index == 0 else "evidence_title"
+                confusable = _confusable_entries(entries, key)
+                if len(confusable) > 1:
+                    chosen = _disambiguate_exact_hits(
+                        confusable,
+                        artist=artist,
+                        channel=channel,
+                        context=[],
+                    )
+                    # producer/channel은 exact 제목을 확인할 수는 있어도 다른 실재 제목으로
+                    # 뒤집을 수 없다. 채널은 업로더·커버러일 수 있으므로 충돌은 보류한다.
+                    if chosen is hits[0]:
+                        return MatchDecision(
+                            status="matched",
+                            reason="confusable_disambiguated",
+                            entry=chosen,
+                            candidate_count=len(confusable),
+                            matched_query=candidate,
+                        )
+                    return MatchDecision(
+                        status="ambiguous",
+                        reason="confusable_title",
+                        candidate_count=len(confusable),
+                        matched_query=candidate,
+                    )
+                if root_index == 0:
+                    reason = "exact_title"
+                elif raw_title and root_index >= len(roots):
+                    reason = "raw_evidence_title"
+                else:
+                    reason = "evidence_title"
                 return MatchDecision(
                     status="matched",
                     reason=reason,
@@ -264,6 +429,42 @@ def match_with_evidence(
                 matched_query=candidate,
             )
 
+    # `(Roki)` 같은 로마자 괄호는 실제 같은 항목의 slug/다른 별칭과도 일치할 때만
+    # 제거한다. `(Remix)`·`(.Type.L)`·`(2024)`는 별칭 증거가 없어 여기서 열리지 않는다.
+    for root in roots:
+        alias_result = _parenthetical_alias_hits(root, entries)
+        if alias_result is None:
+            continue
+        candidate, hits = alias_result
+        if len(hits) == 1:
+            return MatchDecision(
+                status="matched",
+                reason="parenthetical_alias",
+                entry=hits[0],
+                candidate_count=1,
+                matched_query=candidate,
+            )
+        chosen = _disambiguate_exact_hits(
+            hits,
+            artist=artist,
+            channel=channel,
+            context=[],
+        )
+        if chosen is not None:
+            return MatchDecision(
+                status="matched",
+                reason="parenthetical_alias_disambiguated",
+                entry=chosen,
+                candidate_count=len(hits),
+                matched_query=candidate,
+            )
+        return MatchDecision(
+            status="ambiguous",
+            reason="duplicate_parenthetical_alias",
+            candidate_count=len(hits),
+            matched_query=candidate,
+        )
+
     return MatchDecision(status="not_found", reason="no_exact_title")
 
 
@@ -275,15 +476,11 @@ def match(title: str) -> SongEntry | None:
     return match_with_evidence(title).entry
 
 
-def search_match(title: str) -> SongEntry | None:
-    """사용자가 후보 목록에서 직접 고르는 수동 검색용 느슨한 상위 후보.
-
-    자동 채택의 :func:`match_with_evidence`와 의도적으로 분리한다. 포함/잡표기 유사도는
-    여기서만 허용되며, 결과는 Chrome 검색 시트에 후보로 보일 뿐 자동 가사로 채택되지 않는다.
-    """
+def search_matches(title: str, limit: int = 5) -> list[tuple[SongEntry, float]]:
+    """사용자가 직접 고르는 수동 검색용 느슨한 후보를 점수순으로 반환."""
     _ensure_loaded()
     entries = _cache or []
-    ranked = title_match.rank_matches(
+    return title_match.rank_matches(
         title,
         [
             (
@@ -297,8 +494,17 @@ def search_match(title: str) -> SongEntry | None:
             for entry in entries
         ],
         min_score=0.5,
-        limit=1,
+        limit=limit,
     )
+
+
+def search_match(title: str) -> SongEntry | None:
+    """레거시 단일 후보 호환용. 신규 API는 :func:`search_matches` 전체를 노출한다.
+
+    자동 채택의 :func:`match_with_evidence`와 의도적으로 분리한다. 포함/잡표기 유사도는
+    여기서만 허용되며, 결과는 Chrome 검색 시트에 후보로 보일 뿐 자동 가사로 채택되지 않는다.
+    """
+    ranked = search_matches(title, limit=1)
     return ranked[0][0] if ranked else None
 
 

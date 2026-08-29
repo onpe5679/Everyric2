@@ -11,9 +11,14 @@
 //   저작권은 원저작자에게 있음 — UI에서 출처 페이지 링크를 항상 노출한다.
 
 import type { SourceResult } from './sources';
-import { vocaroIndex, vocaroPage, type ServerConfig } from './everyric-api';
+import type { SongMatchPayload } from '../types';
+import {
+  vocaroIndex, vocaroPage, type ServerConfig, type VocaroMatchResponse,
+} from './everyric-api';
 
 const INDEX_TTL_MS = 24 * 60 * 60 * 1000;
+const REF_TTL_MS = 24 * 60 * 60 * 1000;
+const CLOCK_SKEW_MS = 5 * 60 * 1000;
 const LICENSE = 'CC BY 4.0'; // 위키 편집 콘텐츠 라이선스 — 파일 상단 주석 참고
 
 export interface VocaroLine {
@@ -58,7 +63,7 @@ interface IndexEntry {
 /** 제목으로 곡 페이지를 찾아 가사(원문+발음+번역)를 반환. 못 찾으면 null.
  *  hint(정리 전 영상 제목)는 다중 버전 페이지의 표 선택용 — 없으면 title로 대신한다. */
 export async function vocaroLookup(
-  server: ServerConfig, title: string, hint?: string,
+  server: ServerConfig, title: string, hint?: string, evidence?: Partial<SongMatchPayload>,
 ): Promise<VocaroResult | null> {
   const trimmed = title.trim();
   if (!trimmed) return null;
@@ -70,7 +75,7 @@ export async function vocaroLookup(
     const page = await fetchSongPage(server, guessed, variantHint);
     // 슬러그 추측 성공은 곡 식별 성공이 아니다. 페이지 제목이 실제 질의와 기호까지 같은
     // 경우만 채택해 ``S.C.R.E.A.M``과 ``SCREAM`` 같은 충돌을 막는다.
-    if (page && identityKey(page.pageTitle) === identityKey(trimmed)) return page;
+    if (page && vocaroResultMatchesEvidence(page, evidence ?? { title: trimmed }, true)) return page;
   }
 
   // 2) 제목 첫 글자에 해당하는 '수록곡 일람' 인덱스에서 제목 매칭
@@ -81,7 +86,10 @@ export async function vocaroLookup(
   const entries = await getIndexEntries(server, indexPage);
   const match = entries ? findMatch(entries, trimmed) : null;
   if (match && match.slug !== guessed) {
-    return fetchSongPage(server, match.slug, variantHint);
+    const page = await fetchSongPage(server, match.slug, variantHint);
+    return page && vocaroResultMatchesEvidence(page, evidence ?? { title: trimmed }, true)
+      ? page
+      : null;
   }
   return null;
 }
@@ -164,6 +172,195 @@ function normalizeTitle(t: string): string {
 
 function identityKey(t: string): string {
   return t.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+}
+
+const SAFE_FEAT_SUFFIX = /(?:^|\s)(?:feat|ft)\.?\s*\S.*$/i;
+const SAFE_ROMAN_ALIAS = /^(.+?)\s*[（(]([A-Za-z0-9 '\-–—]+)[）)]\s*$/;
+const RECOVERY_KNOWN_VOCALS = new Set([
+  '初音ミク', 'Hatsune Miku', '鏡音リン', 'Kagamine Rin', '鏡音レン', 'Kagamine Len',
+  '巡音ルカ', 'Megurine Luka', 'GUMI', 'IA', 'KAITO', 'MEIKO', '重音テト', 'Kasane Teto',
+  '可不', 'Kafu', 'flower', 'v flower', '歌愛ユキ', 'Kaai Yuki',
+].map(normalizeTitle));
+
+function safeIdentityTitles(values: (string | null | undefined)[]): string[] {
+  const out: string[] = [];
+  const add = (value: string | null | undefined): void => {
+    const text = value?.trim();
+    if (text && !out.includes(text)) out.push(text);
+  };
+  for (const value of values) {
+    const text = value?.trim();
+    if (!text) continue;
+    add(text);
+    add(text.replace(SAFE_FEAT_SUFFIX, '').trim());
+  }
+  return out;
+}
+
+function identityValuesMatch(
+  expectedValues: (string | null | undefined)[],
+  returnedValues: (string | null | undefined)[],
+): boolean {
+  const expected = safeIdentityTitles(expectedValues);
+  const returned = safeIdentityTitles(returnedValues);
+  const returnedIdentity = returned.map(identityKey);
+  if (expected.map(identityKey).some(key => returnedIdentity.includes(key))) return true;
+  const returnedLoose = returned.map(normalizeTitle);
+  return expectedValues.some(value => {
+    const alias = value?.trim().match(SAFE_ROMAN_ALIAS);
+    return Boolean(
+      alias
+      && returnedIdentity.includes(identityKey(alias[1]))
+      && returnedLoose.includes(normalizeTitle(alias[2])),
+    );
+  });
+}
+
+function evidenceValues(evidence: Partial<SongMatchPayload>): string[] {
+  return evidence.titleCandidates?.length ? evidence.titleCandidates : [evidence.title ?? ''];
+}
+
+function recoveredVideoTitles(response: VocaroMatchResponse): string[] {
+  if (response.evidence_source !== 'youtube_oembed' || !response.resolved_title) return [];
+  const out = safeIdentityTitles([response.resolved_title]);
+  const split = response.resolved_title.match(/^(.+?)\s[-–—]\s(.+)$/);
+  const channel = response.resolved_channel?.replace(/\s+-\s+Topic$/i, '').trim();
+  if (split && channel) {
+    const left = split[1].trim();
+    const right = split[2].trim();
+    const rightWithoutFeat = right.replace(SAFE_FEAT_SUFFIX, '').trim() || right;
+    const channelKey = normalizeTitle(channel);
+    const leftKey = normalizeTitle(left);
+    const rightKey = normalizeTitle(rightWithoutFeat);
+    if (channelKey && channelKey === rightKey && channelKey !== leftKey) out.push(left);
+    if (channelKey && channelKey === leftKey && channelKey !== rightKey) out.push(right);
+  }
+  const slash = response.resolved_title.match(/\s*[/／|｜ㅣ]\s*/);
+  if (slash?.index && slash.index > 0) {
+    const head = response.resolved_title.slice(0, slash.index).trim();
+    const tail = response.resolved_title.slice(slash.index + slash[0].length).trim();
+    const featVocal = tail.match(/(?:^|\s)(?:feat|ft)\.?\s*(.+)$/i)?.[1];
+    if (
+      RECOVERY_KNOWN_VOCALS.has(normalizeTitle(tail))
+      || RECOVERY_KNOWN_VOCALS.has(normalizeTitle(featVocal ?? ''))
+    ) out.push(head);
+  }
+  return safeIdentityTitles(out);
+}
+
+/** 신 identity 계약 응답만 자동 채택하고, 응답 제목/슬러그도 보낸 후보와 기호까지 대조한다. */
+export function vocaroMatchResponseIsSafe(
+  response: VocaroMatchResponse,
+  evidence: Partial<SongMatchPayload>,
+): boolean {
+  if (
+    !response.found
+    || !response.slug
+    || response.matcher_version !== 'identity-1'
+    || response.status !== 'matched'
+  ) return false;
+  const expected = [
+    ...evidenceValues(evidence),
+    ...recoveredVideoTitles(response),
+  ];
+  const returned = [
+    response.ja,
+    response.ko,
+    response.slug.replace(/-/g, ' '),
+  ];
+  return identityValuesMatch(expected, returned);
+}
+
+/** 안전하다고 확인한 match의 다국어 별칭으로 실제 page 응답도 다시 대조한다. */
+export function vocaroPageMatchesSafeMatch(
+  result: VocaroResult,
+  response: VocaroMatchResponse,
+  evidence: Partial<SongMatchPayload>,
+): boolean {
+  if (!vocaroMatchResponseIsSafe(response, evidence)) return false;
+  return vocaroResultMatchesEvidence(result, {
+    ...evidence,
+    titleCandidates: safeIdentityTitles([
+      ...evidenceValues(evidence),
+      response.ja,
+      response.ko,
+    ]),
+  });
+}
+
+/** 페이지 응답이 현재 곡 정체성과 맞는지. legacy 자동 폴백은 producer 근거까지 요구한다. */
+export function vocaroResultMatchesEvidence(
+  result: VocaroResult,
+  evidence: Partial<SongMatchPayload>,
+  requireProducer = false,
+): boolean {
+  const expected = evidenceValues(evidence);
+  const returned = [
+    result.pageTitle,
+    result.slug.replace(/-/g, ' '),
+  ];
+  if (!identityValuesMatch(expected, returned)) return false;
+  if (!requireProducer) return true;
+  const hints = [evidence.artist, evidence.channel]
+    .map(value => normalizeTitle(value ?? ''))
+    .filter(value => value.length >= 3);
+  if (hints.length === 0) return true;
+  const producerKeys: string[] = [];
+  if (result.pageTitle.includes('/')) {
+    producerKeys.push(normalizeTitle(result.pageTitle.slice(result.pageTitle.lastIndexOf('/') + 1)));
+  }
+  const slugParts = result.slug.split('-').filter(Boolean);
+  for (let start = 1; start < slugParts.length; start++) {
+    producerKeys.push(normalizeTitle(slugParts.slice(start).join(' ')));
+  }
+  return hints.some(hint => producerKeys.includes(hint));
+}
+
+export function vocaroIdentityKey(value: string): string {
+  return identityKey(value);
+}
+
+export function vocaroCacheIdentityKey(evidence: Partial<SongMatchPayload>): string {
+  return [
+    ...evidenceValues(evidence),
+    evidence.rawTitle ?? evidence.hint ?? '',
+    evidence.artist ?? '',
+    evidence.channel ?? '',
+  ].map(identityKey).join('\u0000');
+}
+
+export interface VocaroRefCache {
+  slug: string;
+  t: number;
+  matcherVersion: 'identity-1';
+  titleKey: string;
+}
+
+export function cachedVocaroSlug(
+  raw: unknown,
+  titleKey: string,
+  now = Date.now(),
+): string | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Partial<VocaroRefCache>;
+  const age = typeof value.t === 'number' ? now - value.t : Number.POSITIVE_INFINITY;
+  return value.matcherVersion === 'identity-1'
+    && value.titleKey === titleKey
+    && typeof value.slug === 'string'
+    && value.slug.length > 0
+    && Number.isFinite(age)
+    && age >= -CLOCK_SKEW_MS
+    && age <= REF_TTL_MS
+    ? value.slug
+    : null;
+}
+
+export function makeVocaroRef(
+  slug: string,
+  titleKey: string,
+  now = Date.now(),
+): VocaroRefCache {
+  return { slug, titleKey, t: now, matcherVersion: 'identity-1' };
 }
 
 function findMatch(entries: IndexEntry[], title: string): IndexEntry | null {

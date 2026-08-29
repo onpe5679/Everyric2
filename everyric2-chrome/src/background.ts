@@ -2,7 +2,12 @@ import { fetchFromLrclib, getLrclibById, searchTracksLrclib } from './lib/lrclib
 import { attachLineMeta, cancelJob, checkServerStatus, fetchCaptionLines, fetchLimits, fetchNotices, fetchPreviousSync, fetchSyncVersion, fetchSyncVersions, fetchViewStats, findLinkCandidates, generateSync, generateSyncFromCaption, getJobStatus, getLinkJobStatus, getServerLog, linkSync, listSyncs, lookupSync, regenerateSync, resetSync, saveTranslationLayer, saveUserOffset, submitFeedback, syncExists, translateLyrics, unlinkSync, vocaroMatch, type FailureSink, type ServerConfig } from './lib/everyric-api';
 import { parseLRC, parsePlainLyrics, segmentsToLines } from './lib/lyrics-parser';
 import { mirahezeLookup } from './lib/miraheze';
-import { fetchSongPage, vocaroLookup } from './lib/vocaro';
+import {
+  fetchSongPage,
+  vocaroLookup,
+  vocaroMatchResponseIsSafe,
+  vocaroPageMatchesSafeMatch,
+} from './lib/vocaro';
 import { getSettings } from './lib/settings';
 import type { BgRequest, ContentMessage, LRCLibTrack, LyricsData, MessageResponse, SearchCandidate, SongInfo, SourceAttribution } from './types';
 
@@ -280,28 +285,62 @@ async function handleMessage(message: BgRequest): Promise<MessageResponse> {
       // hint = 정리 전 영상 제목 — 다중 버전 페이지(원곡/리믹스)에서 맞는 표를 고른다
       const hint = message.payload.hint ?? message.payload.title;
       const matched = await vocaroMatch(server, message.payload.title, undefined, message.payload);
-      if (matched?.found && matched.slug) {
+      if (matched && vocaroMatchResponseIsSafe(matched, message.payload) && matched.slug) {
         const page = await fetchSongPage(server, matched.slug, hint);
-        if (page) return { data: page };
+        if (page && vocaroPageMatchesSafeMatch(page, matched, message.payload)) {
+          return { data: page };
+        }
       }
-      // identity 계약을 아는 신서버가 모호/미발견으로 판정했다면 느슨한 구형 클라이언트
-      // 인덱스로 다시 살려내지 않는다. index_empty와 구서버(버전 필드 없음)만 폴백한다.
-      if (matched?.matcher_version && matched.status !== 'index_empty') return { data: null };
+      // 신서버가 모호하다고 판정했거나 matched 응답의 페이지 검증이 깨졌다면 구형 인덱스로
+      // 우회하지 않는다. 단, not_found는 서버보다 최신인 24h 클라이언트 인덱스가 답할 수
+      // 있어 아래의 엄격한 페이지/producer 재검증 폴백을 한 번 허용한다.
+      if (
+        matched?.matcher_version
+        && matched.status !== 'index_empty'
+        && matched.status !== 'not_found'
+      ) return { data: null };
       // 서버가 미발견이거나 페이지를 못 읽은 경우에만 클라 경로 — 초성 인덱스가 답할 수
       // 있는 제목(한글·라틴·숫자 시작)에서만 결과가 나온다
-      return { data: await vocaroLookup(server, message.payload.title, hint) };
+      return {
+        data: await vocaroLookup(
+          server, message.payload.title, hint, message.payload,
+        ),
+      };
     }
 
     // 가사 본문 없이 원제 매칭만 — 제목 확인·후보 표시 경로가 페이지 조회 없이 쓴다
     case 'VOCARO_MATCH': {
       const server = await getServerConfig();
-      return call('vocaro_match_failed', sink =>
+      const response = await call('vocaro_match_failed', sink =>
         vocaroMatch(server, message.payload.title, sink, message.payload));
+      if (
+        response.data?.found
+        && !vocaroMatchResponseIsSafe(response.data, message.payload)
+      ) {
+        return {
+          data: {
+            ...response.data,
+            found: false,
+            slug: null,
+            status: 'not_found',
+            reason: 'client_identity_rejected',
+          },
+        };
+      }
+      return response;
     }
 
     case 'MIRAHEZE_LOOKUP': {
       return {
-        data: await mirahezeLookup(message.payload.title, message.payload.titleCandidates),
+        data: await mirahezeLookup(
+          message.payload.title,
+          message.payload.titleCandidates,
+          {
+            artist: message.payload.artist,
+            channel: message.payload.channel,
+            rawTitle: message.payload.rawTitle,
+          },
+        ),
       };
     }
 
@@ -592,18 +631,38 @@ async function searchCandidates(query: { title: string; artist: string; duration
   ]);
 
   const candidates: SearchCandidate[] = [];
-  if (wikiMatch?.found && wikiMatch.slug) {
-    candidates.push({
-      source: 'vocaro',
-      slug: wikiMatch.slug,
-      title: wikiMatch.ja ?? wikiMatch.ko ?? query.title,
-      url: wikiMatch.page_url ?? `http://vocaro.wikidot.com/${wikiMatch.slug}`,
-    });
+  const wikiCandidates = wikiMatch?.candidates?.length
+    ? wikiMatch.candidates
+    : wikiMatch?.found && wikiMatch.slug
+      ? [{
+          slug: wikiMatch.slug,
+          page_url: wikiMatch.page_url ?? `http://vocaro.wikidot.com/${wikiMatch.slug}`,
+          ko: wikiMatch.ko,
+          ja: wikiMatch.ja,
+          score: 1,
+        }]
+      : [];
+  if (wikiCandidates.length > 0) {
+    for (const wiki of wikiCandidates) {
+      candidates.push({
+        source: 'vocaro',
+        slug: wiki.slug,
+        title: wiki.ja ?? wiki.ko ?? query.title,
+        artist: wiki.producer ?? wiki.slug,
+        url: wiki.page_url,
+      });
+    }
   } else {
     // 서버 원제 인덱스가 미스 — 독음 인덱스 매칭으로 한 번 더 (페이지까지 확보되면 그 제목 사용)
     const direct = await vocaroLookup(await getServerConfig(), query.title);
     if (direct) {
-      candidates.push({ source: 'vocaro', slug: direct.slug, title: direct.pageTitle, url: direct.pageUrl });
+      candidates.push({
+        source: 'vocaro',
+        slug: direct.slug,
+        title: direct.pageTitle,
+        artist: direct.slug,
+        url: direct.pageUrl,
+      });
     }
   }
   for (const t of tracks) {
