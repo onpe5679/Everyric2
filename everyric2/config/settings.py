@@ -165,8 +165,8 @@ class AudioSettings(BaseSettings):
 class AlignmentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EVERYRIC_ALIGNMENT_")
 
-    engine: Literal["ctc", "nemo", "gpu-hybrid", "sofa", "owsm", "omniasr"] = Field(
-        default="owsm",
+    engine: Literal["adaptive"] = Field(
+        default="adaptive",
         description="Alignment engine to use. 'owsm'과 'omniasr' 두 값은 **새 앵커 스택을 "
         "켜는 스위치**로 취급된다(everyric2/server/worker.py의 _new_stack_enabled) — 둘 중 "
         "어느 리터럴을 고르든 실제로 어느 모델이 도는지는 요청마다 3단계 라우팅이 정한다 "
@@ -1442,15 +1442,11 @@ class Settings(BaseSettings):
         같은 결) 기동 시점(Settings() 생성, get_settings()의 첫 호출)에 바로 실패시킨다 —
         요청이 한참 진행된 뒤 애매하게 저품질로 새는 것보다 낫다.
         """
-        new_stack = self.alignment.engine in ("owsm", "omniasr")
-        if new_stack and self.audio.separator_backend != "bs-polarformer-fp16":
+        if self.audio.separator_backend != "bs-polarformer-fp16":
             raise ValueError(
-                f"alignment.engine={self.alignment.engine!r} selects the new anchor stack "
-                "(owsm/omniasr), which requires audio.separator_backend='bs-polarformer-fp16' "
+                "The adaptive stack requires audio.separator_backend='bs-polarformer-fp16' "
                 f"(got {self.audio.separator_backend!r}). Mixing the new anchor with htdemucs "
-                "was never measured and the alignment result would be uninterpretable — set "
-                "EVERYRIC_AUDIO_SEPARATOR_BACKEND=bs-polarformer-fp16, or revert "
-                "EVERYRIC_ALIGNMENT_ENGINE to a legacy engine (ctc/nemo/gpu-hybrid/sofa)."
+                "was never measured and the alignment result would be uninterpretable."
             )
         return self
 

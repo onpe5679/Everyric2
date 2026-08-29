@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "1.0.0",
+  "bridgeProtocol": "everyric-local-bridge/v1",
+  "resultSchema": "sync-document/v3",
+  "platforms": {
+    "win32-x64": {
+      "local": true,
+      "accelerator": "cuda",
+      "cuda": "12.8",
+      "torch": "2.8.0",
+      "python": "3.11",
+      "minimumVramMb": 6144,
+      "recommendedVramMb": 8192
+    },
+    "darwin-arm64": {
+      "local": false,
+      "reason": "The adopted BS-PolarFormer path has no verified MPS implementation yet."
+    },
+    "linux-x64": {
+      "local": false,
+      "reason": "Runtime layout is reserved for a future headless engine bundle; AE packaging is not shipped."
+    }
+  },
+  "models": {
+    "omniasr": {
+      "repoId": "facebook/omniASR-CTC-300M",
+      "revision": "8e35f0cc28fa6099e0c14d56db85ce0423baa691",
+      "allowPatterns": ["omniASR-CTC-300M.pt", "omniASR_tokenizer.model"],
+      "license": "Apache-2.0"
+    },
+    "owsm": {
+      "repoId": "espnet/owsm_ctc_v4_1B",
+      "revision": "6db41715b887d65d2d6936a290e7844cb98f9d29",
+      "allowPatterns": ["exp/**", "data/**", "config.yaml", "*.model", "*.txt"],
+      "license": "CC-BY-4.0",
+      "notice": "Checkpoint license and training-data rights are separate review surfaces."
+    },
+    "polarformer": {
+      "release": "v1.0.20",
+      "license": "MIT",
+      "files": [
+        {
+          "name": "model_bs_polarformer_float16.ckpt",
+          "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v1.0.20/model_bs_polarformer_float16.ckpt",
+          "size": 102410301,
+          "sha256": "fc8b72c3beb92caad4e14f180979c02ddf18a330182176cf6c7bb0eb6c685e87"
+        },
+        {
+          "name": "model_bs_polarformer_float16.yaml",
+          "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v1.0.20/model_bs_polarformer_float16.yaml",
+          "size": 3599,
+          "sha256": "0348205cb562a58e9724870a4cf43e5d2c49ae87258159b2827c4e42ed51b00d"
+        }
+      ],
+      "vendor": {
+        "commit": "e247dfe4abc1f17c69dff719207fe045dc04413a",
+        "files": [
+          {
+            "path": "models/bs_roformer/attend.py",
+            "size": 3681,
+            "sha256": "0459d799ade55541df2994b0becf7aec12214491360c5a06e346f6d615eaed15"
+          },
+          {
+            "path": "models/bs_roformer/bs_roformer.py",
+            "size": 20494,
+            "sha256": "a6f670325cdb8a7a212914f62602119b23eb888df9bcfe4a85f9be74728b3ef4"
+          }
+        ]
+      }
+    }
+  }
+}

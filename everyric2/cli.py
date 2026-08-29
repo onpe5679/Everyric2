@@ -104,10 +104,6 @@ def sync(
         bool,
         typer.Option("--debug", "-d", help="Save debug files (prompts, responses, diagnostics)"),
     ] = False,
-    engine: Annotated[
-        str,
-        typer.Option("--engine", "-e", help="Alignment engine (ctc, whisperx, nemo, sofa, qwen)"),
-    ] = "ctc",
     language: Annotated[
         str,
         typer.Option("--language", "-l", help="Language (auto, en, ja, ko)"),
@@ -180,6 +176,7 @@ def sync(
         raise typer.Exit(1)
 
     settings = get_settings()
+    engine = "adaptive"
     if model:
         settings.model.path = model
     if cache_dir:
@@ -1453,7 +1450,7 @@ def engines() -> None:
 
     console.print(table)
     console.print(
-        "\n[dim]Use --engine/-e option to select: everyric2 sync song.mp3 lyrics.txt -e whisperx[/dim]"
+        "\n[dim]The adaptive stack selects its internal anchor automatically.[/dim]"
     )
 
 

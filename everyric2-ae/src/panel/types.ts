@@ -195,16 +195,20 @@ export interface FillAssignment {
 
 export interface LocalSyncOptions {
   pythonPath: string;
-  engine: string;
   language: string;
   audioPath: string;
   lyrics: string;
+  runtimeRoot?: string;
+  modelDir?: string;
+  minDepth?: "fast" | "medium" | "heavy";
 }
 
 export interface AppSettings {
   uiLocale: UiLocale;
   pythonPath: string;
-  engine: string;
+  runtimeRoot: string;
+  modelDir: string;
+  minDepth: "fast" | "medium" | "heavy";
   language: string;
   density: Density;
   typographyMode: TypographyMode;
@@ -225,8 +229,6 @@ export interface AppSettings {
   /** 자른 조각이 줄 끝까지 남을지(cumulative), 다음 조각이 나오면 사라질지(sequential). */
   cutReveal: CutReveal;
   /** 이미 만들어진 싱크를 영상 ID로 조회할 서버. */
-  serverUrl: string;
-  serverApiKey: string;
   /** 서버에서 받아올 번역 언어. */
   translationLanguage: TranslationLanguage;
   /** 발음 표기. 'auto'면 번역 언어를 따른다(en→romaji, ja→kana, 그 밖→hangul). */
@@ -246,6 +248,7 @@ export interface HostResult {
 }
 
 export interface EnvironmentReport {
+  ready: boolean;
   everyricVersion: string;
   nodeVersion: string;
   platform: string;

@@ -252,7 +252,7 @@ class SyncRepository:
         lyrics_hash: str,
         timestamps: list[dict[str, Any]],
         language: str | None = None,
-        engine: str = "ctc",
+        engine: str = "adaptive",
         engine_variant: str | None = None,
         # 새로 만드는 싱크는 전부 현행 스택 식별자를 새긴다(결함 #5 부수 작업) — 호출부가
         # 일일이 넘기지 않아도 되게 기본값을 ENGINE_VERSION으로 둔다. 옛 스택 흔적을 남기고

@@ -102,6 +102,24 @@ check(armProbe.beforeArmed === false && afterArm.armed === true,
   'R3a 첫 클릭 후 무장(armed) 상태로 전환', { armProbe, afterArm });
 check(/삭제|초기화/.test(afterArm.title), 'R3b 무장 중 title이 삭제 확인 문구로 바뀜', afterArm.title);
 
+// R3c: 첫 클릭이 «아무 일도 안 일어난 것»으로 읽히지 않아야 한다 — 실사용 제보(2026-08-04)
+// 로 추가된 검사다. 무장 표시가 outline(.ey-confirm-armed)과 title 툴팁뿐이라 세 버튼
+// (초기화·검색 시트 삭제·깊이 올리기) 모두 «한 번 누르면 반응이 없다»로 읽혔다.
+// 화면에 보이는 안내 = 알림 칩. title은 마우스를 올리고 기다려야 나오므로 증거가 못 된다.
+const chipProbe = await page.evaluate(() => {
+  const sr = document.getElementById('everyric-root').shadowRoot;
+  const chip = sr.querySelector('.ey-notice-chip');
+  if (!chip) return { exists: false };
+  return {
+    exists: true,
+    visible: chip.style.display !== 'none' && chip.offsetParent !== null,
+    text: (chip.textContent ?? '').trim(),
+  };
+});
+check(chipProbe.exists && chipProbe.visible, 'R3c 무장과 함께 안내 칩이 화면에 뜸', chipProbe);
+check(/한 번 더/.test(chipProbe.text ?? ''),
+  'R3c-2 칩 문구가 «한 번 더 누르면 진행»을 명시', chipProbe.text);
+
 // 실제로 지우지 않도록 여기서 멈춘다 — 무장 해제만 하고(같은 버튼 다시 클릭하면 실행되므로),
 // 대신 다른 곳을 클릭해 confirmTimer가 자연 만료되게 두거나 페이지를 벗어난다.
 console.log('INFO: 실제 삭제 실행은 하지 않음(파괴적 동작) — 무장 전환까지만 확인');

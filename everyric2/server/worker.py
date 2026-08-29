@@ -4227,14 +4227,8 @@ def _anchor_kwargs(forbidden_spans, line_starts=None) -> dict[str, Any]:
 
 
 def _new_stack_enabled(settings) -> bool:
-    """``settings.alignment.engine``이 새 앵커 스택(owsm/omniasr) 중 하나를 가리키면 True.
-
-    둘 다 "새 스택 켜짐"의 동의어다 — 실제로 어느 모델이 도는지는 요청마다 라우팅이
-    정한다(``_run_new_stack_alignment`` docstring). engine이 기존 값("ctc" 등)으로 남아
-    있는 한 이 함수는 False이고 _run_alignment는 구스택(get_shared_ctc_engine)으로
-    정렬한다 — 이건 명시적으로 고른 대안 경로이지 실패 시 새는 폴백이 아니다.
-    """
-    return settings.alignment.engine in ("owsm", "omniasr")
+    """The adaptive stack is the only executable alignment route."""
+    return settings.alignment.engine == "adaptive"
 
 
 # 새 스택 경로에 배선되지 않은 레거시 전용 기능 스위치 — 켜져 있어도 아무 효과가 없다.
@@ -4689,7 +4683,7 @@ def _resolve_stack_language(language: str | None, lyric_lines: list[Any]) -> tup
         # 실패해 무언어(<nolang>) 정렬로 조용히 저하됐다 — 기본 언어 코드만 남긴다.
         lang = lang.split("-")[0].split("_")[0]
         return lang, "label"
-    from everyric2.alignment.ctc_engine import detect_language_from_text
+    from everyric2.alignment.language import detect_language_from_text
 
     detected, _ = detect_language_from_text("\n".join(ln.text for ln in lyric_lines))
     return detected, "script_census"
@@ -5047,7 +5041,7 @@ def _finish_new_stack_alignment(
     return {
         "timestamps": timestamps,
         "language": detected_lang,
-        "engine": engine.get_engine_type(),
+        "engine": "adaptive",
         "engine_variant": engine_variant,
         "quality_score": quality_score,
         "debug": debug_meta,
@@ -5070,6 +5064,7 @@ def _run_alignment(
     video_id: str | None = None,
     min_depth: str | None = None,
     on_depth: Any | None = None,
+    delete_audio: bool = True,
 ) -> dict:
     """정렬 본체. line_meta_resolver를 주면 **보컬 분리·f0 착수 뒤, CTC 진입 직전에** 한 번
     불러 line_meta를 늦게 받아온다 (번역·독음을 클라이언트가 병렬로 만드는 경로).
@@ -5887,4 +5882,5 @@ def _run_alignment(
         # 앵커 수거 지점을 지났으면 이미 None이다 — 그 전에 예외로 빠진 경우만 정리한다
         if anchor_executor is not None:
             anchor_executor.shutdown(wait=False)
-        audio_path_obj.unlink(missing_ok=True)
+        if delete_audio:
+            audio_path_obj.unlink(missing_ok=True)

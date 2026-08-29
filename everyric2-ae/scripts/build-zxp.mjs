@@ -81,6 +81,9 @@ function generateSelfSignedCert(zxpSignCmd) {
   const passwordPath = path.join(secretsDir, "cert-password.txt");
   const password = crypto.randomBytes(12).toString("base64url");
   fs.mkdirSync(secretsDir, { recursive: true });
+  // ZXPSignCmd returns success without replacing an existing p12.  Remove the stale certificate
+  // first so the newly generated password always belongs to the file we subsequently sign with.
+  fs.rmSync(certPath, { force: true });
   execFileSync(
     zxpSignCmd,
     ["-selfSignedCert", "KR", "Seoul", "Everyric", "Everyric Studio", password, certPath, "-validityDays", "3650"],
@@ -104,7 +107,7 @@ function resolveCertificate(zxpSignCmd) {
   }
   if (fs.existsSync(defaultPath)) return { certPath: defaultPath, password };
   if (fs.existsSync(generatedPath) && filePassword !== undefined) {
-    return { certPath: generatedPath, password: filePassword };
+    return generateSelfSignedCert(zxpSignCmd);
   }
   return generateSelfSignedCert(zxpSignCmd);
 }

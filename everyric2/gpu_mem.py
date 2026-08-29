@@ -80,14 +80,12 @@ def drop_warm_caches() -> None:
 
 
 def _clearers():
-    from everyric2.alignment.ctc_engine import clear_shared_ctc_engine
     from everyric2.alignment.omniasr_engine import clear_shared_omniasr_engine
     from everyric2.alignment.owsm_engine import clear_shared_owsm_engine
     from everyric2.audio.separator import clear_shared_separator
     from everyric2.melody.extractor import clear_shared_extractor
 
     return [
-        ("ctc", clear_shared_ctc_engine),
         ("separator", clear_shared_separator),
         ("melody", clear_shared_extractor),
         # 2026-08-04 추가 — 새 스택(owsm/omniasr) 웜 캐시도 같은 idle 가드 대상이다.

@@ -74,7 +74,20 @@ export class VideoCaption {
     this.showPron = showPron;
     this.hidePronForEnglish = hidePronForEnglish;
     this.showTr = showTr;
-    // 표시 방식이 바뀌면 현재 줄을 다시 그린다 (다음 tick을 기다리지 않는다)
+    this.refresh(); // 표시 방식이 바뀌면 현재 줄을 다시 그린다 (다음 tick을 기다리지 않는다)
+  }
+
+  /**
+   * «현재 줄»을 강제로 다시 그린다 — 라인 배열은 그대로인데 **라인 객체의 내용**이
+   * 제자리에서 바뀐 경우를 위한 것이다(번역이 늦게 붙거나, 언어 전환으로 교체되거나,
+   * clearTranslations로 지워질 때. content는 전부 mutation으로 처리한다).
+   *
+   * 이게 없으면 updateTime의 `index !== currentIndex` 가드에 걸려 **줄이 넘어갈 때까지**
+   * 화면이 옛 내용을 유지한다 — 일시정지 중이면 영영 그렇다(실사용 제보 2026-08-04:
+   * "유튜브 자막 오버레이 번역이 안 보인다"). 패널은 refreshTranslations 방송을 받아
+   * 다시 그렸지만 이 모듈은 그 방송 대상이 아니었다.
+   */
+  refresh(): void {
     const index = this.currentIndex;
     this.currentIndex = -1;
     this.render(index >= 0 ? this.lines[index] ?? null : null, index);
@@ -170,14 +183,20 @@ export class VideoCaption {
     // (display는 render가 매번 토글하므로 여기 cssText에 넣지 않는다 — 통짜로 덮어쓰면 지워진다)
     const shared = 'border-radius:4px;padding:2px 10px;display:inline-block;'
       + 'white-space:pre-wrap;text-shadow:0 0 4px rgba(0,0,0,0.9)';
+    // 세 줄에 각자 이름을 준다 — 스타일은 전부 인라인이라 CSS로는 안 쓰이지만, 이름이
+    // 없으면 «세 번째 div»처럼 순서로만 짚게 되어 줄이 하나 늘거나 순서가 바뀌는 순간
+    // 검사가 조용히 다른 줄을 본다(호스트에 ey-video-caption을 붙인 것과 같은 이유).
     this.lineEl = document.createElement('div');
+    this.lineEl.className = 'ey-vc-line';
     this.lineEl.style.cssText = `${shared};color:#fff;font-weight:600;line-height:1.4`;
     this.pronEl = document.createElement('div');
+    this.pronEl.className = 'ey-vc-pron';
     // 발음 줄 기본색은 차분한 청회색 — 예전 앰버(#ffd98e)는 sung 강조색(#ffb02e)과
     // 동계열이라 카라오케 진행이 안 보였다(실사용 제보 "노란 자막에 노란 하이라이트").
     // 원문(흰색)과도, 진행(노랑)과도 갈리는 제3색이어야 한다.
     this.pronEl.style.cssText = `${shared};color:#a9c4e6;opacity:0.95;margin-top:2px`;
     this.trEl = document.createElement('div');
+    this.trEl.className = 'ey-vc-tr';
     this.trEl.style.cssText = `${shared};color:#fff;opacity:0.95;margin-top:2px`;
     for (const el of [this.lineEl, this.pronEl, this.trEl]) {
       const wrap = document.createElement('div');

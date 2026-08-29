@@ -69,7 +69,7 @@ class SyncResult(Base):
     # 유니크)이 그 언어 슬롯을 따로 갖는다(커밋 6a0e614·76292af·1f1ab0b). 세그의 legacy
     # translation 슬롯은 ko 하위호환용으로만 남아 있다 — TranslationLayer 독스트링 참고.
     language: Mapped[str | None] = mapped_column(String(8))
-    engine: Mapped[str] = mapped_column(String(16), default="ctc")
+    engine: Mapped[str] = mapped_column(String(16), default="adaptive")
     # 이 정렬에 실제로 쓰인 엔진의 변형/폴백 식별자. 지금 유일하게 쓰이는 값은 "mms"
     # (force_mms 강제 폴백 — 예전엔 language에 "{lang}_mms"로 뭉쳐 저장되던 값, 결함 #5).
     # None이면 language의 기본 어댑터를 그대로 썼다는 뜻(변형 없음). 기존(마이그레이션
@@ -310,7 +310,7 @@ class SyncResultVersion(Base):
     # 비교가 세그먼트 타이밍·번역·발음까지 그대로 다시 그릴 수 있어야 한다
     timestamps: Mapped[dict[str, Any]] = mapped_column(JSON)
     language: Mapped[str | None] = mapped_column(String(8))
-    engine: Mapped[str] = mapped_column(String(16), default="ctc")
+    engine: Mapped[str] = mapped_column(String(16), default="adaptive")
     # 스냅샷된 세대의 엔진 정체 — 고스트 비교의 **라벨**이다("구: mms-htdemucs-1 →
     # 신: ..."). 이 둘이 없으면 이전 버전이 어느 스택 산출물인지 알 길이 없어
     # engine_version을 시각 추산 대신 값으로 기록한 이유 자체가 사라진다.

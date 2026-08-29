@@ -1,8 +1,8 @@
 # Everyric2
 
-유튜브 영상에 **타임싱크 가사·번역·발음·가라오케 음정 바**를 얹어 주는 로컬 서버 + Chrome 확장.
+유튜브 영상에 **타임싱크 가사·번역·발음·가라오케 음정 바**를 얹어 주는 Chrome 확장 + 서버.
 
-가사 텍스트만 있으면 CTC 강제 정렬(GPU 가속)로 줄·글자 단위 타이밍을 만들고, LLM으로 자연스러운 가사체 번역과 한글 독음을 붙이고, 보컬 멜로디(f0)를 전사해 노래방 스타일 음정 바까지 그려 줍니다.
+가사 텍스트만 있으면 강제 정렬(GPU 가속)로 줄·글자 단위 타이밍을 만들고, LLM으로 자연스러운 가사체 번역을, 규칙 기반 독음 엔진으로 발음 표기를 붙이고, 보컬 멜로디(f0)를 전사해 노래방 스타일 음정 바까지 그려 줍니다.
 
 ![유튜브 가사 오버레이](docs/images/chrome-overlay.png)
 
@@ -13,8 +13,8 @@
 ```
 ┌────────────────┐   가사 검색/생성/번역     ┌───────────────────────────┐
 │ Chrome 확장     │ ◄───────────────────► │ Everyric2 서버 (FastAPI)   │
-│ (유튜브 오버레이) │                       │ CTC 정렬 · demucs · RMVPE  │
-└────────────────┘                       │ LLM 번역/독음 · yt-dlp     │
+│ (유튜브 오버레이) │                       │ 강제 정렬 · 보컬 분리       │
+└────────────────┘                       │ RMVPE · LLM 번역 · yt-dlp  │
                                          └───────────────────────────┘
 ```
 
@@ -36,13 +36,13 @@
 ### ③ 기능 요약
 
 - **3개 언어 번역**: 한국어·영어·일본어를 서로 번역 — 곡의 원어와 같은 언어는 자동으로 생략됩니다
-- **발음 표기**: 원문에 맞춰 한글(hangul)·로마자(romaji)·가나(kana) 표기를 자동으로 골라 보여줍니다
+- **발음 표기**: 원문에 맞춰 한글(hangul)·로마자(romaji)·가나(kana)·IPA 표기를 자동으로 골라 보여줍니다
 - **가라오케 음정 바 (PiP)**: 항상 위에 뜨는 별도 창에 멜로디 노트·계이름·발음·번역이 타이밍에 맞춰 정렬됩니다
 - **언어 칩**: 제목바에서 이 곡에 어떤 언어가 준비돼 있는지 한눈에 보고 클릭 한 번으로 전환합니다
 
 ### ④ 서버
 
-기본 서버 주소는 `https://everyric.moref.co`이며 **API 키를 입력할 필요가 없습니다** — 설정의 키 칸은 비워 두세요. 가사 조회는 무제한이고, 새 싱크 생성만 이용자당 하루 15건으로 제한됩니다.
+기본 서버 주소는 `https://everyric.moref.co`이며 **API 키를 입력할 필요가 없습니다** — 설정의 키 칸은 비워 두세요. 가사 조회는 무제한이고, 새 싱크 생성만 하루 20건으로 제한됩니다(커버 잇기 3건·분석 깊이 올리기 10건은 별도 예산). 남은 횟수는 패널에서 바로 확인할 수 있습니다.
 직접 서버를 구동하고 싶다면 아래 [자체 호스팅](#자체-호스팅-개발자용) 절을 참고하세요.
 개인정보처리방침: <https://everyric.moref.co/privacy>
 
@@ -64,13 +64,13 @@ To see translations, open the panel's settings (⚙), turn on **Show translation
 ### ③ Features
 
 - **Three-language translation** — Korean, English, and Japanese, translated into each other; a song already in your language skips translation automatically
-- **Pronunciation** — shown in Hangul, romaji, or kana, chosen automatically to match the original text
+- **Pronunciation** — shown in Hangul, romaji, kana, or IPA, chosen automatically to match the original text
 - **Karaoke pitch lane (PiP)** — a separate always-on-top window with melody notes, solfège labels, pronunciation, and translation lined up to the beat
 - **Language chips** — the title bar shows which languages are ready for this song; one click switches between them
 
 ### ④ Server
 
-The default server is `https://everyric.moref.co` and **no API key is required** — leave the key field empty. Lookups are unlimited; generating a new sync is capped at 15 per user per day.
+The default server is `https://everyric.moref.co` and **no API key is required** — leave the key field empty. Lookups are unlimited; generating a new sync is capped at 20 per day (linking a cover and raising analysis depth have their own separate budgets: 3 and 10). The panel shows how many you have left.
 Want to run your own server instead? See [Self-Hosting](#self-hosting-for-developers) below.
 Privacy policy: <https://everyric.moref.co/privacy>
 
@@ -92,13 +92,13 @@ YouTubeで曲の動画を開くと、歌詞パネルが自動で表示されま�
 ### ③ 主な機能
 
 - **3言語翻訳** — 韓国語・英語・日本語を相互に翻訳。曲の原語と同じ言語は自動的にスキップされます
-- **発音表記** — 原文に合わせてハングル・ローマ字・かなの表記を自動的に選んで表示します
+- **発音表記** — 原文に合わせてハングル・ローマ字・かな・IPAの表記を自動的に選んで表示します
 - **カラオケ音程バー(PiP)** — 常に最前面に表示される別ウィンドウに、メロディノート・階名・発音・翻訳がタイミングに合わせて並びます
 - **言語チップ** — この曲がどの言語で準備できているかタイトルバーで一目で分かり、クリック一つで切り替えられます
 
 ### ④ サーバー
 
-デフォルトのサーバーは`https://everyric.moref.co`で、**APIキーの入力は不要です** — 設定のキー欄は空のままにしてください。歌詞の検索は無制限、新規同期の生成のみ1ユーザーあたり1日15件までです。
+デフォルトのサーバーは`https://everyric.moref.co`で、**APIキーの入力は不要です** — 設定のキー欄は空のままにしてください。歌詞の検索は無制限、新規同期の生成のみ1日20件までです(カバーのリンクは3件、解析の深さアップは10件と、それぞれ別枠)。残り回数はパネルで確認できます。
 自分でサーバーを立てたい場合は、下記の[セルフホスティング](#セルフホスティング-開発者向け)を参照してください。
 プライバシーポリシー: <https://everyric.moref.co/privacy>
 
@@ -111,18 +111,24 @@ YouTubeで曲の動画を開くと、歌詞パネルが自動で表示されま�
 - **자동 가사 검색**: 서버 저장 싱크 → 보카로 가사 위키(발음·사람 번역) → LRCLIB 순
 - **AI 싱크 생성**: 가사 붙여넣기 → 서버가 오디오를 받아 정렬 (진행 단계·퍼센트 칩 표시, 칩 클릭으로 언제든 취소)
 - **전사 완료 브라우저 알림**: 백그라운드에서 돌던 싱크 생성이 끝나면 브라우저 알림으로 알려줌
-- **번역·한글 독음**: LLM이 곡 전체 맥락으로 가사체 번역 + 원문 발음의 한글 표기
-- **가라오케 음정 바 (BETA)**: PiP 창에 멜로디 노트·계이름·발음·마이크 음정 궤적, 멜로디 신디사이즈·메트로놈(배속/시작 박) 재생, 곡 키·BPM 표시, 좌상단 미니 토글로 가라오케/영상 전환
-- **유튜브 자막 가져오기**: 영상 자막(예: 일본어 가사 자막)을 타이밍 그대로 싱크 가사로
+- **번역·발음 표기**: LLM은 곡 전체 맥락을 보고 가사체로 번역, 발음 표기는 서버의 규칙 기반 독음 엔진이 생성
+- **가라오케 음정 바 (BETA)**: 멜로디 노트·계이름·발음·마이크 음정 궤적, 멜로디 신디사이즈·메트로놈(배속/시작 박) 재생, 곡 키·BPM 표시 — PiP 창과 메인 창 양쪽에서 모듈로 사용
+- **영상 위 자막 표시**: 유튜브 자막처럼 영상 위에 현재 줄(+발음·번역)을 얹는 모듈
+- **재생목록 패널**: 전체 재생목록·이전/다음 곡·현재 곡 강조 + 서버에 싱크가 있는지 배지
+- **분석 깊이 올리기**: 결과의 분석 깊이(빠름/보통/정밀) 배지를 보고 버튼 하나로 더 정밀한 재분석 요청
+- **스트리밍 모드**: PiP 창을 크로마키 배경 + 글자 외곽선으로 바꿔 방송 화면에 합성
+- **유튜브 자막 가져오기**: 영상에 달린 **수동 자막**(예: 일본어 가사 자막)을 타이밍 그대로 싱크 가사로 — 자동 생성(ASR) 자막은 가사로 쓰지 않습니다
 - **싱크 링크**: inst·커버 영상이 원본 영상의 전사를 오프셋 + 배속(rate, nightcore 커버 등)과 함께 재사용
 - **영상별 싱크 오프셋**: ±0.1s 조정이 영상마다 서버에 저장·복원
 
 ### 서버 (`everyric2/`)
-- **CTC 강제 정렬**: HuggingFace MMS wav2vec2, RTX GPU에서 4분 곡 기준 수십 초
+- **강제 정렬**: omniASR-CTC-300M(주력) · OWSM-CTC v4 1B(heavy) 앵커 + 2패스 정밀화
+- **분석 깊이 자동 라우팅**: 정렬 신뢰도에 따라 fast(분리 없이 앵커만) → medium → heavy로 필요한 만큼만 승급
 - **독음(ko) 정렬**: 한글 발음 텍스트로 정렬 후 원문에 역매핑 — 일본어 합성음(보컬로이드)에서 신뢰도 대폭 개선
-- **타이밍 보정 체인**: demucs 보컬 분리 → VAD 기반 라인 클램프·늘임음 연장·간주 스냅
+- **타이밍 보정 체인**: BS-PolarFormer 보컬 분리 → VAD 기반 라인 클램프·늘임음 연장·간주 스냅
 - **멜로디 전사**: RMVPE(폴백 FCPE) f0 → 음절 앵커 노트, 옥타브 폴딩, 키 추정(K-S) + 스케일 스냅
-- **번역 엔진**: Gemini / NVIDIA NIM / OpenAI 호환(로컬 LLM) — 키가 없으면 자동 전환, 독음 가나 혼입 자동 검증·재시도
+- **발음 표기 엔진**: 언어별 규칙 기반 독음 — 일본어 가나·한자 읽기, 영어 CMU 발음 사전, 한국어 음운 변동
+- **번역 엔진**: Gemini / NVIDIA NIM / OpenAI 호환(로컬 LLM) — 키가 없으면 자동 전환
 
 ### After Effects 패널 (`everyric2-ae/`)
 - **Everyric Studio**: 정렬 결과를 편집 가능한 AE 텍스트 레이어 타이포그래피로 변환 — 패널에서 직접 로컬 정렬 실행, 엔진 원클릭 설치, 업데이트 확인
@@ -149,7 +155,7 @@ YouTubeで曲の動画を開くと、歌詞パネルが自動で表示されま�
 ```bash
 git clone https://github.com/onpe5679/Everyric2.git
 cd Everyric2
-pip install uv && uv sync            # 또는 pip install -e ".[all]"
+pip install uv && uv sync --extra separator   # 또는 pip install -e ".[all]"
 
 # GPU (RTX 50xx는 cu128 필수)
 uv pip install "torch==2.8.0+cu128" --index-url https://download.pytorch.org/whl/cu128
@@ -160,7 +166,22 @@ uv pip install "torch==2.8.0+cu128" --index-url https://download.pytorch.org/whl
 uv run uvicorn everyric2.server.main:app --port 8000   # 기본 127.0.0.1(로컬 전용)
 ```
 
-번역·독음을 쓰려면 API 키 하나를 설정합니다 (없으면 무료 웹 번역 폴백 — 발음표기 불가):
+정렬 앵커(omniASR·OWSM)는 첫 실행 때 HuggingFace에서 자동으로 받아옵니다. 반면 **보컬
+분리와 heavy 깊이는 자산을 미리 갖춰야 합니다**:
+
+| 자산 | 쓰이는 곳 | 없으면 |
+|---|---|---|
+| `--extra separator` 의존성 + BS-PolarFormer 체크포인트 | medium/heavy의 보컬 분리 | medium/heavy로 올라가는 곡만 실패 |
+| OWSM 격리 환경(`.venv-owsm`) | heavy 깊이 앵커 | heavy 곡만 실패 |
+
+**fast 깊이(대부분의 곡)는 위 자산이 없어도 정상 동작합니다.** 조용히 낮은 품질로 떨어지는
+대신 명시적으로 실패하도록 설계했습니다 — 자산 준비 절차는 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)를
+참고하세요. 구 스택으로 임시 운영하려면
+`EVERYRIC_ALIGNMENT_ENGINE=ctc` + `EVERYRIC_AUDIO_SEPARATOR_BACKEND=htdemucs`를 씁니다.
+
+번역을 쓰려면 API 키 하나를 설정합니다 (없으면 무료 웹 번역으로 폴백). **발음 표기는 규칙
+기반이라 키가 없어도 그대로 동작합니다** — 예전에는 LLM이 독음까지 만들었지만 지금은 서버의
+독음 엔진이 담당합니다:
 
 ```bash
 # 둘 중 하나
@@ -211,18 +232,19 @@ npm install && npm run build
 | PUT | `/api/sync/offset/{video_id}` | 영상별 사용자 오프셋 저장 |
 | GET | `/api/job/{job_id}` | 잡 진행률 (단계명 + 단계 내 %) |
 | POST | `/api/job/{job_id}/cancel` | 진행/대기 중 잡 취소 (단계 경계에서 중단) |
-| POST | `/api/translate` | LLM 번역 + 한글 독음 (가나 혼입 자동 검증·재시도, 입력 상한 400줄/줄당 1000자/전체 15000자 — 초과 시 422) |
+| POST | `/api/translate` | LLM 가사체 번역 (입력 상한 400줄/줄당 1000자/전체 15000자 — 초과 시 422) |
 | GET | `/api/captions/{video_id}` | 유튜브 자막 트랙 목록 (yt-dlp 경유) |
+| GET | `/api/limits/{video_id}` | 이 영상의 남은 횟수 — 생성·초기화·커버 잇기·정렬 업그레이드별 잔여와 회복 시각 |
+| GET | `/api/notices` | 서버 공지 (언어별 본문, 없으면 기본 언어로 폴백) |
 
 ### 처리 파이프라인 (진행 칩 단계와 동일 순서)
 
 ```
-다운로드(yt-dlp) → 캐시 확인 → 보컬 분리(demucs)
-→ 전사 정렬(CTC, 보컬 스템에서) → 타이밍 보정(VAD)
-→ 멜로디 분석(RMVPE f0 → 노트·키) → 저장
+다운로드(yt-dlp) → 캐시 확인 → [보컬 분리] → 전사 정렬(앵커 + 2패스 정밀화)
+→ 타이밍 보정(VAD) → 멜로디 분석(RMVPE f0 → 노트·키) → 저장
 ```
 
-보컬 분리를 정렬보다 먼저 수행해 CTC가 반주 없는 깨끗한 보컬 스템으로 정렬합니다 (`EVERYRIC_ALIGNMENT_ALIGN_ON_VOCALS`, 기본 true — demucs 미가용 시 원본 믹스로 폴백). 분리 결과는 타이밍 보정(VAD)과 멜로디 전사에도 그대로 재사용됩니다.
+**보컬 분리는 분석 깊이에 따라 조건부입니다.** fast는 원본 믹스에서 앵커만 돌리고(대부분의 곡이 여기서 끝납니다), 정렬 신뢰도가 낮아 medium/heavy로 올라간 곡만 분리를 태워 반주 없는 보컬 스템으로 다시 정렬합니다 — 분리를 함께 태운 조합이 앵커 단독보다 정렬 성공률이 크게 높습니다. 분리 결과는 타이밍 보정(VAD)과 멜로디 전사에도 그대로 재사용됩니다. 사용자가 패널에서 「분석 깊이 올리기」로 직접 요청할 수도 있습니다.
 
 ## 설정 (환경 변수)
 
@@ -230,8 +252,10 @@ npm install && npm run build
 
 | 변수 | 기본 | 설명 |
 |---|---|---|
+| `EVERYRIC_ALIGNMENT_ENGINE` | owsm | 정렬 엔진. `owsm`/`omniasr`은 **새 앵커 스택을 켜는 스위치**로, 실제로 어느 모델이 도는지는 요청마다 깊이 라우팅이 정합니다. `ctc`/`nemo`/`sofa`는 구 스택 |
+| `EVERYRIC_AUDIO_SEPARATOR_BACKEND` | bs-polarformer-fp16 | 보컬 분리 백엔드 (`htdemucs`는 구 스택 전용 — 새 앵커와 섞으면 기동 시 실패) |
 | `EVERYRIC_ALIGNMENT_USE_PRONUNCIATION` | true | 독음(ko) 정렬 경로 (발음 커버리지 ≥90%일 때) |
-| `EVERYRIC_ALIGNMENT_ALIGN_ON_VOCALS` | true | demucs 보컬 스템으로 CTC 정렬 (원 설계 복원 — false면 원본 믹스로 정렬) |
+| `EVERYRIC_ALIGNMENT_ALIGN_ON_VOCALS` | true | 보컬 스템으로 정렬 (false면 원본 믹스로 정렬) |
 | `EVERYRIC_ALIGNMENT_STAR_GUARD_SPLICE` | true | star-swallow 가드 발동 시 전곡 폴백 대신 간주 전 ko + 간주 후 원문 정렬 스플라이스 |
 | `EVERYRIC_MELODY_ENABLED` | true | 멜로디 노트 전사 |
 | `EVERYRIC_MELODY_F0_MODEL` | rmvpe | f0 백엔드 (rmvpe/fcpe) |
@@ -242,6 +266,7 @@ npm install && npm run build
 | `EVERYRIC_SERVER_MAX_JOB_AUDIO_SEC` | 1800 | 싱크 생성 허용 최대 오디오 길이(초). 초과 영상은 다운로드 직후 친절히 실패 (0=무제한) |
 | `EVERYRIC_SERVER_ADMIN_API_KEY` | - | 설정 시 파괴적 행위(재생성·초기화)에 일일 한도 적용, 이 키는 면제 |
 | `EVERYRIC_SERVER_DAILY_DESTRUCTIVE_LIMIT` | 2 | 비어드민의 영상당 24시간 한도 |
+| `EVERYRIC_SERVER_DAILY_UPGRADE_LIMIT` | 10 | 분석 깊이 올리기의 영상당 24시간 한도 (생성·초기화 한도와 별도 예산) |
 
 공개 배포 시 권장 설정은 위의 [보안 경고](#자체-호스팅-개발자용) 참고.
 
@@ -250,8 +275,8 @@ npm install && npm run build
 파일 기반 워크플로도 그대로 지원합니다:
 
 ```bash
-# 정렬 + 번역 + 발음 + 디버그 출력
-everyric2 sync audio.wav lyrics.txt --engine ctc --language ja --translate --pronunciation --debug
+# 정렬 + 번역 + 발음 + 디버그 출력 (엔진은 생략하면 기본값 = 새 앵커 스택)
+everyric2 sync audio.wav lyrics.txt --language ja --translate --pronunciation --debug
 
 # 프로젝트 파일(.everyric.json)로 재분할 (정렬 재실행 없이)
 everyric2 reprocess output.everyric.json --segment-mode word
@@ -284,6 +309,7 @@ cd everyric2-chrome && npm run build   # 확장 (tsc + vite)
 
 - **코드**: [Apache License 2.0](LICENSE) — 상업적 이용 포함 자유. 다만 이 소스로 **공개 서비스를 운영하는 경우 원작자(onpe)에게 알려 주시길 요청**합니다: 이메일 `perion5679@naver.com` · 디스코드 `onpe` (라이선스 조건이 아닌 비구속 요청 — [NOTICE](NOTICE) 참고 / This is a non-binding courtesy request, not a license condition — see [NOTICE](NOTICE))
 - **가사·발음·번역 출처**: [보카로 가사 위키](http://vocaro.wikidot.com/) (CC BY 4.0), [VocaloidLyrics Wiki](https://vocaloidlyrics.miraheze.org/) (CC BY-SA 4.0), [LRCLIB](https://lrclib.net/) — 확장이 조회·저장 시 출처를 함께 표기합니다
-- 정렬: [MMS wav2vec2](https://huggingface.co/facebook/mms-300m) — 모델 가중치 라이선스(CC-BY-NC)는 상업 배포 시 별도 확인 필요
-- 멜로디: RMVPE (추론 코드 MIT 포팅, 가중치 별도 다운로드), [torchfcpe](https://github.com/CNChTu/FCPE)
-- 보컬 분리: [demucs](https://github.com/facebookresearch/demucs)
+- 정렬 앵커: [omniASR-CTC-300M](https://huggingface.co/facebook/omniASR-CTC-300M) (Apache-2.0, 주력) · [OWSM-CTC v4 1B](https://huggingface.co/espnet/owsm_ctc_v4_1B) (CC-BY-4.0, heavy 깊이 전용) — OWSM은 가중치 자체는 CC-BY-4.0이지만 훈련 데이터에 NC/ND 코퍼스가 섞여 있어 상업 배포 시 별도 판단이 필요합니다
+- 보컬 분리: BS-PolarFormer fp16 ([ZFTurbo MSST](https://github.com/ZFTurbo/Music-Source-Separation-Training), MIT)
+- 발음 사전: [CMU Pronouncing Dictionary](http://www.speech.cs.cmu.edu/cgi-bin/cmudict) (BSD 계열, 저장소에 동봉) · [pypinyin](https://github.com/mozillazg/python-pinyin) (MIT)
+- 멜로디: RMVPE (추론 코드 MIT 포팅, 가중치 별도 다운로드 — 가중치 라이선스는 출처 확인 중), [torchfcpe](https://github.com/CNChTu/FCPE)

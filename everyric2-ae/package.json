@@ -1,7 +1,7 @@
 {
   "name": "everyric-studio-ae",
-  "version": "2.2.0",
-  "description": "Editable lyric typography workflow for Adobe After Effects",
+  "version": "3.0.0",
+  "description": "Local-only adaptive lyric alignment and editable typography for After Effects",
   "private": true,
   "type": "module",
   "scripts": {

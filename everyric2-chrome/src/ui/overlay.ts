@@ -69,6 +69,15 @@ const HEADER_BELL_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="n
 const HEADER_CONTRIB_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20V10"/><path d="M9 20V4"/><path d="M15 20v-7"/><path d="M21 20v-11"/></svg>';
 
 /**
+ * «두 번 눌러 확인»(confirmTwice)의 무장 지속 시간. 안내 칩의 수명도 같은 값이라
+ * 「칩이 보이는 동안 = 한 번 더 누르면 실행되는 동안」이 정확히 일치한다.
+ *
+ * 예전 4초는 안내를 읽고 손을 옮기기에 빠듯했다 — 칩 문구는 «무엇을 하려는지»까지
+ * 담아 한 줄이 길다.
+ */
+const CONFIRM_ARM_MS = 6000;
+
+/**
  * 다음 재생 영상 정보 — 제목만 있던 문자열 API의 확대판.
  * videoId가 있으면 썸네일 URL을 유도할 수 있어(thumbnail 생략 가능) content는 보통
  * id만 넘기면 된다. 어느 필드든 없으면 카드가 그 조각만 생략한다.
@@ -957,8 +966,16 @@ export class LyricsOverlay {
    * 일어나지 않고 유튜브 탭이 응답을 기다려, 화면이 멈춘 것처럼 보인다. 설정 시트의
    * 전체 초기화가 이미 쓰던 방식을 공용으로 올려 되돌릴 수 없는 동작 전부에 적용한다.
    *
-   * 무장은 4초 뒤 스스로 풀린다 — 남아 있는 무장이 다음 클릭을 삼키면 사용자는 "한 번
-   * 눌렀는데 실행됐다"고 느낀다. 다른 버튼을 무장하면 이전 무장은 즉시 풀린다.
+   * 무장은 CONFIRM_ARM_MS 뒤 스스로 풀린다 — 남아 있는 무장이 다음 클릭을 삼키면
+   * 사용자는 "한 번 눌렀는데 실행됐다"고 느낀다. 다른 버튼을 무장하면 이전 무장은 즉시 풀린다.
+   *
+   * **첫 클릭은 반드시 알림 칩으로 말한다**(실사용 제보 2026-08-04: 초기화·검색 시트의
+   * 싱크 삭제·분석 깊이 올리기 **세 버튼 전부** "한 번 누르면 아무 일도 안 일어난다"로
+   * 읽혔다). 테두리(.ey-confirm-armed)와 title 툴팁만으로는 발견되지 않는다 — 셋 다
+   * 작은 아이콘 버튼이라 2px 외곽선이 눈에 안 띄고, 툴팁은 마우스를 올린 채 기다려야
+   * 나온다. 자동 접힘 알림(notifyAutoCollapsed)이 같은 «눌렀는데 아무 일도 없다» 문제를
+   * 이미 이 칩으로 풀었으므로 새 UI를 만들지 않고 그대로 쓴다 — 표면별로 자기 칩이 있어
+   * PiP에서 눌러도 그 창에 뜬다.
    *
    * @returns 이번 클릭이 «확정»이면 true — 호출부는 이때만 실제 동작을 실행한다
    */
@@ -972,7 +989,15 @@ export class LyricsOverlay {
     this.armedTitle = btn.title;
     btn.title = prompt;
     btn.classList.add('ey-confirm-armed');
-    this.confirmTimer = window.setTimeout(() => this.disarmConfirm(), 4000);
+    // 프롬프트(무엇을 하려는지) + 안내(어떻게 확정하는지)를 한 줄로. 칩의 수명은 무장과
+    // 같아, 칩이 사라진 시점엔 무장도 풀려 있다 — 안내와 실제 동작이 어긋나지 않는다.
+    //
+    // 프롬프트는 **첫 줄만** 싣는다. title 툴팁용 문구라 둘째 줄부터는 부연(초기화의
+    // "삭제 후 자동으로 다시 검색해요…")인데, 한 줄짜리 칩에 통째로 넣으면 정작 중요한
+    // 뒷부분("한 번 더 누르면")이 잘려 나간다. 전문은 여전히 버튼 툴팁에 있다.
+    const head = prompt.split('\n')[0];
+    this.setNoticeChip(`${head} ${t('overlay.notice.confirmArmed')}`, CONFIRM_ARM_MS);
+    this.confirmTimer = window.setTimeout(() => this.disarmConfirm(), CONFIRM_ARM_MS);
     return false;
   }
 
@@ -983,6 +1008,9 @@ export class LyricsOverlay {
     b.classList.remove('ey-confirm-armed');
     b.title = this.armedTitle;
     this.armedBtn = null;
+    // 무장 안내는 무장과 함께 사라진다. 확정 클릭이면 이 직후 호출부가 실제 동작을
+    // 실행하고 그 동작이 자기 칩(진행·결과)을 띄우므로, 여기서 지워도 덮이지 않는다.
+    this.setNoticeChip(null);
   }
 
   /** 창에 건 것만 끊는다 — DOM·상태는 그대로 두므로 다른 문서로 다시 mountInto할 수 있다 */

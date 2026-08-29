@@ -14,7 +14,7 @@ class ProjectMetadata:
     source_audio: str | None = None
     source_lyrics: str | None = None
     language: str = "ja"
-    engine: str = "ctc"
+    engine: str = "adaptive"
     audio_duration: float | None = None
 
 

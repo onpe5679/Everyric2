@@ -76,7 +76,7 @@ class BaseAlignmentEngine(ABC):
 
     @staticmethod
     def get_engine_type() -> (
-        Literal["whisperx", "qwen", "ctc", "nemo", "gpu-hybrid", "sofa", "owsm", "omniasr"]
+        Literal["adaptive", "owsm", "omniasr"]
     ):
         raise NotImplementedError
 

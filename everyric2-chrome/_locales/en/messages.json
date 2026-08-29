@@ -1114,6 +1114,9 @@
   "overlay_notice_autoCollapsed": {
     "message": "Folded away automatically because the window is too narrow. Widen it to see it again"
   },
+  "overlay_notice_confirmArmed": {
+    "message": "— press the same button once more to go ahead"
+  },
   "overlay_settings_row_streamTextOutline": {
     "message": "Text outline (for streaming)"
   },

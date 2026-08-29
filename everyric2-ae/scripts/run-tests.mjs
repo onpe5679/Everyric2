@@ -297,27 +297,6 @@ try {
   assert.ok(cutBlocker({ ...wholeLine, text: "君" }).includes("두 개 이상"));
   assert.ok(buildCutSession({ ...wholeLine, locked: true }, cutDocument).blocked, "a blocked layer still builds a session so the panel can explain why");
 
-  const serverOutfile = path.join(temp, "server-client.mjs");
-  await build({
-    entryPoints: [path.join(root, "src/panel/server-client.ts")],
-    outfile: serverOutfile,
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    target: "node18",
-  });
-  const { extractVideoId, normalizeServerUrl } = await import(`${pathToFileURL(serverOutfile).href}?v=${Date.now()}`);
-  assert.equal(extractVideoId("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "dQw4w9WgXcQ");
-  assert.equal(extractVideoId("https://youtu.be/dQw4w9WgXcQ?t=30"), "dQw4w9WgXcQ");
-  assert.equal(extractVideoId("https://www.youtube.com/shorts/dQw4w9WgXcQ"), "dQw4w9WgXcQ");
-  assert.equal(extractVideoId("https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RD"), "dQw4w9WgXcQ");
-  assert.equal(extractVideoId("dQw4w9WgXcQ"), "dQw4w9WgXcQ");
-  assert.equal(extractVideoId("https://example.com/video"), null, "a non-YouTube link yields no id");
-  assert.equal(extractVideoId(""), null);
-  assert.equal(normalizeServerUrl("everyric.moref.co/"), "https://everyric.moref.co");
-  assert.equal(normalizeServerUrl("http://127.0.0.1:8300//"), "http://127.0.0.1:8300", "a local http server keeps its scheme");
-  assert.equal(normalizeServerUrl("  "), "");
-
   // 서버 응답의 timestamps는 세그먼트 배열이고 words/pronunciation/translation을 그대로 담는다.
   const serverShaped = normalizeSyncPayload({
     language: "ja",
@@ -497,10 +476,6 @@ try {
     !/line\.pronunciation|match\.line\.pronunciation/.test(cutterSource.replace(/resolvedPronunciation\([^)]*\)/g, "")),
     "nothing may read the legacy pronunciation slot directly",
   );
-  const serverClientSource = fs.readFileSync(path.join(root, "src/panel/server-client.ts"), "utf8");
-  assert.ok(serverClientSource.includes("?lang=${encodeURIComponent(lang)}"), "the lookup must pass the requested translation language");
-  assert.ok(serverClientSource.includes("translations_by_lang"), "the multilingual payload must be carried through");
-
   const storeOutfile = path.join(temp, "sync-store.mjs");
   await build({
     entryPoints: [path.join(root, "src/panel/sync-store.ts")],
@@ -558,10 +533,15 @@ try {
   );
   assert.ok(engineInstallSource.includes("function seedRuntimeDir"), "the ZXP-bundled runtime must be located as a seed");
   assert.ok(
-    engineInstallSource.includes("fs.cpSync(seed, managedRuntimeDir()"),
+    engineInstallSource.includes("fs.cpSync(seed, targetRuntime"),
     "the seed must be copied out of the extension folder, otherwise a panel update wipes the installed engine",
   );
   assert.ok(engineInstallSource.includes("function venvPythonPath"), "existing uv installs must keep working");
+  assert.ok(engineInstallSource.includes("active-runtime.json"), "updates must activate a verified runtime slot atomically");
+  assert.ok(engineInstallSource.includes("cu128"), "the Windows bundle must install the verified CUDA 12.8 stack");
+  const localSyncSource = fs.readFileSync(path.join(root, "src/panel/local-sync.ts"), "utf8");
+  assert.ok(localSyncSource.includes("everyric-local-bridge/v1"), "CEP must use the versioned local bridge");
+  assert.ok(!localSyncSource.includes("--engine"), "CEP must not expose or invoke a legacy engine selector");
   const installSource = fs.readFileSync(path.join(root, "scripts/install.mjs"), "utf8");
   assert.ok(installSource.includes('"junction"'), "dev installs should link the runtime instead of copying 30MB each time");
 

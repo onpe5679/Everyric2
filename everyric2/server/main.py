@@ -188,7 +188,7 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     gpu_available: bool
-    engine: str = "ctc"
+    engine: str = "adaptive"
 
 
 @app.get("/health", response_model=HealthResponse)

@@ -11,7 +11,6 @@ import { installEngine } from "./engine-install";
 import { inspectEnvironment, readJsonFile, runLocalSync } from "./local-sync";
 import { normalizeSyncPayload, planLayerFill, planLineLyrics, planTypography } from "./planner";
 import { resolveScript, selectableLanguages, withTranslationLanguage } from "./lang";
-import { fetchServerSync } from "./server-client";
 import { compKey, forgetSyncForComp, loadSyncForComp, saveSyncForComp } from "./sync-store";
 import { fetchLatestManifest, openExternal, panelUpdate, RELEASES_URL } from "./updater";
 import type { LatestManifest } from "./updater";
@@ -37,7 +36,9 @@ import type {
 const DEFAULT_SETTINGS: AppSettings = {
   uiLocale: "ko",
   pythonPath: "python",
-  engine: "ctc",
+  runtimeRoot: "",
+  modelDir: "",
+  minDepth: "fast",
   language: "auto",
   density: "balanced",
   typographyMode: "designed",
@@ -55,8 +56,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoLabelColors: false,
   keepCutPosition: false,
   cutReveal: "cumulative",
-  serverUrl: "https://everyric.moref.co",
-  serverApiKey: "",
   translationLanguage: "ko",
   pronunciationScript: "auto",
 };
@@ -311,7 +310,7 @@ const UI_TEXT: Record<UiLocale, LocaleDictionary> = {
     pronScriptAuto: "자동 (번역 언어 기준)",
     pronScriptHangul: "한글",
     statusLangUnavailable: "이 곡에는 {lang} 번역이 아직 없습니다. 준비된 언어: {available}",
-    statusLangNeedsRefetch: "{lang} 번역은 서버에서 다시 받아야 합니다. 준비된 언어: {available}",
+    statusLangNeedsRefetch: "{lang} 번역이 없습니다. 로컬 싱크를 다시 실행해 주세요. 준비된 언어: {available}",
   },
   ja: {
     settingsAria: "設定",
@@ -504,7 +503,7 @@ const UI_TEXT: Record<UiLocale, LocaleDictionary> = {
     pronScriptAuto: "自動（翻訳言語に合わせる）",
     pronScriptHangul: "ハングル",
     statusLangUnavailable: "この曲には{lang}の翻訳がまだありません。利用可能: {available}",
-    statusLangNeedsRefetch: "{lang}の翻訳はサーバーから取得し直す必要があります。利用可能: {available}",
+    statusLangNeedsRefetch: "{lang}の翻訳がありません。ローカル同期を再実行してください。利用可能: {available}",
   },
   en: {
     settingsAria: "Settings",
@@ -697,7 +696,7 @@ const UI_TEXT: Record<UiLocale, LocaleDictionary> = {
     pronScriptAuto: "Auto (follows translation)",
     pronScriptHangul: "Hangul",
     statusLangUnavailable: "This song has no {lang} translation yet. Available: {available}",
-    statusLangNeedsRefetch: "The {lang} translation has to be fetched from the server again. Available: {available}",
+    statusLangNeedsRefetch: "The {lang} translation is missing. Run local sync again. Available: {available}",
   },
 };
 
@@ -761,7 +760,6 @@ class EveryricStudioPanel {
     });
     this.bindClick("refreshCompBtn", () => this.refreshComp());
     this.bindClick("loadJsonBtn", () => this.loadJson());
-    this.bindClick("fetchServerBtn", () => this.fetchFromServer());
     this.bindClick("forgetSyncBtn", () => this.forgetStoredSync());
     this.bindClick("checkEngineBtn", () => this.checkEngine());
     this.bindClick("runSyncBtn", () => this.runSync());
@@ -793,6 +791,7 @@ class EveryricStudioPanel {
       });
     });
     this.bindClick("installEngineBtn", () => this.installEngineFlow());
+    this.bindClick("repairEngineBtn", () => this.installEngineFlow(true));
     this.bindClick("updateBadge", () => openExternal(this.latestManifest?.ae?.releaseUrl ?? RELEASES_URL));
     this.bindClick("removeTypeMarkersBtn", () => this.removeMarkers());
     this.bindClick("openSettingsBtn", () => this.toggleSettings(true));
@@ -924,14 +923,10 @@ class EveryricStudioPanel {
     this.setText("#view-sync .section-heading h1", "syncTitle");
     this.setText("#view-sync .section-heading p", "syncIntro");
     this.setText("#loadJsonBtn", "loadJson");
-    this.setText("#fetchServerBtn", "fetchServer");
     this.setLabelText("translationLangSelect", "translationLangLabel");
     this.setLabelText("pronScriptSelect", "pronScriptLabel");
     this.setOptionText("pronScriptSelect", "auto", "pronScriptAuto");
     this.setOptionText("pronScriptSelect", "hangul", "pronScriptHangul");
-    element<HTMLInputElement>("videoUrlInput").placeholder = this.t("videoUrlPlaceholder");
-    this.setLabelHint("serverUrlInput", "serverUrlHint");
-    this.setLabelHint("serverApiKeyInput", "serverKeyHint");
     this.setText(".divider span", "localDivider");
     this.setText('label[for="lyricsInput"]', "lyricsLabel");
     this.setText("#checkEngineBtn", "engineCheck");
@@ -1063,7 +1058,9 @@ class EveryricStudioPanel {
   private applySettingsToUI(): void {
     element<HTMLSelectElement>("uiLocaleSelect").value = this.settings.uiLocale;
     element<HTMLInputElement>("pythonPathInput").value = this.settings.pythonPath;
-    element<HTMLSelectElement>("engineSelect").value = this.settings.engine;
+    element<HTMLInputElement>("runtimeRootInput").value = this.settings.runtimeRoot;
+    element<HTMLInputElement>("modelDirInput").value = this.settings.modelDir;
+    element<HTMLSelectElement>("minDepthSelect").value = this.settings.minDepth;
     element<HTMLSelectElement>("languageSelect").value = this.settings.language;
     element<HTMLSelectElement>("densitySelect").value = this.settings.density;
     element<HTMLSelectElement>("typographyModeSelect").value = this.settings.typographyMode;
@@ -1081,8 +1078,6 @@ class EveryricStudioPanel {
     element<HTMLInputElement>("autoLabelColorsCheck").checked = this.settings.autoLabelColors;
     element<HTMLInputElement>("keepCutPositionCheck").checked = this.settings.keepCutPosition;
     element<HTMLSelectElement>("cutRevealSelect").value = this.settings.cutReveal;
-    element<HTMLInputElement>("serverUrlInput").value = this.settings.serverUrl;
-    element<HTMLInputElement>("serverApiKeyInput").value = this.settings.serverApiKey;
     element<HTMLSelectElement>("translationLangSelect").value = this.settings.translationLanguage;
     element<HTMLSelectElement>("pronScriptSelect").value = this.settings.pronunciationScript;
     this.renderPresetState();
@@ -1102,7 +1097,9 @@ class EveryricStudioPanel {
     this.settings = {
       pythonPath: element<HTMLInputElement>("pythonPathInput").value.trim() || "python",
       uiLocale: element<HTMLSelectElement>("uiLocaleSelect").value as UiLocale,
-      engine: element<HTMLSelectElement>("engineSelect").value,
+      runtimeRoot: element<HTMLInputElement>("runtimeRootInput").value.trim(),
+      modelDir: element<HTMLInputElement>("modelDirInput").value.trim(),
+      minDepth: element<HTMLSelectElement>("minDepthSelect").value as AppSettings["minDepth"],
       language: element<HTMLSelectElement>("languageSelect").value,
       density: element<HTMLSelectElement>("densitySelect").value as AppSettings["density"],
       typographyMode: element<HTMLSelectElement>("typographyModeSelect").value as AppSettings["typographyMode"],
@@ -1120,8 +1117,6 @@ class EveryricStudioPanel {
       autoLabelColors: element<HTMLInputElement>("autoLabelColorsCheck").checked,
       keepCutPosition: element<HTMLInputElement>("keepCutPositionCheck").checked,
       cutReveal: element<HTMLSelectElement>("cutRevealSelect").value as AppSettings["cutReveal"],
-      serverUrl: element<HTMLInputElement>("serverUrlInput").value.trim() || DEFAULT_SETTINGS.serverUrl,
-      serverApiKey: element<HTMLInputElement>("serverApiKeyInput").value.trim(),
       translationLanguage: element<HTMLSelectElement>("translationLangSelect").value as AppSettings["translationLanguage"],
       pronunciationScript: element<HTMLSelectElement>("pronScriptSelect").value as AppSettings["pronunciationScript"],
     };
@@ -1494,47 +1489,15 @@ class EveryricStudioPanel {
     this.statusKey("ready", "statusSyncForgotten");
   }
 
-  private async fetchFromServer(): Promise<void> {
-    this.captureSettings(false);
-    const query = element<HTMLInputElement>("videoUrlInput").value;
-    if (!query.trim()) {
-      this.statusKey("error", "statusServerNeedVideo");
-      return;
-    }
-    this.setBusyKey(true, "statusServerFetching");
-    try {
-      const result = await fetchServerSync(
-        this.settings.serverUrl,
-        query,
-        this.settings.serverApiKey,
-        this.settings.translationLanguage,
-      );
-      this.setSyncDocument(result.document);
-      const available = selectableLanguages(result.document);
-      if (available.length > 0 && available.indexOf(this.settings.translationLanguage) < 0) {
-        this.addProgress("warn", this.t("statusLangUnavailable", {
-          lang: this.settings.translationLanguage,
-          available: available.join(", "),
-        }));
-      }
-      if (result.attribution?.name) this.addProgress("info", `${this.t("cutTransLabel")} · ${result.attribution.name}`);
-      if (result.linked?.source_video_id) {
-        // 빌려온 싱크는 다른 영상 기준이라, 오프셋이 맞는지 사용자가 알아야 한다.
-        this.addProgress("warn", this.t("statusServerLinked", { source: result.linked.source_video_id }));
-      }
-      this.statusKey("success", "statusServerFetched", { count: result.document.lines.length });
-    } catch (error) {
-      this.statusKey("error", "statusParseError", { error: errorMessage(error) });
-    } finally {
-      this.setBusy(false);
-    }
-  }
-
   private async checkEngine(): Promise<void> {
     this.captureSettings(false);
     this.setBusyKey(true, "statusEnvChecking");
     try {
-      const report = await inspectEnvironment(this.settings.pythonPath);
+      const report = await inspectEnvironment(
+        this.settings.pythonPath,
+        this.settings.runtimeRoot || undefined,
+        this.settings.modelDir || undefined,
+      );
       this.renderEnvironmentReport(report);
       const vram = report.vramTotalMb
         ? this.t("vramSuffix", { gb: Math.round(report.vramTotalMb / 1024) })
@@ -1608,7 +1571,7 @@ class EveryricStudioPanel {
     }
   }
 
-  private async installEngineFlow(): Promise<void> {
+  private async installEngineFlow(repair = false): Promise<void> {
     this.latestManifest = this.latestManifest ?? (await fetchLatestManifest());
     this.abortController = new AbortController();
     this.setBusyKey(true, "statusEngineInstalling", { message: "…" });
@@ -1618,6 +1581,8 @@ class EveryricStudioPanel {
         onProgress: (message) => this.statusKey("busy", "statusEngineInstalling", { message }),
         signal: this.abortController.signal,
         extensionRoot: extensionRoot(),
+        modelDir: this.settings.modelDir || undefined,
+        repair,
       });
       this.settings.pythonPath = pythonPath;
       this.saveSettings();
@@ -1652,10 +1617,12 @@ class EveryricStudioPanel {
     try {
       const payload = await runLocalSync({
         pythonPath: this.settings.pythonPath,
-        engine: this.settings.engine,
         language: this.settings.language,
         audioPath,
         lyrics,
+        runtimeRoot: this.settings.runtimeRoot || undefined,
+        modelDir: this.settings.modelDir || undefined,
+        minDepth: this.settings.minDepth,
       }, (message) => this.statusKey("busy", "statusSyncProgress", { message }), this.abortController.signal);
       this.setSyncDocument(normalizeSyncPayload(payload, "로컬 Everyric2"));
     } catch (error) {

@@ -1114,6 +1114,9 @@
   "overlay_notice_autoCollapsed": {
     "message": "창 폭이 좁아 자동으로 접혔어요. 창을 넓히면 다시 표시돼요"
   },
+  "overlay_notice_confirmArmed": {
+    "message": "— 같은 버튼을 한 번 더 누르면 진행돼요"
+  },
   "overlay_settings_row_streamTextOutline": {
     "message": "글자 외곽선(방송용)"
   },

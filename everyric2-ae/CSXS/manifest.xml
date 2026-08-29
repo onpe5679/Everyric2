@@ -2,10 +2,10 @@
 <ExtensionManifest Version="12.0"
   ExtensionBundleId="com.everyric.studio"
   ExtensionBundleName="Everyric Studio"
-  ExtensionBundleVersion="2.2.0"
+  ExtensionBundleVersion="3.0.0"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.everyric.studio.panel" Version="2.2.0"/>
+    <Extension Id="com.everyric.studio.panel" Version="3.0.0"/>
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>

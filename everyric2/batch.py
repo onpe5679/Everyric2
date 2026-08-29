@@ -112,10 +112,10 @@ class BatchRunner:
             return results
 
         if log_callback:
-            log_callback("Loading CTC engine...")
+            log_callback("Loading adaptive engine...")
 
         settings = get_settings()
-        self.engine = EngineFactory.get_engine("ctc", settings.alignment)
+        self.engine = EngineFactory.get_engine("adaptive", settings.alignment)
 
         if log_callback:
             log_callback(f"Engine loaded. Running {len(tests_to_run)} tests...")

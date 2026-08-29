@@ -16,11 +16,13 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 
 if (tag.startsWith("ae-v")) {
   const version = tag.slice("ae-v".length);
+  const major = Number(version.split(".")[0]);
   manifest.ae = {
     ...manifest.ae,
     version,
     zxpUrl: `${REPO_URL}/releases/download/${tag}/Everyric-Studio-${version}.zxp`,
     releaseUrl: `${REPO_URL}/releases/tag/${tag}`,
+    engineRange: major >= 3 ? ">=1.0.0 <2.0.0" : manifest.ae?.engineRange,
   };
 } else if (tag.startsWith("engine-v")) {
   const version = tag.slice("engine-v".length);

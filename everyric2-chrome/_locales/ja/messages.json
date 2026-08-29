@@ -1114,6 +1114,9 @@
   "overlay_notice_autoCollapsed": {
     "message": "ウィンドウの幅が狭いため自動的にたたまれました。広げると再び表示されます"
   },
+  "overlay_notice_confirmArmed": {
+    "message": "— 同じボタンをもう一度押すと実行されます"
+  },
   "overlay_settings_row_streamTextOutline": {
     "message": "文字の縁取り（配信用）"
   },

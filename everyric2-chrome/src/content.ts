@@ -712,6 +712,11 @@ function broadcast<K extends keyof LyricsOverlay>(
   ...args: LyricsOverlay[K] extends (...a: infer A) => void ? A : never
 ): void {
   for (const p of panels()) (p[method] as (...a: unknown[]) => void)(...args);
+  // 영상 자막 모듈은 «패널»이 아니라 이 방송의 수신자가 아니었다. 번역은 라인 객체에
+  // 제자리로 붙는데(applyTranslations·clearTranslations 모두 mutation), 이 모듈은 줄이
+  // 넘어갈 때만 다시 그리므로 **현재 줄에는 번역이 끝내 안 나타났다** — 일시정지 중이면
+  // 영영. 데이터는 이미 공유하고 있으니 «다시 그려라»만 같이 전하면 된다.
+  if (method === 'refreshTranslations') videoCaption.refresh();
 }
 
 /**

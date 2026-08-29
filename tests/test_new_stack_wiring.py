@@ -34,39 +34,22 @@ from everyric2.config.settings import (
 from everyric2.inference.prompt import LyricLine, SyncResult, WordSegment
 from everyric2.server import worker
 
-
 # ---------------------------------------------------------------------------
 # 설정 정합성 가드 — Settings의 cross-field validator
 # ---------------------------------------------------------------------------
 
 
 class TestNewStackSeparatorConsistency:
-    def test_legacy_engine_with_htdemucs_is_fine(self):
-        Settings(alignment=AlignmentSettings(engine="ctc"), audio=AudioSettings(separator_backend="htdemucs"))
-
-    def test_new_stack_engine_with_htdemucs_raises(self):
+    def test_adaptive_engine_with_htdemucs_raises(self):
         with pytest.raises(ValueError, match="bs-polarformer-fp16"):
             Settings(
-                alignment=AlignmentSettings(engine="owsm"),
+                alignment=AlignmentSettings(engine="adaptive"),
                 audio=AudioSettings(separator_backend="htdemucs"),
             )
 
-    def test_omniasr_engine_with_htdemucs_also_raises(self):
-        with pytest.raises(ValueError, match="bs-polarformer-fp16"):
-            Settings(
-                alignment=AlignmentSettings(engine="omniasr"),
-                audio=AudioSettings(separator_backend="htdemucs"),
-            )
-
-    def test_new_stack_engine_with_polarformer_is_fine(self):
+    def test_adaptive_engine_with_polarformer_is_fine(self):
         Settings(
-            alignment=AlignmentSettings(engine="owsm"),
-            audio=AudioSettings(separator_backend="bs-polarformer-fp16"),
-        )
-
-    def test_legacy_engine_with_polarformer_is_fine(self):
-        Settings(
-            alignment=AlignmentSettings(engine="ctc"),
+            alignment=AlignmentSettings(engine="adaptive"),
             audio=AudioSettings(separator_backend="bs-polarformer-fp16"),
         )
 
@@ -78,7 +61,7 @@ class TestNewStackSeparatorConsistency:
 
 class _FakeSettings:
     def __init__(self, engine: str) -> None:
-        self.alignment = AlignmentSettings(engine=engine)
+        self.alignment = SimpleNamespace(engine=engine)
 
 
 class TestNewStackGate:
@@ -86,9 +69,8 @@ class TestNewStackGate:
         for engine in ("ctc", "nemo", "gpu-hybrid", "sofa"):
             assert worker._new_stack_enabled(_FakeSettings(engine)) is False
 
-    def test_enabled_for_new_anchor_engines(self):
-        for engine in ("owsm", "omniasr"):
-            assert worker._new_stack_enabled(_FakeSettings(engine)) is True
+    def test_enabled_only_for_adaptive_engine(self):
+        assert worker._new_stack_enabled(_FakeSettings("adaptive")) is True
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +80,7 @@ class TestNewStackGate:
 
 class _FakeAlignmentSettings:
     def __init__(self, **flags: bool) -> None:
-        self.engine = "owsm"
+        self.engine = "adaptive"
         self.caption_anchors = flags.get("caption_anchors", False)
         self.caption_scaffold = flags.get("caption_scaffold", False)
         self.star_prior = flags.get("star_prior", False)
@@ -258,7 +240,7 @@ class _FakeAnchor:
 
 
 def _settings(**overrides) -> Any:
-    kwargs: dict[str, Any] = {"engine": "owsm", "two_pass_enabled": False}
+    kwargs: dict[str, Any] = {"engine": "adaptive", "two_pass_enabled": False}
     kwargs.update(overrides)
     align = AlignmentSettings(**kwargs)
     return SimpleNamespace(
@@ -347,9 +329,7 @@ class TestRunFastStage:
             recorded["type"] = engine_type
             return anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         lyric_lines = [LyricLine(text="hi", line_number=1)]
         stack = worker._run_fast_stage(_silence(), lyric_lines, "en", _settings())
 
@@ -390,8 +370,13 @@ class TestRunDeepStage:
         )
         with pytest.raises(RuntimeError, match="bs-polarformer-fp16"):
             worker._run_deep_stage(
-                _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-                _settings(), lambda s: None, "heavy",
+                _silence(),
+                None,
+                [LyricLine(text="a", line_number=1)],
+                "ja",
+                _settings(),
+                lambda s: None,
+                "heavy",
             )
         assert anchor.align_calls == []
 
@@ -402,18 +387,26 @@ class TestRunDeepStage:
             anchor_calls.append(engine_type)
             return _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=0.5)])
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         settings = _settings(two_pass_enabled=False)
         worker._run_deep_stage(
-            _silence(), sep, [LyricLine(text="a", line_number=1)], "ja",
-            settings, lambda s: None, "heavy",
+            _silence(),
+            sep,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            settings,
+            lambda s: None,
+            "heavy",
         )
         worker._run_deep_stage(
-            _silence(), sep, [LyricLine(text="a", line_number=1)], "en",
-            settings, lambda s: None, "medium",
+            _silence(),
+            sep,
+            [LyricLine(text="a", line_number=1)],
+            "en",
+            settings,
+            lambda s: None,
+            "medium",
         )
         assert anchor_calls == ["owsm", "omniasr"]
 
@@ -429,8 +422,13 @@ class TestRunDeepStage:
             "everyric2.audio.separator.get_shared_separator", lambda config=None: fake_sep
         )
         stack = worker._run_deep_stage(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(two_pass_enabled=False), lambda s: None, "heavy",
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
+            "heavy",
         )
         assert fake_sep.separate_calls == 1
         assert stack.sep_result is sep
@@ -443,14 +441,17 @@ class TestRunDeepStage:
         def fake_get_engine(engine_type, config=None):
             return anchor if engine_type == "owsm" else refiner
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         with pytest.raises(RuntimeError, match="refiner not available"):
             worker._run_deep_stage(
-                _silence(), sep, [LyricLine(text="a", line_number=1)], "ja",
-                _settings(two_pass_enabled=True), lambda s: None, "heavy",
+                _silence(),
+                sep,
+                [LyricLine(text="a", line_number=1)],
+                "ja",
+                _settings(two_pass_enabled=True),
+                lambda s: None,
+                "heavy",
             )
 
     def test_two_pass_disabled_is_a_legitimate_choice_not_a_failure(self, monkeypatch):
@@ -461,8 +462,13 @@ class TestRunDeepStage:
         )
         sep = _FakeSepResult(_silence(), _silence())
         stack = worker._run_deep_stage(
-            _silence(), sep, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(two_pass_enabled=False), lambda s: None, "heavy",
+            _silence(),
+            sep,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
+            "heavy",
         )
         assert stack.pron_data == {}
         assert stack.alignment_text == "heavy"
@@ -487,7 +493,11 @@ class TestRunDeepStage:
         emission = torch.log_softmax(logits, dim=-1)
         line_end = len(token_ids) * frame_sec
         fake_emission = EngineEmission(
-            emission=emission, blank_id=0, frame_sec=frame_sec, audio_sec=line_end, chunks=1,
+            emission=emission,
+            blank_id=0,
+            frame_sec=frame_sec,
+            audio_sec=line_end,
+            chunks=1,
             vocab=vocab,
         )
         anchor_result = SyncResult(text="cat", start_time=0.0, end_time=line_end, confidence=0.9)
@@ -497,13 +507,16 @@ class TestRunDeepStage:
         def fake_get_engine(engine_type, config=None):
             return anchor if engine_type == "owsm" else refiner_engine
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(0.5), _silence(0.5))
         stack = worker._run_deep_stage(
-            _silence(0.5), sep, [LyricLine(text="cat", line_number=1)], "ja",
-            _settings(two_pass_enabled=True), lambda s: None, "heavy",
+            _silence(0.5),
+            sep,
+            [LyricLine(text="cat", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=True),
+            lambda s: None,
+            "heavy",
         )
         assert stack.alignment_text == "heavy-2pass"
         assert 0 in stack.pron_data
@@ -526,9 +539,7 @@ class TestRunDeepStage:
         def fake_get_engine(engine_type, config=None):
             return anchor if engine_type == "owsm" else refiner_engine
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
 
         def _raise(*a, **kw):
             raise RuntimeError("refine exploded")
@@ -537,8 +548,13 @@ class TestRunDeepStage:
         sep = _FakeSepResult(_silence(0.5), _silence(0.5))
         with pytest.raises(RuntimeError, match="refine exploded"):
             worker._run_deep_stage(
-                _silence(0.5), sep, [LyricLine(text="가", line_number=1)], "ja",
-                _settings(two_pass_enabled=True), lambda s: None, "heavy",
+                _silence(0.5),
+                sep,
+                [LyricLine(text="가", line_number=1)],
+                "ja",
+                _settings(two_pass_enabled=True),
+                lambda s: None,
+                "heavy",
             )
 
 
@@ -567,9 +583,7 @@ class TestRunDeepStageLineFallbackVisibility:
         def fake_get_engine(engine_type, config=None):
             return anchor if engine_type == "owsm" else refiner_engine
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
 
         # 라인0은 정상 리파인, 라인1은 fallback_reason만 걸리고 pron/pron_segs가 비어 있다
         # (실제 refine_lines가 "window_shorter_than_targets" 등에서 만드는 모양 그대로).
@@ -587,8 +601,13 @@ class TestRunDeepStageLineFallbackVisibility:
         ]
         with caplog.at_level("WARNING"):
             stack = worker._run_deep_stage(
-                _silence(0.5), sep, lyric_lines, "ja",
-                _settings(two_pass_enabled=True), lambda s: None, "heavy",
+                _silence(0.5),
+                sep,
+                lyric_lines,
+                "ja",
+                _settings(two_pass_enabled=True),
+                lambda s: None,
+                "heavy",
             )
 
         # 정상 리파인 라인만 pron_data에 실린다 — fallback 라인은 조용히 빠지되(그 자체는
@@ -608,9 +627,7 @@ class TestRunDeepStageLineFallbackVisibility:
         def fake_get_engine(engine_type, config=None):
             return anchor if engine_type == "owsm" else refiner_engine
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         refined = [RefinedLine(start=0.0, end=0.5, pron={"hangul": "가"}, refined=True)]
         monkeypatch.setattr(
             "everyric2.alignment.refine_window.refine_lines", lambda *a, **kw: refined
@@ -618,8 +635,13 @@ class TestRunDeepStageLineFallbackVisibility:
         sep = _FakeSepResult(_silence(0.5), _silence(0.5))
         with caplog.at_level("WARNING"):
             worker._run_deep_stage(
-                _silence(0.5), sep, [LyricLine(text="가", line_number=1)], "ja",
-                _settings(two_pass_enabled=True), lambda s: None, "heavy",
+                _silence(0.5),
+                sep,
+                [LyricLine(text="가", line_number=1)],
+                "ja",
+                _settings(two_pass_enabled=True),
+                lambda s: None,
+                "heavy",
             )
         messages = [r.getMessage() for r in caplog.records]
         assert not any("fell back to anchor-only" in m for m in messages)
@@ -640,12 +662,14 @@ class TestRoutingDecision:
             calls.append(engine_type)
             return anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(), lambda s: None,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(),
+            lambda s: None,
         )
         assert calls == ["omniasr"]
         assert stack.alignment_text == "fast"
@@ -665,17 +689,19 @@ class TestRoutingDecision:
             calls.append(engine_type)
             return fast_anchor if len(calls) == 1 else deep_anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
             lambda config=None: _FakeSeparator(True, sep),
         )
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(two_pass_enabled=False), lambda s: None,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
         )
         assert calls == ["omniasr", "owsm"]  # 고속만으로 안 끝나고 heavy까지 갔다
         assert stack.alignment_text == "heavy"
@@ -691,14 +717,13 @@ class TestRoutingDecision:
             pytest.param([-11.7, -8.0, -4.5], False, id="normal-band"),
         ],
     )
-    def test_measured_bench_bands_route_correctly(
-        self, monkeypatch, log_conf_values, expect_heavy
-    ):
+    def test_measured_bench_bands_route_correctly(self, monkeypatch, log_conf_values, expect_heavy):
         import math
 
         fast_results = [
-            SyncResult(text=f"line{i}", start_time=float(i), end_time=float(i + 1),
-                       confidence=math.exp(v))
+            SyncResult(
+                text=f"line{i}", start_time=float(i), end_time=float(i + 1), confidence=math.exp(v)
+            )
             for i, v in enumerate(log_conf_values)
         ]
         fast_anchor = _FakeAnchor(fast_results)
@@ -709,18 +734,19 @@ class TestRoutingDecision:
             calls.append(engine_type)
             return fast_anchor if len(calls) == 1 else deep_anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
             lambda config=None: _FakeSeparator(True, sep),
         )
         stack = worker._run_new_stack_alignment(
-            _silence(), None,
+            _silence(),
+            None,
             [LyricLine(text=f"line{i}", line_number=i + 1) for i in range(len(log_conf_values))],
-            "ja", _settings(two_pass_enabled=False), lambda s: None,
+            "ja",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
         )
         if expect_heavy:
             assert calls == ["omniasr", "owsm"]
@@ -739,17 +765,19 @@ class TestRoutingDecision:
             calls.append(engine_type)
             return fast_anchor if len(calls) == 1 else deep_anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
             lambda config=None: _FakeSeparator(True, sep),
         )
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(two_pass_enabled=False), lambda s: None,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
         )
         assert calls == ["omniasr", "owsm"]
         assert stack.alignment_text == "heavy"
@@ -763,17 +791,19 @@ class TestRoutingDecision:
             calls.append(engine_type)
             return deep_anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
             lambda config=None: _FakeSeparator(True, sep),
         )
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "en",
-            _settings(two_pass_enabled=False), lambda s: None,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "en",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
         )
         assert calls == ["omniasr"]  # medium의 자기앵커 한 번뿐 — fast 단계 자체가 안 돌았다
         assert stack.alignment_text == "medium"
@@ -791,9 +821,7 @@ class TestRoutingDecision:
             depth_calls.append(engine_type)
             return _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=1.0)])
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         # 매 get_shared_separator 호출마다 새 인스턴스를 만들지 않는다 — medium->heavy
         # 승급이 분리를 재사용하는지 확인하려면 separate_calls 카운터가 호출 전체에
@@ -808,8 +836,12 @@ class TestRoutingDecision:
         monkeypatch.setattr(worker, "_stranded_count", lambda stack: next(counts))
 
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "en",
-            _settings(two_pass_enabled=False), lambda s: None,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "en",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
         )
         assert depth_calls == ["omniasr", "owsm"]
         assert stack.alignment_text == "heavy-escalated"
@@ -828,9 +860,7 @@ class TestRoutingDecision:
             depth_calls.append(engine_type)
             return _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=1.0)])
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
@@ -840,8 +870,12 @@ class TestRoutingDecision:
         monkeypatch.setattr(worker, "_stranded_count", lambda stack: next(counts))
 
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "en",
-            _settings(two_pass_enabled=False), lambda s: None,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "en",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
         )
         assert depth_calls == ["omniasr", "owsm"]
         assert stack.alignment_text == "medium"
@@ -895,18 +929,19 @@ class TestRoutingLanguageResolution:
             calls.append(engine_type)
             return deep_anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
             lambda config=None: _FakeSeparator(True, sep),
         )
         stack = worker._run_new_stack_alignment(
-            _silence(), None,
+            _silence(),
+            None,
             [LyricLine(text="the weathergirl says sunshine again", line_number=1)],
-            None, _settings(two_pass_enabled=False), lambda s: None,
+            None,
+            _settings(two_pass_enabled=False),
+            lambda s: None,
         )
         assert calls == ["omniasr"]  # medium 자기앵커 한 번뿐 — fast 단계가 아예 안 돌았다
         assert stack.alignment_text == "medium"
@@ -922,9 +957,12 @@ class TestRoutingLanguageResolution:
             lambda engine_type, config=None: anchor,
         )
         stack = worker._run_new_stack_alignment(
-            _silence(), None,
+            _silence(),
+            None,
             [LyricLine(text="ナムナム baby yeah we go party tonight", line_number=1)],
-            None, _settings(), lambda s: None,
+            None,
+            _settings(),
+            lambda s: None,
         )
         assert stack.alignment_text == "fast"
         assert stack.routing_meta["language"] == "ja"
@@ -941,9 +979,12 @@ class TestRoutingLanguageResolution:
             lambda engine_type, config=None: anchor,
         )
         stack = worker._run_new_stack_alignment(
-            _silence(), None,
+            _silence(),
+            None,
             [LyricLine(text="pure latin lyrics only here", line_number=1)],
-            "ja", _settings(), lambda s: None,
+            "ja",
+            _settings(),
+            lambda s: None,
         )
         assert stack.alignment_text == "fast"
         assert stack.routing_meta["language"] == "ja"
@@ -958,13 +999,9 @@ class TestMinDepthOverride:
 
         def fake_get_engine(engine_type, config=None):
             calls.append(engine_type)
-            return _FakeAnchor(
-                [SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=0.9)]
-            )
+            return _FakeAnchor([SyncResult(text="a", start_time=0.0, end_time=1.0, confidence=0.9)])
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
@@ -977,8 +1014,13 @@ class TestMinDepthOverride:
         # 버튼의 배지 숫자와 결과 깊이가 일치해야 한다(예측 가능성).
         calls = self._mock_engines(monkeypatch)
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(two_pass_enabled=False), lambda s: None, min_depth="heavy",
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
+            min_depth="heavy",
         )
         assert calls == ["owsm"]  # fast 단계(omniasr) 자체가 안 돌았다
         assert stack.alignment_text == "heavy"
@@ -989,8 +1031,13 @@ class TestMinDepthOverride:
         # ja의 기본 사다리는 fast→heavy로 medium을 건너뛰지만, 명시 요청은 그대로 존중한다
         calls = self._mock_engines(monkeypatch)
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(two_pass_enabled=False), lambda s: None, min_depth="medium",
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=False),
+            lambda s: None,
+            min_depth="medium",
         )
         assert calls == ["omniasr"]
         assert stack.alignment_text == "medium"
@@ -999,8 +1046,12 @@ class TestMinDepthOverride:
     def test_no_min_depth_keeps_router(self, monkeypatch):
         calls = self._mock_engines(monkeypatch)
         stack = worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(), lambda s: None,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(),
+            lambda s: None,
         )
         assert calls == ["omniasr"]
         assert stack.alignment_text == "fast"
@@ -1019,10 +1070,17 @@ class TestFinishNewStackLanguageFallback:
             lambda engine_type, config=None: anchor,
         )
         out = worker._finish_new_stack_alignment(
-            _silence(0.5), None, None,
+            _silence(0.5),
+            None,
+            None,
             [LyricLine(text="こんにちは", line_number=1)],
-            None, _settings(), lambda s: None,
-            gloss_folded=None, melody_extractor=None, f0_future=None, f0_executor=None,
+            None,
+            _settings(),
+            lambda s: None,
+            gloss_folded=None,
+            melody_extractor=None,
+            f0_future=None,
+            f0_executor=None,
         )
         assert out["language"] == "ja"
         assert out["debug"]["routing"]["language_source"] == "script_census"
@@ -1035,9 +1093,17 @@ class TestFinishNewStackLanguageFallback:
             lambda engine_type, config=None: anchor,
         )
         out = worker._finish_new_stack_alignment(
-            _silence(0.5), None, None, [LyricLine(text="hi", line_number=1)],
-            "ja", _settings(), lambda s: None,
-            gloss_folded=None, melody_extractor=None, f0_future=None, f0_executor=None,
+            _silence(0.5),
+            None,
+            None,
+            [LyricLine(text="hi", line_number=1)],
+            "ja",
+            _settings(),
+            lambda s: None,
+            gloss_folded=None,
+            melody_extractor=None,
+            f0_future=None,
+            f0_executor=None,
         )
         assert out["language"] == "ja"
 
@@ -1052,7 +1118,10 @@ class TestFinishNewStackAlignment:
         # ja + 고신뢰(0.9) -> 라우팅이 fast 깊이에서 끝나 분리가 전혀 필요 없다(en은 강제로
         # medium부터 시작해 분리 목이 또 필요해진다 — 별도 관심사라 여기서는 안 섞는다).
         result = SyncResult(
-            text="hi", start_time=0.0, end_time=1.0, confidence=0.9,
+            text="hi",
+            start_time=0.0,
+            end_time=1.0,
+            confidence=0.9,
             word_segments=[WordSegment(word="hi", start=0.0, end=1.0, confidence=0.9)],
         )
         anchor = _FakeAnchor([result])
@@ -1065,8 +1134,17 @@ class TestFinishNewStackAlignment:
         audio = _silence(0.5)
 
         out = worker._finish_new_stack_alignment(
-            audio, None, None, lyric_lines, "ja", settings, lambda s: None,
-            gloss_folded=None, melody_extractor=None, f0_future=None, f0_executor=None,
+            audio,
+            None,
+            None,
+            lyric_lines,
+            "ja",
+            settings,
+            lambda s: None,
+            gloss_folded=None,
+            melody_extractor=None,
+            f0_future=None,
+            f0_executor=None,
         )
 
         assert out["timestamps"][0]["text"] == "hi"
@@ -1106,8 +1184,17 @@ class TestFinishNewStackAlignmentTranslationWiring:
             LyricLine(text="World", line_number=2),
         ]
         out = worker._finish_new_stack_alignment(
-            _silence(0.5), None, None, lyric_lines, "ja", _settings(), lambda s: None,
-            gloss_folded=None, melody_extractor=None, f0_future=None, f0_executor=None,
+            _silence(0.5),
+            None,
+            None,
+            lyric_lines,
+            "ja",
+            _settings(),
+            lambda s: None,
+            gloss_folded=None,
+            melody_extractor=None,
+            f0_future=None,
+            f0_executor=None,
         )
 
         # merge_line_meta(구/신 두 경로가 run_pipeline_core에서 공유하는 병합 함수)가
@@ -1159,8 +1246,12 @@ class TestStageReporting:
         )
         seen: list[str] = []
         worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(), seen.append,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(),
+            seen.append,
         )
         assert seen, "fast route reported nothing"
         assert set(seen) <= self._REGISTERED_STAGES, seen
@@ -1178,9 +1269,7 @@ class TestStageReporting:
             calls.append(engine_type)
             return fast_anchor if len(calls) == 1 else deep_anchor
 
-        monkeypatch.setattr(
-            "everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine
-        )
+        monkeypatch.setattr("everyric2.alignment.factory.EngineFactory.get_engine", fake_get_engine)
         sep = _FakeSepResult(_silence(), _silence())
         monkeypatch.setattr(
             "everyric2.audio.separator.get_shared_separator",
@@ -1188,8 +1277,12 @@ class TestStageReporting:
         )
         seen: list[str] = []
         worker._run_new_stack_alignment(
-            _silence(), None, [LyricLine(text="a", line_number=1)], "ja",
-            _settings(two_pass_enabled=False), seen.append,
+            _silence(),
+            None,
+            [LyricLine(text="a", line_number=1)],
+            "ja",
+            _settings(two_pass_enabled=False),
+            seen.append,
         )
         # 실제 순서는 ["전사 정렬"(고속 시도) -> "보컬 분리"(heavy 진입) -> "전사 정렬"
         # (heavy 앵커)]다 — 고속 시도 자체도 "정렬"이라 먼저 한 번 나오는 게 맞다. 순서
@@ -1209,11 +1302,17 @@ class TestStageReporting:
         logits[0, 1, 1] = 8.0
         emission = torch.log_softmax(logits, dim=-1)
         fake_emission = EngineEmission(
-            emission=emission, blank_id=0, frame_sec=0.02, audio_sec=0.08, chunks=1,
+            emission=emission,
+            blank_id=0,
+            frame_sec=0.02,
+            audio_sec=0.08,
+            chunks=1,
             vocab=vocab,
         )
         anchor = _FakeAnchor([SyncResult(text="가", start_time=0.0, end_time=0.08)])
-        anchor.emission_for = lambda audio: fake_emission  # depth="medium" -> omniasr 자기앵커 겸 리파이너
+        anchor.emission_for = lambda audio: (
+            fake_emission
+        )  # depth="medium" -> omniasr 자기앵커 겸 리파이너
         monkeypatch.setattr(
             "everyric2.alignment.factory.EngineFactory.get_engine",
             lambda engine_type, config=None: anchor,
@@ -1221,8 +1320,13 @@ class TestStageReporting:
         sep = _FakeSepResult(_silence(0.5), _silence(0.5))
         seen: list[str] = []
         worker._run_deep_stage(
-            _silence(0.5), sep, [LyricLine(text="가", line_number=1)], "en",
-            _settings(two_pass_enabled=True), seen.append, "medium",
+            _silence(0.5),
+            sep,
+            [LyricLine(text="가", line_number=1)],
+            "en",
+            _settings(two_pass_enabled=True),
+            seen.append,
+            "medium",
         )
         assert set(seen) <= self._REGISTERED_STAGES, seen
         # 앵커 정렬 진입 + 2패스 진입, 둘 다 같은 등록된 이름으로 두 번 나온다.

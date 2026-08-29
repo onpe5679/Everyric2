@@ -689,7 +689,7 @@ async def submit_result(
             # (위 주석 참고) 이 결함이 실사용자 데이터에 실제로 영향을 준다(MoRef 실측:
             # 신규 3행 전부 engine='ctc'인데 engine_version은 새 스택 값). 구버전 원격
             # 워커는 request.engine이 None이라 기존과 같은 "ctc" 기본값으로 떨어진다.
-            engine=request.engine or "ctc",
+            engine=request.engine or "adaptive",
             engine_variant=request.engine_variant,
             quality_score=request.quality_score,
             audio_hash=request.audio_hash,
