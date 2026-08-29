@@ -883,6 +883,53 @@ class TestRoutingDecision:
         assert stack.routing_meta["stranded_after"] == 2
 
 
+class TestTerminalSilenceQualityGate:
+    @staticmethod
+    def _live_failure_shape():
+        # bEV_tH_yrIc production snapshot: VAD ended at 172.28s, then two low-confidence
+        # lyric lines were stored from 181.331s through 186.014s.
+        results = [
+            SyncResult(text="Windless skies", start_time=163.936, end_time=169.0, confidence=0.0046),
+            SyncResult(text="Kindness blinds", start_time=181.331, end_time=181.781, confidence=0.0011),
+            SyncResult(text="through the fire", start_time=181.781, end_time=186.014, confidence=0.0009),
+        ]
+        return SimpleNamespace(
+            results=results,
+            vad_regions=[(115.82, 172.28)],
+            activity=SimpleNamespace(
+                regions=[SimpleNamespace(start=115.82, end=172.28)]
+            ),
+        )
+
+    def test_live_consecutive_terminal_silence_is_a_hard_failure(self):
+        stack = self._live_failure_shape()
+
+        issue = worker._terminal_silence_issue(stack)
+
+        assert issue == {
+            "last_vocal_end": 172.28,
+            "first_line_index": 1,
+            "line_count": 2,
+            "first_line_start": 181.331,
+            "max_confidence": 0.0011,
+        }
+        with pytest.raises(worker.PipelineError, match="잘못된 싱크는 저장하지 않았습니다"):
+            worker._enforce_deep_alignment_quality(stack)
+
+    def test_one_uncertain_trailing_line_remains_fail_open(self):
+        stack = self._live_failure_shape()
+        stack.results = stack.results[:2]
+
+        assert worker._terminal_silence_issue(stack) is None
+        worker._enforce_deep_alignment_quality(stack)
+
+    def test_missing_independent_activity_signal_remains_fail_open(self):
+        stack = self._live_failure_shape()
+        stack.activity = None
+
+        assert worker._terminal_silence_issue(stack) is None
+
+
 # ---------------------------------------------------------------------------
 # _resolve_stack_language — 라벨이 비면 문자 계열 우세 판정 (weathergirl 결함, 2026-08-03)
 #

@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from everyric2.config.settings import TranslationSettings, get_settings
 from everyric2.inference.prompt import LyricLine
-from everyric2.text.ja_reading import kana_reading, reading_source
+from everyric2.text.ja_reading import reading_source
 from everyric2.text.kana_hangul import has_kana
 from everyric2.text.ko_reading import hangul_to_kana, hangul_to_romaja
 from everyric2.text.pron_style import romaji_line, wiki_pronunciation
@@ -104,70 +104,12 @@ class TranslationBudget:
 _HANGUL_RE = re.compile(r"[가-힣]")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 _OTHER_LETTER_RE = re.compile(r"[^\x00-\x7F가-힣\s\W]")
-_JA_CHAR_RE = re.compile(r"[぀-ヿ㐀-鿿]")
 # 원문 대조용 정규화 — 공백·문장부호를 지운다 (모델이 원문을 되돌려줄 때의 사소한 정리 흡수)
 _ALIGN_STRIP_RE = re.compile(r"[\s\W_]+", re.UNICODE)
 
-# pykakasi가 문맥 없이 오독하거나 훈독이 갈리는 대표 항목 — 단일 확정값 대신 후보를
-# 함께 제시해 모델이 문맥으로 고르게 한다. 실측(pykakasi 2.3):
-#   今更止められない → いまさら"やめ"られない (정답 とめ), 涙を止める → なみだを"やめる",
-#   風が止む → かぜが"とむ" (정답 やむ), 君にだけ → "くん"にだけ (노래에선 きみ)
-# 문맥으로 판별 가능한 것만 담는다 — 行く(いく/ゆく)나 明日(あした/あす)처럼 텍스트만으로
-# 정할 수 없는 것은 오히려 사전값보다 나빠질 수 있어 넣지 않는다.
-# 표는 남겨 두지만 적용은 pykakasi 폴백 경로로 좁혔다(_build_prompt 참조).
-# 일본어 곡의 한글 독음은 이제 LLM에 묻지 않으므로(_use_deterministic_pron) 이 표가 실제로
-# 쓰이는 곳은 **발음을 LLM에 묻는 경로**뿐이다 — 형태소 분석기를 못 쓰는 환경(폴백)과
-# 비일본어(중국어 등) 원문. 그 경로에서는 여전히 유효하다.
-_AMBIGUOUS_READINGS: tuple[tuple[str, str], ...] = (
-    ("君", "きみ (you) / くん (name suffix)"),
-    ("止め", "とめ (stop something) / やめ (quit, give up)"),
-    ("止む", "やむ (rain/wind ceasing)"),
-    ("止ん", "やん (止んで = やんで)"),
-    ("開く", "ひらく (~を開く) / あく (~が開く)"),
-    ("空く", "あく (becomes vacant) / すく (お腹が空く)"),
-)
-
-
-def _kana_readings(text: str) -> list[str] | None:
-    """일본어 원문 각 라인의 히라가나 읽기 — 발음 프롬프트의 참조.
-
-    읽기 엔진은 everyric2.text.ja_reading이 단독 소유한다(형태소 분석 우선, pykakasi
-    폴백). 스레드 안전(번역 배치가 병렬로 부른다)도 그 모듈이 락으로 책임진다.
-
-    일본어 문자가 없거나 읽기 실패 시 None (힌트 없이 진행).
-    라인 수·순서는 입력 텍스트의 줄과 1:1.
-    """
-    if not _JA_CHAR_RE.search(text):
-        return None
-    try:
-        readings = [
-            kana_reading(stripped) if (stripped := ln.strip()) else ""
-            for ln in text.split("\n")
-        ]
-        return readings if any(readings) else None
-    except Exception:
-        logger.exception("kana reading hints failed; prompting without them")
-        return None
-
-
-def _reading_candidates(line: str) -> str:
-    """라인에 다의어 훈독이 있으면 후보 목록 주석을 만든다 (없으면 빈 문자열).
-
-    사전 참조값을 '정답'으로 박아두면 모델이 오독을 그대로 베낀다 — 갈리는 항목만
-    후보를 함께 보여 문맥으로 고르게 한다. 적용 여부는 호출부가 읽기 엔진을 보고
-    정한다(_build_prompt) — 여기는 표 조회만 한다.
-    """
-    hits = [f"{key}={cands}" for key, cands in _AMBIGUOUS_READINGS if key in line]
-    return f"  [CANDIDATES: {'; '.join(hits)}]" if hits else ""
-
 
 # 구조화(JSON) 응답 잘림(NIM max_tokens 소진) 복구 파라미터.
-# - THRESHOLD 초과면 처음부터 배치로 나눠 요청(잘림 예방).
-# - SIZE: 한 배치 라인 수. 8192 예산 안에서 30줄 발음 JSON은 안전(실측).
-# - MAX_SPLIT_DEPTH: 잘림 복구 시 재귀 재분할 깊이 상한(요청 폭주 방지).
-_PRON_BATCH_THRESHOLD = 60
-_PRON_BATCH_SIZE = 30
-# 발음 없는 번역 JSON은 라인당 출력이 절반 이하 — 배치를 크게 잡아 곡 맥락을 덜 끊는다
+# 모델 출력은 번역 JSON만 허용하므로 한 종류의 배치 크기만 사용한다.
 _TEXT_BATCH_THRESHOLD = 120
 _TEXT_BATCH_SIZE = 60
 _MAX_SPLIT_DEPTH = 4
@@ -188,7 +130,7 @@ _LOW_QUALITY_MAX_RETRIES = 1
 _MEANINGFUL_ORIGINAL_CHARS = 2
 
 # 번역 스킵 게이트(원문 언어 == 대상 언어)의 보수 임계. 오판하면 번역이 통째로
-# 사라지므로 발음 게이트(_detect_lang_heuristic)보다 훨씬 엄격하게 잡는다.
+# 사라지므로 확실한 ko/en 텍스트만 자동 판정한다.
 _SKIP_MIN_LETTERS = 20
 _SKIP_DOMINANT_RATIO = 0.85
 _SKIP_FOREIGN_TOLERANCE = 0.05
@@ -226,11 +168,14 @@ class BaseTranslator(ABC):
     def _build_prompt(
         self,
         text: str,
-        source_lang: str,
         target_lang: str,
-        include_pronunciation: bool,
         context: str | None = None,
     ) -> str:
+        """번역 전용 프롬프트를 만든다.
+
+        발음은 모델 출력으로 받지 않는다. ``include_pronunciation`` 설정은 번역이 끝난 뒤
+        지원되는 언어 조합에 결정론 렌더러를 적용할지 여부만 제어한다.
+        """
         lang_names = {"ko": "Korean", "en": "English", "ja": "Japanese", "zh": "Chinese"}
         target = lang_names.get(target_lang, target_lang)
         tone_instruction = TONE_PROMPTS.get(self.settings.tone, TONE_PROMPTS["natural"])
@@ -252,92 +197,10 @@ class BaseTranslator(ABC):
             f" over word-for-word rendering. Never translate a line in isolation.{register_hint}"
         )
 
-        if include_pronunciation:
-            # 일본어 원문이면 가나 읽기를 참조로 프롬프트에 심는다. 기계 읽기는 여전히
-            # '정답'이 아니라 '참조 + 오독은 문맥으로 교정'으로 지시한다.
-            reading_block = ""
-            readings = _kana_readings(text)
-            if readings:
-                text_lines = text.split("\n")
-                # 다의어 후보 주석은 사전 읽기(pykakasi) 폴백일 때만 붙인다. 형태소 분석은
-                # 문맥으로 이미 とめ/やむ를 맞히는데 그 위에 "とめ/やめ 중 골라라"를 얹으면
-                # 맞은 읽기를 모델이 다시 흔든다. 표(_AMBIGUOUS_READINGS)는 폴백 경로에서
-                # 여전히 유효하므로 남겨 두고 적용 조건만 좁혔다.
-                with_candidates = reading_source() == "pykakasi"
-                numbered = "\n".join(
-                    f"{i + 1}. {r}"
-                    + (
-                        _reading_candidates(text_lines[i] if i < len(text_lines) else "")
-                        if with_candidates
-                        else ""
-                    )
-                    for i, r in enumerate(readings)
-                )
-                reading_block = (
-                    "\nREFERENCE READINGS (machine dictionary reading of each line, in order."
-                    " The dictionary can misread context-dependent kanji — e.g. it may say"
-                    " くん for 君 where the song sings きみ, or やめられない for 止められない"
-                    " where the line means 'can't stop' (とめられない). Use these as a base and"
-                    " correct such misreadings from the song's context. Where a line ends with"
-                    " [CANDIDATES: ...], the dictionary reading is unreliable for that word —"
-                    " pick the candidate that fits the meaning of the sentence):\n"
-                    + numbered
-                    + "\n"
-                )
-            if target_lang == "ko":
-                # 한글 독음은 서버가 가나에서 결정적으로 변환한다(kana_hangul) — LLM에겐
-                # 문맥 판단이 필요한 '한자→가나'만 맡긴다. LLM의 가나→한글 기계 전사는
-                # 촉음/ん 소실 실수가 잦았다 (ずっと→즈토, じぶんが→지부가 실측).
-                pron_rule = (
-                    "2. The full kana reading (ひらがな) of the ORIGINAL line — how the line"
-                    " is actually sung. Convert every kanji to kana. FOLLOW the REFERENCE"
-                    " READINGS below; deviate where the dictionary misread a context-dependent"
-                    " kanji (e.g. 君 sung きみ not くん; 今更止められない is いまさらとめられない"
-                    " 'can't stop it', not やめられない 'can't quit') or where the line lists"
-                    " CANDIDATES — those are kun-readings the dictionary cannot pick without"
-                    " context, so choose by meaning. Write particles as pronounced"
-                    " (は→わ, へ→え). Insert a space between sung phrases — a typical line"
-                    " has 2-4 phrases (きみにだけ みえている) — but keep particles attached"
-                    " to their word (きみにだけ, never きみ に だけ). Kana ONLY in this field."
-                )
-                pron_example = (
-                    '[{"original": "時計の針が", "translation": "시곗바늘이",'
-                    ' "pronunciation": "とけいの はりが"}]'
-                )
-                pron_note = (
-                    "- pronunciation must be the kana reading of the ORIGINAL line"
-                    " (hiragana, spaced by phrase) — never romanization, never a"
-                    " translation, never Hangul"
-                )
-            else:
-                pron_rule = "2. Romanized pronunciation of the ORIGINAL text (not the translation)"
-                pron_example = '[{"original": "原文", "translation": "translation", "pronunciation": "genbun"}]'
-                pron_note = "- pronunciation should be romanization of the ORIGINAL lyrics"
-            return f"""Translate these song lyrics to {target}.
-{tone_instruction}
-{lyrics_guidance}{context_block}
-
-For each line, provide:
-1. The translation
-{pron_rule}
-
-Output as JSON array:
-{pron_example}
-
-IMPORTANT:
-- Output exactly one object for EVERY input line, in the same order — including lines that
-  are a title, a repeat, an ad-lib, or already in {target}. Never skip, merge or add lines.
-- Copy "original" verbatim from the input line so the lines can be matched up
-- Output ONLY the JSON array, no explanations
-{pron_note}
-{reading_block}
-LYRICS:
-{text}"""
-        else:
-            # 평문 줄바꿈 응답은 모델이 한 줄만 빠뜨려도 이후 전 라인이 한 칸씩 밀린다
-            # (실측: 0번 줄이 제목이라 가사로 안 보고 건너뛴 곡 31줄 전체가 밀림).
-            # 원문을 함께 돌려받아 라인 정합성을 검증할 수 있게 JSON으로 통일한다.
-            return f"""Translate these song lyrics to {target}.
+        # 평문 줄바꿈 응답은 모델이 한 줄만 빠뜨려도 이후 전 라인이 한 칸씩 밀린다
+        # (실측: 0번 줄이 제목이라 가사로 안 보고 건너뛴 곡 31줄 전체가 밀림).
+        # 원문을 함께 돌려받아 라인 정합성을 검증할 수 있게 JSON으로 통일한다.
+        return f"""Translate these song lyrics to {target}.
 {tone_instruction}
 {lyrics_guidance}{context_block}
 
@@ -428,7 +291,8 @@ LYRICS:
             slots[idx] = TranslationLine(
                 original=lines[idx],
                 translation=str(item.get("translation") or ""),
-                pronunciation=item.get("pronunciation"),
+                # 모델은 번역만 담당한다. 지시를 어기고 발음 필드를 보내도 수용하지 않는다.
+                pronunciation=None,
             )
             matched += 1
             cursor = idx + 1
@@ -447,7 +311,7 @@ LYRICS:
                 slots[i] = TranslationLine(
                     original=lines[i],
                     translation=str(item.get("translation") or ""),
-                    pronunciation=item.get("pronunciation"),
+                    pronunciation=None,
                 )
         return slots
 
@@ -492,13 +356,11 @@ LYRICS:
         )
         return [None] * len(lines)
 
-    def _parse_aligned(
-        self, response: str, original_lines: list[str], include_pronunciation: bool
-    ) -> list[TranslationLine]:
+    def _parse_aligned(self, response: str, original_lines: list[str]) -> list[TranslationLine]:
         """재요청 기전이 없는 엔진(Gemini)용 단발 파싱 — 맞춘 라인만 채우고 나머지는
         원문만 담아 failed로 남긴다. 밀린 번역을 저장하느니 빈 라인이 낫다."""
         slots = self._align_items(self._extract_json_items(response), original_lines)
-        if all(slot is None for slot in slots) and not include_pronunciation:
+        if all(slot is None for slot in slots):
             slots = self._plain_text_slots(response, original_lines)
         if all(slot is None for slot in slots):
             raise ValueError(f"Failed to parse translation response: {response[:200]}")
@@ -515,10 +377,8 @@ LYRICS:
         )
 
     @staticmethod
-    def _is_blank_output(
-        line: TranslationLine | None, original: str, include_pronunciation: bool
-    ) -> bool:
-        """원문은 유의미한데 번역(·발음)이 빈 라인인가 — '저품질 배치' 판정용.
+    def _is_blank_output(line: TranslationLine | None, original: str) -> bool:
+        """원문은 유의미한데 번역이 빈 라인인가 — '저품질 배치' 판정용.
 
         실증: 48줄 중 19~34번의 번역·발음이 전부 빈 값인데 응답 JSON은 문법적으로 완전해
         잘림 복구 경로가 발동하지 않았다(서버 로그에 잘림 경고가 한 건도 없음).
@@ -527,107 +387,54 @@ LYRICS:
             return False
         if len(original.strip()) < _MEANINGFUL_ORIGINAL_CHARS:
             return False
-        if not (line.translation or "").strip():
-            return True
-        return include_pronunciation and not (line.pronunciation or "").strip()
+        return not (line.translation or "").strip()
 
     # ── 언어 게이트 ─────────────────────────────────────────────────────────────
 
-    def _detect_lang_heuristic(self, text: str) -> str:
-        """한글/ASCII 비율 기반 언어 추정. source_lang="auto"일 때 발음 생략 게이트에만 쓰이는
-        거친 휴리스틱이며 실제 번역 언어 감지에는 관여하지 않는다."""
-        hangul = len(_HANGUL_RE.findall(text))
-        ascii_letters = len(_ASCII_LETTER_RE.findall(text))
-        other_letters = len(_OTHER_LETTER_RE.findall(text))
-        total = hangul + ascii_letters + other_letters
-        if total == 0:
-            return "en"
-        if hangul / total >= 0.3:
-            return "ko"
-        if ascii_letters / total >= 0.5:
-            return "en"
-        return "other"
+    def _resolved_pron_source(self, text: str, source_lang: str) -> str:
+        """Resolve only script-explicit sources for deterministic pronunciation.
 
-    def _should_skip_pronunciation(
-        self, text: str, source_lang: str, target_lang: str = "ko"
-    ) -> bool:
-        """발음표기가 대상 언어에 무의미하면 생략한다 — 매트릭스 대각선(곡 언어==대상
-        언어) 우선, 그 다음 target=ko 전용의 기존 규칙.
-
-        **매트릭스 대각선**: 곡 언어와 번역 대상 언어가 같으면(ko곡×ko유저, en곡×en유저,
-        ja곡×ja유저) 무조건 생략한다. ja곡×ja유저는 가나가 있어도 생략된다 — target이
-        ja면 "가나 독음"은 원문 그 자체라 무의미하다(아래 가나 예외는 target=ko 전용).
-
-        **target=ko 전용의 기존 규칙**: 원문이 영어/한국어면 로마자/한글 발음표기가
-        무의미하므로 생략한다. 번역 자체는 그대로 수행되고 pronunciation 필드만 비운다.
-        target이 ko가 아니면 이 규칙은 적용하지 않는다 — 비ko 타깃(예: ko곡×en유저)은
-        로마자 발음이 필요할 수 있어 원문 언어만으로 생략을 결정할 수 없다(ko_reading 등
-        미래 경로를 이 게이트가 먼저 죽이지 않게 한다).
-
-        **가나가 있으면(target=ko일 때만) 생략하지 않는다.** 이 규칙의 전제는 "원문이
-        영어/한국어"인데, `_detect_lang_heuristic`은 글자 수로 판정하므로 **영어가 많이
-        섞인 일본어 곡**을 영어로 오판한다. 실측: 라틴 7줄/일본어 3줄로 된 요청에서 판정이
-        "en"이 되어 10줄 전부 발음이 None으로 나갔다(번역은 정상, `failed=False`). 하필
-        라틴이 많은 곡이 정렬이 가장 나쁜 곡이라(라인 conf가 라틴 없는 줄의 1/10) 발음이 그
-        줄에서 가장 필요한데, 그 곡만 발음을 못 받고 있었다. 가나가 한 글자라도 있으면
-        원문은 영어가 아니고 한글 독음이 의미를 가지므로 전제가 성립하지 않는다.
+        Chrome sends ``source_lang=auto``.  Kana makes Japanese explicit; Hangul-dominant
+        text makes Korean explicit.  Han-only text remains unresolved because it could be
+        Chinese or a kana-free Japanese line, so unsupported cases still return no reading.
         """
-        target = self._norm_lang(target_lang)
-        song_lang = self._norm_lang(source_lang)
-        if song_lang in ("", "auto"):
-            song_lang = self._detect_lang_heuristic(text)
-            if song_lang == "other" and has_kana(text):
-                song_lang = "ja"
-        if target and song_lang == target:
-            return True
-        if target != "ko":
-            return False
+        source = self._norm_lang(source_lang)
+        if source not in ("", "auto"):
+            return source
         if has_kana(text):
-            return False
-        lang = source_lang
-        if lang == "auto":
-            lang = self._detect_lang_heuristic(text)
-        return lang in ("en", "ko")
-
-    def _is_ja_source_for_deterministic_pron(self, text: str, source_lang: str) -> bool:
-        """이 곡을 결정론 ja 발음 경로의 원문으로 볼 것인가.
-
-        판정은 **곡 전체** 텍스트로 한다 — 라인 단위로 보면 한자만 있는 줄이 중국어로
-        오판된다(UniDic은 중국어에 틀려서 중국어는 LLM 경로로 남긴다). 가나가 한 글자라도
-        있거나 source_lang이 명시적으로 ja면 ja로 본다."""
-        return has_kana(text) or self._norm_lang(source_lang) == "ja"
+            return "ja"
+        hangul = len(_HANGUL_RE.findall(text))
+        other = len(_ASCII_LETTER_RE.findall(text)) + len(_OTHER_LETTER_RE.findall(text))
+        if hangul > 0 and hangul >= other:
+            return "ko"
+        return ""
 
     def _deterministic_pron_fn(
         self, text: str, source_lang: str, target_lang: str
     ) -> Callable[[str], str | None] | None:
         """이 (원문, 대상 언어) 조합에 결정론 발음 렌더러가 있으면 그 함수를, 없으면 None.
 
-        `_use_deterministic_pron`(게이트)과 `_apply_deterministic_pron`(실제 렌더)이
-        이 한 곳만 보고 판단하게 해서 두 곳의 매트릭스가 갈리는 사고를 막는다.
-
         매트릭스 (곡 원문 × 사용자 대상 언어):
           ja × ko → `wiki_pronunciation` (기존, 무변경 — 한글 독음)
           ja × en → `romaji_line(text)[0]` (표시 문자열 — 비ko 타깃의 계약은 로마자)
-          ja × ja → 대각선(`_should_skip_pronunciation`)이 먼저 걸러 발음 자체를 안 묻는다
-                     — 이 함수까지 오지 않는다
+          ja × ja → None
           ko × ja → `ko_reading.hangul_to_kana`
           ko × en → `ko_reading.hangul_to_romaja`
-          그 외(zh 등) → None(기존 LLM 자유서술 경로 유지)
+          그 외(en/zh/auto 미해결 등) → None
 
         실측(보카로 위키 사람 발음, ja×ko 경로): 결정론 82.4% vs LLM 82.2%로 정확도는
         동등한데, LLM은 같은 줄을 실행마다 다르게 읽고(「縋って」를 3회 중 2회 오독) 조사
-        は를 표층 그대로 "하"로 쓰는 실수를 반복한다. 발음을 프롬프트에서 빼면 출력이
-        절반 이하로 줄어 번역 배치(_TEXT_BATCH_*)를 크게 잡을 수 있다는 이득도 있다 —
-        결정론 경로를 타는 모든 셀에 이 이득이 동일하게 적용된다(llm_pron 계산이
-        `_use_deterministic_pron` 결과 하나로 갈리므로 별도 배선이 필요 없다).
+        は를 표층 그대로 "하"로 쓰는 실수를 반복한다. 모델은 모든 셀에서 번역만 담당하고,
+        이 함수가 None을 반환하는 셀은 발음을 비운다.
 
         ja 원문 경로만 형태소 분석기 가용성(`reading_source()=='fugashi'`)에 의존한다 —
         폴백(pykakasi) 독음은 신뢰도가 낮다(縋って→ついって). `ko_reading`은 자모 분해
         규칙 기반이라 그런 의존이 없다(무조건 쓸 수 있다).
         """
         target = self._norm_lang(target_lang)
+        source = self._resolved_pron_source(text, source_lang)
 
-        if self._is_ja_source_for_deterministic_pron(text, source_lang):
+        if source == "ja":
             if reading_source() != "fugashi":
                 return None
             if target == "ko":
@@ -640,7 +447,7 @@ LYRICS:
                 return _romaji
             return None
 
-        if self._norm_lang(source_lang) == "ko":
+        if source == "ko":
             if target == "ja":
                 return lambda t: hangul_to_kana(t) or None
             if target == "en":
@@ -649,22 +456,27 @@ LYRICS:
 
         return None
 
-    def _use_deterministic_pron(self, text: str, source_lang: str, target_lang: str) -> bool:
-        """이 곡의 발음표기를 LLM 대신 결정론 엔진(`_deterministic_pron_fn`)으로 만드는가."""
-        return self._deterministic_pron_fn(text, source_lang, target_lang) is not None
-
     def _apply_deterministic_pron(
-        self, lines: list[TranslationLine], text: str, source_lang: str, target_lang: str
+        self,
+        lines: list[TranslationLine],
+        text: str,
+        source_lang: str,
+        target_lang: str,
+        *,
+        requested: bool,
     ) -> None:
-        """LLM이 돌려준 발음을 버리고 결정론 값으로 덮는다 (원문에서만 만든다).
+        """모델이 돌려준 발음을 버리고, 요청된 경우에만 결정론 값으로 채운다.
 
-        번역이 실패한 라인(failed)도 채운다 — 발음은 더 이상 LLM 응답에 의존하지 않으므로
-        번역이 비었다고 독음까지 비울 이유가 없다. 렌더러는 `_deterministic_pron_fn`이
-        게이트(`_use_deterministic_pron`)와 정확히 같은 판정으로 고른다 — 두 곳의 매트릭스가
-        갈릴 수 없다.
+        파서에서도 모델 필드를 버리지만 여기서 한 번 더 초기화해 후속 파서 변경에도 계약을
+        고정한다. 지원되지 않거나 auto에서 해석할 수 없는 셀은 renderer가 None이므로 그대로
+        비운다. 번역이 실패한 라인도 결정론 렌더러가 있으면 원문만으로 채울 수 있다.
         """
+        for line in lines:
+            line.pronunciation = None
+        if not requested:
+            return
         renderer = self._deterministic_pron_fn(text, source_lang, target_lang)
-        if renderer is None:  # 방어적 — 호출부가 deterministic_pron=True일 때만 부른다
+        if renderer is None:
             return
         for line in lines:
             line.pronunciation = renderer(line.original)
@@ -672,9 +484,8 @@ LYRICS:
     def _detect_lang_confident(self, text: str) -> str | None:
         """번역 스킵 게이트 전용 언어 판정 — 확신할 때만 "ko"/"en", 아니면 None.
 
-        _detect_lang_heuristic은 오판해도 발음만 빠지므로 임계가 느슨하다. 번역 스킵은
-        오판하면 번역이 통째로 사라지므로, 글자 수가 충분하고 다른 문자 체계가 거의 없고
-        한쪽이 압도적일 때만 판정한다.
+        번역 스킵은 오판하면 번역이 통째로 사라지므로, 글자 수가 충분하고 다른 문자 체계가
+        거의 없고 한쪽이 압도적일 때만 판정한다.
         """
         hangul = len(_HANGUL_RE.findall(text))
         ascii_letters = len(_ASCII_LETTER_RE.findall(text))
@@ -767,22 +578,23 @@ class GeminiTranslator(BaseTranslator):
         if not text.strip():
             return TranslationResult([], source_lang, target_lang, "gemini", self.settings.tone)
 
+        pronunciation_requested = self.settings.include_pronunciation
         if not self.api_key:
-            return self._fallback_result(original_lines, source_lang, target_lang)
+            fallback = self._fallback_result(original_lines, source_lang, target_lang)
+            self._apply_deterministic_pron(
+                fallback.lines,
+                text,
+                source_lang,
+                target_lang,
+                requested=pronunciation_requested,
+            )
+            return fallback
 
-        include_pron = self.settings.include_pronunciation and not self._should_skip_pronunciation(
-            text, source_lang, target_lang
-        )
-        # 일본어 곡의 독음은 서버가 결정론적으로 만든다 — 모델에는 번역만 요청한다
-        deterministic_pron = include_pron and self._use_deterministic_pron(
-            text, source_lang, target_lang
-        )
-        llm_pron = include_pron and not deterministic_pron
-        if not include_pron and self._should_skip_translation(text, source_lang, target_lang):
+        if self._should_skip_translation(text, source_lang, target_lang):
             return self._skipped_translation_result(
                 original_lines, source_lang, target_lang, "gemini"
             )
-        prompt = self._build_prompt(text, source_lang, target_lang, llm_pron, context)
+        prompt = self._build_prompt(text, target_lang, context)
 
         try:
             response = requests.post(
@@ -805,14 +617,27 @@ class GeminiTranslator(BaseTranslator):
             result = response.json()
             content = result["candidates"][0]["content"]["parts"][0]["text"]
 
-            lines = self._parse_aligned(content, original_lines, llm_pron)
-            if deterministic_pron:
-                self._apply_deterministic_pron(lines, text, source_lang, target_lang)
+            lines = self._parse_aligned(content, original_lines)
+            self._apply_deterministic_pron(
+                lines,
+                text,
+                source_lang,
+                target_lang,
+                requested=pronunciation_requested,
+            )
 
             return TranslationResult(lines, source_lang, target_lang, "gemini", self.settings.tone)
 
         except requests.exceptions.ConnectionError:
-            return self._fallback_result(original_lines, source_lang, target_lang)
+            fallback = self._fallback_result(original_lines, source_lang, target_lang)
+            self._apply_deterministic_pron(
+                fallback.lines,
+                text,
+                source_lang,
+                target_lang,
+                requested=pronunciation_requested,
+            )
+            return fallback
         except Exception as e:
             raise RuntimeError(f"Translation failed: {e}") from e
 
@@ -874,17 +699,8 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 [], source_lang, target_lang, self.engine_name, self.settings.tone
             )
 
-        include_pron = self.settings.include_pronunciation and not self._should_skip_pronunciation(
-            text, source_lang, target_lang
-        )
-        # 일본어 곡의 독음은 서버가 결정론적으로 만든다 — 모델에는 번역만 요청하므로
-        # 라인당 출력이 절반 이하로 줄고 _TEXT_BATCH_*의 큰 배치를 쓸 수 있다
-        deterministic_pron = include_pron and self._use_deterministic_pron(
-            text, source_lang, target_lang
-        )
-        llm_pron = include_pron and not deterministic_pron
         skip_translation = self._should_skip_translation(text, source_lang, target_lang)
-        if skip_translation and not include_pron:
+        if skip_translation:
             return self._skipped_translation_result(
                 original_lines, source_lang, target_lang, self.engine_name
             )
@@ -903,19 +719,17 @@ class OpenAICompatibleTranslator(BaseTranslator):
             # 최악의 경우에도 원문만 담아 부분 성공으로 마감한다.
             lines = self._translate_lines(
                 original_lines,
-                source_lang,
                 target_lang,
                 context,
-                include_pron=llm_pron,
                 budget=budget,
             )
-            if deterministic_pron:
-                self._apply_deterministic_pron(lines, text, source_lang, target_lang)
-            if skip_translation:
-                # 원문 == 대상 언어인데 발음은 필요한 경우(ja→ja 등) — 발음만 남기고
-                # 무의미한 '재번역' 결과는 버린다
-                for line in lines:
-                    line.translation = ""
+            self._apply_deterministic_pron(
+                lines,
+                text,
+                source_lang,
+                target_lang,
+                requested=self.settings.include_pronunciation,
+            )
 
             return TranslationResult(
                 lines,
@@ -1043,48 +857,37 @@ class OpenAICompatibleTranslator(BaseTranslator):
     def _translate_lines(
         self,
         original_lines: list[str],
-        source_lang: str,
         target_lang: str,
         context: str | None,
         *,
-        include_pron: bool,
         budget: "TranslationBudget | None" = None,
     ) -> list[TranslationLine]:
         """긴 입력은 처음부터 배치로 나눠(잘림 예방) 각 배치를 복구 로직으로 처리한 뒤
-        순서대로 이어붙인다. 발음 배치는 라인당 출력이 커서 더 잘게 나눈다.
+        순서대로 이어붙인다.
 
         배치끼리는 의존이 없어(각자 자기 구간만 번역한다) 동시에 요청한다 — 순차 루프에서는
         번역 시간이 배치 수에 선형 비례했다(실측: 30줄 1배치 8.3s, 실사용 평균 20.9s·최대
         118.5s). 결합은 완료 순서가 아니라 배치 인덱스 순으로만 한다.
         """
-        threshold, size = (
-            (_PRON_BATCH_THRESHOLD, _PRON_BATCH_SIZE)
-            if include_pron
-            else (_TEXT_BATCH_THRESHOLD, _TEXT_BATCH_SIZE)
-        )
-        if len(original_lines) <= threshold:
+        if len(original_lines) <= _TEXT_BATCH_THRESHOLD:
             return self._translate_batch(
                 original_lines,
-                source_lang,
                 target_lang,
                 context,
-                include_pron=include_pron,
                 depth=0,
                 budget=budget,
             )
 
         batches = [
-            original_lines[start : start + size]
-            for start in range(0, len(original_lines), size)
+            original_lines[start : start + _TEXT_BATCH_SIZE]
+            for start in range(0, len(original_lines), _TEXT_BATCH_SIZE)
         ]
         return [
             line
             for batch in self._run_batches(
                 batches,
-                source_lang,
                 target_lang,
                 context,
-                include_pron=include_pron,
                 budget=budget,
             )
             for line in batch
@@ -1097,11 +900,9 @@ class OpenAICompatibleTranslator(BaseTranslator):
     def _run_batches(
         self,
         batches: list[list[str]],
-        source_lang: str,
         target_lang: str,
         context: str | None,
         *,
-        include_pron: bool,
         budget: "TranslationBudget | None" = None,
     ) -> list[list[TranslationLine]]:
         """배치들을 설정된 동시성으로 실행하고 **입력 인덱스 순서**의 결과를 돌려준다.
@@ -1121,10 +922,8 @@ class OpenAICompatibleTranslator(BaseTranslator):
         def run(index: int) -> list[TranslationLine]:
             return self._translate_batch(
                 batches[index],
-                source_lang,
                 target_lang,
                 context,
-                include_pron=include_pron,
                 depth=0,
                 budget=budget,
             )
@@ -1165,11 +964,9 @@ class OpenAICompatibleTranslator(BaseTranslator):
     def _translate_batch(
         self,
         lines: list[str],
-        source_lang: str,
         target_lang: str,
         context: str | None,
         *,
-        include_pron: bool,
         depth: int,
         quality_retries: int = 0,
         budget: "TranslationBudget | None" = None,
@@ -1178,8 +975,8 @@ class OpenAICompatibleTranslator(BaseTranslator):
 
         못 맞춘 라인(잘림·누락·빈 응답)은 ① 그 라인들만 재요청하고, 진전이 전혀 없으면
         ② 절반으로 나눠 재귀, ③ 깊이 한도를 넘거나 단일 라인도 실패하면 원문만 담고
-        failed=True로 마감(전체 500 방지). 응답이 완전한데도 번역·발음이 빈 라인이 많으면
-        ④ '저품질 배치'로 보고 그 라인들만 한 번 더 요청한다.
+        failed=True로 마감(전체 500 방지). 응답이 완전한데도 번역이 빈 라인이 많으면
+        ④ 번역이 빈 '저품질 배치'로 보고 그 라인들만 한 번 더 요청한다.
 
         budget이 이미 소진됐으면(요청당 총예산 — TranslationBudget 참고) 새 NIM 왕복을 만들지
         않고 이 배치 전체를 원문만 담은 failed 라인으로 즉시 마감한다. 재귀(미스매치 복구·절반
@@ -1193,11 +990,11 @@ class OpenAICompatibleTranslator(BaseTranslator):
             return [self._failed_line(line) for line in lines]
 
         text = "\n".join(lines)
-        prompt = self._build_prompt(text, source_lang, target_lang, include_pron, context)
+        prompt = self._build_prompt(text, target_lang, context)
         content, finish_reason = self._request_completion(prompt, allow_empty=True, budget=budget)
 
         slots = self._align_items(self._extract_json_items(content), lines)
-        if all(slot is None for slot in slots) and not include_pron:
+        if all(slot is None for slot in slots):
             # 모델이 JSON 지시를 무시하고 평문으로 답한 경우 — 줄 수가 맞을 때만 수용
             slots = self._plain_text_slots(content, lines)
 
@@ -1220,10 +1017,8 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 # 일부는 확보 — 못 맞춘 라인만 다시 요청해 제자리에 채운다
                 retried = self._translate_batch(
                     [lines[i] for i in missing],
-                    source_lang,
                     target_lang,
                     context,
-                    include_pron=include_pron,
                     depth=depth + 1,
                     budget=budget,
                 )
@@ -1233,11 +1028,9 @@ class OpenAICompatibleTranslator(BaseTranslator):
                 # 한 라인도 못 맞췄다 — 절반으로 쪼개 재귀
                 mid = len(lines) // 2
                 return self._translate_batch(
-                    lines[:mid], source_lang, target_lang, context,
-                    include_pron=include_pron, depth=depth + 1, budget=budget,
+                    lines[:mid], target_lang, context, depth=depth + 1, budget=budget,
                 ) + self._translate_batch(
-                    lines[mid:], source_lang, target_lang, context,
-                    include_pron=include_pron, depth=depth + 1, budget=budget,
+                    lines[mid:], target_lang, context, depth=depth + 1, budget=budget,
                 )
             else:
                 slots[0] = self._failed_line(lines[0])
@@ -1248,8 +1041,12 @@ class OpenAICompatibleTranslator(BaseTranslator):
             for i, slot in enumerate(slots)
         ]
         return self._retry_low_quality(
-            resolved, lines, source_lang, target_lang, context,
-            include_pron=include_pron, depth=depth, quality_retries=quality_retries,
+            resolved,
+            lines,
+            target_lang,
+            context,
+            depth=depth,
+            quality_retries=quality_retries,
             budget=budget,
         )
 
@@ -1257,16 +1054,14 @@ class OpenAICompatibleTranslator(BaseTranslator):
         self,
         resolved: list[TranslationLine],
         lines: list[str],
-        source_lang: str,
         target_lang: str,
         context: str | None,
         *,
-        include_pron: bool,
         depth: int,
         quality_retries: int,
         budget: "TranslationBudget | None" = None,
     ) -> list[TranslationLine]:
-        """응답이 절단되지 않았는데도 중간 구간의 번역·발음만 비어 온 경우의 재요청.
+        """응답이 절단되지 않았는데도 중간 구간의 번역만 비어 온 경우의 재요청.
 
         실증: 48줄 중 19~34번이 통째로 빈 값이었는데 잘림 로그는 한 건도 없었다 — 모델이
         문법적으로 완전한 JSON을 주면서 내용만 뭉갠 품질 문제라 잘림 복구가 발동하지 않았다.
@@ -1275,7 +1070,7 @@ class OpenAICompatibleTranslator(BaseTranslator):
         blank = [
             i
             for i, line in enumerate(resolved)
-            if self._is_blank_output(line, lines[i], include_pron)
+            if self._is_blank_output(line, lines[i])
         ]
         if (
             not blank
@@ -1302,17 +1097,15 @@ class OpenAICompatibleTranslator(BaseTranslator):
         )
         retried = self._translate_batch(
             [lines[i] for i in blank],
-            source_lang,
             target_lang,
             context,
-            include_pron=include_pron,
             depth=depth,
             quality_retries=quality_retries + 1,
             budget=budget,
         )
         for i, line in zip(blank, retried):
             # 재요청도 비었으면 1차 결과를 유지한다 (failed 표시로 덮어쓰지 않는다)
-            if not self._is_blank_output(line, lines[i], include_pron):
+            if not self._is_blank_output(line, lines[i]):
                 resolved[i] = line
         return resolved
 
@@ -1426,11 +1219,4 @@ class LyricsTranslator:
             result = self._translator.translate(lyrics, source_lang, target_lang, context)
         finally:
             self.settings.include_pronunciation = old_setting
-        if target_lang == "ko":
-            # LLM은 가나 독음까지만 책임진다 — 가나→한글은 결정적 변환으로 마감
-            # (촉음=ㅅ받침, ん=ㄴ받침, 장음=모음 반복). 한글로 온 구형 응답은 그대로 둔다.
-            from everyric2.text.kana_hangul import finalize_pronunciation
-
-            for line in result.lines:
-                line.pronunciation = finalize_pronunciation(line.pronunciation)
         return result

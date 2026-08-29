@@ -1,11 +1,7 @@
-"""독음 품질 가드 테스트 — 가나 혼입 감지·재시도 병합 + 가나 읽기 프롬프트 힌트."""
+"""독음 품질 가드와 번역 전용 모델 프롬프트 테스트."""
 from everyric2.config.settings import TranslationSettings
 from everyric2.server.api.translate import bad_pron_indices, merge_pron_retry
-from everyric2.translation.translator import (
-    GeminiTranslator,
-    TranslationLine,
-    _kana_readings,
-)
+from everyric2.translation.translator import GeminiTranslator, TranslationLine
 
 
 def _line(pron):
@@ -41,18 +37,10 @@ class TestMergePronRetry:
         assert lines[0].pronunciation is None
 
 
-class TestKanaReadingHints:
-    def test_readings_for_japanese(self):
-        assert _kana_readings("消えないで\nずっと見えて") == ["きえないで", "ずっとみえて"]
-
-    def test_none_for_non_japanese(self):
-        assert _kana_readings("hello world\nsecond line") is None
-
-    def test_prompt_includes_hints_only_with_pronunciation(self):
+class TestTranslationOnlyPrompt:
+    def test_prompt_never_requests_pronunciation(self):
         t = GeminiTranslator(TranslationSettings())
-        p = t._build_prompt("消えないで", "ja", "ko", True)
-        # 힌트는 '참조'로 제공(사전 오독은 문맥 교정 지시) + 발음 필드는 가나로만 요구
-        assert "REFERENCE READINGS" in p and "きえないで" in p
-        assert "kana reading" in p and "きみ" in p
-        p2 = t._build_prompt("消えないで", "ja", "ko", False)
-        assert "READINGS" not in p2 and "pronunciation" not in p2
+        for target in ("ko", "en", "ja", "zh"):
+            prompt = t._build_prompt("消えないで", target)
+            assert "READINGS" not in prompt
+            assert "pronunciation" not in prompt.lower()

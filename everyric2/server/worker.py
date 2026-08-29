@@ -381,6 +381,29 @@ def _referee_switched(seg: dict[str, Any]) -> bool:
     return bool(chosen) and chosen != ref.get("default")
 
 
+def _authoritative_pron_tokens(text: str, pronunciation: str) -> list | None:
+    """Return the deterministic token set that renders an authoritative pronunciation.
+
+    Wiki/human ``line_meta`` may differ from the renderer only in phrase spacing, so compare
+    with the same whitespace-insensitive normalization used for line metadata.  A miss is an
+    important result: it means the deterministic tokenizer cannot represent the authoritative
+    reading and must not manufacture kana/romaji variants that claim otherwise.
+    """
+    try:
+        from everyric2.text.pron_style import candidate_token_sets
+
+        rendered, token_sets = candidate_token_sets(text)
+    except Exception:
+        logger.exception("authoritative pronunciation candidate lookup failed")
+        return None
+
+    wanted = _normalize_line(pronunciation)
+    for candidate, tokens in zip(rendered, token_sets):
+        if _normalize_line(candidate) == wanted:
+            return tokens
+    return None
+
+
 def merge_line_meta(
     timestamps: list[dict[str, Any]],
     line_meta: list[dict[str, Any]],
@@ -422,7 +445,8 @@ def merge_line_meta(
             # 바로 심판이 **오디오 점수로 이미 진 기본값**이고, pron_segments(음절 스팬)는
             # 이긴 후보 기준이라 표기만 갈아끼우면 음절 수가 어긋난다(캐시 재사용·늦은 메타
             # 병합 경로에서 발생). 재병합은 표시 메타를 채우는 경로일 뿐 판정 지점이 아니다.
-            if not _referee_switched(seg):
+            referee_switched = _referee_switched(seg)
+            if not referee_switched:
                 seg["pronunciation"] = alignable_pronunciation
             _attach_pron_segments(seg)
         if with_translation and m.get("translation"):
@@ -432,7 +456,27 @@ def merge_line_meta(
         # 없으므로 attach가 romaji를 스스로 생략한다(기본 읽기로 렌더하면 표기가 어긋난다).
         # language를 흘려야 zh 게이트가 이 경로에서도 동작한다 — 안 넘기면 zh 곡의 순한자
         # 라인이 ja 분기로 빠져 일본어 독음이 붙는다(엣지 감사 #10, 2026-08-03).
-        attach_pron_variants(seg, language=language)
+        if alignable_pronunciation and not referee_switched:
+            # ``pron`` may have been attached before delayed line_meta arrived.  Keeping that
+            # dict makes the client prefer stale deterministic text over the newly authoritative
+            # wiki/human value.  Rebuild the whole display bundle atomically when the authoritative
+            # reading maps to a known candidate.  If it does not map, expose only the trustworthy
+            # Hangul value for Japanese text; invented kana/romaji would describe a different word.
+            seg.pop("pron", None)
+            seg.pop("pron_segs", None)
+            authoritative_tokens = _authoritative_pron_tokens(text, alignable_pronunciation)
+            attach_pron_variants(
+                seg,
+                referee_tokens=authoritative_tokens,
+                language=language,
+            )
+            lang = (language or "").strip().lower()
+            japanese_text = bool(_JA_CHAR_RE.search(text)) and not lang.startswith("zh")
+            if japanese_text and authoritative_tokens is None:
+                seg["pron"] = {"hangul": alignable_pronunciation}
+                seg.pop("pron_segs", None)
+        else:
+            attach_pron_variants(seg, language=language)
         merged += 1
     return merged
 
@@ -4658,6 +4702,61 @@ def _stranded_count(stack: "_NewStackResult") -> int:
     return _stranded_sites(stack.results, stack.activity.regions)
 
 
+_TERMINAL_SILENCE_MIN_GAP_SEC = 1.0
+_TERMINAL_SILENCE_MIN_LINES = 2
+_TERMINAL_SILENCE_MAX_CONFIDENCE = 0.05
+
+
+def _terminal_silence_issue(stack: "_NewStackResult") -> dict[str, Any] | None:
+    """Return a hard-quality issue for consecutive lyric lines after the last vocal.
+
+    One detector is not enough: VAD can miss a quiet coda.  A hard failure therefore requires
+    all of these independent facts: dominance-based stranded detection, a VAD boundary, at
+    least two consecutive terminal lines beyond that boundary, and uniformly tiny alignment
+    confidence.  This is the live ``bEV_tH_yrIc`` failure signature; weaker evidence remains a
+    debug signal and keeps the previous fail-open behaviour.
+    """
+    if stack.activity is None or not stack.vad_regions or _stranded_count(stack) <= 0:
+        return None
+
+    last_vocal_end = max(float(end) for _, end in stack.vad_regions)
+    trailing: list[tuple[int, Any]] = []
+    for index in range(len(stack.results) - 1, -1, -1):
+        line = stack.results[index]
+        if float(line.start_time) < last_vocal_end + _TERMINAL_SILENCE_MIN_GAP_SEC:
+            break
+        trailing.append((index, line))
+    trailing.reverse()
+    if len(trailing) < _TERMINAL_SILENCE_MIN_LINES:
+        return None
+
+    confidences = [line.confidence for _, line in trailing]
+    if any(value is None for value in confidences):
+        return None
+    if max(float(value) for value in confidences if value is not None) > _TERMINAL_SILENCE_MAX_CONFIDENCE:
+        return None
+
+    return {
+        "last_vocal_end": round(last_vocal_end, 3),
+        "first_line_index": trailing[0][0],
+        "line_count": len(trailing),
+        "first_line_start": round(float(trailing[0][1].start_time), 3),
+        "max_confidence": round(max(float(value) for value in confidences if value is not None), 6),
+    }
+
+
+def _enforce_deep_alignment_quality(stack: "_NewStackResult") -> None:
+    issue = _terminal_silence_issue(stack)
+    if issue is None:
+        return
+    raise PipelineError(
+        "정렬 결과의 마지막 가사 줄들이 발성 종료 뒤 무음에 배치됐어요 "
+        f"(첫 줄 {issue['first_line_index']}, 시작 {issue['first_line_start']}초, "
+        f"마지막 발성 {issue['last_vocal_end']}초, {issue['line_count']}줄, "
+        f"최대 신뢰도 {issue['max_confidence']}). 잘못된 싱크는 저장하지 않았습니다."
+    )
+
+
 def _resolve_stack_language(language: str | None, lyric_lines: list[Any]) -> tuple[str, str]:
     """새 스택이 쓸 언어와 그 출처(``"label"`` | ``"script_census"``).
 
@@ -4770,6 +4869,7 @@ def _run_new_stack_alignment(
             "threshold": _ROUTE_THRESHOLD,
             "requested_min_depth": min_depth,
         }
+        _enforce_deep_alignment_quality(deep)
         return deep
 
     starts_at_medium = any(lang.startswith(prefix) for prefix in _FORCE_MEDIUM_LANGUAGES)
@@ -4856,6 +4956,7 @@ def _run_new_stack_alignment(
                     "stranded_before": stranded_before,
                     "stranded_after": stranded_after,
                 }
+                _enforce_deep_alignment_quality(escalated)
                 return escalated
             logger.info(
                 f"Heavy-depth escalation rejected (no improvement: {stranded_before} -> "
@@ -4865,6 +4966,7 @@ def _run_new_stack_alignment(
             deep.routing_meta["stranded_before"] = stranded_before
             deep.routing_meta["stranded_after"] = stranded_after
 
+    _enforce_deep_alignment_quality(deep)
     return deep
 
 

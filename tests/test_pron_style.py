@@ -35,6 +35,20 @@ _MIN_LOOSE_RATIO = 0.691
 _QUALITY_THRESHOLD = 0.6
 
 
+@pytest.mark.parametrize(
+    ("text", "expected", "forbidden"),
+    [
+        ("何一つ解らなくても", "나니 히토츠", "난 히토츠"),
+        ("その内声も届かなくなって", "소노 우치코에", "나이세이"),
+        ("身体 君のこと", "신타이 키미노", "쿤노"),
+    ],
+)
+def test_live_report_context_readings(text: str, expected: str, forbidden: str) -> None:
+    rendered = wiki_pronunciation(text)
+    assert expected in rendered
+    assert forbidden not in rendered
+
+
 @pytest.fixture(scope="module")
 def wiki_pairs() -> list[dict]:
     return json.loads(_FIXTURE.read_text(encoding="utf-8"))["pairs"]
@@ -392,7 +406,7 @@ def test_sokuon_and_n_cross_token_boundaries():
 
 
 def test_default_reading_is_unchanged_by_the_new_options():
-    # text_to_moras / kana_hangul.kanji_to_kana / translator._kana_readings가 쓰는 기본값
+    # text_to_moras / kana_hangul.kanji_to_kana가 쓰는 기본값
     assert kana_reading("帰る動画（トコ）は既に廃墟") == "かえるどうが（とこ）はすでにはいきょ"
     assert kana_reading("今更止められない") == "いまさらとめられない"
 
@@ -476,7 +490,7 @@ def test_spaced_pronunciation_maps_back_to_the_original_line():
 
 
 # ---------------------------------------------------------------------------
-# 5. translator 연동 — 일본어면 LLM 발음을 버리고 결정론 값을 쓴다
+# 5. translator 연동 — 모델 발음은 항상 버리고 지원 셀만 결정론 값을 쓴다
 # ---------------------------------------------------------------------------
 
 
@@ -546,8 +560,8 @@ def test_kanji_only_japanese_line_is_still_detected_by_the_song_text(monkeypatch
     assert [line.pronunciation for line in result.lines] == ["겐카이", "마데 아이시테"]
 
 
-def test_chinese_song_keeps_the_llm_pronunciation(monkeypatch, tmp_path):
-    # UniDic은 중국어에 틀린다(我听到 → "와가 킨 이타루") — 기존 LLM 경로를 유지한다
+def test_chinese_song_discards_the_model_pronunciation(monkeypatch, tmp_path):
+    # 중국어는 지원되는 결정론 셀이 아니며 모델 자유서술로 폴백하지 않는다.
     translator = _nvidia(monkeypatch, tmp_path)
     calls = _fake_post(
         monkeypatch,
@@ -557,27 +571,30 @@ def test_chinese_song_keeps_the_llm_pronunciation(monkeypatch, tmp_path):
 
     result = translator.translate("我听到你的声音", source_lang="zh", target_lang="ko")
 
-    assert result.lines[0].pronunciation == "워 팅 다오 니 더 성인"
-    assert "pronunciation" in calls[0]["messages"][0]["content"]
+    assert result.lines[0].translation == "네 목소리가 들려"
+    assert result.lines[0].pronunciation is None
+    assert "pronunciation" not in calls[0]["messages"][0]["content"]
 
 
-def test_pykakasi_fallback_keeps_the_llm_pronunciation(monkeypatch, tmp_path):
-    # 폴백 독음은 신뢰도가 낮다(縋って→ついって) — 그 환경에서는 LLM에게 계속 묻는다
+def test_pykakasi_fallback_returns_none_instead_of_model_pronunciation(monkeypatch, tmp_path):
+    # 폴백 독음은 신뢰도가 낮다(縋って→ついって) — 모델에 넘기지 않고 발음을 비운다.
     monkeypatch.setattr(
         "everyric2.translation.translator.reading_source", lambda: "pykakasi"
     )
     translator = _nvidia(monkeypatch, tmp_path)
-    _fake_post(monkeypatch, _JA_RESPONSE)
+    calls = _fake_post(monkeypatch, _JA_RESPONSE)
 
     result = translator.translate("君は王女", source_lang="ja", target_lang="ko")
 
-    assert result.lines[0].pronunciation == "키미하 오우조"
+    assert result.lines[0].translation == "너는 왕녀"
+    assert result.lines[0].pronunciation is None
+    assert "pronunciation" not in calls[0]["messages"][0]["content"]
 
 
 def test_ja_to_en_uses_deterministic_romaji_not_the_llm_value(monkeypatch, tmp_path):
     # 발음 매트릭스(ja×en 셀)가 결정론화된 뒤: 비ko 타깃도 로마자 결정론 경로가 있다
-    # (`pron_style.romaji_line`) — LLM이 돌려준 자유서술 로마자는 버려진다. 프롬프트도
-    # 발음을 묻지 않는다(deterministic_pron이면 llm_pron이 꺼진다 — ja×ko 경로와 동일 이득).
+    # (`pron_style.romaji_line`) — 모델이 돌려준 자유서술 로마자는 버려지고 프롬프트도
+    # 발음을 묻지 않는다.
     translator = _nvidia(monkeypatch, tmp_path)
     calls = _fake_post(
         monkeypatch,

@@ -593,6 +593,16 @@ def _nani_override(words, i: int, text: str, idx: int) -> str | None:
         return None
     nxt = words[i + 1]
     tail_start = idx + len(word.surface)
+    # ``何一つ`` is the fixed pronoun phrase なにひとつ.  UniDic returns なん for
+    # bare 何 and splits 一/つ into separate tokens, so the ordinary case-particle
+    # rule below never sees it (live report 6ObvFPLk8eI).
+    if (
+        nxt.surface == "一"
+        and i + 2 < len(words)
+        and words[i + 2].surface == "つ"
+        and text[tail_start : tail_start + 2] == "一つ"
+    ):
+        return "なに"
     # 何+か+격조사 (부정칭 대명사 なにか) — か 다음 토큰이 격조사인지까지 본다
     if nxt.surface == "か" and (getattr(nxt.feature, "pos1", "") or "") == "助詞":
         if text[tail_start : tail_start + 1] != "か" or i + 2 >= len(words):
@@ -613,6 +623,47 @@ def _nani_override(words, i: int, text: str, idx: int) -> str | None:
     if text[tail_start : tail_start + len(nxt_surface)] != nxt_surface:
         return None
     return "なに"
+
+
+def _sonouchi_override(word, text: str, idx: int, reading: str) -> str | None:
+    """Split the lexical phrase ``その内`` before a following noun.
+
+    UniDic can merge ``内`` with that noun (``内声`` -> ないせい, ``内空`` ->
+    ないくう).  After the demonstrative その, however, 内 is the adverbial うち.
+    Replace only the merged reading prefix and preserve the following noun's reading.
+    """
+    if idx < 2 or text[idx - 2 : idx] != "その" or not word.surface.startswith("内"):
+        return None
+    if not reading.startswith("ない"):
+        return None
+    # The merged token's suffix can itself use the wrong on-reading (内声=ないせい,
+    # while this lyric means 内 + 声=うち + こえ).  Read the remaining surface as
+    # a standalone noun instead of preserving that contaminated suffix.
+    tail = _pykakasi_reading(word.surface[1:]) if len(word.surface) > 1 else ""
+    return "うち" + (tail or reading[2:])
+
+
+_KIMI_FOLLOWING_PARTICLES = frozenset({"が", "の", "を", "に", "は", "へ", "と", "も"})
+
+
+def _kimi_override(words, i: int, text: str, idx: int) -> str | None:
+    """Read standalone ``君`` followed by a particle as the pronoun きみ.
+
+    Honorific ``-kun`` remains untouched when it follows a name without a textual
+    boundary.  The live failure had an explicit phrase space (``身体 君の``) but
+    UniDic still tagged 君 as a suffix.
+    """
+    word = words[i]
+    if word.surface != "君" or i + 1 >= len(words):
+        return None
+    if idx > 0 and not text[idx - 1].isspace() and text[idx - 1] not in "「『（([、。！？…":
+        return None
+    nxt = words[i + 1]
+    if nxt.surface not in _KIMI_FOLLOWING_PARTICLES:
+        return None
+    if (getattr(nxt.feature, "pos1", "") or "") != "助詞":
+        return None
+    return "きみ"
 
 
 # 私(わたし/わたくし) — UniDic 사전은 わたくし(격식체)를 1순위로 준다. 가사에서는
@@ -700,6 +751,12 @@ def _tokens_from_words(words, text: str, *, phonetic: bool = False) -> list[Read
         reading, surface_reading = _token_readings(
             word, phonetic=phonetic, orphan_prefix=_is_orphan_prefix(words, i, text, idx)
         )
+        sonouchi = _sonouchi_override(word, text, idx, reading)
+        if sonouchi is not None:
+            reading = sonouchi
+        sonouchi_surface = _sonouchi_override(word, text, idx, surface_reading)
+        if sonouchi_surface is not None:
+            surface_reading = sonouchi_surface
         numeral = _numeral_override(words, i, text, idx)
         if numeral is not None:
             reading = surface_reading = numeral
@@ -708,9 +765,13 @@ def _tokens_from_words(words, text: str, *, phonetic: bool = False) -> list[Read
             if nani is not None:
                 reading = surface_reading = nani
             else:
-                watashi = _watashi_override(word)
-                if watashi is not None:
-                    reading = surface_reading = watashi
+                kimi = _kimi_override(words, i, text, idx)
+                if kimi is not None:
+                    reading = surface_reading = kimi
+                else:
+                    watashi = _watashi_override(word)
+                    if watashi is not None:
+                        reading = surface_reading = watashi
         tokens.append(
             ReadingToken(
                 surface,

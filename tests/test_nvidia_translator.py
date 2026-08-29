@@ -1,6 +1,5 @@
 """Tests for the NVIDIA NIM translation engine and the en/ko pronunciation gate."""
 
-import re
 from dataclasses import dataclass
 from json import dumps
 
@@ -138,81 +137,6 @@ class TestApiKeyResolutionOrder:
         assert translator.api_key is None
 
 
-class TestPronunciationGateHeuristic:
-    """BaseTranslator._should_skip_pronunciation / _detect_lang_heuristic."""
-
-    def setup_method(self):
-        class _Probe(BaseTranslator):
-            def translate(self, *a, **k):  # pragma: no cover - not exercised
-                raise NotImplementedError
-
-        self.probe = _Probe(TranslationSettings())
-
-    @pytest.mark.parametrize(
-        "source_lang,text,expected",
-        [
-            ("en", "I can hear your voice", True),
-            ("ko", "오늘 밤 너의 목소리", True),
-            ("ja", "きみの声が聴こえる", False),
-            ("zh", "我听到你的声音", False),
-        ],
-    )
-    def test_explicit_source_lang(self, source_lang, text, expected):
-        assert self.probe._should_skip_pronunciation(text, source_lang) is expected
-
-    def test_auto_detects_english(self):
-        text = "Walking down an empty street tonight"
-        assert self.probe._detect_lang_heuristic(text) == "en"
-        assert self.probe._should_skip_pronunciation(text, "auto") is True
-
-    def test_auto_detects_korean(self):
-        text = "오늘 밤 너의 목소리가 들려"
-        assert self.probe._detect_lang_heuristic(text) == "ko"
-        assert self.probe._should_skip_pronunciation(text, "auto") is True
-
-    def test_auto_detects_japanese_as_other(self):
-        text = "夜の街に消えていく光"
-        assert self.probe._detect_lang_heuristic(text) == "other"
-        assert self.probe._should_skip_pronunciation(text, "auto") is False
-
-    def test_latin_heavy_japanese_still_gets_a_reading(self):
-        """영어가 많이 섞인 일본어 곡은 발음을 건너뛰면 안 된다.
-
-        `_detect_lang_heuristic`은 글자 수로 판정하므로 라틴이 가나보다 많으면 "en"을 낸다.
-        실측: 라틴 7줄 / 일본어 3줄 요청에서 판정이 "en"이 되어 **10줄 전부 발음이 None**으로
-        나갔다(번역은 정상, failed=False). 하필 라틴이 많은 곡이 정렬이 가장 나쁜 곡이라
-        (라인 conf가 라틴 없는 줄의 1/10) 발음이 그 줄에서 가장 필요한데 그 곡만 못 받았다.
-        가나가 한 글자라도 있으면 원문은 영어가 아니므로 이 게이트의 전제가 성립하지 않는다.
-        """
-        text = "\n".join([
-            "Approved Approved Approved Approved",
-            "ひらひら numb numb",
-            "おまえはATM",
-            "Catch my heart",
-            "LOVE STOP YEAH",
-            "エグいよ",
-            "縋って いつも縋って",
-        ])
-        assert self.probe._detect_lang_heuristic(text) == "en"  # 판정은 여전히 en이다
-        assert self.probe._should_skip_pronunciation(text, "auto") is False  # 그래도 건너뛰지 않는다
-
-    def test_a_single_kana_is_enough_to_keep_the_reading(self):
-        # 경계: 라틴이 압도적이어도 가나 한 글자가 있으면 유지한다
-        assert self.probe._should_skip_pronunciation("hello world さ", "auto") is False
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "hello world this is a song about love",   # 순수 영어
-            "오늘 밤 우리 함께 걸어요",                  # 순수 한국어
-            "오늘 밤 baby 우리 dance floor",            # 한국어+라틴(KPOP) — 가나 없음
-        ],
-    )
-    def test_kana_free_text_still_skips(self, text):
-        # 가나가 없으면 기존 판정 그대로 — 이 변경이 영어·한국어 곡을 건드리지 않는다
-        assert self.probe._should_skip_pronunciation(text, "auto") is True
-
-
 class TestPayloadExtras:
     """reasoning 모델별 추가 페이로드 — qwen은 thinking off, gpt-oss는 effort low.
     안 보내면 사고가 max_tokens 예산을 소진해 빈 응답/잘린 JSON이 난다."""
@@ -242,9 +166,7 @@ class TestPayloadExtras:
 
 
 class TestTranslateAppliesGate:
-    """The gate must apply inside translate(), overriding settings.include_pronunciation,
-    and the request payload must always include max_tokens (NIM truncates long
-    pronunciation JSON without it)."""
+    """모델은 번역만 받고, include_pronunciation은 결정론 렌더러만 제어한다."""
 
     def _make_translator(self, monkeypatch, tmp_path, include_pronunciation=True):
         key_file = tmp_path / "nvapi.txt"
@@ -256,11 +178,7 @@ class TestTranslateAppliesGate:
         return NvidiaTranslator(settings)
 
     def test_english_source_skips_pronunciation_even_if_requested(self, monkeypatch, tmp_path):
-        # 매트릭스 대각선(Task 10) 이후: "en/ko 원문이면 발음 생략"은 target=ko 전용이다
-        # (ko곡×en유저처럼 target이 ko가 아닌 조합은 미래의 로마자 발음 경로를 위해 더 이상
-        # 여기서 생략하지 않는다 — _should_skip_pronunciation 참고). 이 테스트는 여전히
-        # 원래 실증 시나리오(영어/한국어 원문에 그 언어 자체의 "발음표기"는 무의미하다)를
-        # target=ko로 검증한다.
+        # en→ko는 지원되는 결정론 셀이 아니므로 요청 토글이 켜져 있어도 발음은 없다.
         translator = self._make_translator(monkeypatch, tmp_path, include_pronunciation=True)
 
         captured = {}
@@ -281,10 +199,7 @@ class TestTranslateAppliesGate:
 
         assert all(line.pronunciation is None for line in result.lines)
         assert captured["json"]["max_tokens"] == translator.settings.max_tokens
-        # plain-text prompt path was used, not the JSON pronunciation format
-        assert "pronunciation" not in captured["json"]["messages"][0]["content"].lower() or (
-            "romanized" not in captured["json"]["messages"][0]["content"].lower()
-        )
+        assert "pronunciation" not in captured["json"]["messages"][0]["content"].lower()
 
     def test_japanese_source_gets_deterministic_pronunciation(self, monkeypatch, tmp_path):
         # 새 계약: 일본어 곡의 한글 독음은 서버가 규칙으로 만든다(text.pron_style) —
@@ -455,12 +370,9 @@ class TestTruncatedJsonRecovery:
 
     def test_long_input_is_batched_up_front(self, monkeypatch, tmp_path):
         # 라인 수가 임계를 넘으면 처음부터 배치로 나눠 요청(잘림 예방).
-        # 일본어 곡은 발음을 묻지 않으므로 실제로 쓰이는 임계는 _TEXT_BATCH_* 쪽이다 —
-        # 배치 분할 자체가 검증 대상이므로 두 경로의 임계를 함께 내린다.
+        # 모델 출력은 번역 전용 한 경로뿐이므로 _TEXT_BATCH_* 임계만 내린다.
         import everyric2.translation.translator as tr
 
-        monkeypatch.setattr(tr, "_PRON_BATCH_THRESHOLD", 2)
-        monkeypatch.setattr(tr, "_PRON_BATCH_SIZE", 2)
         monkeypatch.setattr(tr, "_TEXT_BATCH_THRESHOLD", 2)
         monkeypatch.setattr(tr, "_TEXT_BATCH_SIZE", 2)
         translator = self._make_translator(monkeypatch, tmp_path)
@@ -525,7 +437,8 @@ class TestSalvageJsonHelper:
         )
         slots = self._slots(p, text, ["x"])
         assert len(slots) == 1
-        assert slots[0].pronunciation == "xx"
+        assert slots[0].translation == "X"
+        assert slots[0].pronunciation is None
 
     def test_no_array_returns_empty(self):
         p = self._probe()
@@ -872,9 +785,8 @@ class TestLowQualityBatchRetry:
         retry_prompt = calls[1]["messages"][0]["content"]
         assert "line 3" in retry_prompt and "line 0" not in retry_prompt
 
-    def test_blank_pronunciation_counts_as_low_quality(self, monkeypatch, tmp_path):
-        # 발음을 LLM에 묻는 경로(비일본어 원문)에서만 성립하는 규칙이다 — 일본어 곡은
-        # 발음을 서버가 만들므로 응답의 빈 발음이 품질 판정에 들어가지 않는다
+    def test_model_pronunciation_is_ignored_by_quality_retry(self, monkeypatch, tmp_path):
+        # 모델은 번역만 담당한다. 응답의 pronunciation 유무는 저품질 재요청 조건이 아니다.
         translator = self._make(monkeypatch, tmp_path, include_pronunciation=True)
         lines = [f"第{i}行的歌词" for i in range(6)]
 
@@ -883,27 +795,24 @@ class TestLowQualityBatchRetry:
                 dumps(orig), dumps(trans), dumps(pron)
             )
 
-        # 번역은 다 있는데 절반의 발음이 빈 값
+        # 번역은 모두 정상이고 pronunciation만 일부 비어 있다.
         first = "[" + ",".join(
             obj(ln, f"T{i}", "" if i < 3 else f"pron{i}") for i, ln in enumerate(lines)
         ) + "]"
-        retry = "[" + ",".join(obj(lines[i], f"T{i}", f"fixed{i}") for i in range(3)) + "]"
 
         calls = []
-        responses = iter([chat_response(first, "stop"), chat_response(retry, "stop")])
 
         def fake_post(url, json, headers, timeout):
             calls.append(json)
-            return next(responses)
+            return chat_response(first, "stop")
 
         monkeypatch.setattr("everyric2.translation.translator.requests.post", fake_post)
 
         result = translator.translate("\n".join(lines), source_lang="zh", target_lang="ko")
 
-        assert len(calls) == 2
-        assert [line.pronunciation for line in result.lines[:3]] == [
-            "fixed0", "fixed1", "fixed2",
-        ]
+        assert len(calls) == 1
+        assert [line.translation for line in result.lines] == [f"T{i}" for i in range(6)]
+        assert all(line.pronunciation is None for line in result.lines)
 
     def test_few_blank_lines_do_not_trigger_a_retry(self, monkeypatch, tmp_path):
         # 10줄 중 1줄(10%)만 비었으면 임계 미만 — 재요청하지 않는다
@@ -967,113 +876,8 @@ class TestLowQualityBatchRetry:
         assert [line.translation for line in result.lines] == ["", "", "A", "B"]
 
 
-class TestAmbiguousReadingHints:
-    """사전 오독을 '정답 참조'로 박아넣지 않고 후보로 제시한다.
-
-    실증: 今更止められない → pykakasi는 いまさら"やめ"られない (정답 とめ),
-    涙を止める → なみだを"やめる", 風が止む → かぜが"とむ" (정답 やむ).
-
-    참조 읽기는 이제 형태소 분석(ja_reading)이 만들고 그쪽은 위 케이스를 다 맞힌다 —
-    그래서 후보 주석은 pykakasi 폴백일 때만 붙는다. 맞은 읽기 위에 "とめ/やめ 중
-    골라라"를 얹으면 모델이 맞은 답을 다시 흔들기 때문이다.
-    """
-
-    def setup_method(self):
-        class _Probe(BaseTranslator):
-            def translate(self, *a, **k):  # pragma: no cover - not exercised
-                raise NotImplementedError
-
-        self.probe = _Probe(TranslationSettings())
-
-    @staticmethod
-    def _reading_lines(prompt: str) -> list[str]:
-        """REFERENCE READINGS 블록의 번호 붙은 참조 줄만 뽑는다.
-
-        지시문 본문에도 'CANDIDATES'라는 단어가 나오고 번호 매긴 규칙("2. The full
-        kana reading …")도 있어서, 프롬프트 전체를 훑으면 지시문이 함께 걸린다.
-        후보 주석이 붙는 대상은 참조 줄이므로 그 블록만 잘라서 본다."""
-        marker = "the meaning of the sentence):\n"
-        if marker not in prompt:
-            return []
-        tail = prompt.split(marker, 1)[1]
-        lines = []
-        for ln in tail.split("\n"):
-            if not re.match(r"^\d+\.\s", ln):
-                break
-            lines.append(ln)
-        return lines
-
-    def test_candidates_are_attached_to_the_ambiguous_line_on_dictionary_fallback(
-        self, monkeypatch
-    ):
-        monkeypatch.setattr(
-            "everyric2.translation.translator.reading_source", lambda: "pykakasi"
-        )
-        prompt = self.probe._build_prompt(
-            "今更止められない\n静かな夜だ", "ja", "ko", include_pronunciation=True
-        )
-        assert "とめ" in prompt and "やめ" in prompt
-        readings = self._reading_lines(prompt)
-        assert len(readings) == 2  # 입력 2줄 → 참조 2줄
-        # 후보 주석은 다의어가 있는 그 줄에만 붙는다
-        with_candidates = [ln for ln in readings if "CANDIDATES" in ln]
-        assert len(with_candidates) == 1
-        assert with_candidates[0].startswith("1. ")
-
-    def test_morphological_readings_get_no_candidates(self):
-        # 형태소 분석이 とめ를 이미 맞히므로 후보를 얹지 않는다 (기본 경로)
-        from everyric2.text.ja_reading import reading_source
-
-        assert reading_source() == "fugashi"
-        prompt = self.probe._build_prompt(
-            "今更止められない\n静かな夜だ", "ja", "ko", include_pronunciation=True
-        )
-        readings = self._reading_lines(prompt)
-        assert len(readings) == 2
-        assert all("CANDIDATES" not in ln for ln in readings)
-        # 참조 줄 자체는 문맥 맞는 읽기(とめ)로 채워진다
-        assert readings[0].startswith("1. いまさらとめられない")
-
-    def test_line_without_ambiguity_gets_no_candidates(self, monkeypatch):
-        monkeypatch.setattr(
-            "everyric2.translation.translator.reading_source", lambda: "pykakasi"
-        )
-        prompt = self.probe._build_prompt(
-            "静かな夜だった", "ja", "ko", include_pronunciation=True
-        )
-        # 지시문은 CANDIDATES를 설명하지만, 참조 줄에는 붙으면 안 된다
-        assert all("CANDIDATES" not in ln for ln in self._reading_lines(prompt))
-
-    def test_prompt_tells_the_model_to_correct_the_dictionary(self):
-        prompt = self.probe._build_prompt(
-            "今更止められない", "ja", "ko", include_pronunciation=True
-        )
-        # 다의어 예시가 君 하나뿐이면 모델이 참조값을 그대로 베낀다
-        assert "とめられない" in prompt
-        assert "きみ" in prompt
-        # 오쿠리가나는 무조건 믿으라던 옛 지시문은 止める 오독의 근거였다
-        assert "reliable as given" not in prompt
-
-    def test_reading_candidates_helper_covers_known_misreads(self):
-        from everyric2.translation.translator import _reading_candidates
-
-        assert "やむ" in _reading_candidates("風が止む")
-        assert "きみ" in _reading_candidates("君にだけ")
-        assert _reading_candidates("静かな夜") == ""
-
-    def test_romaji_target_also_gets_candidates(self, monkeypatch):
-        # 후보 게이트는 target_lang과 무관하다 — 읽기 엔진만 본다
-        monkeypatch.setattr(
-            "everyric2.translation.translator.reading_source", lambda: "pykakasi"
-        )
-        prompt = self.probe._build_prompt(
-            "今更止められない", "ja", "en", include_pronunciation=True
-        )
-        assert any("CANDIDATES" in ln for ln in self._reading_lines(prompt))
-
-
 class TestPromptBuilding:
-    """_build_prompt — ko 타깃은 한글 독음, 곡 컨텍스트 주입, 가사 맥락 지시."""
+    """_build_prompt는 대상 언어와 무관하게 번역만 요청한다."""
 
     def setup_method(self):
         class _Probe(BaseTranslator):
@@ -1082,28 +886,19 @@ class TestPromptBuilding:
 
         self.probe = _Probe(TranslationSettings())
 
-    def test_ko_target_pron_asks_kana_reading_not_romanization(self):
-        # 새 계약: LLM은 가나 독음만 쓰고(문맥 한자 읽기), 한글 변환은 서버가 한다
-        # (kana_hangul — 촉음/ん/장음의 기계 전사 실수 원천 차단)
-        prompt = self.probe._build_prompt("時計の針が", "ja", "ko", include_pronunciation=True)
-        assert "kana reading" in prompt
-        # 가나 예시가 있어야 LLM이 로마자/한글로 새지 않는다
-        assert "とけいの はりが" in prompt
-        assert "never Hangul" in prompt
-        assert "Romanized pronunciation" not in prompt
-
-    def test_non_ko_target_pron_stays_romanized(self):
-        prompt = self.probe._build_prompt("時計の針が", "ja", "en", include_pronunciation=True)
-        assert "Romanized pronunciation" in prompt
-        assert "kana reading" not in prompt
+    @pytest.mark.parametrize("target", ["ko", "en", "ja", "zh"])
+    def test_prompt_never_requests_pronunciation(self, target):
+        prompt = self.probe._build_prompt("時計の針が", target)
+        assert "pronunciation" not in prompt.lower()
+        assert "romanized" not in prompt.lower()
+        assert "kana reading" not in prompt.lower()
 
     def test_song_context_is_injected(self):
         prompt = self.probe._build_prompt(
-            "きみの声", "ja", "ko", include_pronunciation=False, context='"熱異常" by かいりきベア'
+            "きみの声", "ko", context='"熱異常" by かいりきベア'
         )
         assert 'Song: "熱異常" by かいりきベア' in prompt
 
-    def test_lyrics_guidance_present_in_both_paths(self):
-        for pron in (True, False):
-            prompt = self.probe._build_prompt("きみの声", "ja", "ko", include_pronunciation=pron)
-            assert "ONE song" in prompt
+    def test_lyrics_guidance_present(self):
+        prompt = self.probe._build_prompt("きみの声", "ko")
+        assert "ONE song" in prompt

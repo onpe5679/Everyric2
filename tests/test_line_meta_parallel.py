@@ -404,6 +404,57 @@ def test_pending_flag_ignored_when_line_meta_is_in_the_body():
     asyncio.run(body())
 
 
+def test_late_authoritative_pronunciation_replaces_stale_display_bundle():
+    """A late human/wiki reading must not lose to an already attached deterministic dict."""
+    segment = {
+        "text": "その内声も届かなくなって",
+        "start": 0.0,
+        "end": 2.0,
+        "pronunciation": "소노 나이세이모 토도카나쿠 낫테",
+        "pron": {
+            "hangul": "소노 나이세이모 토도카나쿠 낫테",
+            "romaji": "sono naisee mo todokanaku natte",
+            "kana": "ソノ ナイセー モ トドカナク ナッテ",
+        },
+        "pron_segs": {"romaji": [{"text": "sono", "start": 0.0, "end": 0.2}]},
+    }
+
+    merged = worker_core.merge_line_meta(
+        [segment],
+        [{"text": segment["text"], "pronunciation": "소노우치 코에모 토도카나쿠낫테"}],
+        language="ja",
+    )
+
+    assert merged == 1
+    assert segment["pronunciation"] == "소노우치 코에모 토도카나쿠낫테"
+    assert segment["pron"]["hangul"] == "소노우치 코에모 토도카나쿠낫테"
+    assert "uchikoe" in segment["pron"]["romaji"].replace(" ", "")
+    assert "ウチコエ" in segment["pron"]["kana"].replace(" ", "")
+    assert "pron_segs" not in segment
+
+
+def test_late_authoritative_candidate_rebuilds_all_scripts_consistently():
+    """When the source reading names a known candidate, every display script follows it."""
+    text = "遠くまで風を切って行けたら届くかな？"
+    segment = {
+        "text": text,
+        "start": 0.0,
+        "end": 4.0,
+        "pronunciation": "토오쿠마데 카제오 킷테이케타라 토도쿠카나?",
+        "pron": {"hangul": "토오쿠마데 카제오 킷테이케타라 토도쿠카나?"},
+    }
+
+    worker_core.merge_line_meta(
+        [segment],
+        [{"text": text, "pronunciation": "토오쿠마데 카제오 킷테유케타라 토도쿠카나?"}],
+        language="ja",
+    )
+
+    assert segment["pron"]["hangul"] == "토오쿠마데 카제오 킷테유케타라 토도쿠카나?"
+    assert "yuketara" in segment["pron"]["romaji"].replace(" ", "")
+    assert "ユケタラ" in segment["pron"]["kana"].replace(" ", "")
+
+
 # ── ④ 대기 중 취소 ────────────────────────────────────────────────
 
 

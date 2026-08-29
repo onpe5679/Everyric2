@@ -734,8 +734,18 @@ class _JsonFetcher:
         params = parse_qs(urlparse(url).query)
         if params.get("action") == ["query"]:
             return {"query": {"search": self.search_hits.get(params["srsearch"][0], [])}}
-        html = self.pages.get(int(params["pageid"][0]))
-        return {"parse": {"text": {"*": html}}} if html else {}
+        pageid = int(params["pageid"][0])
+        html = self.pages.get(pageid)
+        page_title = next(
+            (
+                hit["title"]
+                for hits in self.search_hits.values()
+                for hit in hits
+                if hit["pageid"] == pageid
+            ),
+            None,
+        )
+        return {"parse": {"title": page_title, "text": {"*": html}}} if html else {}
 
 
 def _runtime(tmp_path, **overrides):

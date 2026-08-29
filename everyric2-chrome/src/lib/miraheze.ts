@@ -1,5 +1,6 @@
 // vocaloidlyrics.miraheze.org (VocaloidLyrics Wiki) 클라이언트.
-// - MediaWiki API로 검색 → 최상위 후보 문서를 파싱한다. 발음은 로마자, 번역은 영어다
+// - MediaWiki API로 검색 → 제목 검증을 통과한 후보 문서만 파싱한다. 발음은 로마자,
+//   번역은 영어다
 //   (vocaro.wikidot.com의 한글 발음/한국어 번역과 대칭축 — SourceResult.pronLang/translationLang
 //   로 구분해 소비처가 script를 고른다).
 // - service worker에는 DOMParser가 없어 vocaro.ts와 동일하게 정규식으로 파싱한다.
@@ -50,34 +51,32 @@ interface SearchHit {
 /**
  * 제목으로 곡 페이지를 찾아 가사(원문+로마자+[영어 번역])를 반환. 못 찾으면 null.
  *
- * `titleCandidates`가 낸 후보를 순서대로 시도한다 — 검색해서 접두 일치 히트를 얻고,
- * 그 페이지에 일본어 가사 표가 있으면 채택한다. 접두 일치가 없거나(마지막 후보 제외)
- * 표가 없으면 다음 후보로 넘어간다. **마지막 후보에서만** 접두 일치 실패 시 최상위
- * 검색 결과로 물러난다(폴백) — 그 전 후보에서 물러나면 프로듀서·앨범 페이지를 잘못
- * 채택하는 사고(위 사고 기록)가 재현된다.
+ * `titleCandidates`가 낸 후보를 순서대로 시도한다. 검색 결과와 실제 parse한 정규
+ * 페이지 제목이 모두 후보와 정규화 접두 관계이고, 그 페이지에 일본어 가사 표가
+ * 있을 때만 채택한다. 하나라도 어긋나면 다음 후보로 넘어가며, 검증되지 않은 검색
+ * 1위로는 절대 물러나지 않는다.
  */
 export async function mirahezeLookup(title: string): Promise<SourceResult | null> {
   const trimmed = title.trim();
   if (!trimmed) return null;
 
   const candidates = titleCandidates(trimmed);
-  for (let i = 0; i < candidates.length; i++) {
-    const isLastCandidate = i === candidates.length - 1;
-    const hit = await searchTopHit(candidates[i], isLastCandidate);
+  for (const candidate of candidates) {
+    const hit = await searchTopHit(candidate);
     if (!hit) continue;
 
-    const html = await fetchParsedHtml(hit.pageid);
-    if (!html) continue;
+    const page = await fetchParsedPage(hit.pageid);
+    if (!page || !titleMatchesCandidate(candidate, page.title)) continue;
 
-    const parsed = parseLyricsTable(html);
+    const parsed = parseLyricsTable(page.html);
     if (!parsed || parsed.lines.length === 0) continue; // 이 후보의 채택 페이지엔 가사 표가 없다 — 다음 후보로
 
     return {
       sourceId: 'miraheze',
       // MediaWiki 문서 URL은 공백→'_'만 치환하고 나머지(괄호·'*'·'/' 등)는 그대로 남긴다
       // (encodeURI가 그 규칙과 일치 — encodeURIComponent를 쓰면 '/'까지 %2F로 깨진다).
-      pageUrl: `${BASE}/wiki/${encodeURI(hit.title.replace(/ /g, '_'))}`,
-      pageTitle: hit.title,
+      pageUrl: `${BASE}/wiki/${encodeURI(page.title.replace(/ /g, '_'))}`,
+      pageTitle: page.title,
       lines: parsed.lines,
       pronLang: 'romaji',
       translationLang: parsed.hasTranslation ? 'en' : undefined,
@@ -130,6 +129,24 @@ export function titleCandidates(raw: string): string[] {
   return out.slice(0, 3);
 }
 
+/** MediaWiki 제목 비교용 정규화 — NFKC + 소문자 + 공백 접기. */
+function normalizeMatchTitle(value: string): string {
+  return value.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 정확 일치 또는 `ロキ (Roki)`·`フラジール/nulut`처럼 인정된 접미가 붙은 접두만
+ * 자동 채택한다. 접두 뒤가 일반 문자인 `Wonderland`는 `Wonder`의 일치가 아니다.
+ */
+export function titleMatchesCandidate(candidate: string, pageTitle: string): boolean {
+  const candidateNorm = normalizeMatchTitle(candidate);
+  const pageNorm = normalizeMatchTitle(pageTitle);
+  if (!candidateNorm || !pageNorm) return false;
+  if (pageNorm === candidateNorm) return true;
+  if (!pageNorm.startsWith(candidateNorm)) return false;
+  return ' (/'.includes(pageNorm[candidateNorm.length]);
+}
+
 // ── 검색 ──────────────────────────────────────────────────────
 
 // MediaWiki 전문검색(list=search)은 제목이 아니라 본문 관련도로 정렬한다 — 짧고 흔한
@@ -141,11 +158,10 @@ export function titleCandidates(raw: string): string[] {
 const SEARCH_LIMIT = 10;
 
 /**
- * `allowFallback=false`면 접두 일치 히트가 없을 때 null(다음 후보로 넘어가라는 신호) —
- * 최상위 검색 결과로 물러나지 않는다. 물러나면 프로듀서·앨범 페이지를 오채택할 수 있다
- * (실사용 사고, 파일 머리말 참조). `mirahezeLookup`이 **마지막 후보에서만** true를 준다.
+ * 정규화 접두 일치 히트가 없으면 null(다음 후보로 넘어가라는 신호). 검색 순위는
+ * 같은 곡임을 증명하지 않으므로 마지막 후보에서도 최상위 결과로 폴백하지 않는다.
  */
-async function searchTopHit(title: string, allowFallback: boolean): Promise<SearchHit | null> {
+async function searchTopHit(title: string): Promise<SearchHit | null> {
   const params = new URLSearchParams({
     action: 'query',
     list: 'search',
@@ -157,14 +173,12 @@ async function searchTopHit(title: string, allowFallback: boolean): Promise<Sear
   const data = await getJSON<{ query?: { search?: SearchHit[] } }>(`${API}?${params}`);
   const hits = data?.query?.search ?? [];
   if (hits.length === 0) return null;
-  const titleMatch = hits.find(h => h.title.startsWith(title));
+  const titleMatch = hits.find(h => titleMatchesCandidate(title, h.title));
   if (titleMatch) return { pageid: titleMatch.pageid, title: titleMatch.title };
-  if (!allowFallback) return null;
-  const hit = hits[0];
-  return { pageid: hit.pageid, title: hit.title };
+  return null;
 }
 
-async function fetchParsedHtml(pageid: number): Promise<string | null> {
+async function fetchParsedPage(pageid: number): Promise<{ title: string; html: string } | null> {
   const params = new URLSearchParams({
     action: 'parse',
     pageid: String(pageid),
@@ -172,8 +186,10 @@ async function fetchParsedHtml(pageid: number): Promise<string | null> {
     format: 'json',
     origin: '*',
   });
-  const data = await getJSON<{ parse?: { text?: { '*': string } } }>(`${API}?${params}`);
-  return data?.parse?.text?.['*'] ?? null;
+  const data = await getJSON<{ parse?: { title?: string; text?: { '*': string } } }>(`${API}?${params}`);
+  const title = data?.parse?.title;
+  const html = data?.parse?.text?.['*'];
+  return title && html ? { title, html } : null;
 }
 
 async function getJSON<T>(url: string): Promise<T | null> {

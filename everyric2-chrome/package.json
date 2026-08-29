@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite build --watch --mode development",
-    "build": "tsc --noEmit && vite build",
+    "test": "node scripts/miraheze-title-match.test.mjs",
+    "build": "npm test && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -25,6 +25,7 @@ ko·en·ja 세 언어가 모인다.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode
 
@@ -37,8 +38,8 @@ SOURCE_ID = "miraheze"
 
 # MediaWiki 전문검색(list=search)은 제목이 아니라 본문 관련도로 정렬한다 — 짧고 흔한
 # 제목일수록 진짜 곡 페이지가 밀려난다(실측: 곡 페이지가 2위·5위, 1위는 수록 앨범·
-# 프로듀서 페이지). 곡 페이지 제목은 예외 없이 원어 제목으로 **시작하므로** 상위
-# SEARCH_LIMIT개 중 검색어로 시작하는 첫 제목을 우선한다.
+# 프로듀서 페이지). 그래서 순위와 무관하게 검색 후보의 제목이 요청 후보와 검증된
+# 정규화 접두 관계인 페이지만 조회한다. 일치가 없으면 검색 1위로 물러나지 않는다.
 SEARCH_LIMIT = 10
 
 
@@ -110,6 +111,34 @@ def title_candidates(raw: str) -> list[str]:
         if value and value not in out:
             out.append(value)
     return out[:3]
+
+
+def _normalize_match_title(value: str) -> str:
+    """MediaWiki 제목 비교용 정규화 — NFKC + 소문자 + 공백 접기.
+
+    문자를 전부 제거하지 않는다. 접두 뒤의 문자가 괄호·슬래시 같은
+    Miraheze 곡 페이지 접미인지 검증해 ``Wonder``가 ``Wonderland``를 통과하지
+    않게 하기 위해서다.
+    """
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value).lower()).strip()
+
+
+def page_title_matches_candidate(candidate: str, page_title: str) -> bool:
+    """검색 후보와 페이지 제목이 자동 채택해도 되는 접두 관계인지.
+
+    정확 일치 또는 ``ロキ (Roki)``·``フラジール/nulut``처럼 곡명 뒤에
+    로마자·프로듀서 식별자가 붙은 모양만 통과한다. 제목을 정규화한 뒤
+    다음 문자가 일반 문자인 부분열(``Wonderland`` 등)은 거절한다.
+    """
+    candidate_norm = _normalize_match_title(candidate)
+    page_norm = _normalize_match_title(page_title)
+    if not candidate_norm or not page_norm:
+        return False
+    if page_norm == candidate_norm:
+        return True
+    if not page_norm.startswith(candidate_norm):
+        return False
+    return page_norm[len(candidate_norm)] in " (/"
 
 
 def producer_from_page_title(page_title: str) -> str | None:
@@ -188,14 +217,8 @@ def _fetcher() -> WikiFetcher:
     return _default_fetcher
 
 
-def _search_top_hit(
-    title: str, allow_fallback: bool, fetcher: WikiFetcher
-) -> tuple[int, str] | None:
-    """(pageid, 제목). ``allow_fallback``이 False면 접두 일치가 없을 때 None.
-
-    물러나면 프로듀서·앨범 페이지를 오채택할 수 있어(실사용 사고) **마지막 후보에서만**
-    최상위 검색 결과로 물러난다 — :func:`lookup`이 그때만 True를 준다.
-    """
+def _search_top_hit(title: str, fetcher: WikiFetcher) -> tuple[int, str] | None:
+    """(pageid, 제목). 정규화 접두 검증을 통과한 첫 검색 결과만 돌려준다."""
     query = urlencode(
         {
             "action": "query",
@@ -211,23 +234,25 @@ def _search_top_hit(
         return None
     for hit in hits:
         hit_title = hit.get("title") or ""
-        if hit_title.startswith(title):
+        if page_title_matches_candidate(title, hit_title):
             return int(hit["pageid"]), hit_title
-    if not allow_fallback:
-        return None
-    top = hits[0]
-    return int(top["pageid"]), top.get("title") or ""
+    return None
 
 
-def _fetch_parsed_html(pageid: int, fetcher: WikiFetcher) -> str | None:
+def _fetch_parsed_page(pageid: int, fetcher: WikiFetcher) -> tuple[str, str] | None:
+    """pageid로 정규 페이지 제목과 파싱 HTML을 함께 읽는다."""
     query = urlencode(
         {"action": "parse", "pageid": str(pageid), "prop": "text", "format": "json"}
     )
     data = fetcher.get_json(f"{API_URL}?{query}")
-    text = ((data or {}).get("parse") or {}).get("text")
+    parsed = (data or {}).get("parse") or {}
+    page_title = parsed.get("title")
+    text = parsed.get("text")
     if isinstance(text, dict):
-        return text.get("*")
-    return text if isinstance(text, str) else None
+        text = text.get("*")
+    if not isinstance(page_title, str) or not page_title or not isinstance(text, str):
+        return None
+    return page_title, text
 
 
 # JS ``encodeURI``가 손대지 않는 문자들 — 확장과 같은 URL을 만들기 위한 safe 집합.
@@ -248,8 +273,9 @@ def lookup(title: str, fetcher: WikiFetcher | None = None) -> MirahezeSong | Non
     """제목으로 곡 페이지를 찾아 가사(원문 + 로마자 + [영어 번역])를 반환. 없으면 None.
 
     :func:`title_candidates`가 낸 후보를 순서대로 시도한다 — 검색해서 접두 일치 히트를
-    얻고, 그 페이지에 일본어 가사 표가 있으면 채택한다. 접두 일치가 없거나 표가 없으면
-    다음 후보로 넘어간다(마지막 후보만 최상위 결과 폴백을 허용).
+    얻고, 실제 조회한 정규 페이지 제목도 같은 접두 검증을 통과하며 일본어 가사 표가
+    있을 때만 채택한다. 하나라도 어긋나면 다음 후보로 넘어가고, 검증되지 않은 검색
+    1위로는 절대 물러나지 않는다.
     """
     trimmed = title.strip()
     if not trimmed:
@@ -257,13 +283,16 @@ def lookup(title: str, fetcher: WikiFetcher | None = None) -> MirahezeSong | Non
     fetch = fetcher or _fetcher()
 
     candidates = title_candidates(trimmed)
-    for i, candidate in enumerate(candidates):
-        hit = _search_top_hit(candidate, i == len(candidates) - 1, fetch)
+    for candidate in candidates:
+        hit = _search_top_hit(candidate, fetch)
         if hit is None:
             continue
-        pageid, page_title = hit
-        page_html = _fetch_parsed_html(pageid, fetch)
-        if not page_html:
+        pageid, _search_title = hit
+        fetched = _fetch_parsed_page(pageid, fetch)
+        if fetched is None:
+            continue
+        page_title, page_html = fetched
+        if not page_title_matches_candidate(candidate, page_title):
             continue
         parsed = parse_lyrics_table(page_html)
         if parsed is None or not parsed[0]:

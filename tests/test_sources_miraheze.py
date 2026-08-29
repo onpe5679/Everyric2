@@ -192,9 +192,11 @@ class _StubFetcher:
         self,
         search_hits: dict[str, list[dict]] | None = None,
         pages: dict[int, str] | None = None,
+        page_titles: dict[int, str] | None = None,
     ) -> None:
         self.search_hits = search_hits or {}
         self.pages = pages or {}
+        self.page_titles = page_titles or {}
         self.urls: list[str] = []
 
     def get_json(self, url: str):
@@ -207,11 +209,37 @@ class _StubFetcher:
             return {"query": {"search": self.search_hits.get(query, [])}}
         pageid = int(params["pageid"][0])
         html = self.pages.get(pageid)
-        return {"parse": {"text": {"*": html}}} if html else {}
+        page_title = self.page_titles.get(pageid)
+        if page_title is None:
+            page_title = next(
+                (
+                    hit["title"]
+                    for hits in self.search_hits.values()
+                    for hit in hits
+                    if hit["pageid"] == pageid
+                ),
+                None,
+            )
+        return {"parse": {"title": page_title, "text": {"*": html}}} if html else {}
 
 
 def _hit(pageid: int, title: str) -> dict:
     return {"pageid": pageid, "title": title}
+
+
+@pytest.mark.parametrize(
+    ("candidate", "page_title", "expected"),
+    [
+        ("Ｒｏｋｉ", "roki (song)", True),  # NFKC + case-insensitive
+        ("ロキ", "ロキ (Roki)", True),
+        ("フラジール", "フラジール/nulut", True),
+        ("Wonder", "Wonderland", False),  # 일반 문자가 이어진 부분열은 접미가 아님
+        ("Wonder", "Tenshi", False),
+        ("Whole Blue World", "トコヨトキヨ (Tokoyo Tokiyo)", False),
+    ],
+)
+def test_page_title_match_is_normalized_and_boundary_aware(candidate, page_title, expected):
+    assert miraheze.page_title_matches_candidate(candidate, page_title) is expected
 
 
 def test_lookup_prefers_a_prefix_matching_hit_over_the_top_result():
@@ -226,6 +254,60 @@ def test_lookup_prefers_a_prefix_matching_hit_over_the_top_result():
     assert song is not None
     assert song.page_title == "ダミー曲 (Dummy)"
     assert song.has_translation is True
+
+
+@pytest.mark.parametrize(
+    ("query", "wrong_page_title"),
+    [
+        pytest.param("Wonder", "Tenshi", id="wonder-must-not-adopt-tenshi"),
+        pytest.param(
+            "Whole Blue World",
+            "トコヨトキヨ (Tokoyo Tokiyo)",
+            id="whole-blue-world-must-not-adopt-tokoyo",
+        ),
+    ],
+)
+def test_lookup_rejects_real_incident_top_hit_even_when_it_has_a_japanese_lyrics_table(
+    query, wrong_page_title
+):
+    """실사용 오채택 회귀: 검색 1위의 다른 곡에 정상 가사 표가 있어도 채택하지 않는다."""
+    fetcher = _StubFetcher(
+        search_hits={query: [_hit(1, wrong_page_title)]},
+        pages={1: _fixture("miraheze_lyrics_3col.html")},
+    )
+
+    assert miraheze.lookup(query, fetcher) is None
+    assert not any("action=parse" in url for url in fetcher.urls)
+
+
+@pytest.mark.parametrize(
+    ("query", "page_title"),
+    [
+        pytest.param("ロキ", "ロキ (Roki)", id="roki"),
+        pytest.param("シアンブルー", "シアンブルー (Cyan Blue)", id="cyan-blue"),
+    ],
+)
+def test_lookup_preserves_verified_real_prefix_matches(query, page_title):
+    fetcher = _StubFetcher(
+        search_hits={query: [_hit(1, "Unrelated album"), _hit(2, page_title)]},
+        pages={2: _fixture("miraheze_lyrics_3col.html")},
+    )
+
+    song = miraheze.lookup(query, fetcher)
+
+    assert song is not None
+    assert song.page_title == page_title
+
+
+def test_lookup_revalidates_the_canonical_title_returned_by_parse():
+    """검색 히트가 맞아도 pageid가 다른 정규 제목으로 해석되면 채택하지 않는다."""
+    fetcher = _StubFetcher(
+        search_hits={"Wonder": [_hit(1, "Wonder (Song)")]},
+        pages={1: _fixture("miraheze_lyrics_3col.html")},
+        page_titles={1: "Tenshi"},
+    )
+
+    assert miraheze.lookup("Wonder", fetcher) is None
 
 
 def test_lookup_does_not_fall_back_to_the_top_hit_on_a_non_final_candidate():

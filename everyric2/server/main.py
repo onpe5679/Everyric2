@@ -101,7 +101,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Everyric2 API",
-    description="Lyrics synchronization API using CTC forced alignment",
+    description="Lyrics synchronization API using the adaptive alignment stack",
     version=__version__,
     lifespan=lifespan,
 )
@@ -188,23 +188,34 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     gpu_available: bool
-    engine: str = "adaptive"
+    engine: str
+    engine_version: str
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
+    from everyric2.config.settings import get_settings
+    from everyric2.server.db.models import ENGINE_VERSION
+
     return HealthResponse(
         status="healthy",
         version=__version__,
         gpu_available=_gpu_available(),
+        engine=get_settings().alignment.engine,
+        engine_version=ENGINE_VERSION,
     )
 
 
 @app.get("/")
 async def root():
+    from everyric2.config.settings import get_settings
+    from everyric2.server.db.models import ENGINE_VERSION
+
     return {
         "name": "Everyric2 API",
         "version": __version__,
+        "engine": get_settings().alignment.engine,
+        "engine_version": ENGINE_VERSION,
         "docs": "/docs",
         "privacy": "/privacy",
     }
