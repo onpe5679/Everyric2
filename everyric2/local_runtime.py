@@ -193,7 +193,8 @@ def _ensure_owsm_environment(paths: RuntimePaths) -> None:
         raise RuntimeError("uv is required to create the isolated OWSM environment")
     paths.owsm_venv.parent.mkdir(parents=True, exist_ok=True)
     _emit("owsm-environment-create", path=str(paths.owsm_venv))
-    subprocess.run([uv, "venv", str(paths.owsm_venv), "--python", "3.11"], check=True)
+    if not paths.owsm_python.is_file():
+        subprocess.run([uv, "venv", str(paths.owsm_venv), "--python", "3.11"], check=True)
     subprocess.run(
         [
             uv,
@@ -215,10 +216,10 @@ def _ensure_owsm_environment(paths: RuntimePaths) -> None:
             "install",
             "--python",
             str(paths.owsm_python),
-            "--extra-index-url",
-            "https://download.pytorch.org/whl/cu128",
             "espnet==202511",
             "sentencepiece==0.2.0",
+            "torch==2.8.0+cu128",
+            "torchaudio==2.8.0+cu128",
         ],
         check=True,
     )
