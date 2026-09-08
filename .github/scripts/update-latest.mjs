@@ -8,23 +8,13 @@ const REPO_URL = "https://github.com/onpe5679/Everyric2";
 
 const tag = process.argv[2];
 if (!tag) {
-  console.error("usage: node update-latest.mjs <tag>  (ae-v2.0.0 | engine-v0.1.0 | chrome-v1.1.0)");
+  console.error("usage: node update-latest.mjs <tag>  (engine-v0.1.0 | chrome-v1.1.0)");
   process.exit(1);
 }
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 
-if (tag.startsWith("ae-v")) {
-  const version = tag.slice("ae-v".length);
-  const major = Number(version.split(".")[0]);
-  manifest.ae = {
-    ...manifest.ae,
-    version,
-    zxpUrl: `${REPO_URL}/releases/download/${tag}/Everyric-Studio-${version}.zxp`,
-    releaseUrl: `${REPO_URL}/releases/tag/${tag}`,
-    engineRange: major >= 3 ? ">=1.0.0 <2.0.0" : manifest.ae?.engineRange,
-  };
-} else if (tag.startsWith("engine-v")) {
+if (tag.startsWith("engine-v")) {
   const version = tag.slice("engine-v".length);
   manifest.engine = {
     ...manifest.engine,
