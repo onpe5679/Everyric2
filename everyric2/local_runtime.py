@@ -122,6 +122,12 @@ def _download(url: str, target: Path, expected_sha256: str, expected_size: int) 
 
     part = target.with_suffix(target.suffix + ".part")
     start = part.stat().st_size if part.exists() else 0
+    if start >= expected_size:
+        if start == expected_size and _sha256(part) == expected_sha256:
+            part.replace(target)
+            return
+        part.unlink()
+        start = 0
     request = urllib.request.Request(url)
     if start:
         request.add_header("Range", f"bytes={start}-")
@@ -265,7 +271,9 @@ def provision(paths: RuntimePaths) -> dict[str, Any]:
         "modelDir": str(paths.models),
         "healthy": True,
     }
-    paths.state.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    pending_state = paths.state.with_suffix(".json.tmp")
+    pending_state.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    pending_state.replace(paths.state)
     _emit("ready", state=state)
     return state
 
@@ -333,6 +341,14 @@ def health_report(paths: RuntimePaths) -> dict[str, Any]:
             problems.append("BS-PolarFormer dependencies or assets are missing")
     except Exception as exc:
         problems.append(f"BS-PolarFormer probe failed: {exc}")
+
+    try:
+        from everyric2.alignment.owsm_engine import _find_snapshot
+
+        if _find_snapshot() is None:
+            problems.append("OWSM model is not provisioned")
+    except Exception as exc:
+        problems.append(f"OWSM model probe failed: {exc}")
 
     if not paths.owsm_python.is_file():
         problems.append("OWSM isolated Python is missing")

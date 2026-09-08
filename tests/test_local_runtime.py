@@ -1,3 +1,5 @@
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -45,3 +47,21 @@ def test_legacy_engine_setting_is_rejected() -> None:
     assert AlignmentSettings().engine == "adaptive"
     with pytest.raises(Exception):
         AlignmentSettings(engine="ctc")
+
+
+def test_repair_restarts_corrupt_complete_partial(tmp_path: Path, monkeypatch) -> None:
+    from everyric2.local_runtime import _download
+
+    target = tmp_path / "model.bin"
+    target.with_suffix(".bin.part").write_bytes(b"broken")
+    payload = b"valid!"
+    requests = []
+
+    def download(request, timeout):
+        requests.append(request)
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr("urllib.request.urlopen", download)
+    _download("https://example.com/model.bin", target, hashlib.sha256(payload).hexdigest(), 6)
+    assert target.read_bytes() == payload
+    assert requests[0].get_header("Range") is None
