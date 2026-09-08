@@ -124,8 +124,9 @@ YouTubeで曲の動画を開くと、歌詞パネルが自動で表示されま�
 - **멜로디 전사**: RMVPE(폴백 FCPE) f0 → 음절 앵커 노트, 옥타브 폴딩, 키 추정(K-S) + 스케일 스냅
 - **번역 엔진**: Gemini / NVIDIA NIM / OpenAI 호환(로컬 LLM) — 키가 없으면 자동 전환, 독음 가나 혼입 자동 검증·재시도
 
-### After Effects 패널 (`everyric2-ae/`)
-- **Everyric Studio**: 정렬 결과를 편집 가능한 AE 텍스트 레이어 타이포그래피로 변환 — 패널에서 직접 로컬 정렬 실행, 엔진 원클릭 설치, 업데이트 확인
+### After Effects 패널
+
+AE 플러그인은 별도 비공개 저장소로 이전되었습니다. 이 저장소에서는 AE 소스와 ZXP를 배포하지 않습니다.
 
 ## 다운로드
 
@@ -135,7 +136,6 @@ YouTubeで曲の動画を開くと、歌詞パネルが自動で表示されま�
 |---|---|---|
 | Chrome 확장 | `Everyric-Chrome-<버전>.zip` | 압축 해제 → `chrome://extensions` → 개발자 모드 → **압축해제된 확장 프로그램 로드** |
 | 서버/엔진 | `everyric2-<버전>-py3-none-any.whl` | `pip install <경로/URL>` (소스 설치는 아래 [자체 호스팅](#자체-호스팅-개발자용) 참고) |
-| After Effects 패널 | `Everyric-Studio-<버전>.zxp` | [aescripts ZXP Installer](https://aescripts.com/learn/zxp-installer/)로 열기 (AE 2024+) |
 
 ## 자체 호스팅 (개발자용)
 
